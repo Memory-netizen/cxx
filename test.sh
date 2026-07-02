@@ -14,7 +14,7 @@ assert() {
 
     ./build/cxx "$input" > "$TMP_LL" || exit
 
-    clang "$TMP_LL" -o "$TMP_EXE" || { echo "clang compile failed"; exit 1; }
+    clang "$TMP_LL" -o "$TMP_EXE" -Wno-override-module || { echo "clang compile failed"; exit 1; }
 
     "$TMP_EXE"
     actual="$?"
@@ -29,5 +29,7 @@ assert() {
 
 assert 0 0
 assert 42 42
+assert 21 '5+20-4'
+assert 41 ' 12 + 34 - 5 '
 
 echo OK
