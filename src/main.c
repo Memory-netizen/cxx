@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -75,7 +76,7 @@ void freeall(void) {
 // token ::= keyword | ident | constant | strlit | punctuator;
 // pp-token ::= header_name | ident | pp_num | charlit | strlit | punctuator | other;
 typedef enum {
-    TK_EOF,
+    TK_NOP,
     TK_AS,
     TK_ADDAS,
     TK_SUBAS,
@@ -91,6 +92,10 @@ typedef enum {
 
     TK_OR,
     TK_AND,
+    TK_BOR,
+    TK_XOR,
+    TK_BAND,
+
     TK_EQ,
     TK_NE,
     TK_LT,
@@ -98,9 +103,6 @@ typedef enum {
     TK_LE,
     TK_GE,
 
-    TK_BOR,
-    TK_XOR,
-    TK_BAND,
     TK_LEFT,
     TK_RIGHT,
 
@@ -138,16 +140,18 @@ typedef enum {
     TK_PPNUM,
     TK_CHAR,
     TK_STR,
+    TK_EOF,
 } TokenKind;
 
-typedef struct Token {
+typedef struct Token Token;
+struct Token {
     TokenKind kind;
     struct Token *next;
     char *loc, *end;
     int val;
-} Token;
+};
 
-static bool start_with(char *p, char *q) { return strncmp(p, q, strlen(q)) == 0; }
+static inline bool start_with(char *p, char *q) { return strncmp(p, q, strlen(q)) == 0; }
 
 static int read_punct(char *p, TokenKind *type) {
     static struct {
@@ -207,7 +211,7 @@ static Token *tokenize(char *input) {
 
         // Punctuator
         if (ispunct(*p)) {
-            cur = cur->next = new_token(TK_EOF, p, p);
+            cur = cur->next = new_token(TK_NOP, p, p);
             p += read_punct(p, &cur->kind);
             cur->end = p;
             continue;
@@ -218,33 +222,230 @@ static Token *tokenize(char *input) {
     return dummy.next;
 }
 
+//
+// Parser
+//
+
+typedef enum {
+    ND_BOR,    // |
+    ND_XOR,    // ^
+    ND_BAND,   // &
+    ND_EQ,     // ==
+    ND_NE,     // !=
+    ND_LT,     // <
+    ND_GT,     // >
+    ND_LE,     // <=
+    ND_GE,     // >=
+    ND_LEFT,   // <<
+    ND_RIGHT,  // >>
+    ND_ADD,    // +
+    ND_SUB,    // -
+    ND_MUL,    // *
+    ND_DIV,    // /
+    ND_MOD,    // %
+    ND_NUM,    // Int
+} NodeKind;
+
+// AST node type
+typedef struct Node Node;
+struct Node {
+    NodeKind kind;  // Node kind
+    Node *lhs;      // Left-hand side
+    Node *rhs;      // Right-hand side
+    int val;
+};
+
+static Node *new_node(NodeKind kind) {
+    Node *node = emalloc(sizeof(Node));
+    node->kind = kind;
+    return node;
+}
+
+static Node *new_num(int val) {
+    Node *node = new_node(ND_NUM);
+    node->val = val;
+    return node;
+}
+
+static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs) {
+    Node *node = new_node(kind);
+    node->lhs = lhs;
+    node->rhs = rhs;
+    return node;
+}
+
+// Exp        ::= OrExp;
+// OrExp      ::= XorExp     { "|" XorExp};
+// XorExp     ::= AndExp     { "^" AndExp};
+// AndExp     ::= EqExp      { "&" EqExp};
+// EqExp      ::= RelExp     { ("==" | "!=") RelExp};
+// RelExp     ::= ShiftExp   { ("<" | ">" | "<=" | ">=") ShiftExp};
+// ShiftExp   ::= AddExp     { ("<<" | ">>") AddExp};
+// AddExp     ::= MulExp     { ("+" | "-") MulExp};
+// MulExp     ::= PrimaryExp { ("*" | "/" | "%") PrimaryExp};
+// PrimaryExp ::= Number | "(" Exp ")";
+
+static Node *expr(Token **rest, Token *tok);
+
+static Node *primary(Token **rest, Token *tok) {
+    Node *node = NULL;
+    if (tok->kind == TK_LPAREN) {
+        node = expr(&tok, tok->next);
+        assert(tok->kind == TK_RPAREN);
+    } else if (tok->kind == TK_NUM) {
+        node = new_num(tok->val);
+    }
+    *rest = tok->next;
+    return node;
+}
+
+static Node *binexpr(Token **rest, Token *tok, int min_prec) {
+    static int op_table[][2] = {
+        [TK_BOR] = {40, ND_BOR},    [TK_XOR] = {50, ND_XOR},   [TK_BAND] = {60, ND_BAND},   [TK_EQ] = {70, ND_EQ},
+        [TK_NE] = {70, ND_NE},      [TK_LT] = {80, ND_LT},     [TK_GT] = {80, ND_GT},       [TK_LE] = {80, ND_LE},
+        [TK_GE] = {80, ND_GE},      [TK_LEFT] = {90, ND_LEFT}, [TK_RIGHT] = {90, ND_RIGHT}, [TK_PLUS] = {100, ND_ADD},
+        [TK_MINUS] = {100, ND_SUB}, [TK_STAR] = {110, ND_MUL}, [TK_SLASH] = {110, ND_DIV},  [TK_MOD] = {110, ND_MOD},
+    };
+
+    Node *lhs = primary(&tok, tok);
+
+    while (TK_BOR <= tok->kind && tok->kind <= TK_MOD) {
+        NodeKind expr_op = op_table[tok->kind][1];
+        int cur_prec = op_table[tok->kind][0];
+        if (cur_prec <= min_prec) break;
+        Node *rhs = binexpr(&tok, tok->next, cur_prec);
+        lhs = new_binary(expr_op, lhs, rhs);
+    }
+    *rest = tok;
+    return lhs;
+}
+
+static Node *expr(Token **rest, Token *tok) {
+    Node *node = binexpr(&tok, tok, 0);
+    *rest = tok;
+    return node;
+}
+
+int cur_reg = 1;
+
+// decode operand to str
+static void fmt_operand(char *buf, int encoded) {
+    if (encoded > 0)
+        sprintf(buf, "%%%d", encoded);
+    else
+        sprintf(buf, "%d", -encoded);
+}
+
+static int gen_expr(Node *node) {
+    // Imm node: returns the negative number without alloc reg
+    if (node->kind == ND_NUM) {
+        return -node->val;
+    }
+
+    int lr = gen_expr(node->lhs);
+    int rr = gen_expr(node->rhs);
+    int reg = cur_reg++;
+
+    char lhs_str[32], rhs_str[32];
+    fmt_operand(lhs_str, lr);
+    fmt_operand(rhs_str, rr);
+
+    switch (node->kind) {
+        // arithmetic operation
+        case ND_ADD:
+            printf("  %%%d = add nsw i32 %s, %s\n", reg, lhs_str, rhs_str);
+            break;
+        case ND_SUB:
+            printf("  %%%d = sub nsw i32 %s, %s\n", reg, lhs_str, rhs_str);
+            break;
+        case ND_MUL:
+            printf("  %%%d = mul nsw i32 %s, %s\n", reg, lhs_str, rhs_str);
+            break;
+        case ND_DIV:
+            printf("  %%%d = sdiv i32 %s, %s\n", reg, lhs_str, rhs_str);
+            break;
+        case ND_MOD:
+            printf("  %%%d = srem i32 %s, %s\n", reg, lhs_str, rhs_str);
+            break;
+
+        // shift operation
+        case ND_LEFT:
+            printf("  %%%d = shl nsw i32 %s, %s\n", reg, lhs_str, rhs_str);
+            break;
+        case ND_RIGHT:
+            printf("  %%%d = ashr i32 %s, %s\n", reg, lhs_str, rhs_str);
+            break;
+
+        // bit operation
+        case ND_BAND:
+            printf("  %%%d = and i32 %s, %s\n", reg, lhs_str, rhs_str);
+            break;
+        case ND_BOR:
+            printf("  %%%d = or i32 %s, %s\n", reg, lhs_str, rhs_str);
+            break;
+        case ND_XOR:
+            printf("  %%%d = xor i32 %s, %s\n", reg, lhs_str, rhs_str);
+            break;
+
+        // Comparison operations：icmp return i1，zext to i32
+        case ND_EQ:
+        case ND_NE:
+        case ND_LT:
+        case ND_GT:
+        case ND_LE:
+        case ND_GE: {
+            const char *pred;
+            switch (node->kind) {
+                case ND_EQ:
+                    pred = "eq";
+                    break;
+                case ND_NE:
+                    pred = "ne";
+                    break;
+                case ND_LT:
+                    pred = "slt";
+                    break;
+                case ND_GT:
+                    pred = "sgt";
+                    break;
+                case ND_LE:
+                    pred = "sle";
+                    break;
+                case ND_GE:
+                    pred = "sge";
+                    break;
+                default:
+                    pred = "";
+            }
+            printf("  %%%d = icmp %s i32 %s, %s\n", reg, pred, lhs_str, rhs_str);
+            int zext_reg = cur_reg++;
+            printf("  %%%d = zext i1 %%%d to i32\n", zext_reg, reg);
+            return zext_reg;
+        }
+
+        default:
+            fprintf(stderr, "gen_expr: unknown node kind %d\n", node->kind);
+            exit(1);
+    }
+
+    return reg;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) return 1;
 
     Token *tok = tokenize(argv[1]);
-    int cur_reg = 1;
+    Node *node = expr(&tok, tok);
 
     printf("define i32 @main() {\n");
     printf("entry:\n");
 
-    // The first token must be a number
-    printf("  %%%d = add nsw i32 0, %d\n", cur_reg, tok->val);
-    tok = tok->next;
+    int ret_val = gen_expr(node);
+    if (ret_val > 0)
+        printf("  ret i32 %%%d\n", ret_val);
+    else
+        printf("  ret i32 %d\n", -ret_val);
 
-    // <number> ([+-] <number>)*
-    while (tok->kind != TK_EOF) {
-        if (tok->kind == TK_PLUS) {
-            int old_reg = cur_reg++;
-            printf("  %%%d = add nsw i32 %%%d, %d\n", cur_reg, old_reg, tok->next->val);
-            tok = tok->next->next;
-        } else if (tok->kind == TK_MINUS) {
-            int old_reg = cur_reg++;
-            printf("  %%%d = sub nsw i32 %%%d, %d\n", cur_reg, old_reg, tok->next->val);
-            tok = tok->next->next;
-        }
-    }
-
-    printf("  ret i32 %%%d\n", cur_reg);
     printf("}\n");
 
     freeall();
