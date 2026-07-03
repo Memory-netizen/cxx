@@ -85,8 +85,63 @@ typedef enum {
     TK_KEYWORD,
     TK_NUM,
     TK_PPNUM,
+    TK_CHARLIT,
+    TK_STRLIT,
+
+    TK_ALIGNAS,
+    TK_ALIGNOF,
+    TK_ATOMIC,
+    TK_BITINT,
+    TK_COUNTOF,
+    TK_GENERIC,
+    TK_NORETURN,
+    TK_THREAD,
+    TK_ASM,
+    TK_ATTRIBUTE,
+
+    TK_AUTO,
+    TK_BOOL,
+    TK_BREAK,
+    TK_CASE,
     TK_CHAR,
-    TK_STR,
+    TK_CONST,
+    TK_CONSTEXPR,
+    TK_CONTINUE,
+    TK_DEFAULT,
+    TK_DO,
+    TK_DOUBLE,
+    TK_ELSE,
+    TK_ENUM,
+    TK_EXTERN,
+    TK_FALSE,
+    TK_FLOAT,
+    TK_FOR,
+    TK_GOTO,
+    TK_IF,
+    TK_INLINE,
+    TK_INT,
+    TK_LONG,
+    TK_NULLPTR,
+    TK_REGISTER,
+    TK_RESTRICT,
+    TK_RETURN,
+    TK_SHORT,
+    TK_SIGNED,
+    TK_SIZEOF,
+    TK_STATIC,
+    TK_STATIC_ASSERT,
+    TK_STRUCT,
+    TK_SWITCH,
+    TK_TRUE,
+    TK_TYPEDEF,
+    TK_TYPEOF,
+    TK_TYPEOF_UNQUAL,
+    TK_UNION,
+    TK_UNSIGNED,
+    TK_VOID,
+    TK_VOLATILE,
+    TK_WHILE,
+
     TK_EOF,
 } TokenKind;
 
@@ -142,7 +197,9 @@ typedef enum {
     ND_NEG,        // unary -
     ND_NOT,        // !
     ND_INVERT,     // ~
+    ND_RETURN,     // return
     ND_EXPR_STMT,  // Expression statement
+    ND_COMP_STMT,  // {...}
     ND_VAR,        // Variable
     ND_NUM,        // Int
 } NodeKind;
@@ -151,8 +208,11 @@ typedef enum {
 struct Node {
     NodeKind kind;  // Node kind
     Node *next;     // Next node
-    Node *lhs;      // Left-hand side
-    Node *rhs;      // Right-hand side
+
+    Node *lhs;    // Left-hand side
+    Node *rhs;    // Right-hand side
+    Node *items;  // items
+
     Obj *var;
     int val;
 };

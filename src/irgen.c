@@ -117,27 +117,41 @@ static int gen_expr(Node *node) {
 }
 
 static int gen_stmt(Node *node) {
-    if (node->kind == ND_EXPR_STMT) return gen_expr(node->lhs);
-    exit(1);
+    int reg;
+    char reg_str[32];
+    switch (node->kind) {
+        case ND_COMP_STMT:
+            for (Node *n = node->items; n; n = n->next) reg = gen_stmt(n);
+            break;
+        case ND_RETURN:
+            reg = gen_expr(node->lhs);
+            fmt_operand(reg_str, reg);
+            printf("  store i32 %s, ptr %%1, align 4\n", reg_str);
+            printf("  br label %%return\n");
+            break;
+        case ND_EXPR_STMT:
+            reg = gen_expr(node->lhs);
+            break;
+        default:
+            exit(1);
+    }
+    return reg;
 }
 
 void irgen(Function *prog) {
     printf("define i32 @main() {\n");
     printf("entry:\n");
+    printf("  %%%d = alloca i32, align 4\n", cur_reg++);
 
     for (Obj *var = prog->locals; var; var = var->next) {
         var->vreg = cur_reg++;
         printf("  %%%d = alloca i32, align 4\n", var->vreg);
     }
 
-    int ret_val = 0;
-    for (Node *n = prog->body; n; n = n->next) {
-        ret_val = gen_stmt(n);
-    }
-
-    if (ret_val > 0)
-        printf("  ret i32 %%%d\n", ret_val);
-    else
-        printf("  ret i32 %d\n", -ret_val);
+    gen_stmt(prog->body);
+    printf("return:\n");
+    int ret_reg = cur_reg++;
+    printf("  %%%d = load i32, ptr %%1, align 4\n", ret_reg);
+    printf("  ret i32 %%%d\n", ret_reg);
     printf("}\n");
 }

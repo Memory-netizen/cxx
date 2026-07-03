@@ -134,23 +134,68 @@ static Node *expr(Token **rest, Token *tok) {
     return node;
 }
 
-// ExpStmt = Exp ";";
+static Node *stmt(Token **rest, Token *tok);
+static Node *compound_stmt(Token **rest, Token *tok);
+
+// ExpStmt = [Exp] ";";
 static Node *expr_stmt(Token **rest, Token *tok) {
-    Node *node = new_unary(ND_EXPR_STMT, expr(&tok, tok));
+    Node *node = NULL;
+
+    if (tok->kind != TK_SEMI) node = expr(&tok, tok);
     assert(tok->kind == TK_SEMI);
     *rest = tok->next;
+
+    return new_unary(ND_EXPR_STMT, node);
+}
+
+// RetStmt ::= "return" [Exp] ";";
+static Node *return_stmt(Token **rest, Token *tok) {
+    Node *node = NULL;
+
+    if (tok->next->kind != TK_SEMI) node = expr(&tok, tok->next);
+    assert(tok->kind == TK_SEMI);
+    *rest = tok->next;
+
+    return new_unary(ND_RETURN, node);
+}
+
+// Stmt ::= ExpStmt | CompStmt | RetStmt;
+static Node *stmt(Token **rest, Token *tok) {
+    Node *node;
+    switch (tok->kind) {
+        case TK_LBRACE:
+            node = compound_stmt(&tok, tok);
+            break;
+        case TK_RETURN:
+            node = return_stmt(&tok, tok);
+            break;
+
+        default:
+            node = expr_stmt(&tok, tok);
+            break;
+    }
+    *rest = tok;
     return node;
 }
 
-// Stmt ::= ExpStmt;
-static Node *stmt(Token **rest, Token *tok) { return expr_stmt(rest, tok); }
+// CompStmt ::= "{" {Stmt} "}";
+static Node *compound_stmt(Token **rest, Token *tok) {
+    assert(tok->kind == TK_LBRACE);
+    Node dummy, *cur = &dummy;
+    cur->next = NULL;
+
+    tok = tok->next;
+    while (tok->kind != TK_RBRACE) cur = cur->next = stmt(&tok, tok);
+    *rest = tok->next;
+
+    Node *node = new_node(ND_COMP_STMT);
+    node->items = dummy.next;
+    return node;
+}
 
 Function *parse(Token *tok) {
-    Node head, *cur = &head;
-    while (tok->kind != TK_EOF) cur = cur->next = stmt(&tok, tok);
-
     Function *prog = emalloc(sizeof(Function));
-    prog->body = head.next;
+    prog->body = compound_stmt(&tok, tok);
     prog->locals = locals;
     return prog;
 }
