@@ -3,7 +3,8 @@
 
 #define POOL_SIZE (32 * 1024 * 1024)  // 32MB
 #define ALIGNMENT 8
-#define HEAD_SIZE (((sizeof(void *) + ALIGNMENT - 1) / ALIGNMENT) * ALIGNMENT)
+#define ALIGN_UP(value, align) (((value) + (align) - 1) & ~((align) - 1))
+#define HEAD_SIZE ALIGN_UP(sizeof(void *), ALIGNMENT)
 
 static void **pool;
 static size_t len;
@@ -16,7 +17,7 @@ static big_block *big_blocks;
 
 void *emalloc(size_t n) {
     if (n == 0) return NULL;
-    n = (n + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+    n = ALIGN_UP(n, ALIGNMENT);
     if (n > POOL_SIZE - HEAD_SIZE) {
         void *p = malloc(n);
         big_block *b = malloc(sizeof(big_block));

@@ -12,16 +12,31 @@ static void fmt_operand(char *buf, int encoded) {
 
 static int gen_expr(Node *node) {
     if (!node) return 0;
-    // Imm node: returns the negative number without alloca reg
-    if (node->kind == ND_NUM) {
-        return -node->val;
+
+    char lhs_str[32], rhs_str[32];
+    switch (node->kind) {
+        case ND_NUM:
+            return -node->val;
+        case ND_VAR: {
+            int reg = cur_reg++;
+            printf("  %%%d = load i32, ptr %%%d, align 4\n", reg, node->var->vreg);
+            return reg;
+        }
+        case ND_AS:
+            int reg = gen_expr(node->rhs);
+            fmt_operand(rhs_str, reg);
+            printf("  store i32 %s, ptr %%%d, align 4\n", rhs_str, node->lhs->var->vreg);
+            return reg;
+        default:
+            break;
     }
 
     int lr = gen_expr(node->lhs);
     int rr = gen_expr(node->rhs);
+    if (node->kind == ND_COMMA) return rr;
+
     int reg = cur_reg++;
 
-    char lhs_str[32], rhs_str[32];
     fmt_operand(lhs_str, lr);
     fmt_operand(rhs_str, rr);
 
@@ -106,15 +121,20 @@ static int gen_stmt(Node *node) {
     exit(1);
 }
 
-void irgen(Node *node) {
+void irgen(Function *prog) {
     printf("define i32 @main() {\n");
     printf("entry:\n");
 
-    int ret_val = 0;
+    for (Obj *var = prog->locals; var; var = var->next) {
+        var->vreg = cur_reg++;
+        printf("  %%%d = alloca i32, align 4\n", var->vreg);
+    }
 
-    for (Node *n = node; n; n = n->next) {
+    int ret_val = 0;
+    for (Node *n = prog->body; n; n = n->next) {
         ret_val = gen_stmt(n);
     }
+
     if (ret_val > 0)
         printf("  ret i32 %%%d\n", ret_val);
     else

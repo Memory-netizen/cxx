@@ -7,6 +7,12 @@
 
 static inline bool start_with(char *p, char *q) { return strncmp(p, q, strlen(q)) == 0; }
 
+// Returns true if c is ident_start.
+static inline bool is_ident0(char c) { return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || c == '_'; }
+
+// Returns true if c is ident_continue.
+static inline bool is_ident1(char c) { return is_ident0(c) || ('0' <= c && c <= '9'); }
+
 static int read_punct(char *p, TokenKind *type) {
     static struct {
         char *punct;
@@ -39,7 +45,7 @@ static Token *new_token(TokenKind kind, char *start, char *end) {
     Token *tok = emalloc(sizeof(Token));
     tok->kind = kind;
     tok->loc = start;
-    tok->end = end;
+    tok->len = end - start;
     return tok;
 }
 
@@ -57,17 +63,27 @@ Token *tokenize(char *input) {
 
         // Numeric literal
         if (isdigit(*p)) {
+            char *q = p;
             cur = cur->next = new_token(TK_NUM, p, p);
             cur->val = strtoul(p, &p, 10);
-            cur->end = p;
+            cur->len = p - q;
+            continue;
+        }
+
+        // Identifier
+        if (is_ident0(*p)) {
+            char *start = p;
+            do {
+                p++;
+            } while (is_ident1(*p));
+            cur = cur->next = new_token(TK_IDENT, start, p);
             continue;
         }
 
         // Punctuator
         if (ispunct(*p)) {
             cur = cur->next = new_token(TK_NOP, p, p);
-            p += read_punct(p, &cur->kind);
-            cur->end = p;
+            p += cur->len = read_punct(p, &cur->kind);
             continue;
         }
     }

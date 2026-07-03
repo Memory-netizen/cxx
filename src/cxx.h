@@ -8,6 +8,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef struct Token Token;
+typedef struct Node Node;
+
 //
 // util.c
 //
@@ -21,6 +24,7 @@ void freeall(void);
 
 typedef enum {
     TK_NOP,
+    TK_COMMA,
     TK_AS,
     TK_ADDAS,
     TK_SUBAS,
@@ -69,7 +73,6 @@ typedef enum {
     TK_RBRACKET,
     TK_LBRACE,
     TK_RBRACE,
-    TK_COMMA,
     TK_SEMI,
     TK_COLON,
     TK_COLONCOLON,
@@ -87,11 +90,11 @@ typedef enum {
     TK_EOF,
 } TokenKind;
 
-typedef struct Token Token;
 struct Token {
     TokenKind kind;
-    struct Token *next;
-    char *loc, *end;
+    Token *next;
+    char *loc;
+    size_t len;
     int val;
 };
 
@@ -101,7 +104,24 @@ Token *tokenize(char *input);
 // Parser
 //
 
+// Local variable
+typedef struct Obj Obj;
+struct Obj {
+    Obj *next;
+    char *name;  // Variable name
+    int vreg;    // No of virtual reg
+};
+
+// Function
+typedef struct Function Function;
+struct Function {
+    Node *body;
+    Obj *locals;
+};
+
 typedef enum {
+    ND_COMMA,      // ,
+    ND_AS,         // =
     ND_BOR,        // |
     ND_XOR,        // ^
     ND_BAND,       // &
@@ -123,25 +143,26 @@ typedef enum {
     ND_NOT,        // !
     ND_INVERT,     // ~
     ND_EXPR_STMT,  // Expression statement
+    ND_VAR,        // Variable
     ND_NUM,        // Int
 } NodeKind;
 
 // AST node type
-typedef struct Node Node;
 struct Node {
     NodeKind kind;  // Node kind
     Node *next;     // Next node
     Node *lhs;      // Left-hand side
     Node *rhs;      // Right-hand side
+    Obj *var;
     int val;
 };
 
-Node *parse(Token *tok);
+Function *parse(Token *tok);
 
 //
 // irgen.c
 //
 
-void irgen(Node *node);
+void irgen(Function *node);
 
 #endif  // CXX_H_

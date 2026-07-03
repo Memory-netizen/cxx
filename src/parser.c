@@ -12,6 +12,28 @@ static Node *new_num(int val) {
     return node;
 }
 
+static Node *new_var_node(Obj *var) {
+    Node *node = new_node(ND_VAR);
+    node->var = var;
+    return node;
+}
+
+Obj *locals;
+// Find a local variable by name.
+static Obj *find_var(Token *tok) {
+    for (Obj *var = locals; var; var = var->next)
+        if (strlen(var->name) == tok->len && !strncmp(tok->loc, var->name, tok->len)) return var;
+    return NULL;
+}
+
+static Obj *new_lvar(char *name) {
+    Obj *var = emalloc(sizeof(Obj));
+    var->name = name;
+    var->next = locals;
+    locals = var;
+    return var;
+}
+
 static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs) {
     Node *node = new_node(kind);
     node->lhs = lhs;
@@ -26,21 +48,9 @@ static Node *new_unary(NodeKind kind, Node *expr) {
     return node;
 }
 
-// Exp        ::= OrExp;
-// OrExp      ::= XorExp     { "|" XorExp};
-// XorExp     ::= AndExp     { "^" AndExp};
-// AndExp     ::= EqExp      { "&" EqExp};
-// EqExp      ::= RelExp     { ("==" | "!=") RelExp};
-// RelExp     ::= ShiftExp   { ("<" | ">" | "<=" | ">=") ShiftExp};
-// ShiftExp   ::= AddExp     { ("<<" | ">>") AddExp};
-// AddExp     ::= MulExp     { ("+" | "-") MulExp};
-// MulExp     ::= UnaryExp   { ("*" | "/" | "%") UnaryExp};
-// UnaryExp   ::= PrimaryExp | UnaryOp UnaryExp;
-// UnaryOp    ::= "+" | "-" | "~" | "!" ;
-// PrimaryExp ::= Number | "(" Exp ")";
-
 static Node *expr(Token **rest, Token *tok);
 
+// PrimaryExp ::= Number | ident | "(" Exp ")";
 static Node *primary(Token **rest, Token *tok) {
     Node *node = NULL;
     if (tok->kind == TK_LPAREN) {
@@ -48,11 +58,17 @@ static Node *primary(Token **rest, Token *tok) {
         assert(tok->kind == TK_RPAREN);
     } else if (tok->kind == TK_NUM) {
         node = new_num(tok->val);
+    } else if (tok->kind == TK_IDENT) {
+        Obj *var = find_var(tok);
+        if (!var) var = new_lvar(strndup(tok->loc, tok->len));
+        node = new_var_node(var);
     }
     *rest = tok->next;
     return node;
 }
 
+// UnaryExp   ::= PrimaryExp | UnaryOp UnaryExp;
+// UnaryOp    ::= "+" | "-" | "~" | "!" ;
 static Node *unary(Token **rest, Token *tok) {
     switch (tok->kind) {
         case TK_PLUS:
@@ -73,6 +89,14 @@ static Node *unary(Token **rest, Token *tok) {
     return primary(rest, tok);
 }
 
+// OrExp      ::= XorExp     { "|" XorExp};
+// XorExp     ::= AndExp     { "^" AndExp};
+// AndExp     ::= EqExp      { "&" EqExp};
+// EqExp      ::= RelExp     { ("==" | "!=") RelExp};
+// RelExp     ::= ShiftExp   { ("<" | ">" | "<=" | ">=") ShiftExp};
+// ShiftExp   ::= AddExp     { ("<<" | ">>") AddExp};
+// AddExp     ::= MulExp     { ("+" | "-") MulExp};
+// MulExp     ::= UnaryExp   { ("*" | "/" | "%") UnaryExp};
 static Node *binexpr(Token **rest, Token *tok, int min_prec) {
     static int op_table[][2] = {
         [TK_BOR] = {40, ND_BOR},    [TK_XOR] = {50, ND_XOR},   [TK_BAND] = {60, ND_BAND},   [TK_EQ] = {70, ND_EQ},
@@ -94,13 +118,23 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
     return lhs;
 }
 
-static Node *expr(Token **rest, Token *tok) {
+// AssignExp ::= OrExp { "=" AssignExp };
+static Node *assign(Token **rest, Token *tok) {
     Node *node = binexpr(&tok, tok, 0);
+    while (tok->kind == TK_AS) node = new_binary(ND_AS, node, assign(&tok, tok->next));
     *rest = tok;
     return node;
 }
 
-// ExpStmt = Exp ";"
+// Exp ::= AssignExp { "," AssignExp };
+static Node *expr(Token **rest, Token *tok) {
+    Node *node = assign(&tok, tok);
+    while (tok->kind == TK_COMMA) node = new_binary(ND_COMMA, node, assign(&tok, tok->next));
+    *rest = tok;
+    return node;
+}
+
+// ExpStmt = Exp ";";
 static Node *expr_stmt(Token **rest, Token *tok) {
     Node *node = new_unary(ND_EXPR_STMT, expr(&tok, tok));
     assert(tok->kind == TK_SEMI);
@@ -108,11 +142,15 @@ static Node *expr_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// Stmt ::= ExpStmt
+// Stmt ::= ExpStmt;
 static Node *stmt(Token **rest, Token *tok) { return expr_stmt(rest, tok); }
 
-Node *parse(Token *tok) {
+Function *parse(Token *tok) {
     Node head, *cur = &head;
     while (tok->kind != TK_EOF) cur = cur->next = stmt(&tok, tok);
-    return head.next;
+
+    Function *prog = emalloc(sizeof(Function));
+    prog->body = head.next;
+    prog->locals = locals;
+    return prog;
 }
