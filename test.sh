@@ -27,6 +27,8 @@ assert() {
     fi
 }
 
+assert 0 '0'
+assert 42 '42'
 assert 47 '5+6*7'
 assert 77 '(5+6)*7'
 assert 14 '5+6+3'
@@ -86,5 +88,10 @@ assert 1 '(10-2*3)>=4'
 assert 0 '(10-2*3)>4'
 assert 16 '10/2*3+1'
 assert 2 '10/(2*3)+1'
+assert 10 '-10+20'
+assert 10 '- -10'
+assert 10 '- - +10'
+assert 0 '!10'
+assert 2 '~5 + 8'
 
 echo OK

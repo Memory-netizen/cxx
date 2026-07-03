@@ -115,7 +115,7 @@ typedef enum {
     TK_INC,
     TK_DEC,
     TK_INVERT,
-    TK_LOGNOT,
+    TK_NOT,
     TK_DOT,
     TK_ARROW,
 
@@ -166,7 +166,7 @@ static int read_punct(char *p, TokenKind *type) {
         {"++", TK_INC},        {"--", TK_DEC},     {"##", TK_HASHHASH}, {"<:", TK_LBRACKET},  {":>", TK_RBRACKET},
         {"%", TK_MOD},         {"[", TK_LBRACKET}, {"]", TK_RBRACKET},  {"(", TK_LPAREN},     {")", TK_RPAREN},
         {"{", TK_LBRACE},      {"}", TK_RBRACE},   {"&", TK_BAND},      {"*", TK_STAR},       {"+", TK_PLUS},
-        {"-", TK_MINUS},       {"~", TK_INVERT},   {"!", TK_LOGNOT},    {"/", TK_SLASH},      {"<", TK_LT},
+        {"-", TK_MINUS},       {"~", TK_INVERT},   {"!", TK_NOT},       {"/", TK_SLASH},      {"<", TK_LT},
         {">", TK_GT},          {"^", TK_XOR},      {"|", TK_BOR},       {"?", TK_QUESTION},   {":", TK_COLON},
         {";", TK_SEMI},        {".", TK_DOT},      {"=", TK_AS},        {",", TK_COMMA},      {"#", TK_HASH},
     };
@@ -227,23 +227,27 @@ static Token *tokenize(char *input) {
 //
 
 typedef enum {
-    ND_BOR,    // |
-    ND_XOR,    // ^
-    ND_BAND,   // &
-    ND_EQ,     // ==
-    ND_NE,     // !=
-    ND_LT,     // <
-    ND_GT,     // >
-    ND_LE,     // <=
-    ND_GE,     // >=
-    ND_LEFT,   // <<
-    ND_RIGHT,  // >>
-    ND_ADD,    // +
-    ND_SUB,    // -
-    ND_MUL,    // *
-    ND_DIV,    // /
-    ND_MOD,    // %
-    ND_NUM,    // Int
+    ND_BOR,     // |
+    ND_XOR,     // ^
+    ND_BAND,    // &
+    ND_EQ,      // ==
+    ND_NE,      // !=
+    ND_LT,      // <
+    ND_GT,      // >
+    ND_LE,      // <=
+    ND_GE,      // >=
+    ND_LEFT,    // <<
+    ND_RIGHT,   // >>
+    ND_ADD,     // +
+    ND_SUB,     // -
+    ND_MUL,     // *
+    ND_DIV,     // /
+    ND_MOD,     // %
+    ND_PLUS,    // unary +
+    ND_NEG,     // unary -
+    ND_NOT,     // !
+    ND_INVERT,  // ~
+    ND_NUM,     // Int
 } NodeKind;
 
 // AST node type
@@ -274,6 +278,13 @@ static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs) {
     return node;
 }
 
+static Node *new_unary(NodeKind kind, Node *expr) {
+    Node *node = new_node(kind);
+    node->lhs = expr;
+    node->rhs = NULL;
+    return node;
+}
+
 // Exp        ::= OrExp;
 // OrExp      ::= XorExp     { "|" XorExp};
 // XorExp     ::= AndExp     { "^" AndExp};
@@ -282,7 +293,9 @@ static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs) {
 // RelExp     ::= ShiftExp   { ("<" | ">" | "<=" | ">=") ShiftExp};
 // ShiftExp   ::= AddExp     { ("<<" | ">>") AddExp};
 // AddExp     ::= MulExp     { ("+" | "-") MulExp};
-// MulExp     ::= PrimaryExp { ("*" | "/" | "%") PrimaryExp};
+// MulExp     ::= UnaryExp   { ("*" | "/" | "%") UnaryExp};
+// UnaryExp   ::= PrimaryExp | UnaryOp UnaryExp;
+// UnaryOp    ::= "+" | "-" | "~" | "!" ;
 // PrimaryExp ::= Number | "(" Exp ")";
 
 static Node *expr(Token **rest, Token *tok);
@@ -299,6 +312,26 @@ static Node *primary(Token **rest, Token *tok) {
     return node;
 }
 
+static Node *unary(Token **rest, Token *tok) {
+    switch (tok->kind) {
+        case TK_PLUS:
+            return new_unary(ND_PLUS, unary(rest, tok->next));
+            break;
+        case TK_MINUS:
+            return new_unary(ND_NEG, unary(rest, tok->next));
+            break;
+        case TK_INVERT:
+            return new_unary(ND_INVERT, unary(rest, tok->next));
+            break;
+        case TK_NOT:
+            return new_unary(ND_NOT, unary(rest, tok->next));
+            break;
+        default:
+            break;
+    }
+    return primary(rest, tok);
+}
+
 static Node *binexpr(Token **rest, Token *tok, int min_prec) {
     static int op_table[][2] = {
         [TK_BOR] = {40, ND_BOR},    [TK_XOR] = {50, ND_XOR},   [TK_BAND] = {60, ND_BAND},   [TK_EQ] = {70, ND_EQ},
@@ -307,7 +340,7 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
         [TK_MINUS] = {100, ND_SUB}, [TK_STAR] = {110, ND_MUL}, [TK_SLASH] = {110, ND_DIV},  [TK_MOD] = {110, ND_MOD},
     };
 
-    Node *lhs = primary(&tok, tok);
+    Node *lhs = unary(&tok, tok);
 
     while (TK_BOR <= tok->kind && tok->kind <= TK_MOD) {
         NodeKind expr_op = op_table[tok->kind][1];
@@ -337,7 +370,8 @@ static void fmt_operand(char *buf, int encoded) {
 }
 
 static int gen_expr(Node *node) {
-    // Imm node: returns the negative number without alloc reg
+    if (!node) return 0;
+    // Imm node: returns the negative number without alloca reg
     if (node->kind == ND_NUM) {
         return -node->val;
     }
@@ -351,7 +385,22 @@ static int gen_expr(Node *node) {
     fmt_operand(rhs_str, rr);
 
     switch (node->kind) {
-        // arithmetic operation
+        // unary arithmetic operation
+        case ND_PLUS:
+            printf("  %%%d = add nsw i32 0, %s\n", reg, lhs_str);
+            break;
+        case ND_NEG:
+            printf("  %%%d = sub nsw i32 0, %s\n", reg, lhs_str);
+            break;
+        case ND_INVERT:
+            printf("  %%%d = xor i32 -1, %s\n", reg, lhs_str);
+            break;
+        case ND_NOT:
+            printf("  %%%d = icmp eq i32 %s, 0\n", reg, lhs_str);
+            int zext_reg = cur_reg++;
+            printf("  %%%d = zext i1 %%%d to i32\n", zext_reg, reg);
+            return zext_reg;
+        // binary arithmetic operation
         case ND_ADD:
             printf("  %%%d = add nsw i32 %s, %s\n", reg, lhs_str, rhs_str);
             break;
