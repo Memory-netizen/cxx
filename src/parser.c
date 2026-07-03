@@ -100,4 +100,19 @@ static Node *expr(Token **rest, Token *tok) {
     return node;
 }
 
-Node *parse(Token *tok) { return expr(&tok, tok); }
+// ExpStmt = Exp ";"
+static Node *expr_stmt(Token **rest, Token *tok) {
+    Node *node = new_unary(ND_EXPR_STMT, expr(&tok, tok));
+    assert(tok->kind == TK_SEMI);
+    *rest = tok->next;
+    return node;
+}
+
+// Stmt ::= ExpStmt
+static Node *stmt(Token **rest, Token *tok) { return expr_stmt(rest, tok); }
+
+Node *parse(Token *tok) {
+    Node head, *cur = &head;
+    while (tok->kind != TK_EOF) cur = cur->next = stmt(&tok, tok);
+    return head.next;
+}

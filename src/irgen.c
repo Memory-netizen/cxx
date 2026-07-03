@@ -101,15 +101,23 @@ static int gen_expr(Node *node) {
     return reg;
 }
 
+static int gen_stmt(Node *node) {
+    if (node->kind == ND_EXPR_STMT) return gen_expr(node->lhs);
+    exit(1);
+}
+
 void irgen(Node *node) {
     printf("define i32 @main() {\n");
     printf("entry:\n");
 
-    int ret_val = gen_expr(node);
+    int ret_val = 0;
+
+    for (Node *n = node; n; n = n->next) {
+        ret_val = gen_stmt(n);
+    }
     if (ret_val > 0)
         printf("  ret i32 %%%d\n", ret_val);
     else
         printf("  ret i32 %d\n", -ret_val);
-
     printf("}\n");
 }

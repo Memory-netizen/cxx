@@ -102,33 +102,35 @@ Token *tokenize(char *input);
 //
 
 typedef enum {
-    ND_BOR,     // |
-    ND_XOR,     // ^
-    ND_BAND,    // &
-    ND_EQ,      // ==
-    ND_NE,      // !=
-    ND_LT,      // <
-    ND_GT,      // >
-    ND_LE,      // <=
-    ND_GE,      // >=
-    ND_LEFT,    // <<
-    ND_RIGHT,   // >>
-    ND_ADD,     // +
-    ND_SUB,     // -
-    ND_MUL,     // *
-    ND_DIV,     // /
-    ND_MOD,     // %
-    ND_PLUS,    // unary +
-    ND_NEG,     // unary -
-    ND_NOT,     // !
-    ND_INVERT,  // ~
-    ND_NUM,     // Int
+    ND_BOR,        // |
+    ND_XOR,        // ^
+    ND_BAND,       // &
+    ND_EQ,         // ==
+    ND_NE,         // !=
+    ND_LT,         // <
+    ND_GT,         // >
+    ND_LE,         // <=
+    ND_GE,         // >=
+    ND_LEFT,       // <<
+    ND_RIGHT,      // >>
+    ND_ADD,        // +
+    ND_SUB,        // -
+    ND_MUL,        // *
+    ND_DIV,        // /
+    ND_MOD,        // %
+    ND_PLUS,       // unary +
+    ND_NEG,        // unary -
+    ND_NOT,        // !
+    ND_INVERT,     // ~
+    ND_EXPR_STMT,  // Expression statement
+    ND_NUM,        // Int
 } NodeKind;
 
 // AST node type
 typedef struct Node Node;
 struct Node {
     NodeKind kind;  // Node kind
+    Node *next;     // Next node
     Node *lhs;      // Left-hand side
     Node *rhs;      // Right-hand side
     int val;
