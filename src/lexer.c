@@ -109,12 +109,15 @@ static void convert_keywords(Token *tok) {
         {"while", TK_WHILE},
     };
     while (tok->kind != TK_EOF) {
-        if (tok->kind == TK_IDENT)
-            for (size_t i = 0; i < sizeof(kw) / sizeof(kw[0]); ++i)
-                if (tok->len == strlen(kw[i].keyword) && start_with(tok->loc, kw[i].keyword)) {
-                    tok->kind = kw[i].type;
-                    break;
-                }
+        if (tok->kind != TK_IDENT) {
+            tok = tok->next;
+            continue;
+        }
+        for (size_t i = 0; i < sizeof(kw) / sizeof(kw[0]); ++i)
+            if (tok->len == strlen(kw[i].keyword) && start_with(tok->loc, kw[i].keyword)) {
+                tok->kind = kw[i].type;
+                break;
+            }
         tok = tok->next;
     }
 }
@@ -168,7 +171,7 @@ Token *tokenize(char *input) {
 
         // Punctuator
         if (ispunct(*p)) {
-            cur = cur->next = new_token(TK_NOP, p, p);
+            cur = cur->next = new_token(TK_PUNCT, p, p);
             p += cur->len = read_punct(p, &cur->kind);
             continue;
         }

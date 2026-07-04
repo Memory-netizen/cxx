@@ -1,10 +1,14 @@
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define POOL_SIZE (32 * 1024 * 1024)  // 32MB
-#define ALIGNMENT 8
+#define BIG_THRESHOLD (128 * 1024)    // 128KB
+#define ALIGNMENT 16
 #define ALIGN_UP(value, align) (((value) + (align) - 1) & ~((align) - 1))
 #define HEAD_SIZE ALIGN_UP(sizeof(void *), ALIGNMENT)
+#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
 static void **pool;
 static size_t len;
@@ -18,13 +22,13 @@ static big_block *big_blocks;
 void *emalloc(size_t n) {
     if (n == 0) return NULL;
     n = ALIGN_UP(n, ALIGNMENT);
-    if (n > POOL_SIZE - HEAD_SIZE) {
+    if (n >= BIG_THRESHOLD) {
         void *p = malloc(n);
-        big_block *b = malloc(sizeof(big_block));
-        if (!p || !b) {
+        if (!p) {
             fprintf(stderr, "emalloc: out of memory\n");
             exit(1);
         }
+        big_block *b = emalloc(sizeof(big_block));
         b->ptr = p;
         b->next = big_blocks;
         big_blocks = b;
@@ -48,16 +52,45 @@ void *emalloc(size_t n) {
 }
 
 void freeall(void) {
+    while (big_blocks) {
+        big_block *b = big_blocks;
+        big_blocks = b->next;
+        free(b->ptr);
+    }
     while (pool) {
         void **pp = pool[0];
         free(pool);
         pool = pp;
     }
-    while (big_blocks) {
-        big_block *b = big_blocks;
-        big_blocks = b->next;
-        free(b->ptr);
-        free(b);
-    }
     len = 0;
+}
+
+typedef struct Vec Vec;
+struct Vec {
+    size_t esz;
+    size_t cap;
+    union {
+        long long ll;
+        long double ld;
+        void *ptr;
+    } data[];
+};
+
+void *vnew(size_t len, size_t esz) {
+    size_t cap = 2;
+    while (cap < len) cap *= 2;
+    Vec *v = emalloc(sizeof(Vec) + esz * cap);
+    v->cap = cap;
+    v->esz = esz;
+    return v->data;
+}
+
+void *vgrow(void *data, size_t len) {
+    if (!data) return NULL;
+    Vec *v = container_of(data, Vec, data);
+    if (v->cap >= len) return data;
+
+    void *new_data = vnew(len, v->esz);
+    memcpy(new_data, data, v->esz * v->cap);
+    return new_data;
 }

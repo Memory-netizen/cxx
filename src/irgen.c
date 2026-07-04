@@ -1,97 +1,112 @@
 #include "cxx.h"
 
-int cur_reg = 1;
+static Blk *curb;
+static Blk *entry;
+static Blk *end;
+static Blk *tail;
+int tmp_id = 1;
 
-// decode operand to str
-static void fmt_operand(char *buf, int encoded) {
-    if (encoded > 0)
-        sprintf(buf, "%%%d", encoded);
+static Ref gen_stmt(Node *node);
+
+static Ir *new_ins(IrKind op, Ref dst, Ref arg1, Ref arg2) {
+    Ir *new = emalloc(sizeof(Ir));
+    new->op = op;
+    new->dst = dst;
+    new->args[0] = arg1;
+    new->args[1] = arg2;
+
+    if (curb->head)
+        curb->tail = curb->tail->next = new;
     else
-        sprintf(buf, "%d", -encoded);
+        curb->head = curb->tail = new;
+    return new;
 }
 
-static int gen_expr(Node *node) {
-    if (!node) return 0;
+Blk *new_blk(void) {
+    static int blk_id = 0;
+    Blk *b = emalloc(sizeof(Blk));
+    memset(b, 0, sizeof(*b));
+    b->blk_id = blk_id++;
+    tail = tail->next = b;
+    return b;
+}
 
-    char lhs_str[32], rhs_str[32];
+static Ref gen_expr(Node *node) {
+    if (!node) return R;
+
     switch (node->kind) {
         case ND_NUM:
-            return -node->val;
+            return INT(node->val);
         case ND_VAR: {
-            int reg = cur_reg++;
-            printf("  %%%d = load i32, ptr %%%d, align 4\n", reg, node->var->vreg);
+            Ref reg = TMP(tmp_id++);
+            Ref arg1 = SLOT(node->var->vreg);
+            new_ins(IR_LORD, reg, arg1, R);
             return reg;
         }
-        case ND_AS:
-            int reg = gen_expr(node->rhs);
-            fmt_operand(rhs_str, reg);
-            printf("  store i32 %s, ptr %%%d, align 4\n", rhs_str, node->lhs->var->vreg);
+        case ND_AS: {
+            Ref reg = gen_expr(node->rhs);
+            Ref dst = SLOT(node->lhs->var->vreg);
+            new_ins(IR_STR, dst, reg, R);
             return reg;
+        }
         default:
             break;
     }
 
-    int lr = gen_expr(node->lhs);
-    int rr = gen_expr(node->rhs);
+    Ref lr = gen_expr(node->lhs);
+    Ref rr = gen_expr(node->rhs);
     if (node->kind == ND_COMMA) return rr;
 
-    int reg = cur_reg++;
-
-    fmt_operand(lhs_str, lr);
-    fmt_operand(rhs_str, rr);
+    Ref reg = TMP(tmp_id++);
 
     switch (node->kind) {
         // unary arithmetic operation
         case ND_PLUS:
-            printf("  %%%d = add nsw i32 0, %s\n", reg, lhs_str);
-            break;
+            return lr;
         case ND_NEG:
-            printf("  %%%d = sub nsw i32 0, %s\n", reg, lhs_str);
+            new_ins(IR_SUB, reg, INT(0), lr);
             break;
         case ND_INVERT:
-            printf("  %%%d = xor i32 -1, %s\n", reg, lhs_str);
+            new_ins(IR_XOR, reg, lr, INT(-1));
             break;
         case ND_NOT:
-            printf("  %%%d = icmp eq i32 %s, 0\n", reg, lhs_str);
-            int zext_reg = cur_reg++;
-            printf("  %%%d = zext i1 %%%d to i32\n", zext_reg, reg);
+            new_ins(IR_CMP_EQ, reg, lr, INT(0));
+            Ref zext_reg = TMP(tmp_id++);
+            new_ins(IR_EXT, zext_reg, reg, R);
             return zext_reg;
         // binary arithmetic operation
         case ND_ADD:
-            printf("  %%%d = add nsw i32 %s, %s\n", reg, lhs_str, rhs_str);
+            new_ins(IR_ADD, reg, lr, rr);
             break;
         case ND_SUB:
-            printf("  %%%d = sub nsw i32 %s, %s\n", reg, lhs_str, rhs_str);
+            new_ins(IR_SUB, reg, lr, rr);
             break;
         case ND_MUL:
-            printf("  %%%d = mul nsw i32 %s, %s\n", reg, lhs_str, rhs_str);
+            new_ins(IR_MUL, reg, lr, rr);
             break;
         case ND_DIV:
-            printf("  %%%d = sdiv i32 %s, %s\n", reg, lhs_str, rhs_str);
+            new_ins(IR_DIV, reg, lr, rr);
             break;
         case ND_MOD:
-            printf("  %%%d = srem i32 %s, %s\n", reg, lhs_str, rhs_str);
+            new_ins(IR_REM, reg, lr, rr);
             break;
-
         // shift operation
         case ND_LEFT:
-            printf("  %%%d = shl nsw i32 %s, %s\n", reg, lhs_str, rhs_str);
+            new_ins(IR_SHL, reg, lr, rr);
             break;
         case ND_RIGHT:
-            printf("  %%%d = ashr i32 %s, %s\n", reg, lhs_str, rhs_str);
+            new_ins(IR_SHR, reg, lr, rr);
             break;
-
         // bit operation
         case ND_BAND:
-            printf("  %%%d = and i32 %s, %s\n", reg, lhs_str, rhs_str);
+            new_ins(IR_AND, reg, lr, rr);
             break;
         case ND_BOR:
-            printf("  %%%d = or i32 %s, %s\n", reg, lhs_str, rhs_str);
+            new_ins(IR_OR, reg, lr, rr);
             break;
         case ND_XOR:
-            printf("  %%%d = xor i32 %s, %s\n", reg, lhs_str, rhs_str);
+            new_ins(IR_XOR, reg, lr, rr);
             break;
-
         // Comparison operations：icmp return i1，zext to i32
         case ND_EQ:
         case ND_NE:
@@ -99,35 +114,171 @@ static int gen_expr(Node *node) {
         case ND_GT:
         case ND_LE:
         case ND_GE: {
-            static char *cmp_str[] = {
-                [ND_EQ] = "eq", [ND_NE] = "ne", [ND_LT] = "slt", [ND_GT] = "sgt", [ND_LE] = "sle", [ND_GE] = "sge",
+            static int cmp_op[] = {
+                [ND_EQ] = IR_CMP_EQ, [ND_NE] = IR_CMP_NE, [ND_LT] = IR_CMP_LT,
+                [ND_GT] = IR_CMP_GT, [ND_LE] = IR_CMP_LE, [ND_GE] = IR_CMP_GE,
             };
-            printf("  %%%d = icmp %s i32 %s, %s\n", reg, cmp_str[node->kind], lhs_str, rhs_str);
-            int zext_reg = cur_reg++;
-            printf("  %%%d = zext i1 %%%d to i32\n", zext_reg, reg);
+            new_ins(cmp_op[node->kind], reg, lr, rr);
+            Ref zext_reg = TMP(tmp_id++);
+            new_ins(IR_EXT, zext_reg, reg, R);
             return zext_reg;
         }
-
         default:
             fprintf(stderr, "gen_expr: unknown node kind %d\n", node->kind);
             exit(1);
     }
-
     return reg;
 }
 
-static int gen_stmt(Node *node) {
-    int reg;
-    char reg_str[32];
+static void gen_if(Node *node) {
+    Blk *t_blk = new_blk();
+    Blk *f_blk = node->els ? new_blk() : NULL;
+    Blk *m_blk = new_blk();
+
+    // cond
+    Ref tmp = gen_expr(node->cond);
+    Ref cond = TMP(tmp_id++);
+    new_ins(IR_CMP_NE, cond, tmp, INT(0));
+    curb->jmp.type = IR_JNZ;
+    curb->jmp.arg = cond;
+    curb->succ1 = t_blk;
+    curb->succ2 = f_blk ? f_blk : m_blk;
+
+    // then
+    curb = t_blk;
+    gen_stmt(node->then);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = m_blk;
+
+    // else
+    if (f_blk) {
+        curb = f_blk;
+        gen_stmt(node->els);
+        curb->jmp.type = IR_JMP;
+        curb->succ1 = m_blk;
+    }
+    curb = m_blk;
+}
+
+static void gen_for(Node *node) {
+    Blk *cond_blk = new_blk();
+    Blk *body_blk = new_blk();
+    Blk *merge_blk = new_blk();
+
+    // init
+    gen_expr(node->init);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = cond_blk;
+
+    // cond
+    curb = cond_blk;
+    if (node->cond) {
+        Ref tmp = gen_expr(node->cond);
+        Ref cond = TMP(tmp_id++);
+        new_ins(IR_CMP_NE, cond, tmp, INT(0));
+        curb->jmp.type = IR_JNZ;
+        curb->jmp.arg = cond;
+        curb->succ1 = body_blk;
+        curb->succ2 = merge_blk;
+    } else {
+        curb->jmp.type = IR_JMP;
+        curb->succ1 = body_blk;
+    }
+
+    // body
+    curb = body_blk;
+    gen_stmt(node->body);
+    // incr
+    gen_expr(node->inc);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = cond_blk;
+
+    curb = merge_blk;
+}
+
+static void gen_while(Node *node) {
+    Blk *cond_blk = new_blk();
+    Blk *body_blk = new_blk();
+    Blk *merge_blk = new_blk();
+
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = cond_blk;
+
+    // cond
+    curb = cond_blk;
+    Ref tmp = gen_expr(node->cond);
+    Ref cond = TMP(tmp_id++);
+    new_ins(IR_CMP_NE, cond, tmp, INT(0));
+    curb->jmp.type = IR_JNZ;
+    curb->jmp.arg = cond;
+    curb->succ1 = body_blk;
+    curb->succ2 = merge_blk;
+
+    // body
+    curb = body_blk;
+    gen_stmt(node->body);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = cond_blk;
+
+    curb = merge_blk;
+}
+
+static void gen_do(Node *node) {
+    Blk *body_blk = new_blk();
+    Blk *cond_blk = new_blk();
+    Blk *merge_blk = new_blk();
+
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = body_blk;
+
+    // body
+    curb = body_blk;
+    gen_stmt(node->body);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = cond_blk;
+
+    // cond
+    curb = cond_blk;
+    Ref tmp = gen_expr(node->cond);
+    Ref cond = TMP(tmp_id++);
+    new_ins(IR_CMP_NE, cond, tmp, INT(0));
+    curb->jmp.type = IR_JNZ;
+    curb->jmp.arg = cond;
+    curb->succ1 = body_blk;
+    curb->succ2 = merge_blk;
+
+    curb = merge_blk;
+}
+
+static void gen_ret(Node *n) {
+    Ref result = gen_expr(n->lhs);
+    if (!refeq(result, R)) new_ins(IR_STR, SLOT(1), result, R);
+
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = end;
+    curb = end;
+}
+
+static Ref gen_stmt(Node *node) {
+    Ref reg = R;
     switch (node->kind) {
+        case ND_IF:
+            gen_if(node);
+            break;
+        case ND_FOR:
+            gen_for(node);
+            break;
+        case ND_WHILE:
+            gen_while(node);
+            break;
+        case ND_DO:
+            gen_do(node);
+            break;
         case ND_COMP_STMT:
-            for (Node *n = node->items; n; n = n->next) reg = gen_stmt(n);
+            for (Node *n = node->body; n; n = n->next) reg = gen_stmt(n);
             break;
         case ND_RETURN:
-            reg = gen_expr(node->lhs);
-            fmt_operand(reg_str, reg);
-            printf("  store i32 %s, ptr %%1, align 4\n", reg_str);
-            printf("  br label %%return\n");
+            gen_ret(node);
             break;
         case ND_EXPR_STMT:
             reg = gen_expr(node->lhs);
@@ -138,20 +289,166 @@ static int gen_stmt(Node *node) {
     return reg;
 }
 
-void irgen(Function *prog) {
-    printf("define i32 @main() {\n");
-    printf("entry:\n");
-    printf("  %%%d = alloca i32, align 4\n", cur_reg++);
+Blk *irgen(Function *prog) {
+    Blk dummy;
+    tail = &dummy;
+    curb = entry = new_blk();
+    end = new_blk();
+    tail = entry;
 
-    for (Obj *var = prog->locals; var; var = var->next) {
-        var->vreg = cur_reg++;
-        printf("  %%%d = alloca i32, align 4\n", var->vreg);
-    }
+    // Entry
+    new_ins(IR_ALLOCA, TMP(tmp_id++), R, R);
+    for (Obj *var = prog->locals; var; var = var->next) new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++), R, R);
 
     gen_stmt(prog->body);
-    printf("return:\n");
-    int ret_reg = cur_reg++;
-    printf("  %%%d = load i32, ptr %%1, align 4\n", ret_reg);
-    printf("  ret i32 %%%d\n", ret_reg);
+
+    tail->next = end;
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = end;
+
+    curb = end;
+    new_ins(IR_LORD, TMP(tmp_id), SLOT(1), R);
+    curb->jmp.type = IR_RET;
+    curb->jmp.arg = TMP(tmp_id);
+    return entry;
+}
+
+static void print_operand(Ref r) {
+    if (r.type == RInt)
+        printf("%d", r.val);
+    else if (r.type == RTmp)
+        printf("%%tmp%d", r.val);
+    else if (r.type == RSlot) {
+        printf("%%tmp%d", r.val);
+    }
+}
+
+static void print_binop(const char *op, Ir *ir) {
+    printf("%s i32 ", op);
+    print_operand(ir->args[0]);
+    printf(", ");
+    print_operand(ir->args[1]);
+    printf("\n");
+}
+
+void dump_blk(Blk *b) {
+    printf("blk%d:\n", b->blk_id);
+
+    Ir *ir = b->head;
+    while (ir) {
+        printf("  ");
+        if (ir->op != IR_STR) printf("%%tmp%d = ", ir->dst.val);
+
+        switch (ir->op) {
+            case IR_ALLOCA:
+                printf("alloca i32\n");
+                break;
+            case IR_LORD:
+                printf("load i32, i32* ");
+                print_operand(ir->args[0]);
+                printf("\n");
+                break;
+            case IR_STR:
+                printf("store i32 ");
+                print_operand(ir->args[0]);
+                printf(", i32* ");
+                print_operand(ir->dst);
+                printf("\n");
+                break;
+
+            case IR_ADD:
+                print_binop("add", ir);
+                break;
+            case IR_SUB:
+                print_binop("sub", ir);
+                break;
+            case IR_MUL:
+                print_binop("mul", ir);
+                break;
+            case IR_DIV:
+                print_binop("sdiv", ir);
+                break;
+            case IR_REM:
+                print_binop("srem", ir);
+                break;
+            case IR_AND:
+                print_binop("and", ir);
+                break;
+            case IR_OR:
+                print_binop("or", ir);
+                break;
+            case IR_XOR:
+                print_binop("xor", ir);
+                break;
+            case IR_SHL:
+                print_binop("shl", ir);
+                break;
+            case IR_SHR:
+                print_binop("ashr", ir);
+                break;
+
+            case IR_NEG:
+                printf("sub i32 0, ");
+                print_operand(ir->args[0]);
+                printf("\n");
+                break;
+            case IR_EXT:
+                printf("zext i1 ");
+                print_operand(ir->args[0]);
+                printf(" to i32\n");
+                break;
+
+            case IR_CMP_EQ:
+                print_binop("icmp eq", ir);
+                break;
+            case IR_CMP_NE:
+                print_binop("icmp ne", ir);
+                break;
+            case IR_CMP_GE:
+                print_binop("icmp sge", ir);
+                break;
+            case IR_CMP_GT:
+                print_binop("icmp sgt", ir);
+                break;
+            case IR_CMP_LE:
+                print_binop("icmp sle", ir);
+                break;
+            case IR_CMP_LT:
+                print_binop("icmp slt", ir);
+                break;
+
+            default:
+                break;
+        }
+        ir = ir->next;
+    }
+
+    printf("  ");
+    switch (b->jmp.type) {
+        case IR_RET:
+            printf("ret i32 ");
+            print_operand(b->jmp.arg);
+            printf("\n");
+            break;
+        case IR_JMP:
+            printf("br label %%blk%d\n", b->succ1->blk_id);
+            break;
+        case IR_JNZ:
+            printf("br i1 ");
+            print_operand(b->jmp.arg);
+            printf(", label %%blk%d, label %%blk%d\n", b->succ1->blk_id, b->succ2->blk_id);
+            break;
+        default:
+            break;
+    }
+}
+
+void dump_fn(Blk *b) {
+    printf("define i32 @main() {\n");
+    Blk *cur = b;
+    while (cur) {
+        dump_blk(cur);
+        cur = cur->next;
+    }
     printf("}\n");
 }

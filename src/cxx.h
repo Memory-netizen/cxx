@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,18 +13,12 @@ typedef struct Token Token;
 typedef struct Node Node;
 
 //
-// util.c
-//
-
-void *emalloc(size_t n);
-void freeall(void);
-
-//
 // Lexer
 //
 
 typedef enum {
-    TK_NOP,
+    TK_EOF = -1,
+    TK_PUNCT,
     TK_COMMA,
     TK_AS,
     TK_ADDAS,
@@ -80,69 +75,79 @@ typedef enum {
     TK_ELLIPSIS,
     TK_HASH,
     TK_HASHHASH,
+    TK_PUNCTEND,
 
     TK_IDENT,
-    TK_KEYWORD,
     TK_NUM,
     TK_PPNUM,
     TK_CHARLIT,
     TK_STRLIT,
 
+    TK_KEYWORD,
+    TK_TRUE = TK_KEYWORD,
+    TK_FALSE,
+    TK_NULLPTR,
+
+    // Storage-class specifiers
+    TK_CONSTEXPR,
+    TK_EXTERN,
+    TK_REGISTER,
+    TK_STATIC,
+    TK_THREAD,
+    TK_TYPEDEF,
+
+    // Type specifiers
+    TK_AUTO,  // Auto get type
+    TK_VOID,
+    TK_CHAR,
+    TK_SHORT,
+    TK_INT,
+    TK_LONG,
+    TK_FLOAT,
+    TK_DOUBLE,
+    TK_SIGNED,
+    TK_UNSIGNED,
+    TK_BITINT,
+    TK_BOOL,
+    TK_ENUM,
+    TK_STRUCT,
+    TK_UNION,
+    TK_TYPEOF,
+    TK_TYPEOF_UNQUAL,
+
+    // Type qualifiers
+    TK_CONST,
+    TK_RESTRICT,
+    TK_VOLATILE,
+    TK_ATOMIC,
+
+    // Function specifiers
+    TK_INLINE,
+    TK_NORETURN,
+
     TK_ALIGNAS,
     TK_ALIGNOF,
-    TK_ATOMIC,
-    TK_BITINT,
     TK_COUNTOF,
+    TK_SIZEOF,
+
     TK_GENERIC,
-    TK_NORETURN,
-    TK_THREAD,
     TK_ASM,
     TK_ATTRIBUTE,
 
-    TK_AUTO,
-    TK_BOOL,
     TK_BREAK,
     TK_CASE,
-    TK_CHAR,
-    TK_CONST,
-    TK_CONSTEXPR,
     TK_CONTINUE,
     TK_DEFAULT,
     TK_DO,
-    TK_DOUBLE,
     TK_ELSE,
-    TK_ENUM,
-    TK_EXTERN,
-    TK_FALSE,
-    TK_FLOAT,
     TK_FOR,
     TK_GOTO,
     TK_IF,
-    TK_INLINE,
-    TK_INT,
-    TK_LONG,
-    TK_NULLPTR,
-    TK_REGISTER,
-    TK_RESTRICT,
     TK_RETURN,
-    TK_SHORT,
-    TK_SIGNED,
-    TK_SIZEOF,
-    TK_STATIC,
     TK_STATIC_ASSERT,
-    TK_STRUCT,
     TK_SWITCH,
-    TK_TRUE,
-    TK_TYPEDEF,
-    TK_TYPEOF,
-    TK_TYPEOF_UNQUAL,
-    TK_UNION,
-    TK_UNSIGNED,
-    TK_VOID,
-    TK_VOLATILE,
     TK_WHILE,
 
-    TK_EOF,
 } TokenKind;
 
 struct Token {
@@ -150,7 +155,7 @@ struct Token {
     Token *next;
     char *loc;
     size_t len;
-    int val;
+    int val;  // Uesd if kind == TK_NUM;
 };
 
 Token *tokenize(char *input);
@@ -198,6 +203,10 @@ typedef enum {
     ND_NOT,        // !
     ND_INVERT,     // ~
     ND_RETURN,     // return
+    ND_IF,         // if
+    ND_WHILE,      // while
+    ND_DO,         // do
+    ND_FOR,        // for
     ND_EXPR_STMT,  // Expression statement
     ND_COMP_STMT,  // {...}
     ND_VAR,        // Variable
@@ -209,12 +218,26 @@ struct Node {
     NodeKind kind;  // Node kind
     Node *next;     // Next node
 
-    Node *lhs;    // Left-hand side
-    Node *rhs;    // Right-hand side
-    Node *items;  // items
-
-    Obj *var;
-    int val;
+    union {
+        struct {
+            Node *lhs;  // Left-hand side
+            Node *rhs;  // Right-hand side
+        };
+        struct {
+            Node *init;
+            Node *cond;
+            union {
+                Node *then;
+                Node *body;  // Block
+            };
+            union {
+                Node *els;
+                Node *inc;
+            };
+        };
+        Obj *var;  // Used if kind == ND_VAR
+        int val;   // Used if kind == ND_NUM
+    };
 };
 
 Function *parse(Token *tok);
@@ -222,7 +245,104 @@ Function *parse(Token *tok);
 //
 // irgen.c
 //
+typedef enum {
+    IR_NOP,
+    // Terminator
+    IR_RET,
+    IR_JMP,
+    IR_JNZ,
+    IR_HLT,
 
-void irgen(Function *node);
+    // Arithmetic
+    IR_ADD,
+    IR_SUB,
+    IR_MUL,
+    IR_DIV,
+    IR_REM,
+    IR_NEG,
+
+    // Bitwise
+    IR_AND,
+    IR_OR,
+    IR_XOR,
+    IR_SHL,
+    IR_SHR,
+
+    // Memory
+    IR_ALLOCA,
+    IR_LORD,
+    IR_STR,
+
+    // Conversion
+    IR_EXT,
+
+    // Compare
+    IR_CMP_NE,
+    IR_CMP_EQ,
+    IR_CMP_GE,
+    IR_CMP_GT,
+    IR_CMP_LE,
+    IR_CMP_LT,
+} IrKind;
+
+typedef struct Ref Ref;
+typedef struct Ir Ir;
+typedef struct Blk Blk;
+
+enum {
+    RSlot,
+    RTmp,
+    RInt,
+};
+
+#define R \
+    (Ref) { RTmp, 0 }
+#define TMP(x) \
+    (Ref) { RTmp, x }
+#define SLOT(x) \
+    (Ref) { RSlot, x }
+#define INT(x) \
+    (Ref) { RInt, x }
+
+struct Ref {
+    uint32_t type : 3;
+    int32_t val : 29;
+};
+
+static inline int refeq(Ref a, Ref b) { return a.type == b.type && a.val == b.val; }
+
+struct Ir {
+    IrKind op;
+    Ref dst;
+    Ref args[2];
+    Ir *prev, *next;
+};
+
+struct Blk {
+    int blk_id;
+
+    Ir *head;  // First ir
+    Ir *tail;  // Last ir before Terminator
+    struct {
+        IrKind type;
+        Ref arg;
+    } jmp;
+
+    Blk *succ1;
+    Blk *succ2;
+    Blk *next;
+};
+
+Blk *irgen(Function *node);
+void dump_fn(Blk *b);
+
+//
+// util.c
+//
+
+void *emalloc(size_t n);
+void freeall(void);
+void *vnew(size_t len, size_t esz);
+void *vgrow(void *data, size_t len);
 
 #endif  // CXX_H_

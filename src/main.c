@@ -5,7 +5,8 @@ int main(int argc, char **argv) {
 
     Token *tok = tokenize(argv[1]);
     Function *prog = parse(tok);
-    irgen(prog);
+    Blk *b = irgen(prog);
+    dump_fn(b);
 
     freeall();
     return 0;
