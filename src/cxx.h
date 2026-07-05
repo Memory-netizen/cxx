@@ -208,6 +208,8 @@ typedef enum {
     ND_INVERT,  // ~
     ND_ADDR,    // unary &
     ND_DEREF,   // unary *
+    ND_PTRADD,
+    ND_PTRSUB,
 
     // Statement
     ND_RETURN,     // return
@@ -262,6 +264,7 @@ Function *parse(Token *tok);
 
 typedef enum {
     TY_I1,
+    TY_I64,
     TY_INT,
     TY_PTR,
 } TypeKind;
@@ -277,9 +280,11 @@ struct Type {
 
 extern Type *ty_int;
 extern Type *ty_i1;
+extern Type *ty_i64;
 
 bool is_integer(Type *ty);
-Type *ptr_to(Type *base);
+bool is_prointer(Type *ty);
+Type *pointer_to(Type *base);
 void add_type(Node *node);
 
 //
@@ -312,9 +317,11 @@ typedef enum {
     IR_ALLOCA,
     IR_LORD,
     IR_STR,
+    IR_GETELEMPTR,
 
     // Conversion
-    IR_EXT,
+    IR_ZEXT,
+    IR_SEXT,
 
     // Compare
     IR_CMP_NE,

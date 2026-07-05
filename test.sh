@@ -134,4 +134,10 @@ assert 5 '{ int x=3; int *y=&x; *y=5; return x; }'
 assert 8 '{ int x, y; x=3; y=5; return x+y; }'
 assert 8 '{ int x=3, y=5; return x+y; }'
 
+assert 5 '{ int x=3; int y=5; return *(&x+1); }'
+assert 3 '{ int x=3; int y=5; return *(&y-1); }'
+assert 5 '{ int x=3; int y=5; return *(&x-(-1)); }'
+assert 7 '{ int x=3; int y=5; *(&x+1)=7; return y; }'
+assert 7 '{ int x=3; int y=5; *(&y-2+1)=7; return x; }'
+
 echo OK

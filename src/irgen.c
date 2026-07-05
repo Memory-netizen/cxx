@@ -75,26 +75,49 @@ static Ref gen_expr(Node *node) {
     }
 
     Ref lr = gen_expr(node->lhs);
-    Ref rr = gen_expr(node->rhs);
-
-    if (node->kind == ND_COMMA) return rr;
-    if (node->kind == ND_PLUS) return lr;
-
+    lr.ty = node->lhs->ty;
     reg = TMP(tmp_id++, node->ty);
 
+    // unary arithmetic operation
     switch (node->kind) {
-        // unary arithmetic operation
+        case ND_PLUS:
+            return lr;
         case ND_NEG:
+            if (node->lhs->kind == ND_NUM) return INT(-lr.val);
             new_ins(IR_SUB, reg, INT(0), lr);
-            break;
+            return reg;
         case ND_INVERT:
             new_ins(IR_XOR, reg, lr, INT(-1));
+            return reg;
+        case ND_NOT: {
+            Ref tmp = TMP(tmp_id++, ty_i1);
+            new_ins(IR_CMP_EQ, tmp, lr, INT(0));
+            new_ins(IR_ZEXT, reg, tmp, R);
+            return reg;
+        }
+        default:
             break;
-        case ND_NOT:
-            new_ins(IR_CMP_EQ, reg, lr, INT(0));
-            Ref zext_reg = TMP(tmp_id++, ty_int);
-            new_ins(IR_EXT, zext_reg, reg, R);
-            return zext_reg;
+    }
+
+    Ref rr = gen_expr(node->rhs);
+    rr.ty = node->rhs->ty;
+    if (node->kind == ND_COMMA) return rr;
+
+    switch (node->kind) {
+        case ND_PTRSUB: {
+            Ref tmp = TMP(tmp_id++, rr.ty);
+            new_ins(IR_SUB, tmp, INT(0), rr);
+            Ref sext_reg = TMP(tmp_id++, ty_i64);
+            new_ins(IR_SEXT, sext_reg, tmp, R);
+            new_ins(IR_GETELEMPTR, reg, lr, sext_reg);
+            break;
+        }
+        case ND_PTRADD: {
+            Ref sext_reg = TMP(tmp_id++, ty_i64);
+            new_ins(IR_SEXT, sext_reg, rr, R);
+            new_ins(IR_GETELEMPTR, reg, lr, sext_reg);
+            break;
+        }
         // binary arithmetic operation
         case ND_ADD:
             new_ins(IR_ADD, reg, lr, rr);
@@ -139,10 +162,10 @@ static Ref gen_expr(Node *node) {
                 [ND_EQ] = IR_CMP_EQ, [ND_NE] = IR_CMP_NE, [ND_LT] = IR_CMP_LT,
                 [ND_GT] = IR_CMP_GT, [ND_LE] = IR_CMP_LE, [ND_GE] = IR_CMP_GE,
             };
-            new_ins(cmp_op[node->kind], reg, lr, rr);
-            Ref zext_reg = TMP(tmp_id++, ty_int);
-            new_ins(IR_EXT, zext_reg, reg, R);
-            return zext_reg;
+            Ref tmp = TMP(tmp_id++, ty_i1);
+            new_ins(cmp_op[node->kind], tmp, lr, rr);
+            new_ins(IR_ZEXT, reg, tmp, R);
+            return reg;
         }
         default:
             fprintf(stderr, "gen_expr: unknown node kind %d\n", node->kind);
@@ -355,6 +378,7 @@ static void print_binop(const char *op, Ir *ir) {
 
 static const char *ty_str[] = {
     [TY_I1] = "i1",
+    [TY_I64] = "i64",
     [TY_INT] = "i32",
     [TY_PTR] = "ptr",
 };
@@ -383,6 +407,14 @@ void dump_blk(Blk *b) {
                 printf(", ptr ");
                 print_operand(ir->dst);
                 printf(", align %d\n", ir->dst.ty->align);
+                break;
+            case IR_GETELEMPTR:
+                printf("getelementptr %s ", ty_str[ir->args[0].ty->base->kind]);
+                printf(", ptr ");
+                print_operand(ir->args[0]);
+                printf(", i64 ");
+                print_operand(ir->args[1]);
+                printf("\n");
                 break;
 
             case IR_ADD:
@@ -421,10 +453,15 @@ void dump_blk(Blk *b) {
                 print_operand(ir->args[0]);
                 printf("\n");
                 break;
-            case IR_EXT:
-                printf("zext i1 ");
+            case IR_SEXT:
+                printf("sext %s ", ty_str[ir->args[0].ty->kind]);
                 print_operand(ir->args[0]);
-                printf(" to i32\n");
+                printf(" to %s\n", ty_str[ir->dst.ty->kind]);
+                break;
+            case IR_ZEXT:
+                printf("zext %s ", ty_str[ir->args[0].ty->kind]);
+                print_operand(ir->args[0]);
+                printf(" to %s\n", ty_str[ir->dst.ty->kind]);
                 break;
 
             case IR_CMP_EQ:

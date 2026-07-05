@@ -2,10 +2,12 @@
 
 Type *ty_int = &(Type){TY_INT, 4, 4, NULL};
 Type *ty_i1 = &(Type){TY_I1, 1, 1, NULL};
+Type *ty_i64 = &(Type){TY_I64, 8, 8, NULL};
 
 bool is_integer(Type *ty) { return ty->kind == TY_INT; }
+bool is_prointer(Type *ty) { return ty->kind == TY_PTR; }
 
-Type *ptr_to(Type *base) {
+Type *pointer_to(Type *base) {
     Type *ty = emalloc(sizeof(Type));
     ty->kind = TY_PTR;
     ty->size = 8;
@@ -34,6 +36,8 @@ void add_type(Node *node) {
         case ND_MUL:
         case ND_DIV:
         case ND_MOD:
+        case ND_PTRADD:
+        case ND_PTRSUB:
             add_type(node->lhs);
             add_type(node->rhs);
             node->ty = node->lhs->ty;
@@ -66,7 +70,7 @@ void add_type(Node *node) {
             break;
         case ND_ADDR:
             add_type(node->lhs);
-            node->ty = ptr_to(node->lhs->ty);
+            node->ty = pointer_to(node->lhs->ty);
             break;
         case ND_DEREF:
             add_type(node->lhs);

@@ -29,7 +29,6 @@ static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs) {
 static Node *new_unary(NodeKind kind, Node *expr) {
     Node *node = new_node(kind);
     node->lhs = expr;
-    node->rhs = NULL;
     return node;
 }
 
@@ -55,7 +54,7 @@ static Node *expr(Token **rest, Token *tok);
 
 // PrimaryExp ::= Number | Ident | "(" Exp ")";
 static Node *primary(Token **rest, Token *tok) {
-    Node *node = NULL;
+    Node *node;
     if (tok->kind == TK_LPAREN) {
         node = expr(&tok, tok->next);
         assert(tok->kind == TK_RPAREN);
@@ -65,6 +64,8 @@ static Node *primary(Token **rest, Token *tok) {
         Obj *var = find_var(tok);
         if (!var) exit(1);
         node = new_var_node(var);
+    } else {
+        exit(1);
     }
     *rest = tok->next;
     return node;
@@ -109,6 +110,7 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
     };
 
     Node *lhs = unary(&tok, tok);
+    add_type(lhs);
 
     while (TK_BOR <= tok->kind && tok->kind <= TK_MOD) {
         NodeKind expr_op = op_table[tok->kind][1];
@@ -116,7 +118,17 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
         if (cur_prec <= min_prec) break;
 
         Node *rhs = binexpr(&tok, tok->next, cur_prec);
+        add_type(rhs);
+        // Canonicalize `num + ptr` to `ptr + num`.
+        if (expr_op == ND_ADD && is_prointer(rhs->ty)) {
+            Node *tmp = lhs;
+            lhs = rhs;
+            rhs = tmp;
+        }
+        if (is_prointer(lhs->ty) && is_integer(rhs->ty)) expr_op = expr_op == ND_ADD ? ND_PTRADD : ND_PTRSUB;
+
         lhs = new_binary(expr_op, lhs, rhs);
+        add_type(lhs);
     }
     *rest = tok;
     return lhs;
@@ -144,9 +156,12 @@ static Node *compound_stmt(Token **rest, Token *tok);
 
 // ExpStmt = Exp? ";";
 static Node *expr_stmt(Token **rest, Token *tok) {
-    Node *node = NULL;
+    Node *node;
 
-    if (tok->kind != TK_SEMI) node = expr(&tok, tok);
+    if (tok->kind != TK_SEMI)
+        node = expr(&tok, tok);
+    else
+        node = NULL;
     assert(tok->kind == TK_SEMI);
     *rest = tok->next;
     return new_unary(ND_EXPR_STMT, node);
@@ -154,9 +169,12 @@ static Node *expr_stmt(Token **rest, Token *tok) {
 
 // RetStmt ::= "return" Exp? ";";
 static Node *return_stmt(Token **rest, Token *tok) {
-    Node *node = NULL;
+    Node *node;
 
-    if (tok->next->kind != TK_SEMI) node = expr(&tok, tok->next);
+    if (tok->next->kind != TK_SEMI)
+        node = expr(&tok, tok->next);
+    else
+        node = NULL;
     assert(tok->kind == TK_SEMI);
     *rest = tok->next;
 
@@ -265,7 +283,7 @@ static Type *declspec(Token **rest, Token *tok) {
 
 // Declarator: "*"* Ident;
 static Type *declarator(Token **rest, Token *tok, Type *ty) {
-    while (match(&tok, tok, TK_STAR)) ty = ptr_to(ty);
+    while (match(&tok, tok, TK_STAR)) ty = pointer_to(ty);
 
     assert(tok->kind == TK_IDENT);
 
@@ -276,7 +294,7 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
 // Declaration = DeclSpec (Declarator ("=" Exp)? ("," Declarator ("=" Exp)?)*)? ";"
 static Node *declaration(Token **rest, Token *tok) {
     Type *basety = declspec(&tok, tok);
-    Node head, *cur = &head;
+    Node dummy, *cur = &dummy;
 
     while (tok->kind != TK_SEMI) {
         Type *ty = declarator(&tok, tok, basety);
@@ -297,9 +315,10 @@ static Node *declaration(Token **rest, Token *tok) {
         }
         if (tok->kind == TK_COMMA) tok = tok->next;
     }
+    cur->next = NULL;
 
     Node *node = new_node(ND_DECL);
-    node->body = head.next;
+    node->body = dummy.next;
     *rest = tok->next;
     return node;
 }
@@ -309,7 +328,6 @@ static Node *declaration(Token **rest, Token *tok) {
 static Node *compound_stmt(Token **rest, Token *tok) {
     assert(tok->kind == TK_LBRACE);
     Node dummy, *cur = &dummy;
-    cur->next = NULL;
 
     tok = tok->next;
     while (tok->kind != TK_RBRACE) {
@@ -319,6 +337,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
             cur = cur->next = stmt(&tok, tok);
         add_type(cur);
     }
+    cur->next = NULL;
     *rest = tok->next;
 
     Node *node = new_node(ND_COMP_STMT);
