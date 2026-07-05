@@ -1,3 +1,5 @@
+#include <stdio.h>
+
 #include "cxx.h"
 
 static Blk *curb;
@@ -5,8 +7,6 @@ static Blk *entry;
 static Blk *end;
 static Blk *tail;
 int tmp_id = 1;
-
-static Ref gen_stmt(Node *node);
 
 static Ir *new_ins(IrKind op, Ref dst, Ref arg1, Ref arg2) {
     Ir *new = emalloc(sizeof(Ir));
@@ -31,38 +31,59 @@ Blk *new_blk(void) {
     return b;
 }
 
+static Ref gen_stmt(Node *node);
+static Ref gen_expr(Node *node);
+
+static Ref gen_addr(Node *node) {
+    switch (node->kind) {
+        case ND_VAR:
+            return SLOT(node->var->vreg, node->ty);
+        case ND_DEREF:
+            return gen_expr(node->lhs);
+        default:
+            exit(1);
+    }
+}
+
 static Ref gen_expr(Node *node) {
     if (!node) return R;
-
+    Ref reg, addr;
     switch (node->kind) {
         case ND_NUM:
             return INT(node->val);
-        case ND_VAR: {
-            Ref reg = TMP(tmp_id++);
-            Ref arg1 = SLOT(node->var->vreg);
-            new_ins(IR_LORD, reg, arg1, R);
+        case ND_VAR:
+            addr = gen_addr(node);
+            reg = TMP(tmp_id++, node->ty);
+            new_ins(IR_LORD, reg, addr, R);
             return reg;
-        }
-        case ND_AS: {
-            Ref reg = gen_expr(node->rhs);
-            Ref dst = SLOT(node->lhs->var->vreg);
-            new_ins(IR_STR, dst, reg, R);
+        case ND_DEREF:
+            addr = gen_expr(node->lhs);
+            reg = TMP(tmp_id++, node->ty);
+            new_ins(IR_LORD, reg, addr, R);
             return reg;
-        }
+        case ND_ADDR:
+            return gen_addr(node->lhs);
+        case ND_AS:
+            addr = gen_addr(node->lhs);
+            addr.ty = node->lhs->ty;
+            reg = gen_expr(node->rhs);
+            reg.ty = node->rhs->ty;
+            new_ins(IR_STR, addr, reg, R);
+            return reg;
         default:
             break;
     }
 
     Ref lr = gen_expr(node->lhs);
     Ref rr = gen_expr(node->rhs);
-    if (node->kind == ND_COMMA) return rr;
 
-    Ref reg = TMP(tmp_id++);
+    if (node->kind == ND_COMMA) return rr;
+    if (node->kind == ND_PLUS) return lr;
+
+    reg = TMP(tmp_id++, node->ty);
 
     switch (node->kind) {
         // unary arithmetic operation
-        case ND_PLUS:
-            return lr;
         case ND_NEG:
             new_ins(IR_SUB, reg, INT(0), lr);
             break;
@@ -71,7 +92,7 @@ static Ref gen_expr(Node *node) {
             break;
         case ND_NOT:
             new_ins(IR_CMP_EQ, reg, lr, INT(0));
-            Ref zext_reg = TMP(tmp_id++);
+            Ref zext_reg = TMP(tmp_id++, ty_int);
             new_ins(IR_EXT, zext_reg, reg, R);
             return zext_reg;
         // binary arithmetic operation
@@ -119,7 +140,7 @@ static Ref gen_expr(Node *node) {
                 [ND_GT] = IR_CMP_GT, [ND_LE] = IR_CMP_LE, [ND_GE] = IR_CMP_GE,
             };
             new_ins(cmp_op[node->kind], reg, lr, rr);
-            Ref zext_reg = TMP(tmp_id++);
+            Ref zext_reg = TMP(tmp_id++, ty_int);
             new_ins(IR_EXT, zext_reg, reg, R);
             return zext_reg;
         }
@@ -137,7 +158,7 @@ static void gen_if(Node *node) {
 
     // cond
     Ref tmp = gen_expr(node->cond);
-    Ref cond = TMP(tmp_id++);
+    Ref cond = TMP(tmp_id++, ty_i1);
     new_ins(IR_CMP_NE, cond, tmp, INT(0));
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;
@@ -174,7 +195,7 @@ static void gen_for(Node *node) {
     curb = cond_blk;
     if (node->cond) {
         Ref tmp = gen_expr(node->cond);
-        Ref cond = TMP(tmp_id++);
+        Ref cond = TMP(tmp_id++, ty_i1);
         new_ins(IR_CMP_NE, cond, tmp, INT(0));
         curb->jmp.type = IR_JNZ;
         curb->jmp.arg = cond;
@@ -207,7 +228,7 @@ static void gen_while(Node *node) {
     // cond
     curb = cond_blk;
     Ref tmp = gen_expr(node->cond);
-    Ref cond = TMP(tmp_id++);
+    Ref cond = TMP(tmp_id++, ty_i1);
     new_ins(IR_CMP_NE, cond, tmp, INT(0));
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;
@@ -240,7 +261,7 @@ static void gen_do(Node *node) {
     // cond
     curb = cond_blk;
     Ref tmp = gen_expr(node->cond);
-    Ref cond = TMP(tmp_id++);
+    Ref cond = TMP(tmp_id++, ty_i1);
     new_ins(IR_CMP_NE, cond, tmp, INT(0));
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;
@@ -252,7 +273,7 @@ static void gen_do(Node *node) {
 
 static void gen_ret(Node *n) {
     Ref result = gen_expr(n->lhs);
-    if (!refeq(result, R)) new_ins(IR_STR, SLOT(1), result, R);
+    if (!refeq(result, R)) new_ins(IR_STR, SLOT(1, ty_int), result, R);
 
     curb->jmp.type = IR_JMP;
     curb->succ1 = end;
@@ -274,6 +295,7 @@ static Ref gen_stmt(Node *node) {
         case ND_DO:
             gen_do(node);
             break;
+        case ND_DECL:
         case ND_COMP_STMT:
             for (Node *n = node->body; n; n = n->next) reg = gen_stmt(n);
             break;
@@ -297,8 +319,8 @@ Blk *irgen(Function *prog) {
     tail = entry;
 
     // Entry
-    new_ins(IR_ALLOCA, TMP(tmp_id++), R, R);
-    for (Obj *var = prog->locals; var; var = var->next) new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++), R, R);
+    new_ins(IR_ALLOCA, TMP(tmp_id++, ty_int), R, R);
+    for (Obj *var = prog->locals; var; var = var->next) new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, var->ty), R, R);
 
     gen_stmt(prog->body);
 
@@ -307,9 +329,9 @@ Blk *irgen(Function *prog) {
     curb->succ1 = end;
 
     curb = end;
-    new_ins(IR_LORD, TMP(tmp_id), SLOT(1), R);
+    new_ins(IR_LORD, TMP(tmp_id, ty_int), SLOT(1, ty_int), R);
     curb->jmp.type = IR_RET;
-    curb->jmp.arg = TMP(tmp_id);
+    curb->jmp.arg = TMP(tmp_id, ty_int);
     return entry;
 }
 
@@ -331,6 +353,12 @@ static void print_binop(const char *op, Ir *ir) {
     printf("\n");
 }
 
+static const char *ty_str[] = {
+    [TY_I1] = "i1",
+    [TY_INT] = "i32",
+    [TY_PTR] = "ptr",
+};
+
 void dump_blk(Blk *b) {
     printf("blk%d:\n", b->blk_id);
 
@@ -341,19 +369,20 @@ void dump_blk(Blk *b) {
 
         switch (ir->op) {
             case IR_ALLOCA:
-                printf("alloca i32\n");
+                printf("alloca %s", ty_str[ir->dst.ty->kind]);
+                printf(", align %d\n", ir->dst.ty->align);
                 break;
             case IR_LORD:
-                printf("load i32, i32* ");
+                printf("load %s, ptr ", ty_str[ir->dst.ty->kind]);
                 print_operand(ir->args[0]);
-                printf("\n");
+                printf(", align %d\n", ir->dst.ty->align);
                 break;
             case IR_STR:
-                printf("store i32 ");
+                printf("store %s ", ty_str[ir->args[0].ty->kind]);
                 print_operand(ir->args[0]);
-                printf(", i32* ");
+                printf(", ptr ");
                 print_operand(ir->dst);
-                printf("\n");
+                printf(", align %d\n", ir->dst.ty->align);
                 break;
 
             case IR_ADD:

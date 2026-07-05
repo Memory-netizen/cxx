@@ -60,9 +60,9 @@ floatlit   ::= dec_float | hex_float;
 dec_float  ::= fract exp? [fFlL]? | digit_seq exp [fFlL]?;
 hex_float  ::= 0[xX] hexfract binexp [fFlL]?;
 
-fract      ::= digit_seq '.' digit_seq? | '.' digit_seq;
+fract      ::= digit_seq "." digit_seq? | "." digit_seq;
 exp        ::= [eE][-+]? digit_seq;
-hexfract   ::= hex_seq ('.' hex_seq?)? | '.' hex_seq;
+hexfract   ::= hex_seq ("." hex_seq?)? | "." hex_seq;
 binexp     ::= [pP][-+]? digit_seq;
 
 enum_const ::= ident;
@@ -71,12 +71,12 @@ charlit    ::= (u8 | u | U | L)? "'" c_char+ "'";
 c_char     ::= [^\'\\\n] | esc_seq;
 
 esc_seq    ::= simple_esc | oct_esc | hex_esc | ucn;
-simple_esc ::= '\\' [\'\"\?\\abefnrtv];
-oct_esc    ::= '\\' octdigit octdigit? octdigit? | '\\o' '{' octdigit+ '}';
-hex_esc    ::= '\\x' ( hexdigit+ | '{' hexdigit+ '}' );
-ucn        ::= '\\u' hexdigit{4} | '\\U' hexdigit{8} | '\\[uU]' '{' hexdigit+ '}';
+simple_esc ::= "\\" [\'\"\?\\abefnrtv];
+oct_esc    ::= "\\" octdigit octdigit? octdigit? | "\\o" "{" octdigit+ "}";
+hex_esc    ::= "\\x" ( hexdigit+ | "{" hexdigit+ "}" );
+ucn        ::= "\\u" hexdigit{4} | "\\U" hexdigit{8} | "\\[uU]" "{" hexdigit+ "}";
 
-strlit     ::= (u8 | u | U | L)? '"' s_char* '"';
+strlit     ::= (u8 | u | U | L)? "\"" s_char* "\"";
 s_char     ::= [^\"\\\n] | esc_seq;
 
 punctuator ::= "[" | "]" | "(" | ")" | "{" | "}" | "." | "->"
@@ -89,11 +89,11 @@ punctuator ::= "[" | "]" | "(" | ")" | "{" | "}" | "." | "->"
              | "%:" | "%:%:"
              ;
 
-header_name ::= '<' h_char+ '>' | '"' q_char+ '"';
+header_name ::= "<" h_char+ ">" | "\"" q_char+ "\"";
 h_char      ::= [^\n>];
 q_char      ::= [^\n\"];
 
-pp_number          ::= '.'? digit pp_number_continue*;
+pp_number          ::= "."? digit pp_number_continue*;
 pp_number_continue ::= ident_continue
                      | "'" (digit | nondigit)
                      | [eEpP][+-]

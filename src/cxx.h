@@ -11,6 +11,7 @@
 
 typedef struct Token Token;
 typedef struct Node Node;
+typedef struct Type Type;
 
 //
 // Lexer
@@ -158,6 +159,7 @@ struct Token {
     int val;  // Uesd if kind == TK_NUM;
 };
 
+bool match(Token **rest, Token *tok, TokenKind kind);
 Token *tokenize(char *input);
 
 //
@@ -169,7 +171,8 @@ typedef struct Obj Obj;
 struct Obj {
     Obj *next;
     char *name;  // Variable name
-    int vreg;    // No of virtual reg
+    Type *ty;    // Type
+    int vreg;    // Virtual reg id
 };
 
 // Function
@@ -180,28 +183,33 @@ struct Function {
 };
 
 typedef enum {
-    ND_COMMA,      // ,
-    ND_AS,         // =
-    ND_BOR,        // |
-    ND_XOR,        // ^
-    ND_BAND,       // &
-    ND_EQ,         // ==
-    ND_NE,         // !=
-    ND_LT,         // <
-    ND_GT,         // >
-    ND_LE,         // <=
-    ND_GE,         // >=
-    ND_LEFT,       // <<
-    ND_RIGHT,      // >>
-    ND_ADD,        // +
-    ND_SUB,        // -
-    ND_MUL,        // *
-    ND_DIV,        // /
-    ND_MOD,        // %
-    ND_PLUS,       // unary +
-    ND_NEG,        // unary -
-    ND_NOT,        // !
-    ND_INVERT,     // ~
+    // Expression
+    ND_COMMA,   // ,
+    ND_AS,      // =
+    ND_BOR,     // |
+    ND_XOR,     // ^
+    ND_BAND,    // &
+    ND_EQ,      // ==
+    ND_NE,      // !=
+    ND_LT,      // <
+    ND_GT,      // >
+    ND_LE,      // <=
+    ND_GE,      // >=
+    ND_LEFT,    // <<
+    ND_RIGHT,   // >>
+    ND_ADD,     // +
+    ND_SUB,     // -
+    ND_MUL,     // *
+    ND_DIV,     // /
+    ND_MOD,     // %
+    ND_PLUS,    // unary +
+    ND_NEG,     // unary -
+    ND_NOT,     // !
+    ND_INVERT,  // ~
+    ND_ADDR,    // unary &
+    ND_DEREF,   // unary *
+
+    // Statement
     ND_RETURN,     // return
     ND_IF,         // if
     ND_WHILE,      // while
@@ -209,14 +217,20 @@ typedef enum {
     ND_FOR,        // for
     ND_EXPR_STMT,  // Expression statement
     ND_COMP_STMT,  // {...}
-    ND_VAR,        // Variable
-    ND_NUM,        // Int
+
+    // Declare
+    ND_DECL,
+
+    // Term
+    ND_VAR,  // Variable
+    ND_NUM,  // Int
 } NodeKind;
 
 // AST node type
 struct Node {
     NodeKind kind;  // Node kind
     Node *next;     // Next node
+    Type *ty;       // Type
 
     union {
         struct {
@@ -241,6 +255,32 @@ struct Node {
 };
 
 Function *parse(Token *tok);
+
+//
+// type.c
+//
+
+typedef enum {
+    TY_I1,
+    TY_INT,
+    TY_PTR,
+} TypeKind;
+
+struct Type {
+    TypeKind kind;
+    int size;
+    int align;
+
+    // Pointer
+    Type *base;
+};
+
+extern Type *ty_int;
+extern Type *ty_i1;
+
+bool is_integer(Type *ty);
+Type *ptr_to(Type *base);
+void add_type(Node *node);
 
 //
 // irgen.c
@@ -296,17 +336,18 @@ enum {
 };
 
 #define R \
-    (Ref) { RTmp, 0 }
-#define TMP(x) \
-    (Ref) { RTmp, x }
-#define SLOT(x) \
-    (Ref) { RSlot, x }
+    (Ref) { RTmp, 0, NULL }
+#define TMP(x, ty) \
+    (Ref) { RTmp, x, ty }
+#define SLOT(x, ty) \
+    (Ref) { RSlot, x, ty }
 #define INT(x) \
-    (Ref) { RInt, x }
+    (Ref) { RInt, x, ty_int }
 
 struct Ref {
     uint32_t type : 3;
     int32_t val : 29;
+    Type *ty;
 };
 
 static inline int refeq(Ref a, Ref b) { return a.type == b.type && a.val == b.val; }

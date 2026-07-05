@@ -41,17 +41,19 @@ static Obj *find_var(Token *tok) {
     return NULL;
 }
 
-static Obj *new_lvar(char *name) {
+static Obj *new_lvar(char *name, Type *ty) {
     Obj *var = emalloc(sizeof(Obj));
     var->name = name;
+    var->ty = ty;
     var->next = locals;
     locals = var;
     return var;
 }
 
+static Node *declaration(Token **rest, Token *tok);
 static Node *expr(Token **rest, Token *tok);
 
-// PrimaryExp ::= Number | ident | "(" Exp ")";
+// PrimaryExp ::= Number | Ident | "(" Exp ")";
 static Node *primary(Token **rest, Token *tok) {
     Node *node = NULL;
     if (tok->kind == TK_LPAREN) {
@@ -61,7 +63,7 @@ static Node *primary(Token **rest, Token *tok) {
         node = new_num(tok->val);
     } else if (tok->kind == TK_IDENT) {
         Obj *var = find_var(tok);
-        if (!var) var = new_lvar(strndup(tok->loc, tok->len));
+        if (!var) exit(1);
         node = new_var_node(var);
     }
     *rest = tok->next;
@@ -69,7 +71,7 @@ static Node *primary(Token **rest, Token *tok) {
 }
 
 // UnaryExp   ::= PrimaryExp | UnaryOp UnaryExp;
-// UnaryOp    ::= "+" | "-" | "~" | "!" ;
+// UnaryOp    ::= "+" | "-" | "~" | "!" | "&" | "*";
 static Node *unary(Token **rest, Token *tok) {
     switch (tok->kind) {
         case TK_PLUS:
@@ -80,20 +82,24 @@ static Node *unary(Token **rest, Token *tok) {
             return new_unary(ND_INVERT, unary(rest, tok->next));
         case TK_NOT:
             return new_unary(ND_NOT, unary(rest, tok->next));
+        case TK_BAND:
+            return new_unary(ND_ADDR, unary(rest, tok->next));
+        case TK_STAR:
+            return new_unary(ND_DEREF, unary(rest, tok->next));
         default:
             break;
     }
     return primary(rest, tok);
 }
 
-// OrExp      ::= XorExp     { "|" XorExp};
-// XorExp     ::= AndExp     { "^" AndExp};
-// AndExp     ::= EqExp      { "&" EqExp};
-// EqExp      ::= RelExp     { ("==" | "!=") RelExp};
-// RelExp     ::= ShiftExp   { ("<" | ">" | "<=" | ">=") ShiftExp};
-// ShiftExp   ::= AddExp     { ("<<" | ">>") AddExp};
-// AddExp     ::= MulExp     { ("+" | "-") MulExp};
-// MulExp     ::= UnaryExp   { ("*" | "/" | "%") UnaryExp};
+// OrExp      ::= XorExp     ("|" XorExp)*;
+// XorExp     ::= AndExp     ( "^" AndExp)*;
+// AndExp     ::= EqExp      ( "&" EqExp})*;
+// EqExp      ::= RelExp     ( ("==" | "!=") RelExp)*;
+// RelExp     ::= ShiftExp   ( ("<" | ">" | "<=" | ">=") ShiftExp)*;
+// ShiftExp   ::= AddExp     ( ("<<" | ">>") AddExp)*;
+// AddExp     ::= MulExp     ( ("+" | "-") MulExp)*;
+// MulExp     ::= UnaryExp   ( ("*" | "/" | "%") UnaryExp)*;
 static Node *binexpr(Token **rest, Token *tok, int min_prec) {
     static int op_table[][2] = {
         [TK_BOR] = {40, ND_BOR},    [TK_XOR] = {50, ND_XOR},   [TK_BAND] = {60, ND_BAND},   [TK_EQ] = {70, ND_EQ},
@@ -116,7 +122,7 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
     return lhs;
 }
 
-// AssignExp ::= OrExp { "=" AssignExp };
+// AssignExp ::= OrExp ( "=" AssignExp)*;
 static Node *assign(Token **rest, Token *tok) {
     Node *node = binexpr(&tok, tok, 0);
     while (tok->kind == TK_AS) node = new_binary(ND_AS, node, assign(&tok, tok->next));
@@ -124,29 +130,29 @@ static Node *assign(Token **rest, Token *tok) {
     return node;
 }
 
-// Exp ::= AssignExp { "," AssignExp };
+// Exp ::= AssignExp ("," AssignExp)*;
 static Node *expr(Token **rest, Token *tok) {
     Node *node = assign(&tok, tok);
     while (tok->kind == TK_COMMA) node = new_binary(ND_COMMA, node, assign(&tok, tok->next));
     *rest = tok;
+    add_type(node);
     return node;
 }
 
 static Node *stmt(Token **rest, Token *tok);
 static Node *compound_stmt(Token **rest, Token *tok);
 
-// ExpStmt = [Exp] ";";
+// ExpStmt = Exp? ";";
 static Node *expr_stmt(Token **rest, Token *tok) {
     Node *node = NULL;
 
     if (tok->kind != TK_SEMI) node = expr(&tok, tok);
     assert(tok->kind == TK_SEMI);
     *rest = tok->next;
-
     return new_unary(ND_EXPR_STMT, node);
 }
 
-// RetStmt ::= "return" [Exp] ";";
+// RetStmt ::= "return" Exp? ";";
 static Node *return_stmt(Token **rest, Token *tok) {
     Node *node = NULL;
 
@@ -157,7 +163,7 @@ static Node *return_stmt(Token **rest, Token *tok) {
     return new_unary(ND_RETURN, node);
 }
 
-// IfStmt ::= "if" '(' selection-header ')' Stmt ["else" Stmt];
+// IfStmt ::= "if" "(" selection-header ")" Stmt ("else" Stmt)?;
 // selection-header ::= Exp | declaration Exp | simple-declaration;
 static Node *if_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_IF);
@@ -173,7 +179,7 @@ static Node *if_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// ForStmt ::= "for" '(' [Exp] ';' [Exp] ';' [Exp] ')' Stmt;
+// ForStmt ::= "for" "(" Exp? ";" Exp? ";" Exp? ")" Stmt;
 static Node *for_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_FOR);
     assert(tok->next->kind == TK_LPAREN);
@@ -198,7 +204,7 @@ static Node *for_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// WhileStmt ::= "while" '(' Exp ')' Stmt;
+// WhileStmt ::= "while" "(" Exp ")" Stmt;
 static Node *while_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_WHILE);
     assert(tok->next->kind == TK_LPAREN);
@@ -210,7 +216,7 @@ static Node *while_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// DoStmt ::= "do" Stmt "while" '(' Exp ')' ';';
+// DoStmt ::= "do" Stmt "while" "(" Exp ")" ";";
 static Node *do_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_DO);
     // Body
@@ -245,14 +251,74 @@ static Node *stmt(Token **rest, Token *tok) {
     }
 }
 
-// CompStmt ::= "{" {Stmt} "}";
+static char *get_ident(Token *tok) {
+    assert(tok->kind == TK_IDENT);
+    return strndup(tok->loc, tok->len);
+}
+
+// DeclSpec ::= "int";
+static Type *declspec(Token **rest, Token *tok) {
+    assert(tok->kind == TK_INT);
+    *rest = tok->next;
+    return ty_int;
+}
+
+// Declarator: "*"* Ident;
+static Type *declarator(Token **rest, Token *tok, Type *ty) {
+    while (match(&tok, tok, TK_STAR)) ty = ptr_to(ty);
+
+    assert(tok->kind == TK_IDENT);
+
+    *rest = tok;
+    return ty;
+}
+
+// Declaration = DeclSpec (Declarator ("=" Exp)? ("," Declarator ("=" Exp)?)*)? ";"
+static Node *declaration(Token **rest, Token *tok) {
+    Type *basety = declspec(&tok, tok);
+    Node head, *cur = &head;
+
+    while (tok->kind != TK_SEMI) {
+        Type *ty = declarator(&tok, tok, basety);
+        Obj *var = new_lvar(get_ident(tok), ty);
+        tok = tok->next;
+
+        switch (tok->kind) {
+            case TK_AS: {
+                Node *lhs = new_var_node(var);
+                Node *rhs = assign(&tok, tok->next);
+                Node *node = new_binary(ND_AS, lhs, rhs);
+                add_type(node);
+                cur = cur->next = new_unary(ND_EXPR_STMT, node);
+                break;
+            }
+            default:
+                break;
+        }
+        if (tok->kind == TK_COMMA) tok = tok->next;
+    }
+
+    Node *node = new_node(ND_DECL);
+    node->body = head.next;
+    *rest = tok->next;
+    return node;
+}
+
+// CompStmt ::= "{" (BlockItem)* "}";
+// BlockItem ::= Stmt | Decl;
 static Node *compound_stmt(Token **rest, Token *tok) {
     assert(tok->kind == TK_LBRACE);
     Node dummy, *cur = &dummy;
     cur->next = NULL;
 
     tok = tok->next;
-    while (tok->kind != TK_RBRACE) cur = cur->next = stmt(&tok, tok);
+    while (tok->kind != TK_RBRACE) {
+        if (tok->kind == TK_INT)
+            cur = cur->next = declaration(&tok, tok);
+        else
+            cur = cur->next = stmt(&tok, tok);
+        add_type(cur);
+    }
     *rest = tok->next;
 
     Node *node = new_node(ND_COMP_STMT);
@@ -260,6 +326,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     return node;
 }
 
+// FnBody = CompStmt ;
 Function *parse(Token *tok) {
     Function *prog = emalloc(sizeof(Function));
     prog->body = compound_stmt(&tok, tok);

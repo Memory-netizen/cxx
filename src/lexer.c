@@ -5,6 +5,18 @@
 
 #include "cxx.h"
 
+// Attempt to match the given token type
+// If matched, consume the token and return true;
+// otherwise, leave the token unconsumed and return false.
+bool match(Token **rest, Token *tok, TokenKind kind) {
+    if (tok->kind == kind) {
+        *rest = tok->next;
+        return true;
+    }
+    *rest = tok;
+    return false;
+}
+
 static inline bool start_with(char *p, char *q) { return strncmp(p, q, strlen(q)) == 0; }
 
 // Returns true if c is ident_start.
