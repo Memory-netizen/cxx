@@ -17,6 +17,7 @@ bool match(Token **rest, Token *tok, TokenKind kind) {
     return false;
 }
 
+// Compare if the pending matching string matches the target string
 static inline bool start_with(char *p, char *q) { return strncmp(p, q, strlen(q)) == 0; }
 
 // Returns true if c is ident_start.
@@ -167,9 +168,8 @@ Token *tokenize(char *input) {
         // Identifier
         if (is_ident0(*p)) {
             char *start = p;
-            do {
-                p++;
-            } while (is_ident1(*p));
+            do p++;
+            while (is_ident1(*p));
             cur = cur->next = new_token(TK_IDENT, start, p);
             continue;
         }

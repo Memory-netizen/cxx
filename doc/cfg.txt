@@ -1,0 +1,40 @@
+TransUnit  ::= FuncDef+
+FuncDef    ::= DeclSpec Declr CompStmt
+Decl       ::= DeclSpec (Declr ("=" AsExp)? ("," Declr ("=" AsExp)?)*)? ";"
+Declr      ::= "*"* Ident DeclrSuf
+DeclrSuf   ::= "(" ParamList? ")"
+ParamList  ::= ParamDecl ("," ParamDecl)*
+ParamDecl  ::= DeclSpec Declr
+DeclSpec   ::= "int"
+
+CompStmt   ::= "{" BlockItem* "}"
+BlockItem  ::= Stmt | Decl
+
+Stmt       ::= ExpStmt | CompStmt | RetStmt | IfStmt | WhileStmt | DoStmt | ForStmt
+DoStmt     ::= "do" Stmt "while" "(" Exp ")" ";"
+WhileStmt  ::= "while" "(" Exp ")" Stmt
+ForStmt    ::= "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt
+IfStmt     ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
+SelHead    ::= Exp | Decl Exp | SimDecl
+RetStmt    ::= "return" Exp? ";"
+ExpStmt    ::= ";" | Exp ";"
+
+Exp        ::= AsExp ("," AsExp)*
+AsExp      ::= BOrExp ("=" AsExp)?
+
+BOrExp     ::= XorExp   ("|" XorExp)*
+XorExp     ::= BAndExp  ("^" BAndExp)*
+BAndExp    ::= EqExp    ("&" EqExp)*
+EqExp      ::= RelExp   (("==" | "!=") RelExp)*
+RelExp     ::= ShiftExp (("<" | ">" | "<=" | ">=") ShiftExp)*
+ShiftExp   ::= AddExp   (("<<" | ">>") AddExp)*
+AddExp     ::= MulExp   (("+" | "-") MulExp)*
+MulExp     ::= UnaryExp  (("*" | "/" | "%") UnaryExp)*
+
+UnaryExp   ::= PostExp | UnaryOp UnaryExp
+UnaryOp    ::= "+" | "-" | "~" | "!" | "&" | "*"
+
+PostExp    ::= PrimExp ("(" ArgList? ")")?
+ArgList    ::= AsExp ("," AsExp)*
+
+PrimExp    ::= Number | Ident | "(" Exp ")"

@@ -17,7 +17,7 @@ CC := clang
 # Directories
 TOP_DIR := $(shell pwd)
 SRC_DIR := $(TOP_DIR)/src
-INC_DIR := $(TOP_DIR)/include
+INC_DIR := $(TOP_DIR)/include $(TOP_DIR)/src
 BUILD_DIR ?= $(TOP_DIR)/build
 
 # Source files
@@ -46,10 +46,12 @@ define c_recipe
 endef
 $(BUILD_DIR)/%.c.o: $(SRC_DIR)/%.c ; $(c_recipe)
 
+
+.PHONY: test clean linecnt fmt
+
 test: $(BUILD_DIR)/$(TARGET_EXEC)
 	$(SHELL) ./test.sh
 
-.PHONY: clean linecnt fmt
 clean:
 	-rm -rf $(BUILD_DIR)
 

@@ -1,25 +1,39 @@
 #include "cxx.h"
 
-Type *ty_int = &(Type){TY_INT, 4, 4, NULL};
-Type *ty_i1 = &(Type){TY_I1, 1, 1, NULL};
-Type *ty_i64 = &(Type){TY_I64, 8, 8, NULL};
+Type *ty_int = &(Type){TY_INT, 4, 4, NULL, NULL, {0}};
+Type *ty_i1 = &(Type){TY_I1, 1, 1, NULL, NULL, {0}};
+Type *ty_i64 = &(Type){TY_I64, 8, 8, NULL, NULL, {0}};
 
 bool is_integer(Type *ty) { return ty->kind == TY_INT; }
 bool is_prointer(Type *ty) { return ty->kind == TY_PTR; }
+
+Type *copy_type(Type *ty) {
+    Type *ret = emalloc(sizeof(Type));
+    *ret = *ty;
+    return ret;
+}
 
 Type *pointer_to(Type *base) {
     Type *ty = emalloc(sizeof(Type));
     ty->kind = TY_PTR;
     ty->size = 8;
     ty->align = 8;
-    ty->base = base;
+    ty->ptr.base = base;
+    return ty;
+}
+
+Type *func_type(Type *return_ty) {
+    Type *ty = emalloc(sizeof(Type));
+    ty->kind = TY_FUNC;
+    ty->func.ret = return_ty;
     return ty;
 }
 
 void add_type(Node *node) {
     if (!node || node->ty) return;
-
     switch (node->kind) {
+        case ND_FUNCALL:
+            break;
         case ND_COMMA:
             add_type(node->lhs);
             add_type(node->rhs);
@@ -75,7 +89,7 @@ void add_type(Node *node) {
         case ND_DEREF:
             add_type(node->lhs);
             if (node->lhs->ty->kind != TY_PTR) exit(1);
-            node->ty = node->lhs->ty->base;
+            node->ty = node->lhs->ty->ptr.base;
             break;
         default:
             break;

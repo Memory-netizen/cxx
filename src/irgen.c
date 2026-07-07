@@ -2,18 +2,24 @@
 
 #include "cxx.h"
 
+static Fn *curf;
 static Blk *curb;
-static Blk *entry;
-static Blk *end;
+static Blk dummy;
 static Blk *tail;
-int tmp_id = 1;
+static Blk *unreach = &dummy;
+static int tmp_id;
 
-static Ir *new_ins(IrKind op, Ref dst, Ref arg1, Ref arg2) {
+static Ir *new_ins(IrKind op, Ref dst, Ref *args, uint32_t narg) {
     Ir *new = emalloc(sizeof(Ir));
     new->op = op;
     new->dst = dst;
-    new->args[0] = arg1;
-    new->args[1] = arg2;
+    new->narg = narg;
+    if (narg > 0 && args) {
+        new->args = emalloc(narg * sizeof(Ref));
+        memcpy(new->args, args, narg * sizeof(Ref));
+    } else {
+        new->args = NULL;
+    }
 
     if (curb->head)
         curb->tail = curb->tail->next = new;
@@ -23,10 +29,8 @@ static Ir *new_ins(IrKind op, Ref dst, Ref arg1, Ref arg2) {
 }
 
 Blk *new_blk(void) {
-    static int blk_id = 0;
     Blk *b = emalloc(sizeof(Blk));
     memset(b, 0, sizeof(*b));
-    b->blk_id = blk_id++;
     tail = tail->next = b;
     return b;
 }
@@ -47,53 +51,75 @@ static Ref gen_addr(Node *node) {
 
 static Ref gen_expr(Node *node) {
     if (!node) return R;
-    Ref reg, addr;
+    Ref dst;
     switch (node->kind) {
         case ND_NUM:
             return INT(node->val);
-        case ND_VAR:
-            addr = gen_addr(node);
-            reg = TMP(tmp_id++, node->ty);
-            new_ins(IR_LORD, reg, addr, R);
-            return reg;
-        case ND_DEREF:
-            addr = gen_expr(node->lhs);
-            reg = TMP(tmp_id++, node->ty);
-            new_ins(IR_LORD, reg, addr, R);
-            return reg;
+        case ND_VAR: {
+            Ref ops[1] = {gen_addr(node)};
+            dst = TMP(tmp_id++, node->ty);
+            new_ins(IR_LORD, dst, ops, 1);
+            return dst;
+        }
+        case ND_DEREF: {
+            Ref ops[1] = {gen_expr(node->lhs)};
+            dst = TMP(tmp_id++, node->ty);
+            new_ins(IR_LORD, dst, ops, 1);
+            return dst;
+        }
         case ND_ADDR:
             return gen_addr(node->lhs);
-        case ND_AS:
-            addr = gen_addr(node->lhs);
+        case ND_AS: {
+            Ref addr = gen_addr(node->lhs);
             addr.ty = node->lhs->ty;
-            reg = gen_expr(node->rhs);
-            reg.ty = node->rhs->ty;
-            new_ins(IR_STR, addr, reg, R);
-            return reg;
+            dst = gen_expr(node->rhs);
+            dst.ty = node->rhs->ty;
+            Ref ops[2] = {dst, addr};
+            new_ins(IR_STR, R, ops, 2);
+            return dst;
+        }
+        case ND_FUNCALL: {
+            int nargs = node->narg;
+            Ref call_ops[nargs + 1];
+            call_ops[0] = GLB(node->func);
+
+            int idx = 1;
+            for (Node *arg = node->args; arg; arg = arg->next) call_ops[idx++] = gen_expr(arg);
+
+            Ref dst = TMP(tmp_id++, ty_int);
+            new_ins(IR_CALL, dst, call_ops, nargs + 1);
+            return dst;
+        }
         default:
             break;
     }
 
     Ref lr = gen_expr(node->lhs);
     lr.ty = node->lhs->ty;
-    reg = TMP(tmp_id++, node->ty);
+    if (node->kind == ND_PLUS) return lr;
 
     // unary arithmetic operation
     switch (node->kind) {
-        case ND_PLUS:
-            return lr;
         case ND_NEG:
             if (node->lhs->kind == ND_NUM) return INT(-lr.val);
-            new_ins(IR_SUB, reg, INT(0), lr);
-            return reg;
-        case ND_INVERT:
-            new_ins(IR_XOR, reg, lr, INT(-1));
-            return reg;
+            Ref ops[2] = {INT(0), lr};
+            dst = TMP(tmp_id++, node->ty);
+            new_ins(IR_SUB, dst, ops, 2);
+            return dst;
+        case ND_INVERT: {
+            Ref ops[2] = {lr, INT(-1)};
+            dst = TMP(tmp_id++, node->ty);
+            new_ins(IR_XOR, dst, ops, 2);
+            return dst;
+        }
         case ND_NOT: {
             Ref tmp = TMP(tmp_id++, ty_i1);
-            new_ins(IR_CMP_EQ, tmp, lr, INT(0));
-            new_ins(IR_ZEXT, reg, tmp, R);
-            return reg;
+            Ref cmp_ops[2] = {lr, INT(0)};
+            new_ins(IR_CMP_EQ, tmp, cmp_ops, 2);
+            Ref zext_ops[1] = {tmp};
+            dst = TMP(tmp_id++, node->ty);
+            new_ins(IR_ZEXT, dst, zext_ops, 1);
+            return dst;
         }
         default:
             break;
@@ -106,51 +132,45 @@ static Ref gen_expr(Node *node) {
     switch (node->kind) {
         case ND_PTRSUB: {
             Ref tmp = TMP(tmp_id++, rr.ty);
-            new_ins(IR_SUB, tmp, INT(0), rr);
+            Ref sub_ops[2] = {INT(0), rr};
+            new_ins(IR_SUB, tmp, sub_ops, 2);
             Ref sext_reg = TMP(tmp_id++, ty_i64);
-            new_ins(IR_SEXT, sext_reg, tmp, R);
-            new_ins(IR_GETELEMPTR, reg, lr, sext_reg);
+            Ref sext_ops[1] = {tmp};
+            new_ins(IR_SEXT, sext_reg, sext_ops, 1);
+            Ref gep_ops[2] = {lr, sext_reg};
+            dst = TMP(tmp_id++, node->ty);
+            new_ins(IR_GETELEMPTR, dst, gep_ops, 2);
             break;
         }
         case ND_PTRADD: {
             Ref sext_reg = TMP(tmp_id++, ty_i64);
-            new_ins(IR_SEXT, sext_reg, rr, R);
-            new_ins(IR_GETELEMPTR, reg, lr, sext_reg);
+            Ref sext_ops[1] = {rr};
+            new_ins(IR_SEXT, sext_reg, sext_ops, 1);
+            Ref gep_ops[2] = {lr, sext_reg};
+            dst = TMP(tmp_id++, node->ty);
+            new_ins(IR_GETELEMPTR, dst, gep_ops, 2);
             break;
         }
-        // binary arithmetic operation
+        // binary and bit arithmetic operation
         case ND_ADD:
-            new_ins(IR_ADD, reg, lr, rr);
-            break;
         case ND_SUB:
-            new_ins(IR_SUB, reg, lr, rr);
-            break;
         case ND_MUL:
-            new_ins(IR_MUL, reg, lr, rr);
-            break;
         case ND_DIV:
-            new_ins(IR_DIV, reg, lr, rr);
-            break;
         case ND_MOD:
-            new_ins(IR_REM, reg, lr, rr);
-            break;
-        // shift operation
         case ND_LEFT:
-            new_ins(IR_SHL, reg, lr, rr);
-            break;
         case ND_RIGHT:
-            new_ins(IR_SHR, reg, lr, rr);
-            break;
-        // bit operation
         case ND_BAND:
-            new_ins(IR_AND, reg, lr, rr);
-            break;
         case ND_BOR:
-            new_ins(IR_OR, reg, lr, rr);
+        case ND_XOR: {
+            static int bin_op[] = {
+                [ND_ADD] = IR_ADD,  [ND_SUB] = IR_SUB,   [ND_MUL] = IR_MUL,  [ND_DIV] = IR_DIV, [ND_MOD] = IR_REM,
+                [ND_LEFT] = IR_SHL, [ND_RIGHT] = IR_SHR, [ND_BAND] = IR_AND, [ND_BOR] = IR_OR,  [ND_XOR] = IR_XOR,
+            };
+            Ref ops[2] = {lr, rr};
+            dst = TMP(tmp_id++, node->ty);
+            new_ins(bin_op[node->kind], dst, ops, 2);
             break;
-        case ND_XOR:
-            new_ins(IR_XOR, reg, lr, rr);
-            break;
+        }
         // Comparison operations：icmp return i1，zext to i32
         case ND_EQ:
         case ND_NE:
@@ -163,15 +183,18 @@ static Ref gen_expr(Node *node) {
                 [ND_GT] = IR_CMP_GT, [ND_LE] = IR_CMP_LE, [ND_GE] = IR_CMP_GE,
             };
             Ref tmp = TMP(tmp_id++, ty_i1);
-            new_ins(cmp_op[node->kind], tmp, lr, rr);
-            new_ins(IR_ZEXT, reg, tmp, R);
-            return reg;
+            Ref cmp_ops[2] = {lr, rr};
+            new_ins(cmp_op[node->kind], tmp, cmp_ops, 2);
+            Ref zext_ops[1] = {tmp};
+            dst = TMP(tmp_id++, node->ty);
+            new_ins(IR_ZEXT, dst, zext_ops, 1);
+            break;
         }
         default:
             fprintf(stderr, "gen_expr: unknown node kind %d\n", node->kind);
             exit(1);
     }
-    return reg;
+    return dst;
 }
 
 static void gen_if(Node *node) {
@@ -182,7 +205,8 @@ static void gen_if(Node *node) {
     // cond
     Ref tmp = gen_expr(node->cond);
     Ref cond = TMP(tmp_id++, ty_i1);
-    new_ins(IR_CMP_NE, cond, tmp, INT(0));
+    Ref cmp_ops[2] = {tmp, INT(0)};
+    new_ins(IR_CMP_NE, cond, cmp_ops, 2);
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;
     curb->succ1 = t_blk;
@@ -190,6 +214,7 @@ static void gen_if(Node *node) {
 
     // then
     curb = t_blk;
+    curb->blk_id = tmp_id++;
     gen_stmt(node->then);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
@@ -197,11 +222,13 @@ static void gen_if(Node *node) {
     // else
     if (f_blk) {
         curb = f_blk;
+        curb->blk_id = tmp_id++;
         gen_stmt(node->els);
         curb->jmp.type = IR_JMP;
         curb->succ1 = m_blk;
     }
     curb = m_blk;
+    curb->blk_id = tmp_id++;
 }
 
 static void gen_for(Node *node) {
@@ -216,10 +243,12 @@ static void gen_for(Node *node) {
 
     // cond
     curb = cond_blk;
+    curb->blk_id = tmp_id++;
     if (node->cond) {
         Ref tmp = gen_expr(node->cond);
         Ref cond = TMP(tmp_id++, ty_i1);
-        new_ins(IR_CMP_NE, cond, tmp, INT(0));
+        Ref cmp_ops[2] = {tmp, INT(0)};
+        new_ins(IR_CMP_NE, cond, cmp_ops, 2);
         curb->jmp.type = IR_JNZ;
         curb->jmp.arg = cond;
         curb->succ1 = body_blk;
@@ -231,6 +260,7 @@ static void gen_for(Node *node) {
 
     // body
     curb = body_blk;
+    curb->blk_id = tmp_id++;
     gen_stmt(node->body);
     // incr
     gen_expr(node->inc);
@@ -238,6 +268,7 @@ static void gen_for(Node *node) {
     curb->succ1 = cond_blk;
 
     curb = merge_blk;
+    curb->blk_id = tmp_id++;
 }
 
 static void gen_while(Node *node) {
@@ -250,9 +281,11 @@ static void gen_while(Node *node) {
 
     // cond
     curb = cond_blk;
+    curb->blk_id = tmp_id++;
     Ref tmp = gen_expr(node->cond);
     Ref cond = TMP(tmp_id++, ty_i1);
-    new_ins(IR_CMP_NE, cond, tmp, INT(0));
+    Ref cmp_ops[2] = {tmp, INT(0)};
+    new_ins(IR_CMP_NE, cond, cmp_ops, 2);
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;
     curb->succ1 = body_blk;
@@ -260,11 +293,13 @@ static void gen_while(Node *node) {
 
     // body
     curb = body_blk;
+    curb->blk_id = tmp_id++;
     gen_stmt(node->body);
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
 
     curb = merge_blk;
+    curb->blk_id = tmp_id++;
 }
 
 static void gen_do(Node *node) {
@@ -277,30 +312,37 @@ static void gen_do(Node *node) {
 
     // body
     curb = body_blk;
+    curb->blk_id = tmp_id++;
     gen_stmt(node->body);
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
 
     // cond
     curb = cond_blk;
+    curb->blk_id = tmp_id++;
     Ref tmp = gen_expr(node->cond);
     Ref cond = TMP(tmp_id++, ty_i1);
-    new_ins(IR_CMP_NE, cond, tmp, INT(0));
+    Ref cmp_ops[2] = {tmp, INT(0)};
+    new_ins(IR_CMP_NE, cond, cmp_ops, 2);
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;
     curb->succ1 = body_blk;
     curb->succ2 = merge_blk;
 
     curb = merge_blk;
+    curb->blk_id = tmp_id++;
 }
 
 static void gen_ret(Node *n) {
     Ref result = gen_expr(n->lhs);
-    if (!refeq(result, R)) new_ins(IR_STR, SLOT(1, ty_int), result, R);
+    if (!refeq(result, R)) {
+        Ref ops[2] = {result, SLOT(curf->nparam + 1, ty_int)};
+        new_ins(IR_STR, R, ops, 2);
+    }
 
     curb->jmp.type = IR_JMP;
-    curb->succ1 = end;
-    curb = end;
+    curb->succ1 = curf->end;
+    curb = unreach;
 }
 
 static Ref gen_stmt(Node *node) {
@@ -334,38 +376,51 @@ static Ref gen_stmt(Node *node) {
     return reg;
 }
 
-Blk *irgen(Function *prog) {
-    Blk dummy;
-    tail = &dummy;
-    curb = entry = new_blk();
-    end = new_blk();
-    tail = entry;
+Fn *irgen(Fn *prog) {
+    for (Fn *fn = prog; fn; fn = fn->next) {
+        curf = fn;
+        tmp_id = fn->nparam;
+        tail = &dummy;
+        fn->start = new_blk();
+        fn->end = emalloc(sizeof(Blk));
 
-    // Entry
-    new_ins(IR_ALLOCA, TMP(tmp_id++, ty_int), R, R);
-    for (Obj *var = prog->locals; var; var = var->next) new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, var->ty), R, R);
+        curb = fn->start;
+        curb->blk_id = tmp_id++;
+        // Entry
+        new_ins(IR_ALLOCA, TMP(tmp_id++, ty_int), NULL, 0);
 
-    gen_stmt(prog->body);
+        for (Obj *var = fn->locals; var; var = var->next)
+            new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, var->ty), NULL, 0);
 
-    tail->next = end;
-    curb->jmp.type = IR_JMP;
-    curb->succ1 = end;
+        Obj *var = fn->locals;
+        for (uint32_t i = 0; i < fn->nparam; ++i) {
+            Ref ops[2] = {TMP(i, var->ty), TMP(var->vreg, var->ty)};
+            new_ins(IR_STR, R, ops, 2);
+            var = var->next;
+        }
 
-    curb = end;
-    new_ins(IR_LORD, TMP(tmp_id, ty_int), SLOT(1, ty_int), R);
-    curb->jmp.type = IR_RET;
-    curb->jmp.arg = TMP(tmp_id, ty_int);
-    return entry;
+        // Body
+        gen_stmt(fn->body);
+
+        // End
+        curb->jmp.type = IR_JMP;
+        curb = curb->succ1 = fn->end;
+        curb->blk_id = tmp_id++;
+
+        Ref load_ops[1] = {SLOT(curf->nparam + 1, ty_int)};
+        new_ins(IR_LORD, TMP(tmp_id, ty_int), load_ops, 1);
+        curb->jmp.type = IR_RET;
+        curb->jmp.arg = TMP(tmp_id, ty_int);
+        tail->next = fn->end;
+    }
+    return prog;
 }
 
 static void print_operand(Ref r) {
     if (r.type == RInt)
         printf("%d", r.val);
-    else if (r.type == RTmp)
-        printf("%%tmp%d", r.val);
-    else if (r.type == RSlot) {
-        printf("%%tmp%d", r.val);
-    }
+    else
+        printf("%%%d", r.val);
 }
 
 static void print_binop(const char *op, Ir *ir) {
@@ -383,13 +438,15 @@ static const char *ty_str[] = {
     [TY_PTR] = "ptr",
 };
 
+static void print_type(Type *ty) { printf("%s ", ty_str[ty->kind]); }
+
 void dump_blk(Blk *b) {
-    printf("blk%d:\n", b->blk_id);
+    printf("%d:\n", b->blk_id);
 
     Ir *ir = b->head;
     while (ir) {
         printf("  ");
-        if (ir->op != IR_STR) printf("%%tmp%d = ", ir->dst.val);
+        if (ir->op != IR_STR) printf("%%%d = ", ir->dst.val);
 
         switch (ir->op) {
             case IR_ALLOCA:
@@ -405,18 +462,26 @@ void dump_blk(Blk *b) {
                 printf("store %s ", ty_str[ir->args[0].ty->kind]);
                 print_operand(ir->args[0]);
                 printf(", ptr ");
-                print_operand(ir->dst);
-                printf(", align %d\n", ir->dst.ty->align);
+                print_operand(ir->args[1]);
+                printf(", align %d\n", ir->args[1].ty->align);
                 break;
             case IR_GETELEMPTR:
-                printf("getelementptr %s ", ty_str[ir->args[0].ty->base->kind]);
+                printf("getelementptr %s ", ty_str[ir->args[0].ty->ptr.base->kind]);
                 printf(", ptr ");
                 print_operand(ir->args[0]);
                 printf(", i64 ");
                 print_operand(ir->args[1]);
                 printf("\n");
                 break;
-
+            case IR_CALL:
+                printf("call i32 @%s(", globals[ir->args[0].val]);
+                for (uint32_t i = 1; i < ir->narg; i++) {
+                    print_type(ir->args[i].ty);
+                    print_operand(ir->args[i]);
+                    if (i < ir->narg - 1) printf(", ");
+                }
+                printf(")\n");
+                break;
             case IR_ADD:
                 print_binop("add", ir);
                 break;
@@ -497,24 +562,41 @@ void dump_blk(Blk *b) {
             printf("\n");
             break;
         case IR_JMP:
-            printf("br label %%blk%d\n", b->succ1->blk_id);
+            printf("br label %%%d\n", b->succ1->blk_id);
             break;
         case IR_JNZ:
             printf("br i1 ");
             print_operand(b->jmp.arg);
-            printf(", label %%blk%d, label %%blk%d\n", b->succ1->blk_id, b->succ2->blk_id);
+            printf(", label %%%d, label %%%d\n", b->succ1->blk_id, b->succ2->blk_id);
             break;
         default:
             break;
     }
 }
 
-void dump_fn(Blk *b) {
-    printf("define i32 @main() {\n");
-    Blk *cur = b;
-    while (cur) {
-        dump_blk(cur);
-        cur = cur->next;
+void dump_fn(Fn *fn) {
+    printf("declare i32 @ret3()\n");
+    printf("declare i32 @ret5()\n");
+    printf("declare i32 @add(i32, i32)\n");
+    printf("declare i32 @sub(i32, i32)\n");
+    printf("declare i32 @add6(i32, i32, i32, i32, i32, i32)\n");
+    Fn *curf = fn;
+    while (curf) {
+        printf("define i32 @%s(", curf->name);
+        Obj *var = curf->locals;
+        for (uint32_t i = 0; i < curf->nparam; i++) {
+            print_type(var->ty);
+            printf("%%%d", i);
+            if (i < curf->nparam - 1) printf(", ");
+            var = var->next;
+        }
+        printf(") {\n");
+        Blk *curb = curf->start;
+        while (curb) {
+            dump_blk(curb);
+            curb = curb->next;
+        }
+        printf("}\n");
+        curf = curf->next;
     }
-    printf("}\n");
 }

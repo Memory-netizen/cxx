@@ -12,6 +12,11 @@
 typedef struct Token Token;
 typedef struct Node Node;
 typedef struct Type Type;
+typedef struct Ref Ref;
+typedef struct Ir Ir;
+typedef struct Blk Blk;
+typedef struct Obj Obj;
+typedef struct Fn Fn;
 
 //
 // Lexer
@@ -98,7 +103,7 @@ typedef enum {
     TK_TYPEDEF,
 
     // Type specifiers
-    TK_AUTO,  // Auto get type
+    TK_AUTO,  // Auto type inference
     TK_VOID,
     TK_CHAR,
     TK_SHORT,
@@ -122,7 +127,7 @@ typedef enum {
     TK_VOLATILE,
     TK_ATOMIC,
 
-    // Function specifiers
+    // specifiers
     TK_INLINE,
     TK_NORETURN,
 
@@ -167,7 +172,6 @@ Token *tokenize(char *input);
 //
 
 // Local variable
-typedef struct Obj Obj;
 struct Obj {
     Obj *next;
     char *name;  // Variable name
@@ -176,10 +180,17 @@ struct Obj {
 };
 
 // Function
-typedef struct Function Function;
-struct Function {
+struct Fn {
+    Fn *next;
+    char *name;
+    Obj *params;
+    uint32_t nparam;
     Node *body;
     Obj *locals;
+    Type *ty;  // Type
+
+    Blk *start;
+    Blk *end;
 };
 
 typedef enum {
@@ -210,6 +221,7 @@ typedef enum {
     ND_DEREF,   // unary *
     ND_PTRADD,
     ND_PTRSUB,
+    ND_FUNCALL,  // Function call
 
     // Statement
     ND_RETURN,     // return
@@ -233,6 +245,7 @@ struct Node {
     NodeKind kind;  // Node kind
     Node *next;     // Next node
     Type *ty;       // Type
+    Token *tok;     // Representative token
 
     union {
         struct {
@@ -251,31 +264,52 @@ struct Node {
                 Node *inc;
             };
         };
+        struct {
+            // Function call
+            uint32_t func;
+            Node *args;
+            uint32_t narg;
+        };
         Obj *var;  // Used if kind == ND_VAR
         int val;   // Used if kind == ND_NUM
     };
 };
 
-Function *parse(Token *tok);
+Fn *parse(Token *tok);
 
 //
 // type.c
 //
 
 typedef enum {
+    TY_VOID,
     TY_I1,
     TY_I64,
     TY_INT,
     TY_PTR,
+    TY_FUNC,
 } TypeKind;
 
 struct Type {
     TypeKind kind;
     int size;
     int align;
+    // Declaration
+    Token *name;
+    Type *next;
 
-    // Pointer
-    Type *base;
+    // Data
+    union {
+        struct {
+            // Pointer
+            Type *base;
+        } ptr;
+        struct {
+            // Function
+            Type *ret;
+            Type *params;
+        } func;
+    };
 };
 
 extern Type *ty_int;
@@ -285,6 +319,8 @@ extern Type *ty_i64;
 bool is_integer(Type *ty);
 bool is_prointer(Type *ty);
 Type *pointer_to(Type *base);
+Type *func_type(Type *return_ty);
+Type *copy_type(Type *ty);
 void add_type(Node *node);
 
 //
@@ -330,16 +366,17 @@ typedef enum {
     IR_CMP_GT,
     IR_CMP_LE,
     IR_CMP_LT,
+
+    // Other
+    IR_CALL,
 } IrKind;
 
-typedef struct Ref Ref;
-typedef struct Ir Ir;
-typedef struct Blk Blk;
-
+extern char **globals;
 enum {
     RSlot,
     RTmp,
     RInt,
+    RGlb,
 };
 
 #define R \
@@ -350,6 +387,8 @@ enum {
     (Ref) { RSlot, x, ty }
 #define INT(x) \
     (Ref) { RInt, x, ty_int }
+#define GLB(x) \
+    (Ref) { RGlb, x, NULL }
 
 struct Ref {
     uint32_t type : 3;
@@ -362,7 +401,8 @@ static inline int refeq(Ref a, Ref b) { return a.type == b.type && a.val == b.va
 struct Ir {
     IrKind op;
     Ref dst;
-    Ref args[2];
+    Ref *args;
+    uint32_t narg;
     Ir *prev, *next;
 };
 
@@ -381,8 +421,8 @@ struct Blk {
     Blk *next;
 };
 
-Blk *irgen(Function *node);
-void dump_fn(Blk *b);
+Fn *irgen(Fn *node);
+void dump_fn(Fn *fn);
 
 //
 // util.c
