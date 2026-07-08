@@ -188,7 +188,7 @@ static Node *postfix(Token **rest, Token *tok) {
 }
 
 // UnaryExp ::= PostExp | UnaryOp UnaryExp
-// UnaryOp  ::= "+" | "-" | "~" | "!" | "&" | "*"
+// UnaryOp  ::= "+" | "-" | "~" | "!" | "&" | "*" | "sizeof"
 static Node *unary(Token **rest, Token *tok) {
     switch (tok->kind) {
         case TK_PLUS:
@@ -203,6 +203,11 @@ static Node *unary(Token **rest, Token *tok) {
             return new_unary(ND_ADDR, unary(rest, tok->next), tok);
         case TK_STAR:
             return new_unary(ND_DEREF, unary(rest, tok->next), tok);
+        case TK_SIZEOF: {
+            Node *node = unary(rest, tok->next);
+            add_type(node);
+            return new_num(node->ty->size, tok);
+        }
         default:
             break;
     }
