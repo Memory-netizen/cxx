@@ -70,7 +70,7 @@ static void convert_keywords(Token *tok) {
         {"_Thread_local", TK_THREAD},
         {"__asm", TK_ASM},
         {"__asm__", TK_ASM},
-        {"__attribute__", TK_ATTRIBUTE},
+        {"__attribute__", TK_ATTR},
         {"__restrict", TK_RESTRICT},
         {"__restrict__", TK_RESTRICT},
         {"__thread", TK_THREAD},
@@ -114,7 +114,7 @@ static void convert_keywords(Token *tok) {
         {"true", TK_TRUE},
         {"typedef", TK_TYPEDEF},
         {"typeof", TK_TYPEOF},
-        {"typeof_unqual", TK_TYPEOF_UNQUAL},
+        {"typeof_unqual", TK_TYPEOF_U},
         {"union", TK_UNION},
         {"unsigned", TK_UNSIGNED},
         {"void", TK_VOID},
@@ -177,6 +177,7 @@ Token *tokenize(char *input) {
         // other char
         if (*p == '`' || *p == '@' || *p == '$') {
             // error
+            exit(1);
             p++;
             continue;
         }

@@ -41,12 +41,23 @@ static Ref gen_expr(Node *node);
 static Ref gen_addr(Node *node) {
     switch (node->kind) {
         case ND_VAR:
-            return SLOT(node->var->vreg, node->ty);
+            return SLOT(node->var->vreg, pointer_to(node->ty));
         case ND_DEREF:
             return gen_expr(node->lhs);
         default:
-            exit(1);
     }
+    exit(1);
+}
+
+static Ref load(Ref addr, Type *ty) {
+    if (ty->kind == TY_ARRAY) {
+        addr.ty = pointer_to(addr.ty->base);
+        return addr;
+    }
+    Ref dst = TMP(tmp_id++, ty);
+    Ref ops[1] = {addr};
+    new_ins(IR_LORD, dst, ops, 1);
+    return dst;
 }
 
 static Ref gen_expr(Node *node) {
@@ -55,25 +66,15 @@ static Ref gen_expr(Node *node) {
     switch (node->kind) {
         case ND_NUM:
             return INT(node->val);
-        case ND_VAR: {
-            Ref ops[1] = {gen_addr(node)};
-            dst = TMP(tmp_id++, node->ty);
-            new_ins(IR_LORD, dst, ops, 1);
-            return dst;
-        }
-        case ND_DEREF: {
-            Ref ops[1] = {gen_expr(node->lhs)};
-            dst = TMP(tmp_id++, node->ty);
-            new_ins(IR_LORD, dst, ops, 1);
-            return dst;
-        }
+        case ND_VAR:
+            return load(gen_addr(node), node->ty);
+        case ND_DEREF:
+            return load(gen_expr(node->lhs), node->ty);
         case ND_ADDR:
             return gen_addr(node->lhs);
         case ND_AS: {
             Ref addr = gen_addr(node->lhs);
-            addr.ty = node->lhs->ty;
             dst = gen_expr(node->rhs);
-            dst.ty = node->rhs->ty;
             Ref ops[2] = {dst, addr};
             new_ins(IR_STR, R, ops, 2);
             return dst;
@@ -138,8 +139,8 @@ static Ref gen_expr(Node *node) {
             Ref sext_ops[1] = {tmp};
             new_ins(IR_SEXT, sext_reg, sext_ops, 1);
             Ref gep_ops[2] = {lr, sext_reg};
-            dst = TMP(tmp_id++, node->ty);
-            new_ins(IR_GETELEMPTR, dst, gep_ops, 2);
+            dst = TMP(tmp_id++, pointer_to(ty_void));
+            new_ins(IR_GEP, dst, gep_ops, 2);
             break;
         }
         case ND_PTRADD: {
@@ -147,8 +148,8 @@ static Ref gen_expr(Node *node) {
             Ref sext_ops[1] = {rr};
             new_ins(IR_SEXT, sext_reg, sext_ops, 1);
             Ref gep_ops[2] = {lr, sext_reg};
-            dst = TMP(tmp_id++, node->ty);
-            new_ins(IR_GETELEMPTR, dst, gep_ops, 2);
+            dst = TMP(tmp_id++, pointer_to(ty_void));
+            new_ins(IR_GEP, dst, gep_ops, 2);
             break;
         }
         // binary and bit arithmetic operation
@@ -387,10 +388,10 @@ Fn *irgen(Fn *prog) {
         curb = fn->start;
         curb->blk_id = tmp_id++;
         // Entry
-        new_ins(IR_ALLOCA, TMP(tmp_id++, ty_int), NULL, 0);
+        new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(ty_int)), NULL, 0);
 
         for (Obj *var = fn->locals; var; var = var->next)
-            new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, var->ty), NULL, 0);
+            new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty)), NULL, 0);
 
         Obj *var = fn->locals;
         for (uint32_t i = 0; i < fn->nparam; ++i) {
@@ -438,7 +439,15 @@ static const char *ty_str[] = {
     [TY_PTR] = "ptr",
 };
 
-static void print_type(Type *ty) { printf("%s ", ty_str[ty->kind]); }
+static void print_type(Type *ty) {
+    if (ty->kind == TY_ARRAY) {
+        printf("[%d x ", ty->arr.len);
+        print_type(ty->base);
+        printf("]");
+        return;
+    }
+    printf("%s", ty_str[ty->kind]);
+}
 
 void dump_blk(Blk *b) {
     printf("%d:\n", b->blk_id);
@@ -450,23 +459,29 @@ void dump_blk(Blk *b) {
 
         switch (ir->op) {
             case IR_ALLOCA:
-                printf("alloca %s", ty_str[ir->dst.ty->kind]);
-                printf(", align %d\n", ir->dst.ty->align);
+                printf("alloca ");
+                print_type(ir->dst.ty->base);
+                printf(", align %d\n", ir->dst.ty->base->align);
                 break;
             case IR_LORD:
-                printf("load %s, ptr ", ty_str[ir->dst.ty->kind]);
+                printf("load ");
+                print_type(ir->dst.ty);
+                printf(", ptr ");
                 print_operand(ir->args[0]);
                 printf(", align %d\n", ir->dst.ty->align);
                 break;
             case IR_STR:
-                printf("store %s ", ty_str[ir->args[0].ty->kind]);
+                printf("store ");
+                print_type(ir->args[0].ty);
+                printf(" ");
                 print_operand(ir->args[0]);
                 printf(", ptr ");
                 print_operand(ir->args[1]);
-                printf(", align %d\n", ir->args[1].ty->align);
+                printf(", align %d\n", ir->args[0].ty->align);
                 break;
-            case IR_GETELEMPTR:
-                printf("getelementptr %s ", ty_str[ir->args[0].ty->ptr.base->kind]);
+            case IR_GEP:
+                printf("getelementptr ");
+                print_type(ir->args[0].ty->base);
                 printf(", ptr ");
                 print_operand(ir->args[0]);
                 printf(", i64 ");
@@ -477,6 +492,7 @@ void dump_blk(Blk *b) {
                 printf("call i32 @%s(", globals[ir->args[0].val]);
                 for (uint32_t i = 1; i < ir->narg; i++) {
                     print_type(ir->args[i].ty);
+                    printf(" ");
                     print_operand(ir->args[i]);
                     if (i < ir->narg - 1) printf(", ");
                 }
@@ -519,14 +535,22 @@ void dump_blk(Blk *b) {
                 printf("\n");
                 break;
             case IR_SEXT:
-                printf("sext %s ", ty_str[ir->args[0].ty->kind]);
+                printf("sext ");
+                print_type(ir->args[0].ty);
+                printf(" ");
                 print_operand(ir->args[0]);
-                printf(" to %s\n", ty_str[ir->dst.ty->kind]);
+                printf(" to ");
+                print_type(ir->dst.ty);
+                printf("\n");
                 break;
             case IR_ZEXT:
-                printf("zext %s ", ty_str[ir->args[0].ty->kind]);
+                printf("zext ");
+                print_type(ir->args[0].ty);
+                printf(" ");
                 print_operand(ir->args[0]);
-                printf(" to %s\n", ty_str[ir->dst.ty->kind]);
+                printf(" to \n");
+                print_type(ir->dst.ty);
+                printf("\n");
                 break;
 
             case IR_CMP_EQ:
@@ -586,6 +610,7 @@ void dump_fn(Fn *fn) {
         Obj *var = curf->locals;
         for (uint32_t i = 0; i < curf->nparam; i++) {
             print_type(var->ty);
+            printf(" ");
             printf("%%%d", i);
             if (i < curf->nparam - 1) printf(", ");
             var = var->next;

@@ -119,7 +119,7 @@ typedef enum {
     TK_STRUCT,
     TK_UNION,
     TK_TYPEOF,
-    TK_TYPEOF_UNQUAL,
+    TK_TYPEOF_U,
 
     // Type qualifiers
     TK_CONST,
@@ -138,7 +138,7 @@ typedef enum {
 
     TK_GENERIC,
     TK_ASM,
-    TK_ATTRIBUTE,
+    TK_ATTR,
 
     TK_BREAK,
     TK_CASE,
@@ -221,7 +221,8 @@ typedef enum {
     ND_DEREF,   // unary *
     ND_PTRADD,
     ND_PTRSUB,
-    ND_FUNCALL,  // Function call
+    ND_SUBACCESS,  // [...]
+    ND_FUNCALL,    // Function call
 
     // Statement
     ND_RETURN,     // return
@@ -288,22 +289,27 @@ typedef enum {
     TY_INT,
     TY_PTR,
     TY_FUNC,
+    TY_ARRAY,
 } TypeKind;
 
 struct Type {
     TypeKind kind;
-    int size;
-    int align;
+    int size;   // sizeof() value
+    int align;  // alignof() value
     // Declaration
     Token *name;
     Type *next;
+    Type *base;
 
     // Data
     union {
+        // struct {
+        // // Pointer
+        // } ptr;
         struct {
-            // Pointer
-            Type *base;
-        } ptr;
+            // Array
+            int len;
+        } arr;
         struct {
             // Function
             Type *ret;
@@ -312,14 +318,16 @@ struct Type {
     };
 };
 
+extern Type *ty_void;
 extern Type *ty_int;
 extern Type *ty_i1;
 extern Type *ty_i64;
 
 bool is_integer(Type *ty);
-bool is_prointer(Type *ty);
+bool is_pointer(Type *ty);
 Type *pointer_to(Type *base);
 Type *func_type(Type *return_ty);
+Type *array_of(Type *base, int size);
 Type *copy_type(Type *ty);
 void add_type(Node *node);
 
@@ -353,11 +361,13 @@ typedef enum {
     IR_ALLOCA,
     IR_LORD,
     IR_STR,
-    IR_GETELEMPTR,
+    IR_GEP,
 
     // Conversion
     IR_ZEXT,
     IR_SEXT,
+    IR_PTRTOINT,
+    IR_INTTOPTR,
 
     // Compare
     IR_CMP_NE,

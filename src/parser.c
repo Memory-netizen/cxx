@@ -60,6 +60,11 @@ static uint32_t new_glb(char *name) {
     return num_global++;
 }
 
+static int get_number(Token *tok) {
+    assert(tok->kind == TK_NUM);
+    return tok->val;
+}
+
 static char *get_ident(Token *tok) {
     assert(tok->kind == TK_IDENT);
     return strndup(tok->loc, tok->len);
@@ -69,44 +74,57 @@ static Type *declarator(Token **rest, Token *tok, Type *ty);
 static Node *declaration(Token **rest, Token *tok);
 static Node *expr(Token **rest, Token *tok);
 static Node *assign(Token **rest, Token *tok);
+static Node *unary(Token **rest, Token *tok);
+static Node *binexpr(Token **rest, Token *tok, int min_prec);
 
-// PrimExp ::= Number | Ident | "(" Exp ")";
-static Node *primary(Token **rest, Token *tok) {
-    Node *node;
-    if (tok->kind == TK_LPAREN) {
-        node = expr(&tok, tok->next);
-        assert(tok->kind == TK_RPAREN);
-    } else if (tok->kind == TK_NUM) {
-        node = new_num(tok->val, tok);
-    } else if (tok->kind == TK_IDENT) {
-        Obj *var = find_var(tok);
-        if (!var) return NULL;
-        node = new_var_node(var, tok);
-    } else {
-        exit(1);
+static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
+    add_type(lhs);
+    add_type(rhs);
+
+    // num + num
+    if (is_integer(lhs->ty) && is_integer(rhs->ty)) return new_binary(ND_ADD, lhs, rhs, tok);
+
+    if (lhs->ty->base && rhs->ty->base) exit(1);
+
+    // Canonicalize `num + ptr` to `ptr + num`.
+    if (!lhs->ty->base && rhs->ty->base) {
+        Node *tmp = lhs;
+        lhs = rhs;
+        rhs = tmp;
     }
-    *rest = tok->next;
-    return node;
+
+    // ptr + num
+    return new_binary(ND_PTRADD, lhs, rhs, tok);
 }
 
-// PostExp ::= PrimExp ("(" ArgList? ")")?;
-// ArgList ::= AsExp ("," AsExp)*;
-static Node *postfix(Token **rest, Token *tok) {
-    Token *start = tok;
-    Node *prim = primary(&tok, tok);
-    if (prim) {
-        *rest = tok;
-        return prim;
+static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
+    add_type(lhs);
+    add_type(rhs);
+
+    // num - num
+    if (is_integer(lhs->ty) && is_integer(rhs->ty)) return new_binary(ND_SUB, lhs, rhs, tok);
+
+    // ptr - num
+    if (lhs->ty->base && is_integer(rhs->ty)) {
+        Node *node = new_binary(ND_PTRSUB, lhs, rhs, tok);
+        node->ty = lhs->ty;
+        return node;
     }
 
-    // if (tok->kind != TK_LPAREN) {
-    // *rest = tok;
-    // return prim;
-    // }
+    // ptr - ptr, which returns how many elements are between the two.
+    if (lhs->ty->base && rhs->ty->base) {
+        Node *node = new_binary(ND_SUB, lhs, rhs, tok);
+        node->ty = ty_int;
+        return new_binary(ND_DIV, node, new_num(lhs->ty->base->size, tok), tok);
+    }
+    return NULL;
+}
 
+static Node *fncall(Token **rest, Token *tok) {
+    Node *node = new_node(ND_FUNCALL, tok);
+    node->func = new_glb(get_ident(tok));
     tok = tok->next->next;
-    Node *node = new_node(ND_FUNCALL, start);
-    node->func = new_glb(get_ident(start));
+
     if (tok->kind == TK_RPAREN) {
         *rest = tok->next;
         return node;
@@ -116,19 +134,61 @@ static Node *postfix(Token **rest, Token *tok) {
     cur = cur->next = assign(&tok, tok);
     uint32_t i = 1;
     for (; tok->kind == TK_COMMA; ++i) cur = cur->next = assign(&tok, tok->next);
-    cur->next = NULL;
 
     assert(tok->kind == TK_RPAREN);
     *rest = tok->next;
 
     node->args = dummy.next;
     node->narg = i;
-    node->ty = ty_int;
     return node;
 }
 
-// UnaryExp ::= PostExp | UnaryOp UnaryExp;
-// UnaryOp  ::= "+" | "-" | "~" | "!" | "&" | "*";
+// PrimExp ::= Num | Ident | "(" Exp ")"
+static Node *primary(Token **rest, Token *tok) {
+    Node *node;
+    if (tok->kind == TK_LPAREN) {
+        node = expr(&tok, tok->next);
+        assert(tok->kind == TK_RPAREN);
+    } else if (tok->kind == TK_NUM) {
+        node = new_num(tok->val, tok);
+    } else if (tok->kind == TK_IDENT) {
+        if (tok->next->kind == TK_LPAREN) return fncall(rest, tok);
+        Obj *var = find_var(tok);
+        if (!var) exit(1);
+        node = new_var_node(var, tok);
+    } else {
+        exit(1);
+    }
+    *rest = tok->next;
+    return node;
+}
+
+// PostExp  ::= PrimExp PostFix*
+// PostFix  ::= "(" ArgList? ")" | "[" Exp "]"
+// ArgList  ::= AsExp ("," AsExp)*
+static Node *postfix(Token **rest, Token *tok) {
+    Node *node = primary(&tok, tok);
+    while (1) {
+        switch (tok->kind) {
+            case TK_LBRACKET:
+                // x[y] is short for *(x+y)
+                Token *start = tok;
+                Node *idx = expr(&tok, tok->next);
+                assert(tok->kind == TK_RBRACKET);
+                tok = tok->next;
+                node = new_unary(ND_DEREF, new_add(node, idx, start), start);
+                continue;
+            default:
+                break;
+        }
+        break;
+    }
+    *rest = tok;
+    return node;
+}
+
+// UnaryExp ::= PostExp | UnaryOp UnaryExp
+// UnaryOp  ::= "+" | "-" | "~" | "!" | "&" | "*"
 static Node *unary(Token **rest, Token *tok) {
     switch (tok->kind) {
         case TK_PLUS:
@@ -149,14 +209,14 @@ static Node *unary(Token **rest, Token *tok) {
     return postfix(rest, tok);
 }
 
-// MulExp   ::= UnaryExp (("*" | "/" | "%") UnaryExp)*;
-// AddExp   ::= MulExp   (("+" | "-") MulExp)*;
-// ShiftExp ::= AddExp   (("<<" | ">>") AddExp)*;
-// RelExp   ::= ShiftExp (("<" | ">" | "<=" | ">=") ShiftExp)*;
-// EqExp    ::= RelExp   (("==" | "!=") RelExp)*;
-// BAndExp  ::= EqExp    ("&" EqExp)*;
-// XorExp   ::= BAndExp  ("^" BAndExp)*;
-// BOrExp   ::= XorExp   ("|" XorExp)*;
+// MulExp   ::= UnaryExp (("*" | "/" | "%") UnaryExp)*
+// AddExp   ::= MulExp   (("+" | "-") MulExp)*
+// ShiftExp ::= AddExp   (("<<" | ">>") AddExp)*
+// RelExp   ::= ShiftExp (("<" | ">" | "<=" | ">=") ShiftExp)*
+// EqExp    ::= RelExp   (("==" | "!=") RelExp)*
+// BAndExp  ::= EqExp    ("&" EqExp)*
+// XorExp   ::= BAndExp  ("^" BAndExp)*
+// BOrExp   ::= XorExp   ("|" XorExp)*
 static Node *binexpr(Token **rest, Token *tok, int min_prec) {
     static int op_table[][2] = {
         [TK_BOR] = {40, ND_BOR},    [TK_XOR] = {50, ND_XOR},   [TK_BAND] = {60, ND_BAND},   [TK_EQ] = {70, ND_EQ},
@@ -177,23 +237,20 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
         Node *rhs = binexpr(&tok, tok->next, cur_prec);
         add_type(rhs);
 
-        // Canonicalize `num + ptr` to `ptr + num`
-        if (expr_op == ND_ADD && is_prointer(rhs->ty)) {
-            Node *tmp = lhs;
-            lhs = rhs;
-            rhs = tmp;
-        }
+        if (expr_op == ND_ADD)
+            lhs = new_add(lhs, rhs, op_tok);
+        else if (expr_op == ND_SUB)
+            lhs = new_sub(lhs, rhs, op_tok);
+        else
+            lhs = new_binary(expr_op, lhs, rhs, op_tok);
 
-        if (is_prointer(lhs->ty) && is_integer(rhs->ty)) expr_op = expr_op == ND_ADD ? ND_PTRADD : ND_PTRSUB;
-
-        lhs = new_binary(expr_op, lhs, rhs, op_tok);
         add_type(lhs);
     }
     *rest = tok;
     return lhs;
 }
 
-// AsExp ::= BOrExp ("=" AsExp)?;
+// AsExp ::= BOrExp ("=" AsExp)?
 static Node *assign(Token **rest, Token *tok) {
     Node *node = binexpr(&tok, tok, 0);
     while (tok->kind == TK_AS) node = new_binary(ND_AS, node, assign(&tok, tok->next), tok);
@@ -202,7 +259,7 @@ static Node *assign(Token **rest, Token *tok) {
     return node;
 }
 
-// Exp ::= AsExp ("," AsExp)*;
+// Exp ::= AsExp ("," AsExp)*
 static Node *expr(Token **rest, Token *tok) {
     Node *node = assign(&tok, tok);
     while (tok->kind == TK_COMMA) node = new_binary(ND_COMMA, node, assign(&tok, tok->next), tok);
@@ -244,8 +301,8 @@ static Node *return_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// IfStmt ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?;
-// SelHead ::= Exp | Decl Exp | SimDecl;
+// IfStmt ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
+// SelHead ::= Exp | Decl Exp | SimDecl
 static Node *if_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_IF, tok);
     assert(tok->next->kind == TK_LPAREN);
@@ -285,7 +342,7 @@ static Node *for_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// WhileStmt ::= "while" "(" Exp ")" Stmt;
+// WhileStmt ::= "while" "(" Exp ")" Stmt
 static Node *while_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_WHILE, tok);
     assert(tok->next->kind == TK_LPAREN);
@@ -312,7 +369,7 @@ static Node *do_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// Stmt ::= ExpStmt | CompStmt | RetStmt | IfStmt | WhileStmt | DoStmt | ForStmt;
+// Stmt ::= ExpStmt | CompStmt | RetStmt | IfStmt | WhileStmt | DoStmt | ForStmt
 static Node *stmt(Token **rest, Token *tok) {
     switch (tok->kind) {
         case TK_LBRACE:
@@ -332,8 +389,8 @@ static Node *stmt(Token **rest, Token *tok) {
     }
 }
 
-// CompStmt ::= "{" BlockItem* "}";
-// BlockItem ::= Stmt | Decl;
+// CompStmt ::= "{" BlockItem* "}"
+// BlockItem ::= Stmt | Decl
 static Node *compound_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_COMP_STMT, tok);
     Node dummy, *cur = &dummy;
@@ -353,16 +410,16 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// DeclSpec ::= "int";
+// DeclSpec ::= "int"
 static Type *declspec(Token **rest, Token *tok) {
     assert(tok->kind == TK_INT);
     *rest = tok->next;
     return ty_int;
 }
 
-// DeclrSuf  ::= "(" ParamList? ")";
-// ParamList ::= ParamDecl ("," ParamDecl)*;
-// ParamDecl ::= DeclSpec Declr;
+// DeclrSuf  ::= "(" ParamList? ")" | "[" Num "]"
+// ParamList ::= ParamDecl ("," ParamDecl)*
+// ParamDecl ::= DeclSpec Declr
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
     if (tok->kind == TK_LPAREN) {
         tok = tok->next;
@@ -383,12 +440,18 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
         ty->func.params = dummy.next;
         return ty;
     }
+    if (tok->kind == TK_LBRACKET) {
+        int sz = get_number(tok->next);
+        tok = tok->next->next->next;
+        ty = decl_suffix(rest, tok, ty);
+        return array_of(ty, sz);
+    }
 
     *rest = tok;
     return ty;
 }
 
-// Declr ::= "*"* Ident DeclrSuf;
+// Declr ::= "*"* Ident DeclrSuf*
 static Type *declarator(Token **rest, Token *tok, Type *ty) {
     while (match(&tok, tok, TK_STAR)) ty = pointer_to(ty);
 
@@ -436,7 +499,7 @@ static void create_param_lvars(Type *param) {
     }
 }
 
-// FuncDef ::= DeclSpec Declr CompStmt;
+// FuncDef ::= DeclSpec Declr CompStmt
 static Fn *function(Token **rest, Token *tok) {
     Type *ty = declspec(&tok, tok);
     ty = declarator(&tok, tok, ty);
@@ -459,7 +522,7 @@ static Fn *function(Token **rest, Token *tok) {
     return fn;
 }
 
-// TransUnit ::= FuncDef+;
+// TransUnit ::= FuncDef+
 Fn *parse(Token *tok) {
     Fn dummy, *cur = &dummy;
     while (tok->kind != TK_EOF) cur = cur->next = function(&tok, tok);

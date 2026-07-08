@@ -1,8 +1,11 @@
 TransUnit  ::= FuncDef+
 FuncDef    ::= DeclSpec Declr CompStmt
 Decl       ::= DeclSpec (Declr ("=" AsExp)? ("," Declr ("=" AsExp)?)*)? ";"
-Declr      ::= "*"* Ident DeclrSuf
-DeclrSuf   ::= "(" ParamList? ")"
+
+Declr      ::= "*"* DirDeclr
+DirDeclr   ::= Ident Declrsuf*
+Declrsuf    ::= "[" Num? "]" | "(" ParamList? ")"
+
 ParamList  ::= ParamDecl ("," ParamDecl)*
 ParamDecl  ::= DeclSpec Declr
 DeclSpec   ::= "int"
@@ -34,7 +37,8 @@ MulExp     ::= UnaryExp  (("*" | "/" | "%") UnaryExp)*
 UnaryExp   ::= PostExp | UnaryOp UnaryExp
 UnaryOp    ::= "+" | "-" | "~" | "!" | "&" | "*"
 
-PostExp    ::= PrimExp ("(" ArgList? ")")?
+PostExp    ::= PrimExp PostFix*
+PostFix    ::= "(" ArgList? ")" | "[" Exp "]"
 ArgList    ::= AsExp ("," AsExp)*
 
-PrimExp    ::= Number | Ident | "(" Exp ")"
+PrimExp    ::= Num | Ident | "(" Exp ")"

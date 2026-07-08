@@ -1,11 +1,12 @@
 #include "cxx.h"
 
-Type *ty_int = &(Type){TY_INT, 4, 4, NULL, NULL, {0}};
-Type *ty_i1 = &(Type){TY_I1, 1, 1, NULL, NULL, {0}};
-Type *ty_i64 = &(Type){TY_I64, 8, 8, NULL, NULL, {0}};
+Type *ty_int = &(Type){TY_INT, 4, 4, NULL, NULL, NULL, {0}};
+Type *ty_i1 = &(Type){TY_I1, 1, 1, NULL, NULL, NULL, {0}};
+Type *ty_i64 = &(Type){TY_I64, 8, 8, NULL, NULL, NULL, {0}};
+Type *ty_void = &(Type){TY_VOID, 0, 0, NULL, NULL, NULL, {0}};
 
 bool is_integer(Type *ty) { return ty->kind == TY_INT; }
-bool is_prointer(Type *ty) { return ty->kind == TY_PTR; }
+bool is_pointer(Type *ty) { return ty->base != NULL; }
 
 Type *copy_type(Type *ty) {
     Type *ret = emalloc(sizeof(Type));
@@ -18,7 +19,7 @@ Type *pointer_to(Type *base) {
     ty->kind = TY_PTR;
     ty->size = 8;
     ty->align = 8;
-    ty->ptr.base = base;
+    ty->base = base;
     return ty;
 }
 
@@ -29,10 +30,21 @@ Type *func_type(Type *return_ty) {
     return ty;
 }
 
+Type *array_of(Type *base, int len) {
+    Type *ty = calloc(1, sizeof(Type));
+    ty->kind = TY_ARRAY;
+    ty->size = base->size * len;
+    ty->align = base->align;
+    ty->base = base;
+    ty->arr.len = len;
+    return ty;
+}
+
 void add_type(Node *node) {
     if (!node || node->ty) return;
     switch (node->kind) {
         case ND_FUNCALL:
+            node->ty = ty_int;
             break;
         case ND_COMMA:
             add_type(node->lhs);
@@ -88,8 +100,8 @@ void add_type(Node *node) {
             break;
         case ND_DEREF:
             add_type(node->lhs);
-            if (node->lhs->ty->kind != TY_PTR) exit(1);
-            node->ty = node->lhs->ty->ptr.base;
+            if (!is_pointer(node->lhs->ty)) exit(1);
+            node->ty = node->lhs->ty->base;
             break;
         default:
             break;
