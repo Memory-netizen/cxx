@@ -17,6 +17,12 @@ typedef struct Ir Ir;
 typedef struct Blk Blk;
 typedef struct Obj Obj;
 typedef struct Fn Fn;
+typedef struct Module Module;
+
+extern Type *ty_void;
+extern Type *ty_int;
+extern Type *ty_i1;
+extern Type *ty_i64;
 
 //
 // Lexer
@@ -171,23 +177,23 @@ Token *tokenize(char *input);
 // Parser
 //
 
-// Local variable
+// Variable or function
 struct Obj {
     Obj *next;
-    char *name;  // Variable name
-    Type *ty;    // Type
-    int vreg;    // Virtual reg id
-};
+    uint32_t id;  // Variable name
+    Type *ty;     // Type
 
-// Function
-struct Fn {
-    Fn *next;
-    char *name;
+    // Local variable
+    bool is_local;  // local or global/function
+    int vreg;       // Virtual reg id
+
+    // Global variable or function
+    bool is_function;
+
     Obj *params;
     uint32_t nparam;
     Node *body;
     Obj *locals;
-    Type *ty;  // Type
 
     Blk *start;
     Blk *end;
@@ -221,8 +227,7 @@ typedef enum {
     ND_DEREF,   // unary *
     ND_PTRADD,
     ND_PTRSUB,
-    ND_SUBACCESS,  // [...]
-    ND_FUNCALL,    // Function call
+    ND_FUNCALL,  // Function call
 
     // Statement
     ND_RETURN,     // return
@@ -276,7 +281,7 @@ struct Node {
     };
 };
 
-Fn *parse(Token *tok);
+Obj *parse(Token *tok);
 
 //
 // type.c
@@ -317,11 +322,6 @@ struct Type {
         } func;
     };
 };
-
-extern Type *ty_void;
-extern Type *ty_int;
-extern Type *ty_i1;
-extern Type *ty_i64;
 
 bool is_integer(Type *ty);
 bool is_pointer(Type *ty);
@@ -381,7 +381,6 @@ typedef enum {
     IR_CALL,
 } IrKind;
 
-extern char **globals;
 enum {
     RSlot,
     RTmp,
@@ -431,8 +430,14 @@ struct Blk {
     Blk *next;
 };
 
-Fn *irgen(Fn *node);
-void dump_fn(Fn *fn);
+struct Module {
+    Obj **fns;
+    uint32_t nfn;
+};
+
+Module *irgen(Obj *node);
+void dump_fn(Obj *fn);
+void dump_module(Module *module);
 
 //
 // util.c
@@ -442,5 +447,10 @@ void *emalloc(size_t n);
 void freeall(void);
 void *vnew(size_t len, size_t esz);
 void *vgrow(void *data, size_t len);
+
+char *format(char *s, ...);
+uint32_t intern(char *s, int len);
+char *str(uint32_t id);
+uint32_t str_len(uint32_t id);
 
 #endif  // CXX_H_

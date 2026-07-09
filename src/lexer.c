@@ -168,8 +168,9 @@ Token *tokenize(char *input) {
         // Identifier
         if (is_ident0(*p)) {
             char *start = p;
-            do p++;
-            while (is_ident1(*p));
+            do {
+                p++;
+            } while (is_ident1(*p));
             cur = cur->next = new_token(TK_IDENT, start, p);
             continue;
         }

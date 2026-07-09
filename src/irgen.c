@@ -2,7 +2,7 @@
 
 #include "cxx.h"
 
-static Fn *curf;
+static Obj *curf;
 static Blk *curb;
 static Blk dummy;
 static Blk *tail;
@@ -347,6 +347,7 @@ static void gen_ret(Node *n) {
 }
 
 static Ref gen_stmt(Node *node) {
+    if (!node) return R;
     Ref reg = R;
     switch (node->kind) {
         case ND_IF:
@@ -377,8 +378,10 @@ static Ref gen_stmt(Node *node) {
     return reg;
 }
 
-Fn *irgen(Fn *prog) {
-    for (Fn *fn = prog; fn; fn = fn->next) {
+Module *irgen(Obj *prog) {
+    Module *md = emalloc(sizeof(Module));
+    md->fns = vnew(2, sizeof md->fns[0]);
+    for (Obj *fn = prog; fn; fn = fn->next) {
         curf = fn;
         tmp_id = fn->nparam;
         tail = &dummy;
@@ -413,8 +416,10 @@ Fn *irgen(Fn *prog) {
         curb->jmp.type = IR_RET;
         curb->jmp.arg = TMP(tmp_id, ty_int);
         tail->next = fn->end;
+        md->fns = vgrow(md->fns, md->nfn + 1);
+        md->fns[md->nfn++] = curf;
     }
-    return prog;
+    return md;
 }
 
 static void print_operand(Ref r) {
@@ -489,7 +494,7 @@ void dump_blk(Blk *b) {
                 printf("\n");
                 break;
             case IR_CALL:
-                printf("call i32 @%s(", globals[ir->args[0].val]);
+                printf("call i32 @%s(", str(ir->args[0].val));
                 for (uint32_t i = 1; i < ir->narg; i++) {
                     print_type(ir->args[i].ty);
                     printf(" ");
@@ -598,30 +603,30 @@ void dump_blk(Blk *b) {
     }
 }
 
-void dump_fn(Fn *fn) {
+void dump_fn(Obj *fn) {
+    printf("define i32 @%s(", str(fn->id));
+    Obj *var = fn->locals;
+    for (uint32_t i = 0; i < fn->nparam; i++) {
+        print_type(var->ty);
+        printf(" ");
+        printf("%%%d", i);
+        if (i < fn->nparam - 1) printf(", ");
+        var = var->next;
+    }
+    printf(") {\n");
+    Blk *curb = fn->start;
+    while (curb) {
+        dump_blk(curb);
+        curb = curb->next;
+    }
+    printf("}\n");
+}
+
+void dump_module(Module *md) {
     printf("declare i32 @ret3()\n");
     printf("declare i32 @ret5()\n");
     printf("declare i32 @add(i32, i32)\n");
     printf("declare i32 @sub(i32, i32)\n");
     printf("declare i32 @add6(i32, i32, i32, i32, i32, i32)\n");
-    Fn *curf = fn;
-    while (curf) {
-        printf("define i32 @%s(", curf->name);
-        Obj *var = curf->locals;
-        for (uint32_t i = 0; i < curf->nparam; i++) {
-            print_type(var->ty);
-            printf(" ");
-            printf("%%%d", i);
-            if (i < curf->nparam - 1) printf(", ");
-            var = var->next;
-        }
-        printf(") {\n");
-        Blk *curb = curf->start;
-        while (curb) {
-            dump_blk(curb);
-            curb = curb->next;
-        }
-        printf("}\n");
-        curf = curf->next;
-    }
+    for (uint32_t i = 0; i < md->nfn; i++) dump_fn(md->fns[i]);
 }

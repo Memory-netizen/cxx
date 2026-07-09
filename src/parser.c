@@ -34,30 +34,35 @@ static Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
 }
 
 Obj *locals;
+Obj *globals;
+
 // Find a local variable by name.
 static Obj *find_var(Token *tok) {
     for (Obj *var = locals; var; var = var->next)
-        if (strlen(var->name) == tok->len && !strncmp(tok->loc, var->name, tok->len)) return var;
+        if (var->id == intern(tok->loc, tok->len)) return var;
     return NULL;
 }
 
-static Obj *new_lvar(char *name, Type *ty) {
+static Obj *new_var(uint32_t id, Type *ty) {
     Obj *var = emalloc(sizeof(Obj));
-    var->name = name;
+    var->id = id;
     var->ty = ty;
+    return var;
+}
+
+static Obj *new_lvar(uint32_t id, Type *ty) {
+    Obj *var = new_var(id, ty);
+    var->is_local = true;
     var->next = locals;
     locals = var;
     return var;
 }
 
-char **globals;
-static uint32_t num_global;
-
-static uint32_t new_glb(char *name) {
-    if (globals == NULL) globals = vnew(2, sizeof(char *));
-    globals = vgrow(globals, num_global + 1);
-    globals[num_global] = name;
-    return num_global++;
+static Obj *new_gvar(uint32_t id, Type *ty) {
+    Obj *var = new_var(id, ty);
+    var->next = globals;
+    globals = var;
+    return var;
 }
 
 static int get_number(Token *tok) {
@@ -65,9 +70,9 @@ static int get_number(Token *tok) {
     return tok->val;
 }
 
-static char *get_ident(Token *tok) {
+static uint32_t get_ident(Token *tok) {
     assert(tok->kind == TK_IDENT);
-    return strndup(tok->loc, tok->len);
+    return intern(tok->loc, tok->len);
 }
 
 static Type *declarator(Token **rest, Token *tok, Type *ty);
@@ -122,7 +127,7 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
 
 static Node *fncall(Token **rest, Token *tok) {
     Node *node = new_node(ND_FUNCALL, tok);
-    node->func = new_glb(get_ident(tok));
+    node->func = intern(tok->loc, tok->len);
     tok = tok->next->next;
 
     if (tok->kind == TK_RPAREN) {
@@ -504,15 +509,17 @@ static void create_param_lvars(Type *param) {
     }
 }
 
+// ExDecl ::= FuncDef | Decl;
 // FuncDef ::= DeclSpec Declr CompStmt
-static Fn *function(Token **rest, Token *tok) {
-    Type *ty = declspec(&tok, tok);
-    ty = declarator(&tok, tok, ty);
+static Token *function(Token *tok, Type *basety) {
+    Type *ty = declarator(&tok, tok, basety);
+
+    Obj *fn = new_gvar(get_ident(ty->name), ty);
+    fn->is_function = true;
 
     locals = NULL;
-    Fn *fn = emalloc(sizeof(Fn));
-    fn->name = get_ident(ty->name);
     create_param_lvars(ty->func.params);
+    fn->params = locals;
     uint32_t i = 0;
     Obj *cur = locals;
     while (cur) {
@@ -522,15 +529,18 @@ static Fn *function(Token **rest, Token *tok) {
     fn->params = locals;
     fn->nparam = i;
 
-    fn->body = compound_stmt(rest, tok);
+    fn->body = compound_stmt(&tok, tok);
     fn->locals = locals;
-    return fn;
+    return tok;
 }
 
-// TransUnit ::= FuncDef+
-Fn *parse(Token *tok) {
-    Fn dummy, *cur = &dummy;
-    while (tok->kind != TK_EOF) cur = cur->next = function(&tok, tok);
-    cur->next = 0;
-    return dummy.next;
+// TransUnit ::= ExDecl+;
+Obj *parse(Token *tok) {
+    globals = NULL;
+
+    while (tok->kind != TK_EOF) {
+        Type *basety = declspec(&tok, tok);
+        tok = function(tok, basety);
+    }
+    return globals;
 }

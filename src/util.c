@@ -1,17 +1,31 @@
+#include <assert.h>
+#include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define POOL_SIZE (32 * 1024 * 1024)  // 32MB
 #define BIG_THRESHOLD (128 * 1024)    // 128KB
-#define ALIGNMENT 16
+#define ALIGNMENT _Alignof(max_align_t)
 #define ALIGN_UP(value, align) (((value) + (align) - 1) & ~((align) - 1))
 #define HEAD_SIZE ALIGN_UP(sizeof(void *), ALIGNMENT)
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
 static void **pool;
 static size_t len;
+
+#define IBits 12
+#define IMask ((1 << IBits) - 1)
+
+typedef struct Bucket Bucket;
+struct Bucket {
+    uint32_t nstr;
+    uint32_t *len;
+    char **str;
+};
+static Bucket itbl[IMask + 1];
 
 typedef struct big_block {
     void *ptr;
@@ -63,6 +77,7 @@ void freeall(void) {
         pool = pp;
     }
     len = 0;
+    memset(itbl, 0, sizeof(itbl));
 }
 
 typedef struct Vec Vec;
@@ -73,6 +88,7 @@ struct Vec {
         long long ll;
         long double ld;
         void *ptr;
+        void (*fp)(void);
     } data[];
 };
 
@@ -93,4 +109,69 @@ void *vgrow(void *data, size_t len) {
     void *new_data = vnew(len, v->esz);
     memcpy(new_data, data, v->esz * v->cap);
     return new_data;
+}
+
+char *format(char *s, ...) {
+    va_list ap;
+    int n;
+    char *p;
+
+    va_start(ap, s);
+    n = vsnprintf(NULL, 0, s, ap);
+    va_end(ap);
+    p = emalloc(n + 1);
+    va_start(ap, s);
+    vsnprintf(p, n + 1, s, ap);
+    va_end(ap);
+    return p;
+}
+
+static uint32_t fnv_hash_32(const unsigned char *s, int len) {
+    uint32_t hash = 0x811c9dc5;
+    for (int i = 0; i < len; i++) {
+        hash ^= (uint32_t)s[i];
+        hash *= 0x01000193;
+    }
+    return hash;
+}
+
+uint32_t intern(char *s, int len) {
+    Bucket *b;
+    uint32_t h;
+    uint32_t i, n;
+
+    h = fnv_hash_32((const unsigned char *)s, len) & IMask;
+    b = &itbl[h];
+    n = b->nstr;
+
+    for (i = 0; i < n; i++)
+        if (memcmp(s, b->str[i], len) == 0) return h + (i << IBits);
+
+    if (n == 1 << (32 - IBits)) {
+        fprintf(stderr, "interning table overflow\n");
+        exit(1);
+    }
+    if (n == 0) {
+        b->str = vnew(1, sizeof b->str[0]);
+        b->len = vnew(1, sizeof b->len[0]);
+    } else if ((n & (n - 1)) == 0) {
+        b->str = vgrow(b->str, n + n);
+        b->len = vgrow(b->len, n + n);
+    }
+    b->len[n] = len;
+    b->str[n] = emalloc(len + 1);
+    b->nstr = n + 1;
+    memcpy(b->str[n], s, len);
+    b->str[n][len] = '\0';
+    return h + (n << IBits);
+}
+
+char *str(uint32_t id) {
+    assert(id >> IBits < itbl[id & IMask].nstr);
+    return itbl[id & IMask].str[id >> IBits];
+}
+
+uint32_t str_len(uint32_t id) {
+    assert(id >> IBits < itbl[id & IMask].nstr);
+    return itbl[id & IMask].len[id >> IBits];
 }
