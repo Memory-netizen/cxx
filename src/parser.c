@@ -40,6 +40,8 @@ Obj *globals;
 static Obj *find_var(Token *tok) {
     for (Obj *var = locals; var; var = var->next)
         if (var->id == intern(tok->loc, tok->len)) return var;
+    for (Obj *var = globals; var; var = var->next)
+        if (var->id == intern(tok->loc, tok->len)) return var;
     return NULL;
 }
 
@@ -509,7 +511,6 @@ static void create_param_lvars(Type *param) {
     }
 }
 
-// ExDecl ::= FuncDef | Decl;
 // FuncDef ::= DeclSpec Declr CompStmt
 static Token *function(Token *tok, Type *basety) {
     Type *ty = declarator(&tok, tok, basety);
@@ -534,13 +535,44 @@ static Token *function(Token *tok, Type *basety) {
     return tok;
 }
 
+static Token *global_variable(Token *tok, Type *basety) {
+    bool first = true;
+
+    while (!match(&tok, tok, TK_SEMI)) {
+        if (!first && tok->kind == TK_COMMA) tok = tok->next;
+        first = false;
+
+        Type *ty = declarator(&tok, tok, basety);
+        new_gvar(get_ident(ty->name), ty);
+    }
+    return tok;
+}
+
+// Lookahead tokens and returns true if a given token is a start
+// of a function definition or declaration.
+static bool is_function(Token *tok) {
+    if (tok->kind == TK_SEMI) return false;
+
+    Type dummy = {};
+    Type *ty = declarator(&tok, tok, &dummy);
+    return ty->kind == TY_FUNC;
+}
+
 // TransUnit ::= ExDecl+;
+// ExDecl ::= FuncDef | Decl;
 Obj *parse(Token *tok) {
     globals = NULL;
 
     while (tok->kind != TK_EOF) {
         Type *basety = declspec(&tok, tok);
-        tok = function(tok, basety);
+        // Function
+        if (is_function(tok)) {
+            tok = function(tok, basety);
+            continue;
+        }
+
+        // Global variable
+        tok = global_variable(tok, basety);
     }
     return globals;
 }

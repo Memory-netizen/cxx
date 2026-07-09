@@ -396,8 +396,8 @@ enum {
     (Ref) { RSlot, x, ty }
 #define INT(x) \
     (Ref) { RInt, x, ty_int }
-#define GLB(x) \
-    (Ref) { RGlb, x, NULL }
+#define GLB(x, ty) \
+    (Ref) { RGlb, x, ty }
 
 struct Ref {
     uint32_t type : 3;
@@ -432,7 +432,9 @@ struct Blk {
 
 struct Module {
     Obj **fns;
+    Obj **data;
     uint32_t nfn;
+    uint32_t ndata;
 };
 
 Module *irgen(Obj *node);

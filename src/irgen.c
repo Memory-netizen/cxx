@@ -41,7 +41,11 @@ static Ref gen_expr(Node *node);
 static Ref gen_addr(Node *node) {
     switch (node->kind) {
         case ND_VAR:
-            return SLOT(node->var->vreg, pointer_to(node->ty));
+            if (node->var->is_local)
+                return SLOT(node->var->vreg, pointer_to(node->ty));
+            else
+                // Global variable
+                return GLB(node->var->id, pointer_to(node->ty));
         case ND_DEREF:
             return gen_expr(node->lhs);
         default:
@@ -82,7 +86,7 @@ static Ref gen_expr(Node *node) {
         case ND_FUNCALL: {
             int nargs = node->narg;
             Ref call_ops[nargs + 1];
-            call_ops[0] = GLB(node->func);
+            call_ops[0] = GLB(node->func, ty_int);
 
             int idx = 1;
             for (Node *arg = node->args; arg; arg = arg->next) call_ops[idx++] = gen_expr(arg);
@@ -381,7 +385,13 @@ static Ref gen_stmt(Node *node) {
 Module *irgen(Obj *prog) {
     Module *md = emalloc(sizeof(Module));
     md->fns = vnew(2, sizeof md->fns[0]);
+    md->data = vnew(2, sizeof md->data[0]);
     for (Obj *fn = prog; fn; fn = fn->next) {
+        if (!fn->is_function) {
+            md->data = vgrow(md->data, md->ndata + 1);
+            md->data[md->ndata++] = fn;
+            continue;
+        }
         curf = fn;
         tmp_id = fn->nparam;
         tail = &dummy;
@@ -425,6 +435,8 @@ Module *irgen(Obj *prog) {
 static void print_operand(Ref r) {
     if (r.type == RInt)
         printf("%d", r.val);
+    else if (r.type == RGlb)
+        printf("@%s", str(r.val));
     else
         printf("%%%d", r.val);
 }
@@ -603,6 +615,16 @@ void dump_blk(Blk *b) {
     }
 }
 
+void dump_data(Obj *data) {
+    printf("@%s = global ", str(data->id));
+    print_type(data->ty);
+    if (data->ty->kind == TY_ARRAY)
+        printf(" zeroinitializer");
+    else
+        printf(" 0");
+    printf(", align %d\n", data->ty->align);
+}
+
 void dump_fn(Obj *fn) {
     printf("define i32 @%s(", str(fn->id));
     Obj *var = fn->locals;
@@ -628,5 +650,7 @@ void dump_module(Module *md) {
     printf("declare i32 @add(i32, i32)\n");
     printf("declare i32 @sub(i32, i32)\n");
     printf("declare i32 @add6(i32, i32, i32, i32, i32, i32)\n");
+
+    for (uint32_t i = 0; i < md->ndata; i++) dump_data(md->data[i]);
     for (uint32_t i = 0; i < md->nfn; i++) dump_fn(md->fns[i]);
 }
