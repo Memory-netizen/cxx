@@ -144,16 +144,86 @@ static Token *new_token(TokenKind kind, char *start, char *end) {
     return tok;
 }
 
-static Token *read_string_literal(char *start) {
-    char *p = start + 1;
-    for (; *p != '"'; p++)
+static int from_hex(char c) {
+    if ('0' <= c && c <= '9') return c - '0';
+    if ('a' <= c && c <= 'f') return c - 'a' + 10;
+    return c - 'A' + 10;
+}
+
+static int read_escaped_char(char **new_pos, char *p) {
+    if ('0' <= *p && *p <= '7') {
+        // Read an octal number.
+        int c = *p++ - '0';
+        if ('0' <= *p && *p <= '7') {
+            c = (c << 3) + (*p++ - '0');
+            if ('0' <= *p && *p <= '7') c = (c << 3) + (*p++ - '0');
+        }
+        *new_pos = p;
+        return c;
+    }
+
+    if (*p == 'x') {
+        // Read a hexadecimal number.
+        p++;
+        if (!isxdigit(*p)) exit(1);
+
+        int c = 0;
+        for (; isxdigit(*p); p++) c = (c << 4) + from_hex(*p);
+        *new_pos = p;
+        return c;
+    }
+
+    *new_pos = p + 1;
+
+    switch (*p) {
+        case 'a':
+            return '\a';
+        case 'b':
+            return '\b';
+        case 't':
+            return '\t';
+        case 'n':
+            return '\n';
+        case 'v':
+            return '\v';
+        case 'f':
+            return '\f';
+        case 'r':
+            return '\r';
+        // [GNU] \e for the ASCII escape character is a GNU C extension.
+        case 'e':
+            return 27;
+        default:
+            return *p;
+    }
+}
+
+// Find a closing double-quote.
+static char *string_literal_end(char *p) {
+    for (; *p != '"'; p++) {
         if (*p == '\n' || *p == '\0') {
             fprintf(stderr, "unclosed string literal");
             exit(1);
         }
+        if (*p == '\\') p++;
+    }
+    return p;
+}
 
-    Token *tok = new_token(TK_STRLIT, start, p + 1);
-    tok->id = intern(start + 1, p - start - 1);
+static Token *read_string_literal(char *start) {
+    char *end = string_literal_end(start + 1);
+    char *buf = calloc(1, end - start);
+    int len = 0;
+
+    for (char *p = start + 1; p < end;) {
+        if (*p == '\\')
+            buf[len++] = read_escaped_char(&p, p + 1);
+        else
+            buf[len++] = *p++;
+    }
+
+    Token *tok = new_token(TK_STRLIT, start, end + 1);
+    tok->id = intern(buf, len);
     return tok;
 }
 

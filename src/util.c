@@ -178,37 +178,12 @@ void freeall(void) {
 }
 
 char *escape_char_to_string(char c) {
-    static char buffer[10];
-    switch (c) {
-        case '\n':
-            return "\\n";
-        case '\t':
-            return "\\t";
-        case '\r':
-            return "\\r";
-        case '\0':
-            return "\\00";
-        case '\'':
-            return "\\'";
-        case '\"':
-            return "\\\"";
-        case '\\':
-            return "\\\\";
-        case '\a':
-            return "\\a";
-        case '\b':
-            return "\\b";
-        case '\f':
-            return "\\f";
-        case '\v':
-            return "\\v";
-        default:
-            if (isprint(c)) {
-                buffer[0] = c;
-                buffer[1] = '\0';
-                return buffer;
-            }
-            sprintf(buffer, "\\x%02x", (unsigned char)c);
-            return buffer;
+    static char buffer[8];
+    if (isprint(c)) {
+        buffer[0] = c;
+        buffer[1] = '\0';
+    } else {
+        sprintf(buffer, "\\%02x", (unsigned char)c);
     }
+    return buffer;
 }
