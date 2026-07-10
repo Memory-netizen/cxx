@@ -21,7 +21,7 @@ assert() {
     TMP_LL=$(mktemp --suffix=.ll)
     TMP_EXE=$(mktemp)
 
-    ./build/cxx "$input" > "$TMP_LL" || exit
+    echo "$input" | ./build/cxx - > "$TMP_LL" || exit
 
     clang "$TMP_LL" tmp2.o -o "$TMP_EXE" -Wno-override-module || { echo "clang compile failed"; echo "$input"; cat "$TMP_LL"; exit 1; }
 
@@ -234,7 +234,7 @@ assert 4 'int main() { return sizeof("abc"); }'
 assert 7 'int main() { return "\a"[0]; }'
 assert 8 'int main() { return "\b"[0]; }'
 assert 9 'int main() { return "\t"[0]; }'
-assert 10 'int main() { return "\n"[0]; }'
+assert 10 'int main() { return "\\n"[0]; }'
 assert 11 'int main() { return "\v"[0]; }'
 assert 12 'int main() { return "\f"[0]; }'
 assert 13 'int main() { return "\r"[0]; }'
@@ -244,12 +244,12 @@ assert 106 'int main() { return "\j"[0]; }'
 assert 107 'int main() { return "\k"[0]; }'
 assert 108 'int main() { return "\l"[0]; }'
 
-assert 7 'int main() { return "\ax\ny"[0]; }'
-assert 120 'int main() { return "\ax\ny"[1]; }'
-assert 10 'int main() { return "\ax\ny"[2]; }'
-assert 121 'int main() { return "\ax\ny"[3]; }'
+assert 7 'int main() { return "\ax\\ny"[0]; }'
+assert 120 'int main() { return "\ax\\ny"[1]; }'
+assert 10 'int main() { return "\ax\\ny"[2]; }'
+assert 121 'int main() { return "\ax\\ny"[3]; }'
 
-assert 0 'int main() { return "\0"[0]; }'
+assert 0 'int main() { return "\\0"[0]; }'
 assert 16 'int main() { return "\20"[0]; }'
 assert 65 'int main() { return "\101"[0]; }'
 assert 104 'int main() { return "\1500"[0]; }'

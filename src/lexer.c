@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -202,7 +204,7 @@ static int read_escaped_char(char **new_pos, char *p) {
 static char *string_literal_end(char *p) {
     for (; *p != '"'; p++) {
         if (*p == '\n' || *p == '\0') {
-            fprintf(stderr, "unclosed string literal");
+            fprintf(stderr, "unclosed string literal\n");
             exit(1);
         }
         if (*p == '\\') p++;
@@ -227,9 +229,9 @@ static Token *read_string_literal(char *start) {
     return tok;
 }
 
-// Tokenize 'input' and returns token list.
-Token *tokenize(char *input) {
-    char *p = input;
+// Tokenize a given string and returns new tokens.
+static Token *tokenize(char *filename, char *p) {
+    (void)filename;
     Token dummy, *cur = &dummy;
 
     while (*p) {
@@ -287,3 +289,42 @@ Token *tokenize(char *input) {
     convert_keywords(dummy.next);
     return dummy.next;
 }
+
+// Returns the contents of a given file.
+static char *read_file(char *path) {
+    FILE *fp;
+
+    if (strcmp(path, "-") == 0) {
+        // By convention, read from stdin if a given filename is "-".
+        fp = stdin;
+    } else {
+        fp = fopen(path, "r");
+        if (!fp) {
+            fprintf(stderr, "Unable to open %s: %s\n", path, strerror(errno));
+            exit(1);
+        }
+    }
+
+    char *buf;
+    size_t buflen;
+    FILE *out = open_memstream(&buf, &buflen);
+
+    // Read the entire file.
+    while (1) {
+        char buf2[4096];
+        int n = fread(buf2, 1, sizeof(buf2), fp);
+        if (n == 0) break;
+        fwrite(buf2, 1, n, out);
+    }
+
+    if (fp != stdin) fclose(fp);
+
+    // Make sure that the last line is properly terminated with '\n'.
+    fflush(out);
+    if (buflen == 0 || buf[buflen - 1] != '\n') fputc('\n', out);
+    fputc('\0', out);
+    fclose(out);
+    return buf;
+}
+
+Token *tokenize_file(char *path) { return tokenize(path, read_file(path)); }

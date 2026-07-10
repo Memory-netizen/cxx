@@ -1,8 +1,11 @@
 #ifndef CXX_H_
 #define CXX_H_
 
+#define _POSIX_C_SOURCE 200809L
+
 #include <assert.h>
 #include <ctype.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -175,7 +178,7 @@ struct Token {
 };
 
 bool match(Token **rest, Token *tok, TokenKind kind);
-Token *tokenize(char *input);
+Token *tokenize_file(char *filename);
 
 //
 // Parser
