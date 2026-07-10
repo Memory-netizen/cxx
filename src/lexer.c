@@ -144,6 +144,19 @@ static Token *new_token(TokenKind kind, char *start, char *end) {
     return tok;
 }
 
+static Token *read_string_literal(char *start) {
+    char *p = start + 1;
+    for (; *p != '"'; p++)
+        if (*p == '\n' || *p == '\0') {
+            fprintf(stderr, "unclosed string literal");
+            exit(1);
+        }
+
+    Token *tok = new_token(TK_STRLIT, start, p + 1);
+    tok->id = intern(start + 1, p - start - 1);
+    return tok;
+}
+
 // Tokenize 'input' and returns token list.
 Token *tokenize(char *input) {
     char *p = input;
@@ -162,6 +175,13 @@ Token *tokenize(char *input) {
             cur = cur->next = new_token(TK_NUM, p, p);
             cur->val = strtoul(p, &p, 10);
             cur->len = p - q;
+            continue;
+        }
+
+        // String literal
+        if (*p == '"') {
+            cur = cur->next = read_string_literal(p);
+            p += cur->len;
             continue;
         }
 

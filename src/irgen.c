@@ -617,7 +617,17 @@ void dump_blk(Blk *b) {
 void dump_data(Obj *data) {
     printf("@%s = global ", str(data->id));
     print_type(data->ty);
-    if (data->ty->kind == TY_ARRAY)
+    if (data->is_str) {
+        char *p = str(data->init_data);
+        int len = data->ty->arr.len;
+        if (len == 1)
+            printf(" zeroinitializer");
+        else {
+            printf(" c\"");
+            for (int i = 0; i < len; i++) printf("%s", escape_char_to_string(p[i]));
+            printf("\"");
+        }
+    } else if (data->ty->kind == TY_ARRAY)
         printf(" zeroinitializer");
     else
         printf(" 0");

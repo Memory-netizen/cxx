@@ -193,7 +193,12 @@ struct Obj {
 
     // Global variable or function
     bool is_function;
+    bool is_str;
 
+    // Global variable
+    uint32_t init_data;
+
+    // Function
     Obj *params;
     uint32_t nparam;
     Node *body;
@@ -459,5 +464,6 @@ char *format(char *s, ...);
 uint32_t intern(char *s, int len);
 char *str(uint32_t id);
 uint32_t str_len(uint32_t id);
+char *escape_char_to_string(char c);
 
 #endif  // CXX_H_

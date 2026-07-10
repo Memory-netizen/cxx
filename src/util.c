@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <ctype.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -174,4 +175,40 @@ void freeall(void) {
     }
     free_len = 0;
     memset(itbl, 0, sizeof(itbl));
+}
+
+char *escape_char_to_string(char c) {
+    static char buffer[10];
+    switch (c) {
+        case '\n':
+            return "\\n";
+        case '\t':
+            return "\\t";
+        case '\r':
+            return "\\r";
+        case '\0':
+            return "\\00";
+        case '\'':
+            return "\\'";
+        case '\"':
+            return "\\\"";
+        case '\\':
+            return "\\\\";
+        case '\a':
+            return "\\a";
+        case '\b':
+            return "\\b";
+        case '\f':
+            return "\\f";
+        case '\v':
+            return "\\v";
+        default:
+            if (isprint(c)) {
+                buffer[0] = c;
+                buffer[1] = '\0';
+                return buffer;
+            }
+            sprintf(buffer, "\\x%02x", (unsigned char)c);
+            return buffer;
+    }
 }

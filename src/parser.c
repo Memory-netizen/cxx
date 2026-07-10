@@ -67,6 +67,22 @@ static Obj *new_gvar(uint32_t id, Type *ty) {
     return var;
 }
 
+static uint32_t new_unique_name(void) {
+    static uint32_t id = 0;
+    char buf[64];
+    snprintf(buf, sizeof(buf), ".str.%u", id++);
+    return intern(buf, strlen(buf));
+}
+
+static Obj *new_anon_gvar(Type *ty) { return new_gvar(new_unique_name(), ty); }
+static Obj *new_string_literal(uint32_t id) {
+    Type *ty = array_of(ty_char, str_len(id) + 1);
+    Obj *var = new_anon_gvar(ty);
+    var->is_str = true;
+    var->init_data = id;
+    return var;
+}
+
 static int get_number(Token *tok) {
     assert(tok->kind == TK_NUM);
     return tok->val;
@@ -150,7 +166,7 @@ static Node *fncall(Token **rest, Token *tok) {
     return node;
 }
 
-// PrimExp ::= Num | Ident | "(" Exp ")"
+// PrimExp ::= Num | Str | Ident | "(" Exp ")"
 static Node *primary(Token **rest, Token *tok) {
     Node *node;
     if (tok->kind == TK_LPAREN) {
@@ -158,6 +174,10 @@ static Node *primary(Token **rest, Token *tok) {
         assert(tok->kind == TK_RPAREN);
     } else if (tok->kind == TK_NUM) {
         node = new_num(tok->val, tok);
+    } else if (tok->kind == TK_STRLIT) {
+        Obj *var = new_string_literal(tok->id);
+        *rest = tok->next;
+        return new_var_node(var, tok);
     } else if (tok->kind == TK_IDENT) {
         if (tok->next->kind == TK_LPAREN) return fncall(rest, tok);
         Obj *var = find_var(tok);
