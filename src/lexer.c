@@ -235,6 +235,24 @@ static Token *tokenize(char *filename, char *p) {
     Token dummy, *cur = &dummy;
 
     while (*p) {
+        // Skip line comments.
+        if (start_with(p, "//")) {
+            p += 2;
+            while (*p != '\n') p++;
+            continue;
+        }
+
+        // Skip block comments.
+        if (start_with(p, "/*")) {
+            char *q = strstr(p + 2, "*/");
+            if (!q) {
+                fprintf(stderr, "unclosed block comment");
+                exit(1);
+            }
+            p = q + 2;
+            continue;
+        }
+
         // Skip whitespace characters.
         if (isspace(*p)) {
             p++;
