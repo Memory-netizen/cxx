@@ -51,6 +51,7 @@ $(BUILD_DIR)/%.c.o: $(SRC_DIR)/%.c ; $(c_recipe)
 
 test: $(BUILD_DIR)/$(TARGET_EXEC)
 	$(SHELL) ./test.sh
+	$(SHELL) ./test-driver.sh
 
 clean:
 	-rm -rf $(BUILD_DIR)

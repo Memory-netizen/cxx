@@ -21,7 +21,7 @@ assert() {
     TMP_LL=$(mktemp --suffix=.ll)
     TMP_EXE=$(mktemp)
 
-    echo "$input" | ./build/cxx - > "$TMP_LL" || exit
+    echo "$input" | ./build/cxx -o "$TMP_LL" - || exit
 
     clang "$TMP_LL" tmp2.o -o "$TMP_EXE" -Wno-override-module || { echo "clang compile failed"; echo "$input"; cat "$TMP_LL"; exit 1; }
 

@@ -2,6 +2,7 @@
 
 #include "cxx.h"
 
+static FILE *out_file;
 static Obj *curf;
 static Blk *curb;
 static Blk dummy;
@@ -441,81 +442,81 @@ static const char *ty_str[] = {
 
 static void print_type(Type *ty) {
     if (ty->kind == TY_ARRAY) {
-        printf("[%d x ", ty->arr.len);
+        fprintf(out_file, "[%d x ", ty->arr.len);
         print_type(ty->base);
-        printf("]");
+        fprintf(out_file, "]");
         return;
     }
-    printf("%s", ty_str[ty->kind]);
+    fprintf(out_file, "%s", ty_str[ty->kind]);
 }
 
 static void print_operand(Ref r) {
     if (r.type == RInt)
-        printf("%d", r.val);
+        fprintf(out_file, "%d", r.val);
     else if (r.type == RGlb)
-        printf("@%s", str(r.val));
+        fprintf(out_file, "@%s", str(r.val));
     else
-        printf("%%%d", r.val);
+        fprintf(out_file, "%%%d", r.val);
 }
 
 static void print_binop(const char *op, Ir *ir) {
-    printf("%s ", op);
+    fprintf(out_file, "%s ", op);
     print_type(ir->args[0].ty);
-    printf(" ");
+    fprintf(out_file, " ");
     print_operand(ir->args[0]);
-    printf(", ");
+    fprintf(out_file, ", ");
     print_operand(ir->args[1]);
-    printf("\n");
+    fprintf(out_file, "\n");
 }
 
 void dump_blk(Blk *b) {
-    printf("%d:\n", b->blk_id);
+    fprintf(out_file, "%d:\n", b->blk_id);
 
     Ir *ir = b->head;
     while (ir) {
-        printf("  ");
-        if (ir->op != IR_STR) printf("%%%d = ", ir->dst.val);
+        fprintf(out_file, "  ");
+        if (ir->op != IR_STR) fprintf(out_file, "%%%d = ", ir->dst.val);
 
         switch (ir->op) {
             case IR_ALLOCA:
-                printf("alloca ");
+                fprintf(out_file, "alloca ");
                 print_type(ir->dst.ty->base);
-                printf(", align %d\n", ir->dst.ty->base->align);
+                fprintf(out_file, ", align %d\n", ir->dst.ty->base->align);
                 break;
             case IR_LORD:
-                printf("load ");
+                fprintf(out_file, "load ");
                 print_type(ir->dst.ty);
-                printf(", ptr ");
+                fprintf(out_file, ", ptr ");
                 print_operand(ir->args[0]);
-                printf(", align %d\n", ir->dst.ty->align);
+                fprintf(out_file, ", align %d\n", ir->dst.ty->align);
                 break;
             case IR_STR:
-                printf("store ");
+                fprintf(out_file, "store ");
                 print_type(ir->args[0].ty);
-                printf(" ");
+                fprintf(out_file, " ");
                 print_operand(ir->args[0]);
-                printf(", ptr ");
+                fprintf(out_file, ", ptr ");
                 print_operand(ir->args[1]);
-                printf(", align %d\n", ir->args[0].ty->align);
+                fprintf(out_file, ", align %d\n", ir->args[0].ty->align);
                 break;
             case IR_GEP:
-                printf("getelementptr ");
+                fprintf(out_file, "getelementptr ");
                 print_type(ir->args[0].ty->base);
-                printf(", ptr ");
+                fprintf(out_file, ", ptr ");
                 print_operand(ir->args[0]);
-                printf(", i64 ");
+                fprintf(out_file, ", i64 ");
                 print_operand(ir->args[1]);
-                printf("\n");
+                fprintf(out_file, "\n");
                 break;
             case IR_CALL:
-                printf("call i32 @%s(", str(ir->args[0].val));
+                fprintf(out_file, "call i32 @%s(", str(ir->args[0].val));
                 for (uint32_t i = 1; i < ir->narg; i++) {
                     print_type(ir->args[i].ty);
-                    printf(" ");
+                    fprintf(out_file, " ");
                     print_operand(ir->args[i]);
-                    if (i < ir->narg - 1) printf(", ");
+                    if (i < ir->narg - 1) fprintf(out_file, ", ");
                 }
-                printf(")\n");
+                fprintf(out_file, ")\n");
                 break;
             case IR_ADD:
                 print_binop("add", ir);
@@ -549,27 +550,27 @@ void dump_blk(Blk *b) {
                 break;
 
             case IR_NEG:
-                printf("sub i32 0, ");
+                fprintf(out_file, "sub i32 0, ");
                 print_operand(ir->args[0]);
-                printf("\n");
+                fprintf(out_file, "\n");
                 break;
             case IR_SEXT:
-                printf("sext ");
+                fprintf(out_file, "sext ");
                 print_type(ir->args[0].ty);
-                printf(" ");
+                fprintf(out_file, " ");
                 print_operand(ir->args[0]);
-                printf(" to ");
+                fprintf(out_file, " to ");
                 print_type(ir->dst.ty);
-                printf("\n");
+                fprintf(out_file, "\n");
                 break;
             case IR_ZEXT:
-                printf("zext ");
+                fprintf(out_file, "zext ");
                 print_type(ir->args[0].ty);
-                printf(" ");
+                fprintf(out_file, " ");
                 print_operand(ir->args[0]);
-                printf(" to \n");
+                fprintf(out_file, " to \n");
                 print_type(ir->dst.ty);
-                printf("\n");
+                fprintf(out_file, "\n");
                 break;
 
             case IR_CMP_EQ:
@@ -597,20 +598,20 @@ void dump_blk(Blk *b) {
         ir = ir->next;
     }
 
-    printf("  ");
+    fprintf(out_file, "  ");
     switch (b->jmp.type) {
         case IR_RET:
-            printf("ret i32 ");
+            fprintf(out_file, "ret i32 ");
             print_operand(b->jmp.arg);
-            printf("\n");
+            fprintf(out_file, "\n");
             break;
         case IR_JMP:
-            printf("br label %%%d\n", b->succ1->blk_id);
+            fprintf(out_file, "br label %%%d\n", b->succ1->blk_id);
             break;
         case IR_JNZ:
-            printf("br i1 ");
+            fprintf(out_file, "br i1 ");
             print_operand(b->jmp.arg);
-            printf(", label %%%d, label %%%d\n", b->succ1->blk_id, b->succ2->blk_id);
+            fprintf(out_file, ", label %%%d, label %%%d\n", b->succ1->blk_id, b->succ2->blk_id);
             break;
         default:
             break;
@@ -618,50 +619,51 @@ void dump_blk(Blk *b) {
 }
 
 void dump_data(Obj *data) {
-    printf("@%s = global ", str(data->id));
+    fprintf(out_file, "@%s = global ", str(data->id));
     print_type(data->ty);
     if (data->is_str) {
         char *p = str(data->init_data);
         int len = data->ty->arr.len;
         if (len == 1)
-            printf(" zeroinitializer");
+            fprintf(out_file, " zeroinitializer");
         else {
-            printf(" c\"");
-            for (int i = 0; i < len; i++) printf("%s", escape_char_to_string(p[i]));
-            printf("\"");
+            fprintf(out_file, " c\"");
+            for (int i = 0; i < len; i++) fprintf(out_file, "%s", escape_char_to_string(p[i]));
+            fprintf(out_file, "\"");
         }
     } else if (data->ty->kind == TY_ARRAY)
-        printf(" zeroinitializer");
+        fprintf(out_file, " zeroinitializer");
     else
-        printf(" 0");
-    printf(", align %d\n", data->ty->align);
+        fprintf(out_file, " 0");
+    fprintf(out_file, ", align %d\n", data->ty->align);
 }
 
 void dump_fn(Obj *fn) {
-    printf("define i32 @%s(", str(fn->id));
+    fprintf(out_file, "define i32 @%s(", str(fn->id));
     Obj *var = fn->locals;
     for (uint32_t i = 0; i < fn->nparam; i++) {
         print_type(var->ty);
-        printf(" ");
-        printf("%%%d", i);
-        if (i < fn->nparam - 1) printf(", ");
+        fprintf(out_file, " ");
+        fprintf(out_file, "%%%d", i);
+        if (i < fn->nparam - 1) fprintf(out_file, ", ");
         var = var->next;
     }
-    printf(") {\n");
+    fprintf(out_file, ") {\n");
     Blk *curb = fn->start;
     while (curb) {
         dump_blk(curb);
         curb = curb->next;
     }
-    printf("}\n");
+    fprintf(out_file, "}\n");
 }
 
-void dump_module(Module *md) {
-    printf("declare i32 @ret3()\n");
-    printf("declare i32 @ret5()\n");
-    printf("declare i32 @add(i32, i32)\n");
-    printf("declare i32 @sub(i32, i32)\n");
-    printf("declare i32 @add6(i32, i32, i32, i32, i32, i32)\n");
+void dump_module(Module *md, FILE *out) {
+    out_file = out;
+    fprintf(out_file, "declare i32 @ret3()\n");
+    fprintf(out_file, "declare i32 @ret5()\n");
+    fprintf(out_file, "declare i32 @add(i32, i32)\n");
+    fprintf(out_file, "declare i32 @sub(i32, i32)\n");
+    fprintf(out_file, "declare i32 @add6(i32, i32, i32, i32, i32, i32)\n");
 
     for (uint32_t i = 0; i < md->ndata; i++) dump_data(md->data[i]);
     for (uint32_t i = 0; i < md->nfn; i++) dump_fn(md->fns[i]);

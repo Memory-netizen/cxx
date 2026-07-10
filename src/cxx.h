@@ -452,8 +452,7 @@ struct Module {
 };
 
 Module *irgen(Obj *node);
-void dump_fn(Obj *fn);
-void dump_module(Module *module);
+void dump_module(Module *module, FILE *out);
 
 //
 // util.c
