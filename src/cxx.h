@@ -245,6 +245,7 @@ typedef enum {
     ND_DO,         // do
     ND_FOR,        // for
     ND_EXPR_STMT,  // Expression statement
+    ND_STMT_EXPR,  // Statement expression
     ND_COMP_STMT,  // {...}
 
     // Declare
@@ -272,7 +273,7 @@ struct Node {
             Node *cond;
             union {
                 Node *then;
-                Node *body;  // Block
+                Node *body;  // Block or statement expression
             };
             union {
                 Node *els;

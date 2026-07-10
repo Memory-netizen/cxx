@@ -70,6 +70,9 @@ static Ref gen_expr(Node *node) {
     switch (node->kind) {
         case ND_NUM:
             return INT(node->val);
+        case ND_STMT_EXPR:
+            for (Node *n = node->body; n; n = n->next) dst = gen_stmt(n);
+            return dst;
         case ND_VAR:
             return load(gen_addr(node), node->ty);
         case ND_DEREF:

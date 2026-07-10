@@ -1,5 +1,14 @@
 #include "cxx.h"
 
+static Type *declarator(Token **rest, Token *tok, Type *ty);
+static Node *declaration(Token **rest, Token *tok);
+static Node *stmt(Token **rest, Token *tok);
+static Node *compound_stmt(Token **rest, Token *tok);
+static Node *expr(Token **rest, Token *tok);
+static Node *assign(Token **rest, Token *tok);
+static Node *unary(Token **rest, Token *tok);
+static Node *binexpr(Token **rest, Token *tok, int min_prec);
+
 static Node *new_node(NodeKind kind, Token *tok) {
     Node *node = emalloc(sizeof(Node));
     memset(node, 0, sizeof(*node));
@@ -93,13 +102,6 @@ static uint32_t get_ident(Token *tok) {
     return tok->id;
 }
 
-static Type *declarator(Token **rest, Token *tok, Type *ty);
-static Node *declaration(Token **rest, Token *tok);
-static Node *expr(Token **rest, Token *tok);
-static Node *assign(Token **rest, Token *tok);
-static Node *unary(Token **rest, Token *tok);
-static Node *binexpr(Token **rest, Token *tok, int min_prec);
-
 static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
     add_type(lhs);
     add_type(rhs);
@@ -166,9 +168,17 @@ static Node *fncall(Token **rest, Token *tok) {
     return node;
 }
 
-// PrimExp ::= Num | Str | Ident | "(" Exp ")"
+// PrimExp ::= Num | Str | Ident | "(" Exp ")" | "(" CompStmt ")"
 static Node *primary(Token **rest, Token *tok) {
     Node *node;
+    if (tok->kind == TK_LPAREN && tok->next->kind == TK_LBRACE) {
+        // This is a GNU statement expresssion.
+        Node *node = new_node(ND_STMT_EXPR, tok);
+        node->body = compound_stmt(&tok, tok->next)->body;
+        *rest = tok->next;
+        return node;
+    }
+
     if (tok->kind == TK_LPAREN) {
         node = expr(&tok, tok->next);
         assert(tok->kind == TK_RPAREN);
@@ -299,9 +309,6 @@ static Node *expr(Token **rest, Token *tok) {
     add_type(node);
     return node;
 }
-
-static Node *stmt(Token **rest, Token *tok);
-static Node *compound_stmt(Token **rest, Token *tok);
 
 // ExpStmt ::= ";" | Exp ";";
 static Node *expr_stmt(Token **rest, Token *tok) {
