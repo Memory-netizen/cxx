@@ -20,6 +20,7 @@ typedef struct Fn Fn;
 typedef struct Module Module;
 
 extern Type *ty_void;
+extern Type *ty_char;
 extern Type *ty_int;
 extern Type *ty_i1;
 extern Type *ty_i64;
@@ -167,7 +168,10 @@ struct Token {
     Token *next;
     char *loc;
     size_t len;
-    int val;  // Uesd if kind == TK_NUM;
+    union {
+        uint32_t id;  // Uesd if kind == TK_IDENT;
+        int val;      // Uesd if kind == TK_NUM;
+    };
 };
 
 bool match(Token **rest, Token *tok, TokenKind kind);
@@ -291,6 +295,7 @@ typedef enum {
     TY_VOID,
     TY_I1,
     TY_I64,
+    TY_CHAR,
     TY_INT,
     TY_PTR,
     TY_FUNC,

@@ -171,7 +171,9 @@ Token *tokenize(char *input) {
             do {
                 p++;
             } while (is_ident1(*p));
-            cur = cur->next = new_token(TK_IDENT, start, p);
+            Token *ident = new_token(TK_IDENT, start, p);
+            ident->id = intern(ident->loc, ident->len);
+            cur = cur->next = ident;
             continue;
         }
 

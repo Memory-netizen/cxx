@@ -14,18 +14,7 @@
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
 static void **pool;
-static size_t len;
-
-#define IBits 12
-#define IMask ((1 << IBits) - 1)
-
-typedef struct Bucket Bucket;
-struct Bucket {
-    uint32_t nstr;
-    uint32_t *len;
-    char **str;
-};
-static Bucket itbl[IMask + 1];
+static size_t free_len;
 
 typedef struct big_block {
     void *ptr;
@@ -49,7 +38,7 @@ void *emalloc(size_t n) {
         return p;
     }
 
-    if (len < n) {
+    if (free_len < n) {
         void **new_pool = malloc(POOL_SIZE);
         if (!new_pool) {
             fprintf(stderr, "emalloc: out of memory\n");
@@ -57,27 +46,12 @@ void *emalloc(size_t n) {
         }
         new_pool[0] = pool;
         pool = new_pool;
-        len = POOL_SIZE - HEAD_SIZE;
+        free_len = POOL_SIZE - HEAD_SIZE;
     }
 
-    void *p = (char *)pool + HEAD_SIZE + (len - n);
-    len -= n;
+    void *p = (char *)pool + HEAD_SIZE + (free_len - n);
+    free_len -= n;
     return p;
-}
-
-void freeall(void) {
-    while (big_blocks) {
-        big_block *b = big_blocks;
-        big_blocks = b->next;
-        free(b->ptr);
-    }
-    while (pool) {
-        void **pp = pool[0];
-        free(pool);
-        pool = pp;
-    }
-    len = 0;
-    memset(itbl, 0, sizeof(itbl));
 }
 
 typedef struct Vec Vec;
@@ -126,6 +100,17 @@ char *format(char *s, ...) {
     return p;
 }
 
+#define IBits 12
+#define IMask ((1 << IBits) - 1)
+
+typedef struct Bucket Bucket;
+struct Bucket {
+    uint32_t nstr;
+    uint32_t *len;
+    char **str;
+};
+static Bucket itbl[IMask + 1];
+
 static uint32_t fnv_hash_32(const unsigned char *s, int len) {
     uint32_t hash = 0x811c9dc5;
     for (int i = 0; i < len; i++) {
@@ -145,7 +130,7 @@ uint32_t intern(char *s, int len) {
     n = b->nstr;
 
     for (i = 0; i < n; i++)
-        if (memcmp(s, b->str[i], len) == 0) return h + (i << IBits);
+        if (memcmp(s, b->str[i], len) == 0) return h | (i << IBits);
 
     if (n == 1 << (32 - IBits)) {
         fprintf(stderr, "interning table overflow\n");
@@ -163,7 +148,7 @@ uint32_t intern(char *s, int len) {
     b->nstr = n + 1;
     memcpy(b->str[n], s, len);
     b->str[n][len] = '\0';
-    return h + (n << IBits);
+    return h | (n << IBits);
 }
 
 char *str(uint32_t id) {
@@ -174,4 +159,19 @@ char *str(uint32_t id) {
 uint32_t str_len(uint32_t id) {
     assert(id >> IBits < itbl[id & IMask].nstr);
     return itbl[id & IMask].len[id >> IBits];
+}
+
+void freeall(void) {
+    while (big_blocks) {
+        big_block *b = big_blocks;
+        big_blocks = b->next;
+        free(b->ptr);
+    }
+    while (pool) {
+        void **pp = pool[0];
+        free(pool);
+        pool = pp;
+    }
+    free_len = 0;
+    memset(itbl, 0, sizeof(itbl));
 }

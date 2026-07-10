@@ -1,11 +1,12 @@
 #include "cxx.h"
 
+Type *ty_char = &(Type){TY_CHAR, 1, 1, NULL, NULL, NULL, {0}};
 Type *ty_int = &(Type){TY_INT, 4, 4, NULL, NULL, NULL, {0}};
 Type *ty_i1 = &(Type){TY_I1, 1, 1, NULL, NULL, NULL, {0}};
 Type *ty_i64 = &(Type){TY_I64, 8, 8, NULL, NULL, NULL, {0}};
 Type *ty_void = &(Type){TY_VOID, 0, 0, NULL, NULL, NULL, {0}};
 
-bool is_integer(Type *ty) { return ty->kind == TY_INT; }
+bool is_integer(Type *ty) { return ty->kind == TY_INT || ty->kind == TY_CHAR; }
 bool is_pointer(Type *ty) { return ty->base != NULL; }
 
 Type *copy_type(Type *ty) {

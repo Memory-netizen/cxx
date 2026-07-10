@@ -39,9 +39,9 @@ Obj *globals;
 // Find a local variable by name.
 static Obj *find_var(Token *tok) {
     for (Obj *var = locals; var; var = var->next)
-        if (var->id == intern(tok->loc, tok->len)) return var;
+        if (var->id == tok->id) return var;
     for (Obj *var = globals; var; var = var->next)
-        if (var->id == intern(tok->loc, tok->len)) return var;
+        if (var->id == tok->id) return var;
     return NULL;
 }
 
@@ -74,7 +74,7 @@ static int get_number(Token *tok) {
 
 static uint32_t get_ident(Token *tok) {
     assert(tok->kind == TK_IDENT);
-    return intern(tok->loc, tok->len);
+    return tok->id;
 }
 
 static Type *declarator(Token **rest, Token *tok, Type *ty);
@@ -129,7 +129,7 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
 
 static Node *fncall(Token **rest, Token *tok) {
     Node *node = new_node(ND_FUNCALL, tok);
-    node->func = intern(tok->loc, tok->len);
+    node->func = tok->id;
     tok = tok->next->next;
 
     if (tok->kind == TK_RPAREN) {
@@ -401,6 +401,9 @@ static Node *stmt(Token **rest, Token *tok) {
     }
 }
 
+// Returns true if a given token represents a type.
+static bool is_typename(Token *tok) { return tok->kind == TK_INT || tok->kind == TK_CHAR; }
+
 // CompStmt ::= "{" BlockItem* "}"
 // BlockItem ::= Stmt | Decl
 static Node *compound_stmt(Token **rest, Token *tok) {
@@ -409,7 +412,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
 
     tok = tok->next;
     while (tok->kind != TK_RBRACE) {
-        if (tok->kind == TK_INT)
+        if (is_typename(tok))
             cur = cur->next = declaration(&tok, tok);
         else
             cur = cur->next = stmt(&tok, tok);
@@ -422,9 +425,12 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// DeclSpec ::= "int"
+// DeclSpec ::= "int" | "char"
 static Type *declspec(Token **rest, Token *tok) {
-    assert(tok->kind == TK_INT);
+    if (tok->kind == TK_CHAR) {
+        *rest = tok->next;
+        return ty_char;
+    }
     *rest = tok->next;
     return ty_int;
 }

@@ -432,28 +432,8 @@ Module *irgen(Obj *prog) {
     return md;
 }
 
-static void print_operand(Ref r) {
-    if (r.type == RInt)
-        printf("%d", r.val);
-    else if (r.type == RGlb)
-        printf("@%s", str(r.val));
-    else
-        printf("%%%d", r.val);
-}
-
-static void print_binop(const char *op, Ir *ir) {
-    printf("%s i32 ", op);
-    print_operand(ir->args[0]);
-    printf(", ");
-    print_operand(ir->args[1]);
-    printf("\n");
-}
-
 static const char *ty_str[] = {
-    [TY_I1] = "i1",
-    [TY_I64] = "i64",
-    [TY_INT] = "i32",
-    [TY_PTR] = "ptr",
+    [TY_I1] = "i1", [TY_I64] = "i64", [TY_CHAR] = "i8", [TY_INT] = "i32", [TY_PTR] = "ptr",
 };
 
 static void print_type(Type *ty) {
@@ -464,6 +444,25 @@ static void print_type(Type *ty) {
         return;
     }
     printf("%s", ty_str[ty->kind]);
+}
+
+static void print_operand(Ref r) {
+    if (r.type == RInt)
+        printf("%d", r.val);
+    else if (r.type == RGlb)
+        printf("@%s", str(r.val));
+    else
+        printf("%%%d", r.val);
+}
+
+static void print_binop(const char *op, Ir *ir) {
+    printf("%s ", op);
+    print_type(ir->args[0].ty);
+    printf(" ");
+    print_operand(ir->args[0]);
+    printf(", ");
+    print_operand(ir->args[1]);
+    printf("\n");
 }
 
 void dump_blk(Blk *b) {
