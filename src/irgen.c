@@ -1,5 +1,3 @@
-#include <stdio.h>
-
 #include "cxx.h"
 
 static FILE *out_file;
@@ -31,7 +29,7 @@ static Ir *new_ins(IrKind op, Ref dst, Ref *args, uint32_t narg) {
 
 Blk *new_blk(void) {
     Blk *b = emalloc(sizeof(Blk));
-    memset(b, 0, sizeof(*b));
+    memset(b, 0, sizeof(Blk));
     tail = tail->next = b;
     return b;
 }
@@ -388,8 +386,9 @@ static Ref gen_stmt(Node *node) {
 
 Module *irgen(Obj *prog) {
     Module *md = emalloc(sizeof(Module));
-    md->fns = vnew(2, sizeof md->fns[0]);
-    md->data = vnew(2, sizeof md->data[0]);
+    memset(md, 0, sizeof(Module));
+    md->fns = vnew(2, sizeof(Obj *));
+    md->data = vnew(2, sizeof(Obj *));
     for (Obj *fn = prog; fn; fn = fn->next) {
         if (!fn->is_function) {
             md->data = vgrow(md->data, md->ndata + 1);
@@ -401,11 +400,13 @@ Module *irgen(Obj *prog) {
         tail = &dummy;
         fn->start = new_blk();
         fn->end = emalloc(sizeof(Blk));
+        memset(fn->end, 0, sizeof(Blk));
 
         curb = fn->start;
         curb->blk_id = tmp_id++;
         // Entry
-        new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(ty_int)), NULL, 0);
+        new_ins(IR_ALLOCA, TMP(tmp_id, pointer_to(ty_int)), NULL, 0);
+        new_ins(IR_STR, R, (Ref[]){INT(0), TMP(tmp_id++, ty_int)}, 2);
 
         for (Obj *var = fn->locals; var; var = var->next)
             new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty)), NULL, 0);

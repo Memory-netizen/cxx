@@ -20,12 +20,15 @@ Type *pointer_to(Type *base) {
     ty->kind = TY_PTR;
     ty->size = 8;
     ty->align = 8;
+    ty->name = NULL;
+    ty->next = NULL;
     ty->base = base;
     return ty;
 }
 
 Type *func_type(Type *return_ty) {
     Type *ty = emalloc(sizeof(Type));
+    memset(ty, 0, sizeof(Type));
     ty->kind = TY_FUNC;
     ty->func.ret = return_ty;
     return ty;
@@ -36,6 +39,8 @@ Type *array_of(Type *base, int len) {
     ty->kind = TY_ARRAY;
     ty->size = base->size * len;
     ty->align = base->align;
+    ty->name = NULL;
+    ty->next = NULL;
     ty->base = base;
     ty->arr.len = len;
     return ty;

@@ -67,6 +67,7 @@ static Scope *scope = &(Scope){0};
 static void enter_scope(void) {
     Scope *sc = emalloc(sizeof(Scope));
     sc->next = scope;
+    sc->vars = NULL;
     scope = sc;
 }
 
@@ -91,6 +92,7 @@ static VarScope *push_scope(uint32_t id, Obj *var) {
 
 static Obj *new_var(uint32_t id, Type *ty) {
     Obj *var = emalloc(sizeof(Obj));
+    memset(var, 0, sizeof(Obj));
     var->id = id;
     var->ty = ty;
     push_scope(id, var);
@@ -243,14 +245,15 @@ static Node *postfix(Token **rest, Token *tok) {
     Node *node = primary(&tok, tok);
     while (1) {
         switch (tok->kind) {
-            case TK_LBRACKET:
                 // x[y] is short for *(x+y)
+            case TK_LBRACKET: {
                 Token *start = tok;
                 Node *idx = expr(&tok, tok->next);
                 assert(tok->kind == TK_RBRACKET);
                 tok = tok->next;
                 node = new_unary(ND_DEREF, new_add(node, idx, start), start);
                 continue;
+            }
             default:
                 break;
         }

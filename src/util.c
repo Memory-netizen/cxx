@@ -1,11 +1,4 @@
-#include <assert.h>
-#include <ctype.h>
-#include <stdarg.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "cxx.h"
 
 #define POOL_SIZE (32 * 1024 * 1024)  // 32MB
 #define BIG_THRESHOLD (128 * 1024)    // 128KB
@@ -14,14 +7,15 @@
 #define HEAD_SIZE ALIGN_UP(sizeof(void *), ALIGNMENT)
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
-static void **pool;
-static size_t free_len;
+static void **pool = NULL;
+static size_t free_len = 0;
 
-typedef struct big_block {
+typedef struct Block_Mem {
     void *ptr;
-    struct big_block *next;
-} big_block;
-static big_block *big_blocks;
+    struct Block_Mem *next;
+} Block_Mem;
+
+static Block_Mem *mem_blocks = {0};
 
 void *emalloc(size_t n) {
     if (n == 0) return NULL;
@@ -32,10 +26,10 @@ void *emalloc(size_t n) {
             fprintf(stderr, "emalloc: out of memory\n");
             exit(1);
         }
-        big_block *b = emalloc(sizeof(big_block));
+        Block_Mem *b = emalloc(sizeof(Block_Mem));
         b->ptr = p;
-        b->next = big_blocks;
-        big_blocks = b;
+        b->next = mem_blocks;
+        mem_blocks = b;
         return p;
     }
 
@@ -163,9 +157,9 @@ uint32_t str_len(uint32_t id) {
 }
 
 void freeall(void) {
-    while (big_blocks) {
-        big_block *b = big_blocks;
-        big_blocks = b->next;
+    while (mem_blocks) {
+        Block_Mem *b = mem_blocks;
+        mem_blocks = b->next;
         free(b->ptr);
     }
     while (pool) {
@@ -179,11 +173,16 @@ void freeall(void) {
 
 char *escape_char_to_string(char c) {
     static char buffer[8];
-    /* if (isprint(c)) {
-         buffer[0] = c;
-         buffer[1] = '\0';
-     } else*/
-    {
+    if (c == '\\') {
+        return "\\\\";
+    }
+    if (c == '"') {
+        return "\\22";
+    }
+    if (isprint(c)) {
+        buffer[0] = c;
+        buffer[1] = '\0';
+    } else {
         sprintf(buffer, "\\%02x", (unsigned char)c);
     }
     return buffer;

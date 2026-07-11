@@ -1,10 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
-
-#include <ctype.h>
-#include <stdbool.h>
-#include <stdlib.h>
-#include <string.h>
-
 #include "cxx.h"
 
 // Attempt to match the given token type
