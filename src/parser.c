@@ -42,22 +42,58 @@ static Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
     return node;
 }
 
-Obj *locals;
-Obj *globals;
+// Scope for local or global variables.
+typedef struct VarScope VarScope;
+struct VarScope {
+    VarScope *next;
+    uint32_t id;
+    Obj *var;
+};
 
-// Find a local variable by name.
+// Represents a block scope.
+typedef struct Scope Scope;
+struct Scope {
+    Scope *next;
+    VarScope *vars;
+};
+
+// All local variable instances created during parsing are
+// accumulated to this list.
+static Obj *locals;
+static Obj *globals;
+
+static Scope *scope = &(Scope){0};
+
+static void enter_scope(void) {
+    Scope *sc = emalloc(sizeof(Scope));
+    sc->next = scope;
+    scope = sc;
+}
+
+static void leave_scope(void) { scope = scope->next; }
+
+// Find a variable by name.
 static Obj *find_var(Token *tok) {
-    for (Obj *var = locals; var; var = var->next)
-        if (var->id == tok->id) return var;
-    for (Obj *var = globals; var; var = var->next)
-        if (var->id == tok->id) return var;
+    for (Scope *sc = scope; sc; sc = sc->next)
+        for (VarScope *sc2 = sc->vars; sc2; sc2 = sc2->next)
+            if (tok->id == sc2->id) return sc2->var;
     return NULL;
+}
+
+static VarScope *push_scope(uint32_t id, Obj *var) {
+    VarScope *sc = emalloc(sizeof(VarScope));
+    sc->id = id;
+    sc->var = var;
+    sc->next = scope->vars;
+    scope->vars = sc;
+    return sc;
 }
 
 static Obj *new_var(uint32_t id, Type *ty) {
     Obj *var = emalloc(sizeof(Obj));
     var->id = id;
     var->ty = ty;
+    push_scope(id, var);
     return var;
 }
 
@@ -343,6 +379,7 @@ static Node *return_stmt(Token **rest, Token *tok) {
 // IfStmt ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
 // SelHead ::= Exp | Decl Exp | SimDecl
 static Node *if_stmt(Token **rest, Token *tok) {
+    enter_scope();
     Node *node = new_node(ND_IF, tok);
     assert(tok->next->kind == TK_LPAREN);
     // Cond
@@ -353,11 +390,13 @@ static Node *if_stmt(Token **rest, Token *tok) {
     // Else
     if (tok->kind == TK_ELSE) node->els = stmt(&tok, tok->next);
     *rest = tok;
+    leave_scope();
     return node;
 }
 
 // ForStmt ::= "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt;
 static Node *for_stmt(Token **rest, Token *tok) {
+    enter_scope();
     Node *node = new_node(ND_FOR, tok);
     assert(tok->next->kind == TK_LPAREN);
     tok = tok->next->next;
@@ -378,11 +417,13 @@ static Node *for_stmt(Token **rest, Token *tok) {
 
     // Body
     node->body = stmt(rest, tok->next);
+    leave_scope();
     return node;
 }
 
 // WhileStmt ::= "while" "(" Exp ")" Stmt
 static Node *while_stmt(Token **rest, Token *tok) {
+    enter_scope();
     Node *node = new_node(ND_WHILE, tok);
     assert(tok->next->kind == TK_LPAREN);
     // Cond
@@ -390,11 +431,13 @@ static Node *while_stmt(Token **rest, Token *tok) {
     assert(tok->kind == TK_RPAREN);
     // Body
     node->then = stmt(rest, tok->next);
+    leave_scope();
     return node;
 }
 
 // DoStmt ::= "do" Stmt "while" "(" Exp ")" ";";
 static Node *do_stmt(Token **rest, Token *tok) {
+    enter_scope();
     Node *node = new_node(ND_DO, tok);
     // Body
     node->body = stmt(&tok, tok->next);
@@ -405,6 +448,7 @@ static Node *do_stmt(Token **rest, Token *tok) {
     assert(tok->kind == TK_RPAREN);
     assert(tok->next->kind == TK_SEMI);
     *rest = tok->next->next;
+    leave_scope();
     return node;
 }
 
@@ -434,6 +478,7 @@ static bool is_typename(Token *tok) { return tok->kind == TK_INT || tok->kind ==
 // CompStmt ::= "{" BlockItem* "}"
 // BlockItem ::= Stmt | Decl
 static Node *compound_stmt(Token **rest, Token *tok) {
+    enter_scope();
     Node *node = new_node(ND_COMP_STMT, tok);
     Node dummy, *cur = &dummy;
 
@@ -449,6 +494,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     *rest = tok->next;
 
     node->body = dummy.next;
+    leave_scope();
     return node;
 }
 
@@ -552,6 +598,7 @@ static Token *function(Token *tok, Type *basety) {
     fn->is_function = true;
 
     locals = NULL;
+    enter_scope();
     create_param_lvars(ty->func.params);
     fn->params = locals;
     uint32_t i = 0;
@@ -565,6 +612,7 @@ static Token *function(Token *tok, Type *basety) {
 
     fn->body = compound_stmt(&tok, tok);
     fn->locals = locals;
+    leave_scope();
     return tok;
 }
 
