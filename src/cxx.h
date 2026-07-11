@@ -242,6 +242,8 @@ typedef enum {
     ND_PTRADD,
     ND_PTRSUB,
     ND_FUNCALL,  // Function call
+    ND_IMCAST,
+    ND_EXCAST,
 
     // Statement
     ND_RETURN,     // return

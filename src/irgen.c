@@ -53,14 +53,27 @@ static Ref gen_addr(Node *node) {
 }
 
 static Ref load(Ref addr, Type *ty) {
-    if (ty->kind == TY_ARRAY) {
-        addr.ty = pointer_to(addr.ty->base);
-        return addr;
-    }
     Ref dst = TMP(tmp_id++, ty);
     Ref ops[1] = {addr};
     new_ins(IR_LORD, dst, ops, 1);
     return dst;
+}
+
+static Ref convert(Node *node) {
+    if (node->lhs->ty->kind == TY_ARRAY) {
+        Ref addr = gen_addr(node->lhs);
+        Ref ops[2] = {addr, INT(0)};
+        Ref dst = TMP(tmp_id++, node->ty);
+        new_ins(IR_GEP, dst, ops, 2);
+        return dst;
+    }
+    if (node->lhs->ty->kind == TY_PTR) {
+        Ref ops[1] = {gen_expr(node->lhs)};
+        Ref dst = TMP(tmp_id++, node->ty);
+        new_ins(IR_PTRTOINT, dst, ops, 1);
+        return dst;
+    }
+    return R;
 }
 
 static Ref gen_expr(Node *node) {
@@ -78,6 +91,8 @@ static Ref gen_expr(Node *node) {
             return load(gen_expr(node->lhs), node->ty);
         case ND_ADDR:
             return gen_addr(node->lhs);
+        case ND_IMCAST:
+            return convert(node);
         case ND_AS: {
             Ref addr = gen_addr(node->lhs);
             dst = gen_expr(node->rhs);
@@ -138,23 +153,35 @@ static Ref gen_expr(Node *node) {
 
     switch (node->kind) {
         case ND_PTRSUB: {
-            Ref tmp = TMP(tmp_id++, rr.ty);
-            Ref sub_ops[2] = {INT(0), rr};
-            new_ins(IR_SUB, tmp, sub_ops, 2);
-            Ref sext_reg = TMP(tmp_id++, ty_i64);
-            Ref sext_ops[1] = {tmp};
-            new_ins(IR_SEXT, sext_reg, sext_ops, 1);
+            Ref sext_reg;
+            if (node->rhs->kind == ND_NUM) {
+                sext_reg = INT(-rr.val);
+                sext_reg.ty = ty_i64;
+            } else {
+                Ref tmp = TMP(tmp_id++, rr.ty);
+                Ref sub_ops[2] = {INT(0), rr};
+                new_ins(IR_SUB, tmp, sub_ops, 2);
+                sext_reg = TMP(tmp_id++, ty_i64);
+                Ref sext_ops[1] = {tmp};
+                new_ins(IR_SEXT, sext_reg, sext_ops, 1);
+            }
             Ref gep_ops[2] = {lr, sext_reg};
-            dst = TMP(tmp_id++, pointer_to(ty_void));
+            dst = TMP(tmp_id++, node->ty);
             new_ins(IR_GEP, dst, gep_ops, 2);
             break;
         }
         case ND_PTRADD: {
-            Ref sext_reg = TMP(tmp_id++, ty_i64);
-            Ref sext_ops[1] = {rr};
-            new_ins(IR_SEXT, sext_reg, sext_ops, 1);
+            Ref sext_reg;
+            if (node->rhs->kind == ND_NUM) {
+                sext_reg = INT(rr.val);
+                sext_reg.ty = ty_i64;
+            } else {
+                sext_reg = TMP(tmp_id++, ty_i64);
+                Ref sext_ops[1] = {rr};
+                new_ins(IR_SEXT, sext_reg, sext_ops, 1);
+            }
             Ref gep_ops[2] = {lr, sext_reg};
-            dst = TMP(tmp_id++, pointer_to(ty_void));
+            dst = TMP(tmp_id++, node->ty);
             new_ins(IR_GEP, dst, gep_ops, 2);
             break;
         }
@@ -518,6 +545,11 @@ void dump_blk(Blk *b) {
                     if (i < ir->narg - 1) fprintf(out_file, ", ");
                 }
                 fprintf(out_file, ")\n");
+                break;
+            case IR_PTRTOINT:
+                fprintf(out_file, "ptrtoint ptr ");
+                print_operand(ir->args[0]);
+                fprintf(out_file, " to i64\n");
                 break;
             case IR_ADD:
                 print_binop("add", ir);

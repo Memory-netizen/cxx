@@ -42,6 +42,13 @@ static Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
     return node;
 }
 
+static Node *new_imcast(Type *ty, Node *expr) {
+    Node *node = new_node(ND_IMCAST, expr->tok);
+    node->lhs = expr;
+    node->ty = ty;
+    return node;
+}
+
 // Scope for local or global variables.
 typedef struct VarScope VarScope;
 struct VarScope {
@@ -176,9 +183,12 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
 
     // ptr - ptr, which returns how many elements are between the two.
     if (lhs->ty->base && rhs->ty->base) {
+        size_t size = lhs->ty->base->size;
+        lhs = new_imcast(ty_i64, lhs);
+        rhs = new_imcast(ty_i64, rhs);
         Node *node = new_binary(ND_SUB, lhs, rhs, tok);
-        node->ty = ty_int;
-        return new_binary(ND_DIV, node, new_num(lhs->ty->base->size, tok), tok);
+        node->ty = ty_i64;
+        return new_binary(ND_DIV, node, new_num(size, tok), tok);
     }
     return NULL;
 }
@@ -244,6 +254,8 @@ static Node *primary(Token **rest, Token *tok) {
 static Node *postfix(Token **rest, Token *tok) {
     Node *node = primary(&tok, tok);
     while (1) {
+        add_type(node);
+        if (node->ty->kind == TY_ARRAY) node = new_imcast(pointer_to(node->ty->base), node);
         switch (tok->kind) {
                 // x[y] is short for *(x+y)
             case TK_LBRACKET: {
@@ -275,13 +287,22 @@ static Node *unary(Token **rest, Token *tok) {
             return new_unary(ND_INVERT, unary(rest, tok->next), tok);
         case TK_NOT:
             return new_unary(ND_NOT, unary(rest, tok->next), tok);
-        case TK_BAND:
-            return new_unary(ND_ADDR, unary(rest, tok->next), tok);
-        case TK_STAR:
-            return new_unary(ND_DEREF, unary(rest, tok->next), tok);
+        case TK_BAND: {
+            Node *node = unary(rest, tok->next);
+            add_type(node);
+            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+            return new_unary(ND_ADDR, node, tok);
+        }
+        case TK_STAR: {
+            Node *node = new_unary(ND_DEREF, unary(rest, tok->next), tok);
+            add_type(node);
+            if (node->ty->kind == TY_ARRAY) node = new_imcast(pointer_to(node->ty->base), node);
+            return node;
+        }
         case TK_SIZEOF: {
             Node *node = unary(rest, tok->next);
             add_type(node);
+            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
             return new_num(node->ty->size, tok);
         }
         default:

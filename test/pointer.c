@@ -44,7 +44,10 @@ int main() {
                *(&y - 2 + 1) = 7;
                x;
            }));
-    // ASSERT(5, ({ int x=3; (&x+2)-&x+3; }));
+    ASSERT(5, ({
+               int x = 3;
+               (&x + 2) - &x + 3;
+           }));
     ASSERT(8, ({
                int x, y;
                x = 3;
