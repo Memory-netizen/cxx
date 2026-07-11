@@ -659,11 +659,8 @@ void dump_fn(Obj *fn) {
 
 void dump_module(Module *md, FILE *out) {
     out_file = out;
-    fprintf(out_file, "declare i32 @ret3()\n");
-    fprintf(out_file, "declare i32 @ret5()\n");
-    fprintf(out_file, "declare i32 @add(i32, i32)\n");
-    fprintf(out_file, "declare i32 @sub(i32, i32)\n");
-    fprintf(out_file, "declare i32 @add6(i32, i32, i32, i32, i32, i32)\n");
+    fprintf(out_file, "declare void @assert(i32, i32, ptr)\n");
+    fprintf(out_file, "declare i32 @printf(ptr, ...)\n");
 
     for (uint32_t i = 0; i < md->ndata; i++) dump_data(md->data[i]);
     for (uint32_t i = 0; i < md->nfn; i++) dump_fn(md->fns[i]);

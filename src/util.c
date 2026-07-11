@@ -179,10 +179,11 @@ void freeall(void) {
 
 char *escape_char_to_string(char c) {
     static char buffer[8];
-    if (isprint(c)) {
-        buffer[0] = c;
-        buffer[1] = '\0';
-    } else {
+    /* if (isprint(c)) {
+         buffer[0] = c;
+         buffer[1] = '\0';
+     } else*/
+    {
         sprintf(buffer, "\\%02x", (unsigned char)c);
     }
     return buffer;

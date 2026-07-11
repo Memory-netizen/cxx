@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 tmp=`mktemp -d /tmp/cxx-test-XXXXXX`
 trap 'rm -rf $tmp' INT TERM HUP EXIT
 echo > $tmp/empty.c
@@ -14,12 +14,12 @@ check() {
 
 # -o
 rm -f $tmp/out
-./build/cxx -o $tmp/out $tmp/empty.c
+./cxx -o $tmp/out $tmp/empty.c
 [ -f $tmp/out ]
 check -o
 
 # --help
-./build/cxx --help 2>&1 | grep -q cxx
+./cxx --help 2>&1 | grep -q cxx
 check --help
 
 echo OK
