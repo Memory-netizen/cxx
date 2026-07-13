@@ -58,11 +58,20 @@ struct VarScope {
     Obj *var;
 };
 
+// Scope for struct tags
+typedef struct TagScope TagScope;
+struct TagScope {
+    TagScope *next;
+    uint32_t id;
+    Type *ty;
+};
+
 // Represents a block scope.
 typedef struct Scope Scope;
 struct Scope {
     Scope *next;
     VarScope *vars;
+    TagScope *tags;
 };
 
 // All local variable instances created during parsing are
@@ -90,6 +99,13 @@ static Obj *find_var(Token *tok) {
     return NULL;
 }
 
+static Type *find_tag(Token *tok) {
+    for (Scope *sc = scope; sc; sc = sc->next)
+        for (TagScope *sc2 = sc->tags; sc2; sc2 = sc2->next)
+            if (tok->id == sc2->id) return sc2->ty;
+    return NULL;
+}
+
 static VarScope *push_scope(uint32_t id, Obj *var) {
     VarScope *sc = emalloc(sizeof(VarScope));
     sc->id = id;
@@ -97,6 +113,15 @@ static VarScope *push_scope(uint32_t id, Obj *var) {
     sc->next = scope->vars;
     scope->vars = sc;
     return sc;
+}
+
+static void push_tag_scope(uint32_t id, Type *ty) {
+    TagScope *sc = emalloc(sizeof(TagScope));
+    sc->id = id;
+    sc->ty = ty;
+    sc->next = scope->tags;
+    scope->tags = sc;
+    ty->id = id;
 }
 
 static Obj *new_var(uint32_t id, Type *ty) {
@@ -584,14 +609,26 @@ static uint32_t new_unique_typename(void) {
     return intern(buf, strlen(buf));
 }
 
-// RecordSpec = "{" struct-members
+// RecordSpec = Ident? "{" struct-members
 static Type *record_decl(Token **rest, Token *tok) {
-    tok = tok->next;
+    // Read a struct tag.
+    Token *tag = NULL;
+    if (tok->kind == TK_IDENT) {
+        tag = tok;
+        tok = tok->next;
+    }
+
+    if (tag && tok->kind != TK_LBRACE) {
+        Type *ty = find_tag(tag);
+        assert(ty);
+        *rest = tok;
+        return ty;
+    }
 
     // Construct a struct object.
     Type *ty = emalloc(sizeof(Type));
     ty->kind = TY_STRUCT;
-    struct_members(rest, tok, ty);
+    struct_members(rest, tok->next, ty);
     ty->align = 1;
 
     // Assign offsets within the struct to members.
@@ -606,7 +643,23 @@ static Type *record_decl(Token **rest, Token *tok) {
         if (ty->align < mem->ty->align) ty->align = mem->ty->align;
     }
     ty->size = ALIGN_UP(offset, ty->align);
-    ty->id = new_unique_typename();
+    // Register the struct type if a name was given.
+    if (tag)
+        push_tag_scope(tag->id, ty);
+    else
+        ty->id = new_unique_typename();
+    int i = -1;
+    Type *t = types;
+    while (t) {
+        if (t->id == ty->id) i++;
+        t = t->next;
+    }
+    if (i >= 0) {
+        char *name = format("%s.%d", str(ty->id), i);
+        ty->uid = intern(name, strlen(name));
+    } else {
+        ty->uid = ty->id;
+    }
     ty->next = types;
     types = ty;
     return ty;

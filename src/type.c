@@ -1,10 +1,10 @@
 #include "cxx.h"
 
-Type *ty_char = &(Type){TY_CHAR, 1, 1, 0, NULL, NULL, NULL, {0}};
-Type *ty_int = &(Type){TY_INT, 4, 4, 0, NULL, NULL, NULL, {0}};
-Type *ty_i1 = &(Type){TY_I1, 1, 1, 0, NULL, NULL, NULL, {0}};
-Type *ty_i64 = &(Type){TY_I64, 8, 8, 0, NULL, NULL, NULL, {0}};
-Type *ty_void = &(Type){TY_VOID, 0, 0, 0, NULL, NULL, NULL, {0}};
+Type *ty_char = &(Type){TY_CHAR, 1, 1, 0, 0, NULL, NULL, NULL, {0}};
+Type *ty_int = &(Type){TY_INT, 4, 4, 0, 0, NULL, NULL, NULL, {0}};
+Type *ty_i1 = &(Type){TY_I1, 1, 1, 0, 0, NULL, NULL, NULL, {0}};
+Type *ty_i64 = &(Type){TY_I64, 8, 8, 0, 0, NULL, NULL, NULL, {0}};
+Type *ty_void = &(Type){TY_VOID, 0, 0, 0, 0, NULL, NULL, NULL, {0}};
 
 bool is_integer(Type *ty) {
     return ty->kind == TY_INT || ty->kind == TY_CHAR || ty->kind == TY_I64 || ty->kind == TY_I1;

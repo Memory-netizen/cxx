@@ -183,6 +183,44 @@ int main() {
                sizeof(x);
            }));
 
+    ASSERT(8, ({
+               struct t1 {
+                   int a;
+                   int b;
+               } x;
+               struct t1 y;
+               sizeof(y);
+           }));
+    ASSERT(8, ({
+               struct t2 {
+                   int a;
+                   int b;
+               };
+               struct t2 y;
+               sizeof(y);
+           }));
+    ASSERT(2, ({
+               struct t3 {
+                   char a[2];
+               };
+               {
+                   struct t3 {
+                       char a[4];
+                   };
+               }
+               struct t3 y;
+               sizeof(y);
+           }));
+    ASSERT(3, ({
+               struct t4 {
+                   int x;
+               };
+               int t4 = 1;
+               struct t4 y;
+               y.x = 2;
+               t4 + y.x;
+           }));
+
     printf("OK\n");
     return 0;
 }

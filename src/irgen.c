@@ -465,7 +465,7 @@ static void print_type(Type *ty) {
         return;
     }
     if (ty->kind == TY_STRUCT) {
-        fprintf(out_file, "%%%s", str(ty->id));
+        fprintf(out_file, "%%%s", str(ty->uid));
         return;
     }
     fprintf(out_file, "%s", ty_str[ty->kind]);
@@ -641,7 +641,7 @@ void dump_blk(Blk *b) {
 }
 
 void dump_type(Type *ty) {
-    fprintf(out_file, "%%%s = type { ", str(ty->id));
+    fprintf(out_file, "%%%s = type { ", str(ty->uid));
     Member *mem = ty->members;
     while (mem) {
         print_type(mem->ty);

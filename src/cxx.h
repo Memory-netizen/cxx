@@ -322,6 +322,7 @@ struct Type {
     int size;   // sizeof() value
     int align;  // alignof() value
     uint32_t id;
+    uint32_t uid;
     // Declaration
     Token *name;
     Type *next;
