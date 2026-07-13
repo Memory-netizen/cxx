@@ -2,6 +2,7 @@
 #define CXX_H_
 
 #define _POSIX_C_SOURCE 200809L
+#define ALIGN_UP(value, align) (((value) + (align) - 1) & ~((align) - 1))
 
 #include <assert.h>
 #include <ctype.h>
@@ -23,6 +24,7 @@ typedef struct Blk Blk;
 typedef struct Obj Obj;
 typedef struct Fn Fn;
 typedef struct Module Module;
+typedef struct Member Member;
 
 extern Type *ty_void;
 extern Type *ty_char;
@@ -223,9 +225,7 @@ typedef enum {
     ND_EQ,      // ==
     ND_NE,      // !=
     ND_LT,      // <
-    ND_GT,      // >
     ND_LE,      // <=
-    ND_GE,      // >=
     ND_LEFT,    // <<
     ND_RIGHT,   // >>
     ND_ADD,     // +
@@ -239,8 +239,8 @@ typedef enum {
     ND_INVERT,  // ~
     ND_ADDR,    // unary &
     ND_DEREF,   // unary *
+    ND_MEMBER,  // . (struct member access)
     ND_PTRADD,
-    ND_PTRSUB,
     ND_FUNCALL,  // Function call
     ND_IMCAST,
     ND_EXCAST,
@@ -272,8 +272,9 @@ struct Node {
 
     union {
         struct {
-            Node *lhs;  // Left-hand side
-            Node *rhs;  // Right-hand side
+            Node *lhs;       // Left-hand side
+            Node *rhs;       // Right-hand side
+            Member *member;  // Struct member access
         };
         struct {
             Node *init;
@@ -298,7 +299,7 @@ struct Node {
     };
 };
 
-Obj *parse(Token *tok);
+Module *parse(Token *tok);
 
 //
 // type.c
@@ -313,12 +314,14 @@ typedef enum {
     TY_PTR,
     TY_FUNC,
     TY_ARRAY,
+    TY_STRUCT,
 } TypeKind;
 
 struct Type {
     TypeKind kind;
     int size;   // sizeof() value
     int align;  // alignof() value
+    uint32_t id;
     // Declaration
     Token *name;
     Type *next;
@@ -326,19 +329,29 @@ struct Type {
 
     // Data
     union {
-        // struct {
-        // // Pointer
-        // } ptr;
         struct {
             // Array
             int len;
-        } arr;
+        };
         struct {
             // Function
             Type *ret;
             Type *params;
-        } func;
+        };
+        struct {
+            // Struct
+            Member *members;
+        };
     };
+};
+
+// Struct member
+struct Member {
+    Member *next;
+    Type *ty;
+    Token *name;
+    uint32_t idx;
+    int offset;
 };
 
 bool is_integer(Type *ty);
@@ -390,8 +403,6 @@ typedef enum {
     // Compare
     IR_CMP_NE,
     IR_CMP_EQ,
-    IR_CMP_GE,
-    IR_CMP_GT,
     IR_CMP_LE,
     IR_CMP_LT,
 
@@ -449,13 +460,12 @@ struct Blk {
 };
 
 struct Module {
-    Obj **fns;
-    Obj **data;
-    uint32_t nfn;
-    uint32_t ndata;
+    Obj *fns;
+    Obj *data;
+    Type *tys;
 };
 
-Module *irgen(Obj *node);
+Module *irgen(Module *node);
 void dump_module(Module *module, FILE *out);
 
 //

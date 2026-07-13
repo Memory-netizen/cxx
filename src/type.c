@@ -1,10 +1,10 @@
 #include "cxx.h"
 
-Type *ty_char = &(Type){TY_CHAR, 1, 1, NULL, NULL, NULL, {0}};
-Type *ty_int = &(Type){TY_INT, 4, 4, NULL, NULL, NULL, {0}};
-Type *ty_i1 = &(Type){TY_I1, 1, 1, NULL, NULL, NULL, {0}};
-Type *ty_i64 = &(Type){TY_I64, 8, 8, NULL, NULL, NULL, {0}};
-Type *ty_void = &(Type){TY_VOID, 0, 0, NULL, NULL, NULL, {0}};
+Type *ty_char = &(Type){TY_CHAR, 1, 1, 0, NULL, NULL, NULL, {0}};
+Type *ty_int = &(Type){TY_INT, 4, 4, 0, NULL, NULL, NULL, {0}};
+Type *ty_i1 = &(Type){TY_I1, 1, 1, 0, NULL, NULL, NULL, {0}};
+Type *ty_i64 = &(Type){TY_I64, 8, 8, 0, NULL, NULL, NULL, {0}};
+Type *ty_void = &(Type){TY_VOID, 0, 0, 0, NULL, NULL, NULL, {0}};
 
 bool is_integer(Type *ty) {
     return ty->kind == TY_INT || ty->kind == TY_CHAR || ty->kind == TY_I64 || ty->kind == TY_I1;
@@ -32,7 +32,7 @@ Type *func_type(Type *return_ty) {
     Type *ty = emalloc(sizeof(Type));
     memset(ty, 0, sizeof(Type));
     ty->kind = TY_FUNC;
-    ty->func.ret = return_ty;
+    ty->ret = return_ty;
     return ty;
 }
 
@@ -44,7 +44,7 @@ Type *array_of(Type *base, int len) {
     ty->name = NULL;
     ty->next = NULL;
     ty->base = base;
-    ty->arr.len = len;
+    ty->len = len;
     return ty;
 }
 
@@ -71,7 +71,6 @@ void add_type(Node *node) {
         case ND_DIV:
         case ND_MOD:
         case ND_PTRADD:
-        case ND_PTRSUB:
             add_type(node->lhs);
             add_type(node->rhs);
             node->ty = node->lhs->ty;
@@ -90,8 +89,6 @@ void add_type(Node *node) {
         case ND_NE:
         case ND_LT:
         case ND_LE:
-        case ND_GT:
-        case ND_GE:
             add_type(node->lhs);
             add_type(node->rhs);
             node->ty = ty_int;
@@ -115,13 +112,42 @@ void add_type(Node *node) {
             if (node->body) {
                 Node *stmt = node->body;
                 while (stmt->next) stmt = stmt->next;
-                if (stmt->kind == ND_EXPR_STMT) {
+                if (stmt->kind == ND_EXPR_STMT && stmt->lhs) {
                     node->ty = stmt->lhs->ty;
                     return;
                 }
             }
             break;
-        default:
+        case ND_MEMBER:
+            node->ty = node->member->ty;
+            break;
+        case ND_IMCAST:
+            add_type(node->lhs);
+            break;
+        case ND_EXCAST:
+            add_type(node->lhs);
+            break;
+        case ND_RETURN:
+            add_type(node->lhs);
+            break;
+        case ND_IF:
+        case ND_WHILE:
+        case ND_DO:
+        case ND_FOR:
+            add_type(node->init);
+            add_type(node->cond);
+            add_type(node->then);
+            add_type(node->els);
+            break;
+        case ND_EXPR_STMT:
+            if (node->lhs) {
+                add_type(node->lhs);
+                node->ty = node->lhs->ty;
+            }
+            break;
+        case ND_DECL:
+        case ND_COMP_STMT:
+            for (Node *n = node->body; n; n = n->next) add_type(n);
             break;
     }
 }

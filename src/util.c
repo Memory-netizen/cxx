@@ -3,7 +3,6 @@
 #define POOL_SIZE (32 * 1024 * 1024)  // 32MB
 #define BIG_THRESHOLD (128 * 1024)    // 128KB
 #define ALIGNMENT _Alignof(max_align_t)
-#define ALIGN_UP(value, align) (((value) + (align) - 1) & ~((align) - 1))
 #define HEAD_SIZE ALIGN_UP(sizeof(void *), ALIGNMENT)
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 

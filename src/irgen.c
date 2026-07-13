@@ -47,6 +47,22 @@ static Ref gen_addr(Node *node) {
                 return GLB(node->var->id, pointer_to(node->ty));
         case ND_DEREF:
             return gen_expr(node->lhs);
+        case ND_MEMBER: {
+            Ref addr = gen_addr(node->lhs);
+            int nmem = 0;
+            for (Member *mem = node->member; mem; mem = mem->next) nmem++;
+            Ref gep_ops[nmem + 2];
+            gep_ops[0] = addr;
+            gep_ops[1] = INT(0);
+
+            int idx = 2;
+            for (Member *mem = node->member; mem; mem = mem->next) gep_ops[idx++] = INT(mem->idx);
+
+            Ref dst = TMP(tmp_id++, node->ty);
+            new_ins(IR_GEP, dst, gep_ops, nmem + 2);
+            return dst;
+        }
+
         default:
     }
     exit(1);
@@ -86,6 +102,7 @@ static Ref gen_expr(Node *node) {
             for (Node *n = node->body; n; n = n->next) dst = gen_stmt(n);
             return dst;
         case ND_VAR:
+        case ND_MEMBER:
             return load(gen_addr(node), node->ty);
         case ND_DEREF:
             return load(gen_expr(node->lhs), node->ty);
@@ -152,24 +169,6 @@ static Ref gen_expr(Node *node) {
     if (node->kind == ND_COMMA) return rr;
 
     switch (node->kind) {
-        case ND_PTRSUB: {
-            Ref sext_reg;
-            if (node->rhs->kind == ND_NUM) {
-                sext_reg = INT(-rr.val);
-                sext_reg.ty = ty_i64;
-            } else {
-                Ref tmp = TMP(tmp_id++, rr.ty);
-                Ref sub_ops[2] = {INT(0), rr};
-                new_ins(IR_SUB, tmp, sub_ops, 2);
-                sext_reg = TMP(tmp_id++, ty_i64);
-                Ref sext_ops[1] = {tmp};
-                new_ins(IR_SEXT, sext_reg, sext_ops, 1);
-            }
-            Ref gep_ops[2] = {lr, sext_reg};
-            dst = TMP(tmp_id++, node->ty);
-            new_ins(IR_GEP, dst, gep_ops, 2);
-            break;
-        }
         case ND_PTRADD: {
             Ref sext_reg;
             if (node->rhs->kind == ND_NUM) {
@@ -209,12 +208,12 @@ static Ref gen_expr(Node *node) {
         case ND_EQ:
         case ND_NE:
         case ND_LT:
-        case ND_GT:
-        case ND_LE:
-        case ND_GE: {
+        case ND_LE: {
             static int cmp_op[] = {
-                [ND_EQ] = IR_CMP_EQ, [ND_NE] = IR_CMP_NE, [ND_LT] = IR_CMP_LT,
-                [ND_GT] = IR_CMP_GT, [ND_LE] = IR_CMP_LE, [ND_GE] = IR_CMP_GE,
+                [ND_EQ] = IR_CMP_EQ,
+                [ND_NE] = IR_CMP_NE,
+                [ND_LT] = IR_CMP_LT,
+                [ND_LE] = IR_CMP_LE,
             };
             Ref tmp = TMP(tmp_id++, ty_i1);
             Ref cmp_ops[2] = {lr, rr};
@@ -411,17 +410,8 @@ static Ref gen_stmt(Node *node) {
     return reg;
 }
 
-Module *irgen(Obj *prog) {
-    Module *md = emalloc(sizeof(Module));
-    memset(md, 0, sizeof(Module));
-    md->fns = vnew(2, sizeof(Obj *));
-    md->data = vnew(2, sizeof(Obj *));
-    for (Obj *fn = prog; fn; fn = fn->next) {
-        if (!fn->is_function) {
-            md->data = vgrow(md->data, md->ndata + 1);
-            md->data[md->ndata++] = fn;
-            continue;
-        }
+Module *irgen(Module *md) {
+    for (Obj *fn = md->fns; fn; fn = fn->next) {
         curf = fn;
         tmp_id = fn->nparam;
         tail = &dummy;
@@ -432,11 +422,12 @@ Module *irgen(Obj *prog) {
         curb = fn->start;
         curb->blk_id = tmp_id++;
         // Entry
-        new_ins(IR_ALLOCA, TMP(tmp_id, pointer_to(ty_int)), NULL, 0);
-        new_ins(IR_STR, R, (Ref[]){INT(0), TMP(tmp_id++, ty_int)}, 2);
+        new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(ty_int)), NULL, 0);
 
         for (Obj *var = fn->locals; var; var = var->next)
             new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty)), NULL, 0);
+
+        new_ins(IR_STR, R, (Ref[]){INT(0), TMP(fn->nparam + 1, ty_int)}, 2);
 
         Obj *var = fn->locals;
         for (uint32_t i = 0; i < fn->nparam; ++i) {
@@ -458,8 +449,6 @@ Module *irgen(Obj *prog) {
         curb->jmp.type = IR_RET;
         curb->jmp.arg = TMP(tmp_id, ty_int);
         tail->next = fn->end;
-        md->fns = vgrow(md->fns, md->nfn + 1);
-        md->fns[md->nfn++] = curf;
     }
     return md;
 }
@@ -470,9 +459,13 @@ static const char *ty_str[] = {
 
 static void print_type(Type *ty) {
     if (ty->kind == TY_ARRAY) {
-        fprintf(out_file, "[%d x ", ty->arr.len);
+        fprintf(out_file, "[%d x ", ty->len);
         print_type(ty->base);
         fprintf(out_file, "]");
+        return;
+    }
+    if (ty->kind == TY_STRUCT) {
+        fprintf(out_file, "%%%s", str(ty->id));
         return;
     }
     fprintf(out_file, "%s", ty_str[ty->kind]);
@@ -532,8 +525,12 @@ void dump_blk(Blk *b) {
                 print_type(ir->args[0].ty->base);
                 fprintf(out_file, ", ptr ");
                 print_operand(ir->args[0]);
-                fprintf(out_file, ", i64 ");
-                print_operand(ir->args[1]);
+                for (uint32_t i = 1; i < ir->narg; i++) {
+                    fprintf(out_file, ", ");
+                    print_type(ir->args[i].ty);
+                    fprintf(out_file, " ");
+                    print_operand(ir->args[i]);
+                }
                 fprintf(out_file, "\n");
                 break;
             case IR_CALL:
@@ -581,7 +578,6 @@ void dump_blk(Blk *b) {
             case IR_SHR:
                 print_binop("ashr", ir);
                 break;
-
             case IR_NEG:
                 fprintf(out_file, "sub i32 0, ");
                 print_operand(ir->args[0]);
@@ -612,19 +608,12 @@ void dump_blk(Blk *b) {
             case IR_CMP_NE:
                 print_binop("icmp ne", ir);
                 break;
-            case IR_CMP_GE:
-                print_binop("icmp sge", ir);
-                break;
-            case IR_CMP_GT:
-                print_binop("icmp sgt", ir);
-                break;
             case IR_CMP_LE:
                 print_binop("icmp sle", ir);
                 break;
             case IR_CMP_LT:
                 print_binop("icmp slt", ir);
                 break;
-
             default:
                 break;
         }
@@ -651,12 +640,24 @@ void dump_blk(Blk *b) {
     }
 }
 
+void dump_type(Type *ty) {
+    fprintf(out_file, "%%%s = type { ", str(ty->id));
+    Member *mem = ty->members;
+    while (mem) {
+        print_type(mem->ty);
+        mem = mem->next;
+        if (!mem) break;
+        fprintf(out_file, ", ");
+    }
+    fprintf(out_file, " }\n");
+}
+
 void dump_data(Obj *data) {
     fprintf(out_file, "@%s = global ", str(data->id));
     print_type(data->ty);
     if (data->is_str) {
         char *p = str(data->init_data);
-        int len = data->ty->arr.len;
+        int len = data->ty->len;
         if (len == 1)
             fprintf(out_file, " zeroinitializer");
         else {
@@ -665,6 +666,8 @@ void dump_data(Obj *data) {
             fprintf(out_file, "\"");
         }
     } else if (data->ty->kind == TY_ARRAY)
+        fprintf(out_file, " zeroinitializer");
+    else if (data->ty->kind == TY_STRUCT)
         fprintf(out_file, " zeroinitializer");
     else
         fprintf(out_file, " 0");
@@ -695,6 +698,7 @@ void dump_module(Module *md, FILE *out) {
     fprintf(out_file, "declare void @assert(i32, i32, ptr)\n");
     fprintf(out_file, "declare i32 @printf(ptr, ...)\n");
 
-    for (uint32_t i = 0; i < md->ndata; i++) dump_data(md->data[i]);
-    for (uint32_t i = 0; i < md->nfn; i++) dump_fn(md->fns[i]);
+    for (Type *ty = md->tys; ty; ty = ty->next) dump_type(ty);
+    for (Obj *var = md->data; var; var = var->next) dump_data(var);
+    for (Obj *fn = md->fns; fn; fn = fn->next) dump_fn(fn);
 }

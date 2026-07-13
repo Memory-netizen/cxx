@@ -1,5 +1,6 @@
 #include "cxx.h"
 
+static Type *declspec(Token **rest, Token *tok);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
 static Node *declaration(Token **rest, Token *tok);
 static Node *stmt(Token **rest, Token *tok);
@@ -68,6 +69,7 @@ struct Scope {
 // accumulated to this list.
 static Obj *locals;
 static Obj *globals;
+static Type *types;
 
 static Scope *scope = &(Scope){0};
 
@@ -147,6 +149,12 @@ static uint32_t get_ident(Token *tok) {
     return tok->id;
 }
 
+static void swap(Node **lhs, Node **rhs) {
+    Node *tmp = *lhs;
+    *lhs = *rhs;
+    *rhs = tmp;
+}
+
 static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
     add_type(lhs);
     add_type(rhs);
@@ -157,11 +165,7 @@ static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
     if (lhs->ty->base && rhs->ty->base) exit(1);
 
     // Canonicalize `num + ptr` to `ptr + num`.
-    if (!lhs->ty->base && rhs->ty->base) {
-        Node *tmp = lhs;
-        lhs = rhs;
-        rhs = tmp;
-    }
+    if (!lhs->ty->base && rhs->ty->base) swap(&lhs, &rhs);
 
     // ptr + num
     return new_binary(ND_PTRADD, lhs, rhs, tok);
@@ -176,8 +180,8 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
 
     // ptr - num
     if (lhs->ty->base && is_integer(rhs->ty)) {
-        Node *node = new_binary(ND_PTRSUB, lhs, rhs, tok);
-        node->ty = lhs->ty;
+        Node *node = new_binary(ND_PTRADD, lhs, new_unary(ND_NEG, rhs, rhs->tok), tok);
+        add_type(node);
         return node;
     }
 
@@ -248,8 +252,20 @@ static Node *primary(Token **rest, Token *tok) {
     return node;
 }
 
+static Member *get_struct_member(Type *ty, Token *tok) {
+    for (Member *mem = ty->members; mem; mem = mem->next)
+        if (mem->name->id == tok->id) return mem;
+    return NULL;
+}
+
+static Member *copy_mem(Member *mem) {
+    Member *new = emalloc(sizeof(Member));
+    *new = *mem;
+    return new;
+}
+
 // PostExp  ::= PrimExp PostFix*
-// PostFix  ::= "(" ArgList? ")" | "[" Exp "]"
+// PostFix  ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident
 // ArgList  ::= AsExp ("," AsExp)*
 static Node *postfix(Token **rest, Token *tok) {
     Node *node = primary(&tok, tok);
@@ -264,6 +280,20 @@ static Node *postfix(Token **rest, Token *tok) {
                 assert(tok->kind == TK_RBRACKET);
                 tok = tok->next;
                 node = new_unary(ND_DEREF, new_add(node, idx, start), start);
+                continue;
+            }
+            case TK_DOT: {
+                Member dummy, *mem = &dummy;
+                Type *ty = node->ty;
+                while (tok->kind == TK_DOT) {
+                    tok = tok->next;
+                    mem = mem->next = copy_mem(get_struct_member(ty, tok));
+                    ty = mem->ty;
+                    tok = tok->next;
+                }
+                mem->next = NULL;
+                node = new_unary(ND_MEMBER, node, tok->next);
+                node->member = dummy.next;
                 continue;
             }
             default:
@@ -322,8 +352,8 @@ static Node *unary(Token **rest, Token *tok) {
 static Node *binexpr(Token **rest, Token *tok, int min_prec) {
     static int op_table[][2] = {
         [TK_BOR] = {40, ND_BOR},    [TK_XOR] = {50, ND_XOR},   [TK_BAND] = {60, ND_BAND},   [TK_EQ] = {70, ND_EQ},
-        [TK_NE] = {70, ND_NE},      [TK_LT] = {80, ND_LT},     [TK_GT] = {80, ND_GT},       [TK_LE] = {80, ND_LE},
-        [TK_GE] = {80, ND_GE},      [TK_LEFT] = {90, ND_LEFT}, [TK_RIGHT] = {90, ND_RIGHT}, [TK_PLUS] = {100, ND_ADD},
+        [TK_NE] = {70, ND_NE},      [TK_LT] = {80, ND_LT},     [TK_GT] = {80, ND_LT},       [TK_LE] = {80, ND_LE},
+        [TK_GE] = {80, ND_LE},      [TK_LEFT] = {90, ND_LEFT}, [TK_RIGHT] = {90, ND_RIGHT}, [TK_PLUS] = {100, ND_ADD},
         [TK_MINUS] = {100, ND_SUB}, [TK_STAR] = {110, ND_MUL}, [TK_SLASH] = {110, ND_DIV},  [TK_MOD] = {110, ND_MOD},
     };
 
@@ -338,6 +368,8 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
 
         Node *rhs = binexpr(&tok, tok->next, cur_prec);
         add_type(rhs);
+
+        if (op_tok->kind == TK_GT || op_tok->kind == TK_GE) swap(&lhs, &rhs);
 
         if (expr_op == ND_ADD)
             lhs = new_add(lhs, rhs, op_tok);
@@ -497,7 +529,7 @@ static Node *stmt(Token **rest, Token *tok) {
 }
 
 // Returns true if a given token represents a type.
-static bool is_typename(Token *tok) { return tok->kind == TK_INT || tok->kind == TK_CHAR; }
+static bool is_typename(Token *tok) { return tok->kind == TK_INT || tok->kind == TK_CHAR || tok->kind == TK_STRUCT; }
 
 // CompStmt ::= "{" BlockItem* "}"
 // BlockItem ::= Stmt | Decl
@@ -522,14 +554,77 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// DeclSpec ::= "int" | "char"
+// struct-members = (declspec declarator (","  declarator)* ";")*
+static void struct_members(Token **rest, Token *tok, Type *ty) {
+    Member head = {};
+    Member *cur = &head;
+
+    while (tok->kind != TK_RBRACE) {
+        Type *basety = declspec(&tok, tok);
+        int i = 0;
+
+        while (!match(&tok, tok, TK_SEMI)) {
+            if (i++ && tok->kind == TK_COMMA) tok = tok->next;
+
+            Member *mem = emalloc(sizeof(Member));
+            mem->ty = declarator(&tok, tok, basety);
+            mem->name = mem->ty->name;
+            cur = cur->next = mem;
+        }
+    }
+
+    *rest = tok->next;
+    ty->members = head.next;
+}
+
+static uint32_t new_unique_typename(void) {
+    static uint32_t id = 0;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "struct.anon.%u", id++);
+    return intern(buf, strlen(buf));
+}
+
+// RecordSpec = "{" struct-members
+static Type *record_decl(Token **rest, Token *tok) {
+    tok = tok->next;
+
+    // Construct a struct object.
+    Type *ty = emalloc(sizeof(Type));
+    ty->kind = TY_STRUCT;
+    struct_members(rest, tok, ty);
+    ty->align = 1;
+
+    // Assign offsets within the struct to members.
+    int offset = 0;
+    uint32_t idx = 0;
+    for (Member *mem = ty->members; mem; mem = mem->next) {
+        offset = ALIGN_UP(offset, mem->ty->align);
+        mem->offset = offset;
+        mem->idx = idx++;
+        offset += mem->ty->size;
+
+        if (ty->align < mem->ty->align) ty->align = mem->ty->align;
+    }
+    ty->size = ALIGN_UP(offset, ty->align);
+    ty->id = new_unique_typename();
+    ty->next = types;
+    types = ty;
+    return ty;
+}
+
+// DeclSpec ::= "int" | "char" | RecordSpec
 static Type *declspec(Token **rest, Token *tok) {
     if (tok->kind == TK_CHAR) {
         *rest = tok->next;
         return ty_char;
     }
-    *rest = tok->next;
-    return ty_int;
+    if (tok->kind == TK_INT) {
+        *rest = tok->next;
+        return ty_int;
+    }
+    if (tok->kind == TK_STRUCT) return record_decl(rest, tok->next);
+
+    return NULL;
 }
 
 // DeclrSuf  ::= "(" ParamList? ")" | "[" Num "]"
@@ -552,7 +647,7 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
 
         cur->next = NULL;
         ty = func_type(ty);
-        ty->func.params = dummy.next;
+        ty->params = dummy.next;
         return ty;
     }
     if (tok->kind == TK_LBRACKET) {
@@ -592,9 +687,9 @@ static Node *declaration(Token **rest, Token *tok) {
             case TK_AS: {
                 Node *lhs = new_var_node(var, ty->name);
                 Node *rhs = assign(&tok, tok->next);
-                Node *node = new_binary(ND_AS, lhs, rhs, tok);
-                add_type(node);
-                cur = cur->next = new_unary(ND_EXPR_STMT, node, tok);
+                Node *as = new_binary(ND_AS, lhs, rhs, tok);
+                add_type(as);
+                cur = cur->next = new_unary(ND_EXPR_STMT, as, tok);
             }
             default:
                 break;
@@ -623,7 +718,7 @@ static Token *function(Token *tok, Type *basety) {
 
     locals = NULL;
     enter_scope();
-    create_param_lvars(ty->func.params);
+    create_param_lvars(ty->params);
     fn->params = locals;
     uint32_t i = 0;
     Obj *cur = locals;
@@ -665,9 +760,11 @@ static bool is_function(Token *tok) {
 
 // TransUnit ::= ExDecl+;
 // ExDecl ::= FuncDef | Decl;
-Obj *parse(Token *tok) {
-    globals = NULL;
+Module *parse(Token *tok) {
+    Module *md = emalloc(sizeof(Module));
+    memset(md, 0, sizeof(Module));
 
+    globals = NULL;
     while (tok->kind != TK_EOF) {
         Type *basety = declspec(&tok, tok);
         // Function
@@ -675,9 +772,20 @@ Obj *parse(Token *tok) {
             tok = function(tok, basety);
             continue;
         }
-
         // Global variable
         tok = global_variable(tok, basety);
     }
-    return globals;
+    for (Obj *sym = globals; sym;) {
+        Obj *next = sym->next;
+        if (sym->is_function) {
+            sym->next = md->fns;
+            md->fns = sym;
+        } else {
+            sym->next = md->data;
+            md->data = sym;
+        }
+        sym = next;
+    }
+    md->tys = types;
+    return md;
 }

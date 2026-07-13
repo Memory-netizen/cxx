@@ -54,7 +54,7 @@ int main(int argc, char **argv) {
 
     // Tokenize and parse.
     Token *tok = tokenize_file(input_path);
-    Obj *prog = parse(tok);
+    Module *prog = parse(tok);
 
     // Traverse the AST to emit assembly.
     Module *module = irgen(prog);
