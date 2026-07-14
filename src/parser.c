@@ -307,15 +307,20 @@ static Node *postfix(Token **rest, Token *tok) {
                 node = new_unary(ND_DEREF, new_add(node, idx, start), start);
                 continue;
             }
+            case TK_ARROW:
+                // x->y is short for (*x).y
+                node = new_unary(ND_DEREF, node, tok);
+                add_type(node);
+                // fall through
             case TK_DOT: {
                 Member dummy, *mem = &dummy;
                 Type *ty = node->ty;
-                while (tok->kind == TK_DOT) {
+                do {
                     tok = tok->next;
                     mem = mem->next = copy_mem(get_struct_member(ty, tok));
                     ty = mem->ty;
                     tok = tok->next;
-                }
+                } while (tok->kind == TK_DOT);
                 mem->next = NULL;
                 node = new_unary(ND_MEMBER, node, tok->next);
                 node->member = dummy.next;

@@ -398,6 +398,7 @@ typedef enum {
     // Conversion
     IR_ZEXT,
     IR_SEXT,
+    IR_TRUNC,
     IR_PTRTOINT,
     IR_INTTOPTR,
 

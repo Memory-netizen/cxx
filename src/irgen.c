@@ -597,7 +597,7 @@ void dump_blk(Blk *b) {
                 print_type(ir->args[0].ty);
                 fprintf(out_file, " ");
                 print_operand(ir->args[0]);
-                fprintf(out_file, " to \n");
+                fprintf(out_file, " to ");
                 print_type(ir->dst.ty);
                 fprintf(out_file, "\n");
                 break;
