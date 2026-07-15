@@ -115,6 +115,12 @@ static Ref gen_expr(Node *node) {
             return convert(node);
         case ND_AS: {
             Ref addr = gen_addr(node->lhs);
+            if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) {
+                Ref src = gen_addr(node->rhs);
+                Ref ops[] = {addr, src, INT(node->ty->size)};
+                new_ins(IR_MEMCPY, R, ops, 3);
+                return R;
+            }
             dst = gen_expr(node->rhs);
             Ref ops[2] = {dst, addr};
             new_ins(IR_STR, R, ops, 2);
@@ -499,7 +505,7 @@ void dump_blk(Blk *b) {
     Ir *ir = b->head;
     while (ir) {
         fprintf(out_file, "  ");
-        if (ir->op != IR_STR) fprintf(out_file, "%%%d = ", ir->dst.val);
+        if (ir->op != IR_STR && ir->op != IR_MEMCPY) fprintf(out_file, "%%%d = ", ir->dst.val);
 
         switch (ir->op) {
             case IR_ALLOCA:
@@ -535,6 +541,13 @@ void dump_blk(Blk *b) {
                     print_operand(ir->args[i]);
                 }
                 fprintf(out_file, "\n");
+                break;
+            case IR_MEMCPY:
+                fprintf(out_file, "call void @llvm.memcpy.p0.p0.i64(ptr ");
+                print_operand(ir->args[0]);
+                fprintf(out_file, ", ptr ");
+                print_operand(ir->args[1]);
+                fprintf(out_file, ", i64 %d, i1 false)\n", ir->args[2].val);
                 break;
             case IR_CALL:
                 fprintf(out_file, "call i32 @%s(", str(ir->args[0].val));
@@ -706,6 +719,7 @@ void dump_module(Module *md, FILE *out) {
     out_file = out;
     fprintf(out_file, "declare void @assert(i32, i32, ptr)\n");
     fprintf(out_file, "declare i32 @printf(ptr, ...)\n");
+    fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
 
     for (Type *ty = md->tys; ty; ty = ty->next) dump_type(ty);
     for (Obj *var = md->data; var; var = var->next) dump_data(var);

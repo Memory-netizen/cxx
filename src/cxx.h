@@ -399,6 +399,7 @@ typedef enum {
     IR_LORD,
     IR_STR,
     IR_GEP,
+    IR_MEMCPY,
 
     // Conversion
     IR_ZEXT,
