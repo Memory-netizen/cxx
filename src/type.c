@@ -1,14 +1,22 @@
 #include "cxx.h"
 
-Type *ty_char = &(Type){TY_CHAR, 1, 1, 0, 0, NULL, NULL, NULL, {0}};
-Type *ty_int = &(Type){TY_INT, 4, 4, 0, 0, NULL, NULL, NULL, {0}};
-Type *ty_i1 = &(Type){TY_I1, 1, 1, 0, 0, NULL, NULL, NULL, {0}};
-Type *ty_i64 = &(Type){TY_I64, 8, 8, 0, 0, NULL, NULL, NULL, {0}};
-Type *ty_void = &(Type){TY_VOID, 0, 0, 0, 0, NULL, NULL, NULL, {0}};
+#define TYPE(kind, size, align) &(Type){kind, size, align, 0, 0, NULL, NULL, NULL, {0}};
+
+Type *ty_void = TYPE(TY_VOID, 0, 0);
+Type *ty_char = TYPE(TY_CHAR, 1, 1);
+Type *ty_short = TYPE(TY_SHORT, 2, 2);
+Type *ty_int = TYPE(TY_INT, 4, 4);
+Type *ty_long = TYPE(TY_LONG, 8, 8);
+Type *ty_i1 = TYPE(TY_I1, 1, 1);
+Type *ty_i64 = TYPE(TY_I64, 8, 8);
+
+#undef TYPE
 
 bool is_integer(Type *ty) {
-    return ty->kind == TY_INT || ty->kind == TY_CHAR || ty->kind == TY_I64 || ty->kind == TY_I1;
+    return ty->kind == TY_INT || ty->kind == TY_SHORT || ty->kind == TY_LONG || ty->kind == TY_CHAR ||
+           ty->kind == TY_I64 || ty->kind == TY_I1;
 }
+
 bool is_pointer(Type *ty) { return ty->base != NULL; }
 
 Type *copy_type(Type *ty) {

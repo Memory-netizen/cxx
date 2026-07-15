@@ -463,7 +463,8 @@ Module *irgen(Module *md) {
 }
 
 static const char *ty_str[] = {
-    [TY_I1] = "i1", [TY_I64] = "i64", [TY_CHAR] = "i8", [TY_INT] = "i32", [TY_PTR] = "ptr",
+    [TY_I1] = "i1",   [TY_I64] = "i64",  [TY_CHAR] = "i8", [TY_SHORT] = "i16",
+    [TY_INT] = "i32", [TY_LONG] = "i64", [TY_PTR] = "ptr",
 };
 
 static void print_type(Type *ty) {

@@ -30,7 +30,9 @@ typedef struct Member Member;
 
 extern Type *ty_void;
 extern Type *ty_char;
+extern Type *ty_short;
 extern Type *ty_int;
+extern Type *ty_long;
 extern Type *ty_i1;
 extern Type *ty_i64;
 
@@ -181,7 +183,7 @@ struct Token {
     size_t len;
     union {
         uint32_t id;  // Uesd if kind == TK_IDENT;
-        int val;      // Uesd if kind == TK_NUM;
+        int64_t val;  // Uesd if kind == TK_NUM;
     };
 };
 
@@ -298,8 +300,8 @@ struct Node {
             Node *args;
             uint32_t narg;
         };
-        Obj *var;  // Used if kind == ND_VAR
-        int val;   // Used if kind == ND_NUM
+        Obj *var;     // Used if kind == ND_VAR
+        int64_t val;  // Used if kind == ND_NUM
     };
 };
 
@@ -314,7 +316,9 @@ typedef enum {
     TY_I1,
     TY_I64,
     TY_CHAR,
+    TY_SHORT,
     TY_INT,
+    TY_LONG,
     TY_PTR,
     TY_FUNC,
     TY_ARRAY,

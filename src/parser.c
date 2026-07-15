@@ -18,7 +18,7 @@ static Node *new_node(NodeKind kind, Token *tok) {
     return node;
 }
 
-static Node *new_num(int val, Token *tok) {
+static Node *new_num(int64_t val, Token *tok) {
     Node *node = new_node(ND_NUM, tok);
     node->val = val;
     return node;
@@ -678,9 +678,17 @@ static Type *declspec(Token **rest, Token *tok) {
         *rest = tok->next;
         return ty_char;
     }
+    if (tok->kind == TK_SHORT) {
+        *rest = tok->next;
+        return ty_short;
+    }
     if (tok->kind == TK_INT) {
         *rest = tok->next;
         return ty_int;
+    }
+    if (tok->kind == TK_LONG) {
+        *rest = tok->next;
+        return ty_long;
     }
     if (tok->kind == TK_STRUCT || tok->kind == TK_UNION) return record_decl(rest, tok);
 

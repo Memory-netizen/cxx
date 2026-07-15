@@ -192,6 +192,16 @@ int main() {
                char *b = &z;
                b - a;
            }));
+
+    ASSERT(8, ({
+               long x;
+               sizeof(x);
+           }));
+    ASSERT(2, ({
+               short x;
+               sizeof(x);
+           }));
+
     printf("OK\n");
     return 0;
 }
