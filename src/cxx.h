@@ -3,6 +3,8 @@
 
 #define _POSIX_C_SOURCE 200809L
 #define ALIGN_UP(value, align) (((value) + (align) - 1) & ~((align) - 1))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 #include <assert.h>
 #include <ctype.h>
@@ -108,6 +110,10 @@ typedef enum {
     TK_FALSE,
     TK_NULLPTR,
 
+    // Function specifiers
+    TK_INLINE,
+    TK_NORETURN,
+
     // Storage-class specifiers
     TK_CONSTEXPR,
     TK_EXTERN,
@@ -141,11 +147,9 @@ typedef enum {
     TK_VOLATILE,
     TK_ATOMIC,
 
-    // specifiers
-    TK_INLINE,
-    TK_NORETURN,
-
+    // Align specifier
     TK_ALIGNAS,
+
     TK_ALIGNOF,
     TK_COUNTOF,
     TK_SIZEOF,
@@ -315,6 +319,7 @@ typedef enum {
     TY_FUNC,
     TY_ARRAY,
     TY_STRUCT,
+    TY_UNION,
 } TypeKind;
 
 struct Type {

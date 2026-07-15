@@ -58,7 +58,7 @@ struct VarScope {
     Obj *var;
 };
 
-// Scope for struct tags
+// Scope for struct or union tags
 typedef struct TagScope TagScope;
 struct TagScope {
     TagScope *next;
@@ -313,17 +313,14 @@ static Node *postfix(Token **rest, Token *tok) {
                 add_type(node);
                 // fall through
             case TK_DOT: {
-                Member dummy, *mem = &dummy;
                 Type *ty = node->ty;
-                do {
-                    tok = tok->next;
-                    mem = mem->next = copy_mem(get_struct_member(ty, tok));
-                    ty = mem->ty;
-                    tok = tok->next;
-                } while (tok->kind == TK_DOT);
+                tok = tok->next;
+                Member *mem = copy_mem(get_struct_member(ty, tok));
+                tok = tok->next;
                 mem->next = NULL;
                 node = new_unary(ND_MEMBER, node, tok->next);
-                node->member = dummy.next;
+                node->member = mem;
+                node->ty = mem->ty;
                 continue;
             }
             default:
@@ -559,7 +556,7 @@ static Node *stmt(Token **rest, Token *tok) {
 }
 
 // Returns true if a given token represents a type.
-static bool is_typename(Token *tok) { return tok->kind == TK_INT || tok->kind == TK_CHAR || tok->kind == TK_STRUCT; }
+static bool is_typename(Token *tok) { return TK_AUTO <= tok->kind && tok->kind <= TK_ALIGNAS; }
 
 // CompStmt ::= "{" BlockItem* "}"
 // BlockItem ::= Stmt | Decl
@@ -616,7 +613,9 @@ static uint32_t new_unique_typename(void) {
 
 // RecordSpec = Ident? "{" struct-members
 static Type *record_decl(Token **rest, Token *tok) {
-    // Read a struct tag.
+    bool is_union = tok->kind == TK_UNION;
+    tok = tok->next;
+    // Read a tag.
     Token *tag = NULL;
     if (tok->kind == TK_IDENT) {
         tag = tok;
@@ -632,7 +631,7 @@ static Type *record_decl(Token **rest, Token *tok) {
 
     // Construct a struct object.
     Type *ty = emalloc(sizeof(Type));
-    ty->kind = TY_STRUCT;
+    ty->kind = is_union ? TY_UNION : TY_STRUCT;
     struct_members(rest, tok->next, ty);
     ty->align = 1;
 
@@ -640,12 +639,15 @@ static Type *record_decl(Token **rest, Token *tok) {
     int offset = 0;
     uint32_t idx = 0;
     for (Member *mem = ty->members; mem; mem = mem->next) {
+        ty->align = MAX(ty->align, mem->ty->align);
+        mem->idx = idx++;
+        if (is_union) {
+            offset = MAX(offset, mem->ty->size);
+            continue;
+        }
         offset = ALIGN_UP(offset, mem->ty->align);
         mem->offset = offset;
-        mem->idx = idx++;
         offset += mem->ty->size;
-
-        if (ty->align < mem->ty->align) ty->align = mem->ty->align;
     }
     ty->size = ALIGN_UP(offset, ty->align);
     // Register the struct type if a name was given.
@@ -680,7 +682,7 @@ static Type *declspec(Token **rest, Token *tok) {
         *rest = tok->next;
         return ty_int;
     }
-    if (tok->kind == TK_STRUCT) return record_decl(rest, tok->next);
+    if (tok->kind == TK_STRUCT || tok->kind == TK_UNION) return record_decl(rest, tok);
 
     return NULL;
 }

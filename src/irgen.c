@@ -49,6 +49,10 @@ static Ref gen_addr(Node *node) {
             return gen_expr(node->lhs);
         case ND_MEMBER: {
             Ref addr = gen_addr(node->lhs);
+            if (node->lhs->ty->kind == TY_UNION) {
+                addr.ty = pointer_to(node->member->ty);
+                return addr;
+            }
             int nmem = 0;
             for (Member *mem = node->member; mem; mem = mem->next) nmem++;
             Ref gep_ops[nmem + 2];
@@ -58,11 +62,10 @@ static Ref gen_addr(Node *node) {
             int idx = 2;
             for (Member *mem = node->member; mem; mem = mem->next) gep_ops[idx++] = INT(mem->idx);
 
-            Ref dst = TMP(tmp_id++, node->ty);
+            Ref dst = TMP(tmp_id++, pointer_to(node->ty));
             new_ins(IR_GEP, dst, gep_ops, nmem + 2);
             return dst;
         }
-
         default:
     }
     exit(1);
@@ -464,7 +467,7 @@ static void print_type(Type *ty) {
         fprintf(out_file, "]");
         return;
     }
-    if (ty->kind == TY_STRUCT) {
+    if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
         fprintf(out_file, "%%%s", str(ty->uid));
         return;
     }
@@ -643,11 +646,17 @@ void dump_blk(Blk *b) {
 void dump_type(Type *ty) {
     fprintf(out_file, "%%%s = type { ", str(ty->uid));
     Member *mem = ty->members;
-    while (mem) {
+    if (ty->kind == TY_STRUCT) {
+        while (mem) {
+            print_type(mem->ty);
+            mem = mem->next;
+            if (!mem) break;
+            fprintf(out_file, ", ");
+        }
+    } else if (ty->kind == TY_UNION) {
+        while (mem && mem->ty->align != ty->align) mem = mem->next;
         print_type(mem->ty);
-        mem = mem->next;
-        if (!mem) break;
-        fprintf(out_file, ", ");
+        if (mem->ty->size < ty->size) printf(", [ %d x i8]", ty->size - mem->ty->size);
     }
     fprintf(out_file, " }\n");
 }
