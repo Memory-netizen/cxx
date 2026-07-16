@@ -713,7 +713,7 @@ void dump_fn(Obj *fn) {
         dump_blk(curb);
         curb = curb->next;
     }
-    fprintf(out_file, "}\n");
+    fprintf(out_file, "}\n\n");
 }
 
 void dump_module(Module *md, FILE *out) {
@@ -723,6 +723,10 @@ void dump_module(Module *md, FILE *out) {
     fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
 
     for (Type *ty = md->tys; ty; ty = ty->next) dump_type(ty);
+    fprintf(out_file, "\n");
+
     for (Obj *var = md->data; var; var = var->next) dump_data(var);
+    fprintf(out_file, "\n");
+
     for (Obj *fn = md->fns; fn; fn = fn->next) dump_fn(fn);
 }

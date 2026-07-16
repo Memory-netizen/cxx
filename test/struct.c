@@ -184,41 +184,41 @@ int main() {
            }));
 
     ASSERT(8, ({
-               struct t1 {
+               struct t {
                    int a;
                    int b;
                } x;
-               struct t1 y;
+               struct t y;
                sizeof(y);
            }));
     ASSERT(8, ({
-               struct t2 {
+               struct t {
                    int a;
                    int b;
                };
-               struct t2 y;
+               struct t y;
                sizeof(y);
            }));
     ASSERT(2, ({
-               struct t3 {
+               struct t {
                    char a[2];
                };
                {
-                   struct t3 {
+                   struct t {
                        char a[4];
                    };
                }
-               struct t3 y;
+               struct t y;
                sizeof(y);
            }));
     ASSERT(3, ({
-               struct t4 {
+               struct t {
                    int x;
                };
-               int t4 = 1;
-               struct t4 y;
+               int t = 1;
+               struct t y;
                y.x = 2;
-               t4 + y.x;
+               t + y.x;
            }));
 
     ASSERT(3, ({

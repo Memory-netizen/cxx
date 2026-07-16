@@ -148,14 +148,15 @@ static Obj *new_gvar(uint32_t id, Type *ty) {
     return var;
 }
 
-static uint32_t new_unique_name(void) {
+static uint32_t new_unique_strname(void) {
     static uint32_t id = 0;
     char buf[64];
     snprintf(buf, sizeof(buf), ".str.%u", id++);
     return intern(buf, strlen(buf));
 }
 
-static Obj *new_anon_gvar(Type *ty) { return new_gvar(new_unique_name(), ty); }
+static Obj *new_anon_gvar(Type *ty) { return new_gvar(new_unique_strname(), ty); }
+
 static Obj *new_string_literal(uint32_t id) {
     Type *ty = array_of(ty_char, str_len(id) + 1);
     Obj *var = new_anon_gvar(ty);
@@ -604,13 +605,6 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
     ty->members = head.next;
 }
 
-static uint32_t new_unique_typename(void) {
-    static uint32_t id = 0;
-    char buf[64];
-    snprintf(buf, sizeof(buf), "struct.anon.%u", id++);
-    return intern(buf, strlen(buf));
-}
-
 // RecordSpec = Ident? "{" struct-members
 static Type *record_decl(Token **rest, Token *tok) {
     bool is_union = tok->kind == TK_UNION;
@@ -654,19 +648,22 @@ static Type *record_decl(Token **rest, Token *tok) {
     if (tag)
         push_tag_scope(tag->id, ty);
     else
-        ty->id = new_unique_typename();
+        ty->id = intern("anon", 4);
+
     int i = -1;
     Type *t = types;
     while (t) {
         if (t->id == ty->id) i++;
         t = t->next;
     }
+    char *name;
+    char *kind = is_union ? "union" : "struct";
     if (i >= 0) {
-        char *name = format("%s.%d", str(ty->id), i);
-        ty->uid = intern(name, strlen(name));
+        name = format("%s.%s.%d", kind, str(ty->id), i);
     } else {
-        ty->uid = ty->id;
+        name = format("%s.%s", kind, str(ty->id));
     }
+    ty->uid = intern(name, strlen(name));
     ty->next = types;
     types = ty;
     return ty;

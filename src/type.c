@@ -45,7 +45,7 @@ Type *func_type(Type *return_ty) {
 }
 
 Type *array_of(Type *base, int len) {
-    Type *ty = calloc(1, sizeof(Type));
+    Type *ty = emalloc(sizeof(Type));
     ty->kind = TY_ARRAY;
     ty->size = base->size * len;
     ty->align = base->align;

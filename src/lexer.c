@@ -207,7 +207,7 @@ static char *string_literal_end(char *p) {
 
 static Token *read_string_literal(char *start) {
     char *end = string_literal_end(start + 1);
-    char *buf = calloc(1, end - start);
+    char *buf = emalloc(end - start);
     int len = 0;
 
     for (char *p = start + 1; p < end;) {
