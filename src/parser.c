@@ -730,6 +730,15 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
 static Type *declarator(Token **rest, Token *tok, Type *ty) {
     while (match(&tok, tok, TK_STAR)) ty = pointer_to(ty);
 
+    if (tok->kind == TK_LPAREN) {
+        Token *start = tok;
+        Type dummy = {};
+        declarator(&tok, start->next, &dummy);
+        tok = tok->next;
+        ty = decl_suffix(rest, tok, ty);
+        return declarator(&tok, start->next, ty);
+    }
+
     assert(tok->kind == TK_IDENT);
     ty = decl_suffix(rest, tok->next, ty);
     ty->name = tok;

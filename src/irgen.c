@@ -122,6 +122,7 @@ static Ref gen_expr(Node *node) {
                 return R;
             }
             dst = gen_expr(node->rhs);
+            dst.ty = addr.ty->base;
             Ref ops[2] = {dst, addr};
             new_ins(IR_STR, R, ops, 2);
             return dst;
