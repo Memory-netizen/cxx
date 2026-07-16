@@ -699,6 +699,7 @@ void dump_data(Obj *data) {
 }
 
 void dump_fn(Obj *fn) {
+    if (!fn->is_definition) return;
     fprintf(out_file, "define i32 @%s(", str(fn->id));
     Obj *var = fn->locals;
     for (uint32_t i = 0; i < fn->nparam; i++) {
