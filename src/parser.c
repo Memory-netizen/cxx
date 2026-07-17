@@ -669,32 +669,68 @@ static Type *record_decl(Token **rest, Token *tok) {
     return ty;
 }
 
-// DeclSpec ::= "int" | "char" | RecordSpec
+// DeclSpec ::= "void" | "char" | "short" | "int" | "long" | RecordSpec
 static Type *declspec(Token **rest, Token *tok) {
-    if (tok->kind == TK_VOID) {
-        *rest = tok->next;
-        return ty_void;
-    }
-    if (tok->kind == TK_CHAR) {
-        *rest = tok->next;
-        return ty_char;
-    }
-    if (tok->kind == TK_SHORT) {
-        *rest = tok->next;
-        return ty_short;
-    }
-    if (tok->kind == TK_INT) {
-        *rest = tok->next;
-        return ty_int;
-    }
-    if (tok->kind == TK_LONG) {
-        *rest = tok->next;
-        return ty_long;
-    }
+    Type *ty = ty_int;
+    int typespec_cnt = 0;
+    enum {
+        VOID = 1 << 0,
+        CHAR = 1 << 2,
+        SHORT = 1 << 4,
+        INT = 1 << 6,
+        LONG = 1 << 8,
+        OTHER = 1 << 10,
+    };
 
-    if (tok->kind == TK_STRUCT || tok->kind == TK_UNION) return record_decl(rest, tok);
-
-    return NULL;
+    while (is_typename(tok)) {
+        switch (tok->kind) {
+            case TK_VOID:
+                typespec_cnt += VOID;
+                break;
+            case TK_CHAR:
+                typespec_cnt += CHAR;
+                break;
+            case TK_SHORT:
+                typespec_cnt += SHORT;
+                break;
+            case TK_INT:
+                typespec_cnt += INT;
+                break;
+            case TK_LONG:
+                typespec_cnt += LONG;
+                break;
+            case TK_STRUCT:
+            case TK_UNION:
+                ty = record_decl(&tok, tok);
+                continue;
+            default:
+                break;
+        }
+        switch (typespec_cnt) {
+            case VOID:
+                ty = ty_void;
+                break;
+            case CHAR:
+                ty = ty_char;
+                break;
+            case SHORT:
+            case SHORT + INT:
+                ty = ty_short;
+                break;
+            case INT:
+                ty = ty_int;
+                break;
+            case LONG:
+            case LONG + INT:
+                ty = ty_long;
+                break;
+            default:
+                break;
+        }
+        tok = tok->next;
+    }
+    *rest = tok;
+    return ty;
 }
 
 // DeclrSuf  ::= "(" ParamList? ")" | "[" Num "]"
