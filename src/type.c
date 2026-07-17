@@ -2,7 +2,7 @@
 
 #define TYPE(kind, size, align) &(Type){kind, size, align, 0, 0, NULL, NULL, NULL, {0}};
 
-Type *ty_void = TYPE(TY_VOID, 0, 0);
+Type *ty_void = TYPE(TY_VOID, 1, 1);
 Type *ty_char = TYPE(TY_CHAR, 1, 1);
 Type *ty_short = TYPE(TY_SHORT, 2, 2);
 Type *ty_int = TYPE(TY_INT, 4, 4);

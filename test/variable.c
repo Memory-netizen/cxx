@@ -239,7 +239,9 @@ int main() {
                y[0][0] = 4;
                y[0][0];
            }));
-
+    {
+        void *x;
+    }
     printf("OK\n");
     return 0;
 }

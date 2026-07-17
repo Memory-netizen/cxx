@@ -671,6 +671,10 @@ static Type *record_decl(Token **rest, Token *tok) {
 
 // DeclSpec ::= "int" | "char" | RecordSpec
 static Type *declspec(Token **rest, Token *tok) {
+    if (tok->kind == TK_VOID) {
+        *rest = tok->next;
+        return ty_void;
+    }
     if (tok->kind == TK_CHAR) {
         *rest = tok->next;
         return ty_char;
@@ -687,6 +691,7 @@ static Type *declspec(Token **rest, Token *tok) {
         *rest = tok->next;
         return ty_long;
     }
+
     if (tok->kind == TK_STRUCT || tok->kind == TK_UNION) return record_decl(rest, tok);
 
     return NULL;
