@@ -722,9 +722,11 @@ static Type *declspec(Token **rest, Token *tok) {
                 break;
             case LONG:
             case LONG + INT:
+                ty = ty_long;
+                break;
             case LONG + LONG:
             case LONG + LONG + INT:
-                ty = ty_long;
+                ty = ty_llong;
                 break;
             default:
                 break;

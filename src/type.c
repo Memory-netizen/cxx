@@ -7,14 +7,15 @@ Type *ty_char = TYPE(TY_CHAR, 1, 1);
 Type *ty_short = TYPE(TY_SHORT, 2, 2);
 Type *ty_int = TYPE(TY_INT, 4, 4);
 Type *ty_long = TYPE(TY_LONG, 8, 8);
+Type *ty_llong = TYPE(TY_LLONG, 8, 8);
 Type *ty_i1 = TYPE(TY_I1, 1, 1);
 Type *ty_i64 = TYPE(TY_I64, 8, 8);
 
 #undef TYPE
 
 bool is_integer(Type *ty) {
-    return ty->kind == TY_INT || ty->kind == TY_SHORT || ty->kind == TY_LONG || ty->kind == TY_CHAR ||
-           ty->kind == TY_I64 || ty->kind == TY_I1;
+    return ty->kind == TY_INT || ty->kind == TY_SHORT || ty->kind == TY_LLONG || ty->kind == TY_LONG ||
+           ty->kind == TY_CHAR || ty->kind == TY_I64 || ty->kind == TY_I1;
 }
 
 bool is_pointer(Type *ty) { return ty->base != NULL; }

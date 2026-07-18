@@ -33,6 +33,7 @@ extern Type *ty_char;
 extern Type *ty_short;
 extern Type *ty_int;
 extern Type *ty_long;
+extern Type *ty_llong;
 extern Type *ty_i1;
 extern Type *ty_i64;
 
@@ -320,6 +321,7 @@ typedef enum {
     TY_SHORT,
     TY_INT,
     TY_LONG,
+    TY_LLONG,
     TY_PTR,
     TY_FUNC,
     TY_ARRAY,
