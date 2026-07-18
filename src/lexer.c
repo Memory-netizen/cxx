@@ -1,5 +1,7 @@
 #include "cxx.h"
 
+SrcFile *cur_file = NULL;
+
 // Attempt to match the given token type
 // If matched, consume the token and return true;
 // otherwise, leave the token unconsumed and return false.
@@ -10,6 +12,25 @@ bool match(Token **rest, Token *tok, TokenKind kind) {
     }
     *rest = tok;
     return false;
+}
+
+static char *expect[] = {
+    [TK_LEFTAS] = "<<=", [TK_RIGHTAS] = ">>=",   [TK_ELLIPSIS] = "...", [TK_MODAS] = "%=",    [TK_ADDAS] = "+=",
+    [TK_SUBAS] = "-=",   [TK_MULAS] = "*=",      [TK_DIVAS] = "/=",     [TK_ANDAS] = "&=",    [TK_XORAS] = "^=",
+    [TK_ORAS] = "|=",    [TK_COLONCOLON] = "::", [TK_LEFT] = "<<",      [TK_RIGHT] = ">>",    [TK_EQ] = "==",
+    [TK_NE] = "!=",      [TK_LE] = "<=",         [TK_GE] = ">=",        [TK_AND] = "&&",      [TK_OR] = "||",
+    [TK_ARROW] = "->",   [TK_INC] = "++",        [TK_DEC] = "--",       [TK_HASHHASH] = "##", [TK_MOD] = "%",
+    [TK_LBRACKET] = "[", [TK_RBRACKET] = "]",    [TK_LPAREN] = "(",     [TK_RPAREN] = ")",    [TK_LBRACE] = "{",
+    [TK_RBRACE] = "}",   [TK_BAND] = "&",        [TK_STAR] = "*",       [TK_PLUS] = "+",      [TK_MINUS] = "-",
+    [TK_INVERT] = "~",   [TK_NOT] = "!",         [TK_SLASH] = "/",      [TK_LT] = "<",        [TK_GT] = ">",
+    [TK_XOR] = "^",      [TK_BOR] = "|",         [TK_QUESTION] = "?",   [TK_COLON] = ":",     [TK_SEMI] = ";",
+    [TK_DOT] = ".",      [TK_AS] = "=",          [TK_COMMA] = ",",      [TK_HASH] = "#",      [TK_WHILE] = "while",
+};
+
+// Ensure that the current token is `kind`.
+Token *skip(Token *tok, TokenKind kind) {
+    if (tok->kind != kind) error(tok->loc, "expected '%s'", expect[kind]);
+    return tok->next;
 }
 
 // Compare if the pending matching string matches the target string
@@ -160,7 +181,7 @@ static int read_escaped_char(char **new_pos, char *p) {
     if (*p == 'x') {
         // Read a hexadecimal number.
         p++;
-        if (!isxdigit(*p)) exit(1);
+        if (!isxdigit(*p)) error(p, "invalid hex escape sequence");
 
         int c = 0;
         for (; isxdigit(*p); p++) c = (c << 4) + from_hex(*p);
@@ -195,18 +216,15 @@ static int read_escaped_char(char **new_pos, char *p) {
 
 // Find a closing double-quote.
 static char *string_literal_end(char *p) {
-    for (; *p != '"'; p++) {
-        if (*p == '\n' || *p == '\0') {
-            fprintf(stderr, "unclosed string literal\n");
-            exit(1);
-        }
+    for (char *start = p++; *p != '"'; p++) {
+        if (*p == '\n' || *p == '\0') error(start, "missing terminating \" character");
         if (*p == '\\') p++;
     }
     return p;
 }
 
 static Token *read_string_literal(char *start) {
-    char *end = string_literal_end(start + 1);
+    char *end = string_literal_end(start);
     char *buf = emalloc(end - start);
     int len = 0;
 
@@ -238,10 +256,7 @@ static Token *tokenize(char *filename, char *p) {
         // Skip block comments.
         if (start_with(p, "/*")) {
             char *q = strstr(p + 2, "*/");
-            if (!q) {
-                fprintf(stderr, "unclosed block comment");
-                exit(1);
-            }
+            if (!q) error(p, "unterminated /* comment");
             p = q + 2;
             continue;
         }
@@ -281,12 +296,7 @@ static Token *tokenize(char *filename, char *p) {
         }
 
         // other char
-        if (*p == '`' || *p == '@' || *p == '$') {
-            // error
-            exit(1);
-            p++;
-            continue;
-        }
+        if (*p == '`' || *p == '@' || *p == '$') error(p, "stray ‘%c’ in program", *p);
 
         // Punctuator
         if (ispunct(*p)) {
@@ -294,6 +304,8 @@ static Token *tokenize(char *filename, char *p) {
             p += cur->len = read_punct(p, &cur->kind);
             continue;
         }
+
+        error(p, "invalid token");
     }
 
     cur->next = new_token(TK_EOF, p, p);
@@ -310,10 +322,7 @@ static char *read_file(char *path) {
         fp = stdin;
     } else {
         fp = fopen(path, "r");
-        if (!fp) {
-            fprintf(stderr, "Unable to open %s: %s\n", path, strerror(errno));
-            exit(1);
-        }
+        if (!fp) fatal("%s: %s", path, strerror(errno));
     }
 
     char *buf;
@@ -335,6 +344,11 @@ static char *read_file(char *path) {
     if (buflen == 0 || buf[buflen - 1] != '\n') fputc('\n', out);
     fputc('\0', out);
     fclose(out);
+
+    cur_file = emalloc(sizeof(SrcFile));
+    cur_file->filename = path;
+    cur_file->content = buf;
+
     return buf;
 }
 

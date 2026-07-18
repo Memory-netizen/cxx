@@ -6,6 +6,69 @@
 #define HEAD_SIZE ALIGN_UP(sizeof(void *), ALIGNMENT)
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
+// Reports an error and exit.
+void fatal(char *fmt, ...) {
+    fprintf(stderr, "cxx: fatal error: ");
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    exit(1);
+}
+
+static void emit_diag(char *loc, const char *level, const char *msg, va_list ap) {
+    // Find a line containing `loc`.
+    char *line = loc;
+    char *p = cur_file->content;
+    while (p < line && line[-1] != '\n') line--;
+
+    int line_no = 1;
+    while (p < line)
+        if (*p++ == '\n') line_no++;
+
+    char *end = loc;
+    while (*end != '\n') end++;
+
+    fprintf(stderr, "%s:%d:%ld: %s: ", cur_file->filename, line_no, loc - line + 1, level);
+    vfprintf(stderr, msg, ap);
+    fputc('\n', stderr);
+
+    int indent = fprintf(stderr, " %4d | ", line_no);
+    fprintf(stderr, "%.*s\n", (int)(end - line), line);
+
+    fprintf(stderr, "%*s", indent, "| ");  // print pos spaces.
+
+    while (line < loc) {
+        if (*line++ == '\t')
+            fprintf(stderr, "\t");
+        else
+            fprintf(stderr, " ");
+    }
+    fprintf(stderr, "^\n");
+}
+
+void error(char *loc, const char *msg, ...) {
+    va_list ap;
+    va_start(ap, msg);
+    emit_diag(loc, "error", msg, ap);
+    va_end(ap);
+    exit(1);
+}
+
+void warning(char *loc, const char *msg, ...) {
+    va_list ap;
+    va_start(ap, msg);
+    emit_diag(loc, "warning", msg, ap);
+    va_end(ap);
+}
+
+void note(char *loc, const char *msg, ...) {
+    va_list ap;
+    va_start(ap, msg);
+    emit_diag(loc, "note", msg, ap);
+    va_end(ap);
+}
+
 static void **pool = NULL;
 static size_t free_len = 0;
 
@@ -21,10 +84,7 @@ void *emalloc(size_t n) {
     n = ALIGN_UP(n, ALIGNMENT);
     if (n >= BIG_THRESHOLD) {
         void *p = malloc(n);
-        if (!p) {
-            fprintf(stderr, "emalloc: out of memory\n");
-            exit(1);
-        }
+        if (!p) fatal("emalloc: out of memory");
         Block_Mem *b = emalloc(sizeof(Block_Mem));
         b->ptr = p;
         b->next = mem_blocks;
@@ -34,10 +94,7 @@ void *emalloc(size_t n) {
 
     if (free_len < n) {
         void **new_pool = malloc(POOL_SIZE);
-        if (!new_pool) {
-            fprintf(stderr, "emalloc: out of memory\n");
-            exit(1);
-        }
+        if (!new_pool) fatal("emalloc: out of memory");
         new_pool[0] = pool;
         pool = new_pool;
         free_len = POOL_SIZE - HEAD_SIZE;
@@ -126,10 +183,7 @@ uint32_t intern(char *s, int len) {
     for (i = 0; i < n; i++)
         if (memcmp(s, b->str[i], len) == 0) return h | (i << IBits);
 
-    if (n == 1 << (32 - IBits)) {
-        fprintf(stderr, "interning table overflow\n");
-        exit(1);
-    }
+    if (n == 1 << (32 - IBits)) fatal("interning table overflow");
     if (n == 0) {
         b->str = vnew(1, sizeof b->str[0]);
         b->len = vnew(1, sizeof b->len[0]);

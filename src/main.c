@@ -24,28 +24,18 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
-        if (argv[i][0] == '-' && argv[i][1] != '\0') {
-            fprintf(stderr, "unknown argument: %s", argv[i]);
-            exit(1);
-        }
-
+        if (argv[i][0] == '-' && argv[i][1] != '\0') fatal("unknown argument: %s", argv[i]);
         input_path = argv[i];
     }
 
-    if (!input_path) {
-        fprintf(stderr, "no input files");
-        exit(1);
-    }
+    if (!input_path) fatal("no input files");
 }
 
 static FILE *open_file(char *path) {
     if (!path || strcmp(path, "-") == 0) return stdout;
 
     FILE *out = fopen(path, "w");
-    if (!out) {
-        fprintf(stderr, "cannot open output file: %s: %s", path, strerror(errno));
-        exit(1);
-    }
+    if (!out) fatal("cannot create file: %s: %s", path, strerror(errno));
     return out;
 }
 

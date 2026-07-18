@@ -166,12 +166,12 @@ static Obj *new_string_literal(uint32_t id) {
 }
 
 static int get_number(Token *tok) {
-    assert(tok->kind == TK_NUM);
+    if (tok->kind != TK_NUM) error(tok->loc, "expected a number");
     return tok->val;
 }
 
 static uint32_t get_ident(Token *tok) {
-    assert(tok->kind == TK_IDENT);
+    if (tok->kind != TK_IDENT) error(tok->loc, "expected an identifier");
     return tok->id;
 }
 
@@ -238,8 +238,7 @@ static Node *fncall(Token **rest, Token *tok) {
     uint32_t i = 1;
     for (; tok->kind == TK_COMMA; ++i) cur = cur->next = assign(&tok, tok->next);
 
-    assert(tok->kind == TK_RPAREN);
-    *rest = tok->next;
+    *rest = skip(tok, TK_RPAREN);
 
     node->args = dummy.next;
     node->narg = i;
@@ -251,15 +250,16 @@ static Node *primary(Token **rest, Token *tok) {
     Node *node;
     if (tok->kind == TK_LPAREN && tok->next->kind == TK_LBRACE) {
         // This is a GNU statement expresssion.
-        Node *node = new_node(ND_STMT_EXPR, tok);
+        node = new_node(ND_STMT_EXPR, tok);
         node->body = compound_stmt(&tok, tok->next)->body;
-        *rest = tok->next;
+        *rest = skip(tok, TK_RPAREN);
         return node;
     }
 
     if (tok->kind == TK_LPAREN) {
         node = expr(&tok, tok->next);
-        assert(tok->kind == TK_RPAREN);
+        *rest = skip(tok, TK_RPAREN);
+        return node;
     } else if (tok->kind == TK_NUM) {
         node = new_num(tok->val, tok);
     } else if (tok->kind == TK_STRLIT) {
@@ -269,10 +269,11 @@ static Node *primary(Token **rest, Token *tok) {
     } else if (tok->kind == TK_IDENT) {
         if (tok->next->kind == TK_LPAREN) return fncall(rest, tok);
         Obj *var = find_var(tok);
-        if (!var) exit(1);
+        if (!var) error(tok->loc, "use of undeclared identifier '%.*s'", tok->len, tok->loc);
         node = new_var_node(var, tok);
     } else {
-        exit(1);
+        error(tok->loc, "expected expression");
+        node = NULL;
     }
     *rest = tok->next;
     return node;
@@ -303,8 +304,7 @@ static Node *postfix(Token **rest, Token *tok) {
             case TK_LBRACKET: {
                 Token *start = tok;
                 Node *idx = expr(&tok, tok->next);
-                assert(tok->kind == TK_RBRACKET);
-                tok = tok->next;
+                tok = skip(tok, TK_RBRACKET);
                 node = new_unary(ND_DEREF, new_add(node, idx, start), start);
                 continue;
             }
@@ -440,8 +440,7 @@ static Node *expr_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_EXPR_STMT, tok);
     node->lhs = expr(&tok, tok);
 
-    assert(tok->kind == TK_SEMI);
-    *rest = tok->next;
+    *rest = skip(tok, TK_SEMI);
     return node;
 }
 
@@ -454,8 +453,7 @@ static Node *return_stmt(Token **rest, Token *tok) {
     }
 
     node->lhs = expr(&tok, tok->next);
-    assert(tok->kind == TK_SEMI);
-    *rest = tok->next;
+    *rest = skip(tok, TK_SEMI);
 
     return node;
 }
@@ -465,12 +463,12 @@ static Node *return_stmt(Token **rest, Token *tok) {
 static Node *if_stmt(Token **rest, Token *tok) {
     enter_scope();
     Node *node = new_node(ND_IF, tok);
-    assert(tok->next->kind == TK_LPAREN);
+    tok = skip(tok->next, TK_LPAREN);
     // Cond
-    node->cond = expr(&tok, tok->next->next);
-    assert(tok->kind == TK_RPAREN);
+    node->cond = expr(&tok, tok);
+    tok = skip(tok, TK_RPAREN);
     // Then
-    node->then = stmt(&tok, tok->next);
+    node->then = stmt(&tok, tok);
     // Else
     if (tok->kind == TK_ELSE) node->els = stmt(&tok, tok->next);
     *rest = tok;
@@ -482,25 +480,22 @@ static Node *if_stmt(Token **rest, Token *tok) {
 static Node *for_stmt(Token **rest, Token *tok) {
     enter_scope();
     Node *node = new_node(ND_FOR, tok);
-    assert(tok->next->kind == TK_LPAREN);
-    tok = tok->next->next;
+    tok = skip(tok->next, TK_LPAREN);
 
     // Init
     if (tok->kind != TK_SEMI) node->init = expr(&tok, tok);
-    assert(tok->kind == TK_SEMI);
-    tok = tok->next;
+    tok = skip(tok, TK_SEMI);
 
     // Cond
     if (tok->kind != TK_SEMI) node->cond = expr(&tok, tok);
-    assert(tok->kind == TK_SEMI);
-    tok = tok->next;
+    tok = skip(tok, TK_SEMI);
 
     // Inc
     if (tok->kind != TK_RPAREN) node->inc = expr(&tok, tok);
-    assert(tok->kind == TK_RPAREN);
+    tok = skip(tok, TK_RPAREN);
 
     // Body
-    node->body = stmt(rest, tok->next);
+    node->body = stmt(rest, tok);
     leave_scope();
     return node;
 }
@@ -509,12 +504,12 @@ static Node *for_stmt(Token **rest, Token *tok) {
 static Node *while_stmt(Token **rest, Token *tok) {
     enter_scope();
     Node *node = new_node(ND_WHILE, tok);
-    assert(tok->next->kind == TK_LPAREN);
+    tok = skip(tok->next, TK_LPAREN);
     // Cond
-    node->cond = expr(&tok, tok->next->next);
-    assert(tok->kind == TK_RPAREN);
+    node->cond = expr(&tok, tok);
+    tok = skip(tok, TK_RPAREN);
     // Body
-    node->then = stmt(rest, tok->next);
+    node->then = stmt(rest, tok);
     leave_scope();
     return node;
 }
@@ -526,12 +521,11 @@ static Node *do_stmt(Token **rest, Token *tok) {
     // Body
     node->body = stmt(&tok, tok->next);
     // Cond
-    assert(tok->kind == TK_WHILE);
-    assert(tok->next->kind == TK_LPAREN);
-    node->cond = expr(&tok, tok->next->next);
-    assert(tok->kind == TK_RPAREN);
-    assert(tok->next->kind == TK_SEMI);
-    *rest = tok->next->next;
+    tok = skip(tok, TK_WHILE);
+    tok = skip(tok, TK_LPAREN);
+    node->cond = expr(&tok, tok);
+    tok = skip(tok, TK_RPAREN);
+    *rest = skip(tok, TK_SEMI);
     leave_scope();
     return node;
 }
@@ -575,7 +569,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
         add_type(cur);
     }
     cur->next = NULL;
-    *rest = tok->next;
+    *rest = skip(tok, TK_RBRACE);
 
     node->body = dummy.next;
     leave_scope();
@@ -592,7 +586,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
         int i = 0;
 
         while (!match(&tok, tok, TK_SEMI)) {
-            if (i++ && tok->kind == TK_COMMA) tok = tok->next;
+            if (i++) tok = skip(tok, TK_COMMA);
 
             Member *mem = emalloc(sizeof(Member));
             mem->ty = declarator(&tok, tok, basety);
@@ -729,7 +723,9 @@ static Type *declspec(Token **rest, Token *tok) {
                 ty = ty_llong;
                 break;
             default:
-                break;
+                error(tok->loc,
+                      "cannot combine with previous"
+                      " declaration specifier");
         }
         tok = tok->next;
     }
@@ -748,21 +744,21 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
         Type *cur = &dummy;
 
         while (tok->kind != TK_RPAREN) {
-            if (cur != &dummy && tok->kind == TK_COMMA) tok = tok->next;
+            if (cur != &dummy) tok = skip(tok, TK_COMMA);
             Type *basety = declspec(&tok, tok);
             Type *paramty = declarator(&tok, tok, basety);
             cur = cur->next = copy_type(paramty);
         }
         *rest = tok->next;
-
         cur->next = NULL;
+
         ty = func_type(ty);
         ty->params = dummy.next;
         return ty;
     }
     if (tok->kind == TK_LBRACKET) {
         int sz = get_number(tok->next);
-        tok = tok->next->next->next;
+        tok = skip(tok->next->next, TK_RBRACKET);
         ty = decl_suffix(rest, tok, ty);
         return array_of(ty, sz);
     }
@@ -779,7 +775,7 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
         Token *start = tok;
         Type dummy = {};
         declarator(&tok, start->next, &dummy);
-        tok = tok->next;
+        tok = skip(tok, TK_RPAREN);
         ty = decl_suffix(rest, tok, ty);
         return declarator(&tok, start->next, ty);
     }
@@ -798,7 +794,7 @@ static Node *declaration(Token **rest, Token *tok) {
     int i = 0;
 
     while (tok->kind != TK_SEMI) {
-        if (i++ && tok->kind == TK_COMMA) tok = tok->next;
+        if (i++) tok = skip(tok, TK_COMMA);
         Type *ty = declarator(&tok, tok, basety);
         Obj *var = new_lvar(get_ident(ty->name), ty);
 
@@ -860,7 +856,8 @@ static Token *global_variable(Token *tok, Type *basety) {
     bool first = true;
 
     while (!match(&tok, tok, TK_SEMI)) {
-        if (!first && tok->kind == TK_COMMA) tok = tok->next;
+        if (!first) tok = skip(tok, TK_COMMA);
+        ;
         first = false;
 
         Type *ty = declarator(&tok, tok, basety);

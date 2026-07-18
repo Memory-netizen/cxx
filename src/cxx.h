@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef struct SrcFile SrcFile;
 typedef struct Token Token;
 typedef struct Node Node;
 typedef struct Type Type;
@@ -28,6 +29,7 @@ typedef struct Fn Fn;
 typedef struct Module Module;
 typedef struct Member Member;
 
+extern SrcFile *cur_file;
 extern Type *ty_void;
 extern Type *ty_char;
 extern Type *ty_short;
@@ -36,6 +38,11 @@ extern Type *ty_long;
 extern Type *ty_llong;
 extern Type *ty_i1;
 extern Type *ty_i64;
+
+struct SrcFile {
+    char *filename;
+    char *content;
+};
 
 //
 // Lexer
@@ -189,6 +196,7 @@ struct Token {
 };
 
 bool match(Token **rest, Token *tok, TokenKind kind);
+Token *skip(Token *tok, TokenKind kind);
 Token *tokenize_file(char *filename);
 
 //
@@ -486,6 +494,11 @@ void dump_module(Module *module, FILE *out);
 //
 // util.c
 //
+
+void fatal(char *fmt, ...);
+void error(char *loc, const char *msg, ...);
+void warning(char *loc, const char *msg, ...);
+void note(char *loc, const char *msg, ...);
 
 void *emalloc(size_t n);
 void freeall(void);
