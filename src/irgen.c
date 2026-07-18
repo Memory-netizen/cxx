@@ -1,7 +1,7 @@
 #include "cxx.h"
 
 static FILE *out_file;
-static Obj *curf;
+static Sym *curf;
 static Blk *curb;
 static Blk dummy;
 static Blk *tail;
@@ -421,7 +421,7 @@ static Ref gen_stmt(Node *node) {
 }
 
 Module *irgen(Module *md) {
-    for (Obj *fn = md->fns; fn; fn = fn->next) {
+    for (Sym *fn = md->fns; fn; fn = fn->next) {
         curf = fn;
         tmp_id = fn->nparam;
         tail = &dummy;
@@ -434,12 +434,12 @@ Module *irgen(Module *md) {
         // Entry
         new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(ty_int)), NULL, 0);
 
-        for (Obj *var = fn->locals; var; var = var->next)
+        for (Sym *var = fn->locals; var; var = var->next)
             new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty)), NULL, 0);
 
         new_ins(IR_STR, R, (Ref[]){INT(0), TMP(fn->nparam + 1, ty_int)}, 2);
 
-        Obj *var = fn->locals;
+        Sym *var = fn->locals;
         for (uint32_t i = 0; i < fn->nparam; ++i) {
             Ref ops[2] = {TMP(i, var->ty), TMP(var->vreg, var->ty)};
             new_ins(IR_STR, R, ops, 2);
@@ -676,7 +676,7 @@ void dump_type(Type *ty) {
     fprintf(out_file, " }\n");
 }
 
-void dump_data(Obj *data) {
+void dump_data(Sym *data) {
     fprintf(out_file, "@%s = global ", str(data->id));
     print_type(data->ty);
     if (data->is_str) {
@@ -698,10 +698,10 @@ void dump_data(Obj *data) {
     fprintf(out_file, ", align %d\n", data->ty->align);
 }
 
-void dump_fn(Obj *fn) {
+void dump_fn(Sym *fn) {
     if (!fn->is_definition) return;
     fprintf(out_file, "define i32 @%s(", str(fn->id));
-    Obj *var = fn->locals;
+    Sym *var = fn->locals;
     for (uint32_t i = 0; i < fn->nparam; i++) {
         print_type(var->ty);
         fprintf(out_file, " ");
@@ -727,8 +727,8 @@ void dump_module(Module *md, FILE *out) {
     for (Type *ty = md->tys; ty; ty = ty->next) dump_type(ty);
     fprintf(out_file, "\n");
 
-    for (Obj *var = md->data; var; var = var->next) dump_data(var);
+    for (Sym *var = md->data; var; var = var->next) dump_data(var);
     fprintf(out_file, "\n");
 
-    for (Obj *fn = md->fns; fn; fn = fn->next) dump_fn(fn);
+    for (Sym *fn = md->fns; fn; fn = fn->next) dump_fn(fn);
 }

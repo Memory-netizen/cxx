@@ -24,7 +24,7 @@ static Node *new_num(int64_t val, Token *tok) {
     return node;
 }
 
-static Node *new_var_node(Obj *var, Token *tok) {
+static Node *new_var_node(Sym *var, Token *tok) {
     Node *node = new_node(ND_VAR, tok);
     node->var = var;
     return node;
@@ -55,7 +55,7 @@ typedef struct VarScope VarScope;
 struct VarScope {
     VarScope *next;
     uint32_t id;
-    Obj *var;
+    Sym *var;
 };
 
 // Scope for struct or union tags
@@ -76,8 +76,8 @@ struct Scope {
 
 // All local variable instances created during parsing are
 // accumulated to this list.
-static Obj *locals;
-static Obj *globals;
+static Sym *locals;
+static Sym *globals;
 static Type *types;
 
 static Scope *scope = &(Scope){0};
@@ -92,7 +92,7 @@ static void enter_scope(void) {
 static void leave_scope(void) { scope = scope->next; }
 
 // Find a variable by name.
-static Obj *find_var(Token *tok) {
+static Sym *find_var(Token *tok) {
     for (Scope *sc = scope; sc; sc = sc->next)
         for (VarScope *sc2 = sc->vars; sc2; sc2 = sc2->next)
             if (tok->id == sc2->id) return sc2->var;
@@ -106,7 +106,7 @@ static Type *find_tag(Token *tok) {
     return NULL;
 }
 
-static VarScope *push_scope(uint32_t id, Obj *var) {
+static VarScope *push_scope(uint32_t id, Sym *var) {
     VarScope *sc = emalloc(sizeof(VarScope));
     sc->id = id;
     sc->var = var;
@@ -124,25 +124,25 @@ static void push_tag_scope(uint32_t id, Type *ty) {
     ty->id = id;
 }
 
-static Obj *new_var(uint32_t id, Type *ty) {
-    Obj *var = emalloc(sizeof(Obj));
-    memset(var, 0, sizeof(Obj));
+static Sym *new_var(uint32_t id, Type *ty) {
+    Sym *var = emalloc(sizeof(Sym));
+    memset(var, 0, sizeof(Sym));
     var->id = id;
     var->ty = ty;
     push_scope(id, var);
     return var;
 }
 
-static Obj *new_lvar(uint32_t id, Type *ty) {
-    Obj *var = new_var(id, ty);
+static Sym *new_lvar(uint32_t id, Type *ty) {
+    Sym *var = new_var(id, ty);
     var->is_local = true;
     var->next = locals;
     locals = var;
     return var;
 }
 
-static Obj *new_gvar(uint32_t id, Type *ty) {
-    Obj *var = new_var(id, ty);
+static Sym *new_gvar(uint32_t id, Type *ty) {
+    Sym *var = new_var(id, ty);
     var->next = globals;
     globals = var;
     return var;
@@ -155,11 +155,11 @@ static uint32_t new_unique_strname(void) {
     return intern(buf, strlen(buf));
 }
 
-static Obj *new_anon_gvar(Type *ty) { return new_gvar(new_unique_strname(), ty); }
+static Sym *new_anon_gvar(Type *ty) { return new_gvar(new_unique_strname(), ty); }
 
-static Obj *new_string_literal(uint32_t id) {
+static Sym *new_string_literal(uint32_t id) {
     Type *ty = array_of(ty_char, str_len(id) + 1);
-    Obj *var = new_anon_gvar(ty);
+    Sym *var = new_anon_gvar(ty);
     var->is_str = true;
     var->init_data = id;
     return var;
@@ -263,12 +263,12 @@ static Node *primary(Token **rest, Token *tok) {
     } else if (tok->kind == TK_NUM) {
         node = new_num(tok->val, tok);
     } else if (tok->kind == TK_STRLIT) {
-        Obj *var = new_string_literal(tok->id);
+        Sym *var = new_string_literal(tok->id);
         *rest = tok->next;
         return new_var_node(var, tok);
     } else if (tok->kind == TK_IDENT) {
         if (tok->next->kind == TK_LPAREN) return fncall(rest, tok);
-        Obj *var = find_var(tok);
+        Sym *var = find_var(tok);
         if (!var) error(tok->loc, "use of undeclared identifier '%.*s'", tok->len, tok->loc);
         node = new_var_node(var, tok);
     } else {
@@ -796,7 +796,7 @@ static Node *declaration(Token **rest, Token *tok) {
     while (tok->kind != TK_SEMI) {
         if (i++) tok = skip(tok, TK_COMMA);
         Type *ty = declarator(&tok, tok, basety);
-        Obj *var = new_lvar(get_ident(ty->name), ty);
+        Sym *var = new_lvar(get_ident(ty->name), ty);
 
         switch (tok->kind) {
             case TK_AS: {
@@ -828,7 +828,7 @@ static void create_param_lvars(Type *param) {
 static Token *function(Token *tok, Type *basety) {
     Type *ty = declarator(&tok, tok, basety);
 
-    Obj *fn = new_gvar(get_ident(ty->name), ty);
+    Sym *fn = new_gvar(get_ident(ty->name), ty);
     fn->is_function = true;
     fn->is_definition = !match(&tok, tok, TK_SEMI);
     if (!fn->is_definition) return tok;
@@ -838,7 +838,7 @@ static Token *function(Token *tok, Type *basety) {
     create_param_lvars(ty->params);
     fn->params = locals;
     uint32_t i = 0;
-    Obj *cur = locals;
+    Sym *cur = locals;
     while (cur) {
         ++i;
         cur = cur->next;
@@ -893,8 +893,8 @@ Module *parse(Token *tok) {
         // Global variable
         tok = global_variable(tok, basety);
     }
-    for (Obj *sym = globals; sym;) {
-        Obj *next = sym->next;
+    for (Sym *sym = globals; sym;) {
+        Sym *next = sym->next;
         if (sym->is_function) {
             sym->next = md->fns;
             md->fns = sym;

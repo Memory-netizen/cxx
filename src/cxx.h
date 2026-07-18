@@ -24,7 +24,7 @@ typedef struct Type Type;
 typedef struct Ref Ref;
 typedef struct Ir Ir;
 typedef struct Blk Blk;
-typedef struct Obj Obj;
+typedef struct Sym Sym;
 typedef struct Fn Fn;
 typedef struct Module Module;
 typedef struct Member Member;
@@ -204,8 +204,8 @@ Token *tokenize_file(char *filename);
 //
 
 // Variable or function
-struct Obj {
-    Obj *next;
+struct Sym {
+    Sym *next;
     uint32_t id;  // Variable name
     Type *ty;     // Type
 
@@ -222,10 +222,10 @@ struct Obj {
     uint32_t init_data;
 
     // Function
-    Obj *params;
+    Sym *params;
     uint32_t nparam;
     Node *body;
-    Obj *locals;
+    Sym *locals;
 
     Blk *start;
     Blk *end;
@@ -310,7 +310,7 @@ struct Node {
             Node *args;
             uint32_t narg;
         };
-        Obj *var;     // Used if kind == ND_VAR
+        Sym *var;     // Used if kind == ND_VAR
         int64_t val;  // Used if kind == ND_NUM
     };
 };
@@ -483,8 +483,8 @@ struct Blk {
 };
 
 struct Module {
-    Obj *fns;
-    Obj *data;
+    Sym *fns;
+    Sym *data;
     Type *tys;
 };
 

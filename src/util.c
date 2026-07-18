@@ -84,7 +84,7 @@ void *emalloc(size_t n) {
     n = ALIGN_UP(n, ALIGNMENT);
     if (n >= BIG_THRESHOLD) {
         void *p = malloc(n);
-        if (!p) fatal("emalloc: out of memory");
+        if (!p) fatal("emalloc, out of memory");
         Block_Mem *b = emalloc(sizeof(Block_Mem));
         b->ptr = p;
         b->next = mem_blocks;
@@ -94,7 +94,7 @@ void *emalloc(size_t n) {
 
     if (free_len < n) {
         void **new_pool = malloc(POOL_SIZE);
-        if (!new_pool) fatal("emalloc: out of memory");
+        if (!new_pool) fatal("emalloc, out of memory");
         new_pool[0] = pool;
         pool = new_pool;
         free_len = POOL_SIZE - HEAD_SIZE;
