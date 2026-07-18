@@ -221,6 +221,8 @@ struct Sym {
     // Global variable
     uint32_t init_data;
 
+    Node *init;
+
     // Function
     Sym *params;
     uint32_t nparam;

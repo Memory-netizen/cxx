@@ -1,14 +1,12 @@
 #include "cxx.h"
 
-static Type *declspec(Token **rest, Token *tok);
+static Type *declspecs(Token **rest, Token *tok);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
 static Node *declaration(Token **rest, Token *tok);
 static Node *stmt(Token **rest, Token *tok);
 static Node *compound_stmt(Token **rest, Token *tok);
 static Node *expr(Token **rest, Token *tok);
 static Node *assign(Token **rest, Token *tok);
-static Node *unary(Token **rest, Token *tok);
-static Node *binexpr(Token **rest, Token *tok, int min_prec);
 
 static Node *new_node(NodeKind kind, Token *tok) {
     Node *node = emalloc(sizeof(Node));
@@ -73,6 +71,15 @@ struct Scope {
     VarScope *vars;
     TagScope *tags;
 };
+
+typedef enum {
+    SC_NONE,
+    SC_AUTO,
+    SC_TYPEDEF,
+    SC_EXTERN,
+    SC_STATIC,
+    SC_REG,
+} SClass;
 
 // All local variable instances created during parsing are
 // accumulated to this list.
@@ -222,6 +229,9 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
     }
     return NULL;
 }
+
+// Init ::= AsExp
+static Node *initializer(Token **rest, Token *tok) { return assign(rest, tok); }
 
 static Node *fncall(Token **rest, Token *tok) {
     Node *node = new_node(ND_FUNCALL, tok);
@@ -430,7 +440,7 @@ static Node *expr(Token **rest, Token *tok) {
     return node;
 }
 
-// ExpStmt ::= ";" | Exp ";";
+// ExpStmt ::= ";" | Exp ";"
 static Node *expr_stmt(Token **rest, Token *tok) {
     if (tok->kind == TK_SEMI) {
         *rest = tok->next;
@@ -444,7 +454,7 @@ static Node *expr_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// RetStmt ::= "return" Exp? ";";
+// RetStmt ::= "return" Exp? ";"
 static Node *return_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_RETURN, tok);
     if (tok->next->kind == TK_SEMI) {
@@ -476,7 +486,7 @@ static Node *if_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// ForStmt ::= "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt;
+// ForStmt ::= "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt
 static Node *for_stmt(Token **rest, Token *tok) {
     enter_scope();
     Node *node = new_node(ND_FOR, tok);
@@ -514,7 +524,7 @@ static Node *while_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// DoStmt ::= "do" Stmt "while" "(" Exp ")" ";";
+// DoStmt ::= "do" Stmt "while" "(" Exp ")" ";"
 static Node *do_stmt(Token **rest, Token *tok) {
     enter_scope();
     Node *node = new_node(ND_DO, tok);
@@ -553,7 +563,7 @@ static Node *stmt(Token **rest, Token *tok) {
 // Returns true if a given token represents a type.
 static bool is_typename(Token *tok) { return TK_AUTO <= tok->kind && tok->kind <= TK_ALIGNAS; }
 
-// CompStmt ::= "{" BlockItem* "}"
+// CompStmt  ::= "{" BlockItem* "}"
 // BlockItem ::= Stmt | Decl
 static Node *compound_stmt(Token **rest, Token *tok) {
     enter_scope();
@@ -576,13 +586,14 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// struct-members = (declspec declarator (","  declarator)* ";")*
+// MemDecl  ::= TypeSpec+ (MemDeclr ("," MemDeclr)*)? ";"
+// MemDeclr ::= Declr
 static void struct_members(Token **rest, Token *tok, Type *ty) {
     Member head = {};
     Member *cur = &head;
 
     while (tok->kind != TK_RBRACE) {
-        Type *basety = declspec(&tok, tok);
+        Type *basety = declspecs(&tok, tok);
         int i = 0;
 
         while (!match(&tok, tok, TK_SEMI)) {
@@ -599,7 +610,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
     ty->members = head.next;
 }
 
-// RecordSpec = Ident? "{" struct-members
+// RecordSpec ::= Record Ident ("{" MemDecl+ "}")? | Record "{" MemDecl+ "}"
 static Type *record_decl(Token **rest, Token *tok) {
     bool is_union = tok->kind == TK_UNION;
     tok = tok->next;
@@ -663,8 +674,11 @@ static Type *record_decl(Token **rest, Token *tok) {
     return ty;
 }
 
-// DeclSpec ::= "void" | "char" | "short" | "int" | "long" | RecordSpec
-static Type *declspec(Token **rest, Token *tok) {
+// DeclSpecs ::= DeclSpec+
+// DeclSpec  ::= SCSpec | TypeSpec
+// SCSpec    ::= "typedef"
+// TypeSpec  ::= "void" | "char" | "short" | "int" | "long" | RecordSpec | TypedefName
+static Type *declspecs(Token **rest, Token *tok) {
     Type *ty = ty_int;
     int typespec_cnt = 0;
     enum {
@@ -735,17 +749,15 @@ static Type *declspec(Token **rest, Token *tok) {
 
 // DeclrSuf  ::= "(" ParamList? ")" | "[" Num "]"
 // ParamList ::= ParamDecl ("," ParamDecl)*
-// ParamDecl ::= DeclSpec Declr
+// ParamDecl ::= DeclSpecs Declr
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
     if (tok->kind == TK_LPAREN) {
         tok = tok->next;
-
-        Type dummy = {};
-        Type *cur = &dummy;
+        Type dummy, *cur = &dummy;
 
         while (tok->kind != TK_RPAREN) {
             if (cur != &dummy) tok = skip(tok, TK_COMMA);
-            Type *basety = declspec(&tok, tok);
+            Type *basety = declspecs(&tok, tok);
             Type *paramty = declarator(&tok, tok, basety);
             cur = cur->next = copy_type(paramty);
         }
@@ -767,7 +779,9 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
     return ty;
 }
 
-// Declr ::= "*"* Ident DeclrSuf*
+// Declr    ::= Ptr? DirDeclr
+// Ptr      ::= "*"+
+// DirDeclr ::= (Ident | "(" Declr ")") DeclrSuf*
 static Type *declarator(Token **rest, Token *tok, Type *ty) {
     while (match(&tok, tok, TK_STAR)) ty = pointer_to(ty);
 
@@ -780,16 +794,16 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
         return declarator(&tok, start->next, ty);
     }
 
-    assert(tok->kind == TK_IDENT);
+    if (tok->kind != TK_IDENT) error(tok->loc, "expected an identifier");
     ty = decl_suffix(rest, tok->next, ty);
     ty->name = tok;
     return ty;
 }
 
-// Decl ::= DeclSpec (Declr ("=" AsExp)? ("," Declr ("=" AsExp)?)*)? ";";
+// Decl ::= DeclSpecs (InitDeclr ("," InitDeclr)*)? ";"
 static Node *declaration(Token **rest, Token *tok) {
     Node *node = new_node(ND_DECL, tok);
-    Type *basety = declspec(&tok, tok);
+    Type *basety = declspecs(&tok, tok);
     Node dummy, *cur = &dummy;
     int i = 0;
 
@@ -797,17 +811,12 @@ static Node *declaration(Token **rest, Token *tok) {
         if (i++) tok = skip(tok, TK_COMMA);
         Type *ty = declarator(&tok, tok, basety);
         Sym *var = new_lvar(get_ident(ty->name), ty);
-
-        switch (tok->kind) {
-            case TK_AS: {
-                Node *lhs = new_var_node(var, ty->name);
-                Node *rhs = assign(&tok, tok->next);
-                Node *as = new_binary(ND_AS, lhs, rhs, tok);
-                add_type(as);
-                cur = cur->next = new_unary(ND_EXPR_STMT, as, tok);
-            }
-            default:
-                break;
+        if (tok->kind == TK_AS) {
+            Node *lhs = new_var_node(var, ty->name);
+            Node *rhs = initializer(&tok, tok->next);
+            Node *as = new_binary(ND_AS, lhs, rhs, tok);
+            add_type(as);
+            cur = cur->next = new_unary(ND_EXPR_STMT, as, tok);
         }
     }
     *rest = tok->next;
@@ -824,75 +833,81 @@ static void create_param_lvars(Type *param) {
     }
 }
 
-// FuncDef ::= DeclSpec Declr CompStmt
-static Token *function(Token *tok, Type *basety) {
-    Type *ty = declarator(&tok, tok, basety);
+// ExDecl    ::= FuncDef | Decl
+// FuncDef   ::= DeclSpecs Declr CompStmt
+// InitDeclr ::= Declr ("=" Init)?
+static Token *external_declaration(Token *tok) {
+    while (match(&tok, tok, TK_SEMI));
+    if (tok->kind == TK_EOF) return tok;
 
-    Sym *fn = new_gvar(get_ident(ty->name), ty);
-    fn->is_function = true;
-    fn->is_definition = !match(&tok, tok, TK_SEMI);
-    if (!fn->is_definition) return tok;
+    SClass sclass = 0;
+    Type *basety = declspecs(&tok, tok);
+    if (tok->kind == TK_SEMI) return tok->next;
 
-    locals = NULL;
-    enter_scope();
-    create_param_lvars(ty->params);
-    fn->params = locals;
-    uint32_t i = 0;
-    Sym *cur = locals;
-    while (cur) {
-        ++i;
-        cur = cur->next;
-    }
-    fn->params = locals;
-    fn->nparam = i;
-
-    fn->body = compound_stmt(&tok, tok);
-    fn->locals = locals;
-    leave_scope();
-    return tok;
-}
-
-static Token *global_variable(Token *tok, Type *basety) {
-    bool first = true;
-
-    while (!match(&tok, tok, TK_SEMI)) {
-        if (!first) tok = skip(tok, TK_COMMA);
-        ;
-        first = false;
-
+    int cnt = -1;
+    while (1) {
+        cnt++;
+        Node *init = NULL;
         Type *ty = declarator(&tok, tok, basety);
-        new_gvar(get_ident(ty->name), ty);
+
+        // function-definition
+        if (tok->kind == TK_LBRACE) {
+            if (cnt || ty->kind != TY_FUNC || sclass == SC_TYPEDEF)
+                error(tok->loc, "expected ';' after top level declarator");
+            Sym *fn = new_gvar(get_ident(ty->name), ty);
+            fn->is_function = true;
+            fn->is_definition = true;
+
+            locals = NULL;
+            enter_scope();
+            create_param_lvars(ty->params);
+            fn->params = locals;
+            uint32_t i = 0;
+            Sym *cur = locals;
+            while (cur) {
+                ++i;
+                cur = cur->next;
+            }
+            fn->params = locals;
+            fn->nparam = i;
+
+            fn->body = compound_stmt(&tok, tok);
+            fn->locals = locals;
+            leave_scope();
+            return tok;
+        }
+
+        // declaration
+        if (tok->kind == TK_AS) {
+            if (ty->kind == TY_FUNC || sclass == SC_TYPEDEF)
+                error(ty->name->loc,
+                      "illegal initializer (only variables can be "
+                      "initialized)");
+            init = initializer(&tok, tok);
+        }
+        if (sclass == SC_TYPEDEF) {
+        } else {
+            Sym *var = new_gvar(get_ident(ty->name), ty);
+            var->is_function = var->ty->kind == TY_FUNC;
+            var->init = init;
+        }
+        if (match(&tok, tok, TK_COMMA))
+            continue;
+        else if (tok->kind == TK_SEMI)
+            return tok->next;
+        else
+            error(tok->loc, "expected ';' after top level declarator");
     }
-    return tok;
 }
 
-// Lookahead tokens and returns true if a given token is a start
-// of a function definition or declaration.
-static bool is_function(Token *tok) {
-    if (tok->kind == TK_SEMI) return false;
-
-    Type dummy = {};
-    Type *ty = declarator(&tok, tok, &dummy);
-    return ty->kind == TY_FUNC;
-}
-
-// TransUnit ::= ExDecl+;
-// ExDecl ::= FuncDef | Decl;
+// TransUnit ::= ExDecl+
 Module *parse(Token *tok) {
     Module *md = emalloc(sizeof(Module));
     memset(md, 0, sizeof(Module));
 
     globals = NULL;
-    while (tok->kind != TK_EOF) {
-        Type *basety = declspec(&tok, tok);
-        // Function
-        if (is_function(tok)) {
-            tok = function(tok, basety);
-            continue;
-        }
-        // Global variable
-        tok = global_variable(tok, basety);
-    }
+    while (tok->kind != TK_EOF) tok = external_declaration(tok);
+
     for (Sym *sym = globals; sym;) {
         Sym *next = sym->next;
         if (sym->is_function) {

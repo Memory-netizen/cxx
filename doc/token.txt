@@ -1,4 +1,3 @@
-==================================================================================
 token     ::= keyword | Ident | constant | strlit | punctuator
 pp-token  ::= header_name | Ident | pp_number | charlit | strlit | punctuator | other
 
