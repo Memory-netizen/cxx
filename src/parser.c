@@ -1,8 +1,8 @@
 #include "cxx.h"
 
-static Type *declspecs(Token **rest, Token *tok);
+static Type *declspecs(Token **rest, Token *tok, SClass *sclass);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
-static Node *declaration(Token **rest, Token *tok);
+static Node *declaration(Token **rest, Token *tok, Type *ty);
 static Node *stmt(Token **rest, Token *tok);
 static Node *compound_stmt(Token **rest, Token *tok);
 static Node *expr(Token **rest, Token *tok);
@@ -48,12 +48,13 @@ static Node *new_imcast(Type *ty, Node *expr) {
     return node;
 }
 
-// Scope for local or global variables.
+// Scope for local, global variables or typedefs.
 typedef struct VarScope VarScope;
 struct VarScope {
     VarScope *next;
     uint32_t id;
     Sym *var;
+    Type *type_def;
 };
 
 // Scope for struct or union tags
@@ -71,15 +72,6 @@ struct Scope {
     VarScope *vars;
     TagScope *tags;
 };
-
-typedef enum {
-    SC_NONE,
-    SC_AUTO,
-    SC_TYPEDEF,
-    SC_EXTERN,
-    SC_STATIC,
-    SC_REG,
-} SClass;
 
 // All local variable instances created during parsing are
 // accumulated to this list.
@@ -99,24 +91,35 @@ static void enter_scope(void) {
 static void leave_scope(void) { scope = scope->next; }
 
 // Find a variable by name.
-static Sym *find_var(Token *tok) {
-    for (Scope *sc = scope; sc; sc = sc->next)
+static VarScope *find_var(Token *tok, bool search_par) {
+    Scope *sc = scope;
+    while (sc) {
         for (VarScope *sc2 = sc->vars; sc2; sc2 = sc2->next)
-            if (tok->id == sc2->id) return sc2->var;
+            if (tok->id == sc2->id) return sc2;
+        if (search_par)
+            sc = sc->next;
+        else
+            return NULL;
+    }
     return NULL;
 }
 
-static Type *find_tag(Token *tok) {
-    for (Scope *sc = scope; sc; sc = sc->next)
+static Type *find_tag(Token *tok, bool search_par) {
+    Scope *sc = scope;
+    while (sc) {
         for (TagScope *sc2 = sc->tags; sc2; sc2 = sc2->next)
             if (tok->id == sc2->id) return sc2->ty;
+        if (search_par)
+            sc = sc->next;
+        else
+            return NULL;
+    }
     return NULL;
 }
 
-static VarScope *push_scope(uint32_t id, Sym *var) {
+static VarScope *push_scope(uint32_t id) {
     VarScope *sc = emalloc(sizeof(VarScope));
     sc->id = id;
-    sc->var = var;
     sc->next = scope->vars;
     scope->vars = sc;
     return sc;
@@ -136,7 +139,7 @@ static Sym *new_var(uint32_t id, Type *ty) {
     memset(var, 0, sizeof(Sym));
     var->id = id;
     var->ty = ty;
-    push_scope(id, var);
+    push_scope(id)->var = var;
     return var;
 }
 
@@ -172,7 +175,15 @@ static Sym *new_string_literal(uint32_t id) {
     return var;
 }
 
-static int get_number(Token *tok) {
+static Type *find_typedef(Token *tok, bool search_par) {
+    if (tok->kind == TK_IDENT) {
+        VarScope *sc = find_var(tok, search_par);
+        if (sc) return sc->type_def;
+    }
+    return NULL;
+}
+
+static long get_number(Token *tok) {
     if (tok->kind != TK_NUM) error(tok->loc, "expected a number");
     return tok->val;
 }
@@ -278,9 +289,9 @@ static Node *primary(Token **rest, Token *tok) {
         return new_var_node(var, tok);
     } else if (tok->kind == TK_IDENT) {
         if (tok->next->kind == TK_LPAREN) return fncall(rest, tok);
-        Sym *var = find_var(tok);
-        if (!var) error(tok->loc, "use of undeclared identifier '%.*s'", tok->len, tok->loc);
-        node = new_var_node(var, tok);
+        VarScope *sc = find_var(tok, 1);
+        if (!sc || !sc->var) error(tok->loc, "use of undeclared identifier '%.*s'", tok->len, tok->loc);
+        node = new_var_node(sc->var, tok);
     } else {
         error(tok->loc, "expected expression");
         node = NULL;
@@ -561,7 +572,10 @@ static Node *stmt(Token **rest, Token *tok) {
 }
 
 // Returns true if a given token represents a type.
-static bool is_typename(Token *tok) { return TK_AUTO <= tok->kind && tok->kind <= TK_ALIGNAS; }
+static bool is_typename(Token *tok, bool search_par) {
+    if (TK_INLINE <= tok->kind && tok->kind <= TK_ALIGNAS) return true;
+    return find_typedef(tok, search_par);
+}
 
 // CompStmt  ::= "{" BlockItem* "}"
 // BlockItem ::= Stmt | Decl
@@ -572,10 +586,18 @@ static Node *compound_stmt(Token **rest, Token *tok) {
 
     tok = tok->next;
     while (tok->kind != TK_RBRACE) {
-        if (is_typename(tok))
-            cur = cur->next = declaration(&tok, tok);
-        else
+        if (is_typename(tok, 1)) {
+            SClass sclass = 0;
+            Type *basety = declspecs(&tok, tok, &sclass);
+            if (sclass == SC_TYPEDEF) {
+                Type *ty = declarator(&tok, tok, basety);
+                push_scope(get_ident(ty->name))->type_def = ty;
+            } else {
+                cur = cur->next = declaration(&tok, tok, basety);
+            }
+        } else {
             cur = cur->next = stmt(&tok, tok);
+        }
         add_type(cur);
     }
     cur->next = NULL;
@@ -593,7 +615,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
     Member *cur = &head;
 
     while (tok->kind != TK_RBRACE) {
-        Type *basety = declspecs(&tok, tok);
+        Type *basety = declspecs(&tok, tok, NULL);
         int i = 0;
 
         while (!match(&tok, tok, TK_SEMI)) {
@@ -622,7 +644,7 @@ static Type *record_decl(Token **rest, Token *tok) {
     }
 
     if (tag && tok->kind != TK_LBRACE) {
-        Type *ty = find_tag(tag);
+        Type *ty = find_tag(tag, 1);
         assert(ty);
         *rest = tok;
         return ty;
@@ -678,10 +700,11 @@ static Type *record_decl(Token **rest, Token *tok) {
 // DeclSpec  ::= SCSpec | TypeSpec
 // SCSpec    ::= "typedef"
 // TypeSpec  ::= "void" | "char" | "short" | "int" | "long" | RecordSpec | TypedefName
-static Type *declspecs(Token **rest, Token *tok) {
+static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
     Type *ty = ty_int;
     int typespec_cnt = 0;
     enum {
+        NONE,
         VOID = 1 << 0,
         CHAR = 1 << 2,
         SHORT = 1 << 4,
@@ -690,8 +713,35 @@ static Type *declspecs(Token **rest, Token *tok) {
         OTHER = 1 << 10,
     };
 
-    while (is_typename(tok)) {
+    while (is_typename(tok, 1)) {
+        Token *ty_tok = tok;
         switch (tok->kind) {
+            case TK_TYPEDEF:
+                if (!sclass) error(tok->loc, "storage class specifier is not allowed in this context");
+                if (*sclass) {
+                    if (*sclass == SC_TYPEDEF)
+                        error(tok->loc, "duplicate ‘typedef’");
+                    else
+                        error(tok->loc, "multiple storage classes in declaration specifiers");
+                };
+                *sclass = SC_TYPEDEF;
+                break;
+            case TK_IDENT: {
+                Type *orig = find_typedef(tok, *sclass != SC_TYPEDEF);
+                if (orig) {
+                    if (typespec_cnt)
+                        error(tok->loc, "redefinition of '%.*s' as different kind of symbol", tok->len, tok->loc);
+                    ty = orig;
+                    typespec_cnt += OTHER;
+                    break;
+                }
+                goto loop_end;
+            }
+            case TK_STRUCT:
+            case TK_UNION:
+                ty = record_decl(&tok, tok);
+                typespec_cnt += OTHER;
+                goto check_type;
             case TK_VOID:
                 typespec_cnt += VOID;
                 break;
@@ -707,13 +757,11 @@ static Type *declspecs(Token **rest, Token *tok) {
             case TK_LONG:
                 typespec_cnt += LONG;
                 break;
-            case TK_STRUCT:
-            case TK_UNION:
-                ty = record_decl(&tok, tok);
-                continue;
             default:
                 break;
         }
+        tok = tok->next;
+    check_type:
         switch (typespec_cnt) {
             case VOID:
                 ty = ty_void;
@@ -736,13 +784,17 @@ static Type *declspecs(Token **rest, Token *tok) {
             case LONG + LONG + INT:
                 ty = ty_llong;
                 break;
+            case NONE:
+            case OTHER:
+                break;
             default:
-                error(tok->loc,
+                error(ty_tok->loc,
                       "cannot combine with previous"
                       " declaration specifier");
         }
-        tok = tok->next;
     }
+loop_end:
+    if (!typespec_cnt) error(tok->loc, "a type specifier is required for all declarations");
     *rest = tok;
     return ty;
 }
@@ -757,7 +809,7 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
 
         while (tok->kind != TK_RPAREN) {
             if (cur != &dummy) tok = skip(tok, TK_COMMA);
-            Type *basety = declspecs(&tok, tok);
+            Type *basety = declspecs(&tok, tok, NULL);
             Type *paramty = declarator(&tok, tok, basety);
             cur = cur->next = copy_type(paramty);
         }
@@ -801,9 +853,8 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
 }
 
 // Decl ::= DeclSpecs (InitDeclr ("," InitDeclr)*)? ";"
-static Node *declaration(Token **rest, Token *tok) {
+static Node *declaration(Token **rest, Token *tok, Type *basety) {
     Node *node = new_node(ND_DECL, tok);
-    Type *basety = declspecs(&tok, tok);
     Node dummy, *cur = &dummy;
     int i = 0;
 
@@ -841,7 +892,7 @@ static Token *external_declaration(Token *tok) {
     if (tok->kind == TK_EOF) return tok;
 
     SClass sclass = 0;
-    Type *basety = declspecs(&tok, tok);
+    Type *basety = declspecs(&tok, tok, &sclass);
     if (tok->kind == TK_SEMI) return tok->next;
 
     int cnt = -1;
@@ -886,6 +937,7 @@ static Token *external_declaration(Token *tok) {
             init = initializer(&tok, tok);
         }
         if (sclass == SC_TYPEDEF) {
+            push_scope(get_ident(ty->name))->type_def = ty;
         } else {
             Sym *var = new_gvar(get_ident(ty->name), ty);
             var->is_function = var->ty->kind == TY_FUNC;

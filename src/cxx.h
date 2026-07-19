@@ -203,6 +203,15 @@ Token *tokenize_file(char *filename);
 // Parser
 //
 
+typedef enum {
+    SC_NONE,
+    SC_AUTO,
+    SC_TYPEDEF,
+    SC_EXTERN,
+    SC_STATIC,
+    SC_REG,
+} SClass;
+
 // Variable or function
 struct Sym {
     Sym *next;
