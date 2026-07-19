@@ -1,62 +1,66 @@
-TransUnit  ::= ExDecl+
-ExDecl     ::= FuncDef | Decl
-FuncDef    ::= DeclSpecs Declr CompStmt
-Decl       ::= DeclSpecs (InitDeclr ("," InitDeclr)*)? ";"
+TransUnit   ::= ExDecl+
+ExDecl      ::= FuncDef | Decl
+FuncDef     ::= DeclSpecs Declr CompStmt
+Decl        ::= DeclSpecs (InitDeclr ("," InitDeclr)*)? ";"
 
-InitDeclr  ::= Declr ("=" Init)?
-Init       ::= AsExp
+InitDeclr   ::= Declr ("=" Init)?
+Init        ::= AsExp
 
-Declr      ::= Ptr? DirDeclr
-Ptr        ::= "*"+
-DirDeclr   ::= (Ident | "(" Declr ")") DeclrSuf*
+Declr       ::= Ptr? DirDeclr
+Ptr         ::= "*"+
+DirDeclr    ::= (Ident | "(" Declr ")") DeclrSuf*
 
-DeclrSuf   ::= "(" ParamList? ")" | "[" Num "]"
-ParamList  ::= ParamDecl ("," ParamDecl)*
-ParamDecl  ::= DeclSpecs Declr
+DeclrSuf    ::= "(" ParamList? ")" | "[" Num "]"
+ParamList   ::= ParamDecl ("," ParamDecl)*
+ParamDecl   ::= DeclSpecs Declr
 
-DeclSpecs  ::= DeclSpec+
-DeclSpec   ::= SCSpec | TypeSpec
-SCSpec     ::= "typedef"
-TypeSpec   ::= "void" | "char" | "short" | "int" | "long" | RecordSpec | TypedefName
-TypedefName::= Ident
+DeclSpecs   ::= DeclSpec+
+DeclSpec    ::= SCSpec | TypeSpec
+SCSpec      ::= "typedef"
+TypeSpec    ::= "void" | "char" | "short" | "int" | "long" | RecordSpec | TypedefName
+TypedefName ::= Ident
 
-RecordSpec ::= Record Ident ("{" MemDecl+ "}")? | Record "{" MemDecl+ "}"
-MemDecl    ::= TypeSpec+ (MemDeclr ("," MemDeclr)*)? ";"
-MemDeclr   ::= Declr
+TypeName    ::= DeclSpecs AbsDeclr?
+AbsDeclr    ::= Ptr DirAbsDeclr? | DirAbsDeclr;
+DirAbsDeclr ::= ("(" AbsDeclr ")")? DeclrSuf*
 
-CompStmt   ::= "{" BlockItem* "}"
-BlockItem  ::= Stmt | Decl
+RecordSpec  ::= Record Ident ("{" MemDecl+ "}")? | Record "{" MemDecl+ "}"
+MemDecl     ::= TypeSpec+ (MemDeclr ("," MemDeclr)*)? ";"
+MemDeclr    ::= Declr
 
-Stmt       ::= ExpStmt | CompStmt | RetStmt | IfStmt | WhileStmt | DoStmt | ForStmt
+CompStmt    ::= "{" BlockItem* "}"
+BlockItem   ::= Stmt | Decl
 
-ExpStmt    ::= ";" | Exp ";"
-RetStmt    ::= "return" Exp? ";"
+Stmt        ::= ExpStmt | CompStmt | RetStmt | IfStmt | WhileStmt | DoStmt | ForStmt
 
-IfStmt     ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
-SelHead    ::= Exp | Decl Exp | SimDecl
-SimDecl    ::= DeclSpecs Declr "=" Init
+ExpStmt     ::= ";" | Exp ";"
+RetStmt     ::= "return" Exp? ";"
 
-ForStmt    ::= "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt
-WhileStmt  ::= "while" "(" Exp ")" Stmt
-DoStmt     ::= "do" Stmt "while" "(" Exp ")" ";"
+IfStmt      ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
+SelHead     ::= Exp | Decl Exp | SimDecl
+SimDecl     ::= DeclSpecs Declr "=" Init
 
-Exp        ::= AsExp ("," AsExp)*
-AsExp      ::= BOrExp ("=" AsExp)?
+ForStmt     ::= "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt
+WhileStmt   ::= "while" "(" Exp ")" Stmt
+DoStmt      ::= "do" Stmt "while" "(" Exp ")" ";"
 
-MulExp     ::= UnaryExp (("*" | "/" | "%") UnaryExp)*
-AddExp     ::= MulExp   (("+" | "-") MulExp)*
-ShiftExp   ::= AddExp   (("<<" | ">>") AddExp)*
-RelExp     ::= ShiftExp (("<" | ">" | "<=" | ">=") ShiftExp)*
-EqExp      ::= RelExp   (("==" | "!=") RelExp)*
-BAndExp    ::= EqExp    ("&" EqExp)*
-XorExp     ::= BAndExp  ("^" BAndExp)*
-BOrExp     ::= XorExp   ("|" XorExp)*
+Exp         ::= AsExp ("," AsExp)*
+AsExp       ::= BOrExp ("=" AsExp)?
 
-UnaryExp   ::= PostExp | UnaryOp UnaryExp
-UnaryOp    ::= "+" | "-" | "~" | "!" | "&" | "*" | "sizeof"
+MulExp      ::= UnaryExp (("*" | "/" | "%") UnaryExp)*
+AddExp      ::= MulExp   (("+" | "-") MulExp)*
+ShiftExp    ::= AddExp   (("<<" | ">>") AddExp)*
+RelExp      ::= ShiftExp (("<" | ">" | "<=" | ">=") ShiftExp)*
+EqExp       ::= RelExp   (("==" | "!=") RelExp)*
+BAndExp     ::= EqExp    ("&" EqExp)*
+XorExp      ::= BAndExp  ("^" BAndExp)*
+BOrExp      ::= XorExp   ("|" XorExp)*
 
-PostExp    ::= PrimExp PostFix*
-PostFix    ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident
-ArgList    ::= AsExp ("," AsExp)*
+UnaryExp    ::= PostExp | UnaryOp UnaryExp | "sizeof" "(" TypeName ")"
+UnaryOp     ::= "+" | "-" | "~" | "!" | "&" | "*" | "sizeof"
 
-PrimExp    ::= Num | Str | Ident | "(" Exp ")" | "(" CompStmt ")"
+PostExp     ::= PrimExp PostFix*
+PostFix     ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident
+ArgList     ::= AsExp ("," AsExp)*
+
+PrimExp     ::= Num | Str | Ident | "(" Exp ")" | "(" CompStmt ")"

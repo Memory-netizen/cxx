@@ -1,6 +1,7 @@
 #include "cxx.h"
 
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass);
+static Type *decl_suffix(Token **rest, Token *tok, Type *ty);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
 static Node *declaration(Token **rest, Token *tok, Type *ty);
 static Node *stmt(Token **rest, Token *tok);
@@ -241,6 +242,35 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
     return NULL;
 }
 
+// Returns true if a given token represents a type.
+static bool is_typename(Token *tok, bool search_par) {
+    if (TK_INLINE <= tok->kind && tok->kind <= TK_ALIGNAS) return true;
+    return find_typedef(tok, search_par);
+}
+
+// AbsDeclr ::= Ptr DirAbsDeclr? | DirAbsDeclr;
+// DirAbsDeclr ::= ("(" AbsDeclr ")")? DeclrSuf*
+static Type *abstract_declarator(Token **rest, Token *tok, Type *ty) {
+    while (match(&tok, tok, TK_STAR)) ty = pointer_to(ty);
+
+    if (tok->kind == TK_LPAREN) {
+        Token *start = tok;
+        Type dummy = {};
+        abstract_declarator(&tok, start->next, &dummy);
+        tok = skip(tok, TK_RPAREN);
+        ty = decl_suffix(rest, tok, ty);
+        return abstract_declarator(&tok, start->next, ty);
+    }
+
+    return decl_suffix(rest, tok, ty);
+}
+
+// TypeName ::= DeclSpecs AbsDeclr?
+static Type *typename(Token **rest, Token *tok) {
+    Type *ty = declspecs(&tok, tok, NULL);
+    return abstract_declarator(rest, tok, ty);
+}
+
 // Init ::= AsExp
 static Node *initializer(Token **rest, Token *tok) { return assign(rest, tok); }
 
@@ -354,7 +384,7 @@ static Node *postfix(Token **rest, Token *tok) {
     return node;
 }
 
-// UnaryExp ::= PostExp | UnaryOp UnaryExp
+// UnaryExp ::= PostExp | UnaryOp UnaryExp | "sizeof" "(" TypeName ")"
 // UnaryOp  ::= "+" | "-" | "~" | "!" | "&" | "*" | "sizeof"
 static Node *unary(Token **rest, Token *tok) {
     switch (tok->kind) {
@@ -379,6 +409,12 @@ static Node *unary(Token **rest, Token *tok) {
             return node;
         }
         case TK_SIZEOF: {
+            if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, 1)) {
+                Token *start = tok;
+                Type *ty = typename(&tok, tok->next->next);
+                *rest = skip(tok, TK_RPAREN);
+                return new_num(ty->size, start);
+            }
             Node *node = unary(rest, tok->next);
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
@@ -571,12 +607,6 @@ static Node *stmt(Token **rest, Token *tok) {
     }
 }
 
-// Returns true if a given token represents a type.
-static bool is_typename(Token *tok, bool search_par) {
-    if (TK_INLINE <= tok->kind && tok->kind <= TK_ALIGNAS) return true;
-    return find_typedef(tok, search_par);
-}
-
 // CompStmt  ::= "{" BlockItem* "}"
 // BlockItem ::= Stmt | Decl
 static Node *compound_stmt(Token **rest, Token *tok) {
@@ -730,7 +760,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
                 Type *orig = find_typedef(tok, *sclass != SC_TYPEDEF);
                 if (orig) {
                     if (typespec_cnt)
-                        error(tok->loc, "redefinition of '%.*s' as different kind of symbol", tok->len, tok->loc);
+                        error(tok->loc, "'%.*s' redeclared as different kind of symbol", tok->len, tok->loc);
                     ty = orig;
                     typespec_cnt += OTHER;
                     break;
