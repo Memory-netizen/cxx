@@ -47,7 +47,7 @@ DoStmt      ::= "do" Stmt "while" "(" Exp ")" ";"
 Exp         ::= AsExp ("," AsExp)*
 AsExp       ::= BOrExp ("=" AsExp)?
 
-MulExp      ::= UnaryExp (("*" | "/" | "%") UnaryExp)*
+MulExp      ::= CastExp (("*" | "/" | "%") CastExp)*
 AddExp      ::= MulExp   (("+" | "-") MulExp)*
 ShiftExp    ::= AddExp   (("<<" | ">>") AddExp)*
 RelExp      ::= ShiftExp (("<" | ">" | "<=" | ">=") ShiftExp)*
@@ -56,8 +56,9 @@ BAndExp     ::= EqExp    ("&" EqExp)*
 XorExp      ::= BAndExp  ("^" BAndExp)*
 BOrExp      ::= XorExp   ("|" XorExp)*
 
-UnaryExp    ::= PostExp | UnaryOp UnaryExp | "sizeof" "(" TypeName ")"
-UnaryOp     ::= "+" | "-" | "~" | "!" | "&" | "*" | "sizeof"
+CastExp     ::= UnaryExp | "(" TypeName ")" CastExp
+UnaryExp    ::= PostExp | UnaryOP CastExp | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
+UnaryOp     ::= "+" | "-" | "~" | "!" | "&" | "*"
 
 PostExp     ::= PrimExp PostFix*
 PostFix     ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident

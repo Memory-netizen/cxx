@@ -18,7 +18,7 @@ bool is_integer(Type *ty) {
            ty->kind == TY_CHAR || ty->kind == TY_I64 || ty->kind == TY_I1;
 }
 
-bool is_pointer(Type *ty) { return ty->base != NULL; }
+bool is_pointer(Type *ty) { return ty->kind == TY_PTR; }
 
 Type *copy_type(Type *ty) {
     Type *ret = emalloc(sizeof(Type));
@@ -131,12 +131,9 @@ void add_type(Node *node) {
             node->ty = node->member->ty;
             break;
         case ND_IMCAST:
-            add_type(node->lhs);
-            break;
         case ND_EXCAST:
-            add_type(node->lhs);
-            break;
         case ND_RETURN:
+        case ND_EXPR_STMT:
             add_type(node->lhs);
             break;
         case ND_IF:
@@ -147,12 +144,6 @@ void add_type(Node *node) {
             add_type(node->cond);
             add_type(node->then);
             add_type(node->els);
-            break;
-        case ND_EXPR_STMT:
-            if (node->lhs) {
-                add_type(node->lhs);
-                node->ty = node->lhs->ty;
-            }
             break;
         case ND_DECL:
         case ND_COMP_STMT:

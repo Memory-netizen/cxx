@@ -8,6 +8,7 @@ static Node *stmt(Token **rest, Token *tok);
 static Node *compound_stmt(Token **rest, Token *tok);
 static Node *expr(Token **rest, Token *tok);
 static Node *assign(Token **rest, Token *tok);
+static Node *cast(Token **rest, Token *tok);
 
 static Node *new_node(NodeKind kind, Token *tok) {
     Node *node = emalloc(sizeof(Node));
@@ -42,8 +43,17 @@ static Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
     return node;
 }
 
-static Node *new_imcast(Type *ty, Node *expr) {
+static Node *new_imcast(Node *expr, Type *ty) {
+    add_type(expr);
     Node *node = new_node(ND_IMCAST, expr->tok);
+    node->lhs = expr;
+    node->ty = ty;
+    return node;
+}
+
+static Node *new_excast(Node *expr, Type *ty) {
+    add_type(expr);
+    Node *node = new_node(ND_EXCAST, expr->tok);
     node->lhs = expr;
     node->ty = ty;
     return node;
@@ -233,8 +243,8 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
     // ptr - ptr, which returns how many elements are between the two.
     if (lhs->ty->base && rhs->ty->base) {
         size_t size = lhs->ty->base->size;
-        lhs = new_imcast(ty_i64, lhs);
-        rhs = new_imcast(ty_i64, rhs);
+        lhs = new_imcast(lhs, ty_i64);
+        rhs = new_imcast(rhs, ty_i64);
         Node *node = new_binary(ND_SUB, lhs, rhs, tok);
         node->ty = ty_i64;
         return new_binary(ND_DIV, node, new_num(size, tok), tok);
@@ -349,7 +359,7 @@ static Node *postfix(Token **rest, Token *tok) {
     Node *node = primary(&tok, tok);
     while (1) {
         add_type(node);
-        if (node->ty->kind == TY_ARRAY) node = new_imcast(pointer_to(node->ty->base), node);
+        if (node->ty->kind == TY_ARRAY) node = new_imcast(node, pointer_to(node->ty->base));
         switch (tok->kind) {
                 // x[y] is short for *(x+y)
             case TK_LBRACKET: {
@@ -384,28 +394,28 @@ static Node *postfix(Token **rest, Token *tok) {
     return node;
 }
 
-// UnaryExp ::= PostExp | UnaryOp UnaryExp | "sizeof" "(" TypeName ")"
-// UnaryOp  ::= "+" | "-" | "~" | "!" | "&" | "*" | "sizeof"
+// UnaryExp ::= PostExp | UnaryOP CastExp | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
+// UnaryOp  ::= "+" | "-" | "~" | "!" | "&" | "*"
 static Node *unary(Token **rest, Token *tok) {
     switch (tok->kind) {
         case TK_PLUS:
-            return new_unary(ND_PLUS, unary(rest, tok->next), tok);
+            return new_unary(ND_PLUS, cast(rest, tok->next), tok);
         case TK_MINUS:
-            return new_unary(ND_NEG, unary(rest, tok->next), tok);
+            return new_unary(ND_NEG, cast(rest, tok->next), tok);
         case TK_INVERT:
-            return new_unary(ND_INVERT, unary(rest, tok->next), tok);
+            return new_unary(ND_INVERT, cast(rest, tok->next), tok);
         case TK_NOT:
-            return new_unary(ND_NOT, unary(rest, tok->next), tok);
+            return new_unary(ND_NOT, cast(rest, tok->next), tok);
         case TK_BAND: {
-            Node *node = unary(rest, tok->next);
+            Node *node = cast(rest, tok->next);
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
             return new_unary(ND_ADDR, node, tok);
         }
         case TK_STAR: {
-            Node *node = new_unary(ND_DEREF, unary(rest, tok->next), tok);
+            Node *node = new_unary(ND_DEREF, cast(rest, tok->next), tok);
             add_type(node);
-            if (node->ty->kind == TY_ARRAY) node = new_imcast(pointer_to(node->ty->base), node);
+            if (node->ty->kind == TY_ARRAY) node = new_imcast(node, pointer_to(node->ty->base));
             return node;
         }
         case TK_SIZEOF: {
@@ -426,7 +436,21 @@ static Node *unary(Token **rest, Token *tok) {
     return postfix(rest, tok);
 }
 
-// MulExp   ::= UnaryExp (("*" | "/" | "%") UnaryExp)*
+// CastExp ::= UnaryExp | "(" TypeName ")" CastExp
+static Node *cast(Token **rest, Token *tok) {
+    if (tok->kind == TK_LPAREN && is_typename(tok->next, 1)) {
+        Token *start = tok;
+        Type *ty = typename(&tok, tok->next);
+        tok = skip(tok, TK_RPAREN);
+        Node *node = new_excast(cast(rest, tok), ty);
+        node->tok = start;
+        return node;
+    }
+
+    return unary(rest, tok);
+}
+
+// MulExp   ::= CastExp (("*" | "/" | "%") CastExp)*
 // AddExp   ::= MulExp   (("+" | "-") MulExp)*
 // ShiftExp ::= AddExp   (("<<" | ">>") AddExp)*
 // RelExp   ::= ShiftExp (("<" | ">" | "<=" | ">=") ShiftExp)*
@@ -442,7 +466,7 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
         [TK_MINUS] = {100, ND_SUB}, [TK_STAR] = {110, ND_MUL}, [TK_SLASH] = {110, ND_DIV},  [TK_MOD] = {110, ND_MOD},
     };
 
-    Node *lhs = unary(&tok, tok);
+    Node *lhs = cast(&tok, tok);
     add_type(lhs);
 
     while (TK_BOR <= tok->kind && tok->kind <= TK_MOD) {
