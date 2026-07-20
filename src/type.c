@@ -160,7 +160,7 @@ void add_type(Node *node) {
             break;
         // other
         case ND_FUNCALL:
-            node->ty = ty_int;
+            // Nothing to do
             break;
         case ND_STMT_EXPR:
             if (node->body) {
