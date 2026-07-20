@@ -66,16 +66,19 @@ static Node *new_excast(Node *expr, Type *ty) {
     return node;
 }
 
-// Scope for local, global variables or typedefs.
+// Scope for local variables, global variables, typedefs
+// or enum constants
 typedef struct VarScope VarScope;
 struct VarScope {
     VarScope *next;
     uint32_t id;
     Sym *var;
     Type *type_def;
+    Type *enum_ty;
+    int enum_val;
 };
 
-// Scope for struct or union tags
+// Scope for struct, union or enum tags
 typedef struct TagScope TagScope;
 struct TagScope {
     TagScope *next;
@@ -87,6 +90,9 @@ struct TagScope {
 typedef struct Scope Scope;
 struct Scope {
     Scope *next;
+
+    // C has two block scopes; one is for variables/typedefs and
+    // the other is for struct/union/enum tags.
     VarScope *vars;
     TagScope *tags;
 };
@@ -356,10 +362,16 @@ static Node *primary(Token **rest, Token *tok) {
         *rest = tok->next;
         return new_var_node(var, tok);
     } else if (tok->kind == TK_IDENT) {
+        // Function call
         if (tok->next->kind == TK_LPAREN) return fncall(rest, tok);
+        // Variable or enum constant
         VarScope *sc = find_var(tok, 1);
-        if (!sc || !sc->var) error(tok->loc, "use of undeclared identifier ‘%.*s’", tok->len, tok->loc);
-        node = new_var_node(sc->var, tok);
+        if (!sc || (!sc->var && !sc->enum_ty))
+            error(tok->loc, "use of undeclared identifier ‘%.*s’", tok->len, tok->loc);
+        if (sc->var)
+            node = new_var_node(sc->var, tok);
+        else
+            node = new_num(sc->enum_val, tok);
     } else {
         error(tok->loc, "expected expression");
         node = NULL;
@@ -701,6 +713,55 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     return node;
 }
 
+// EnumSpec ::= "enum" Ident? "{" Enumr ("," Enumr)* ","? "}"
+//            | "enum" Ident
+// Enumr    ::= Ident ("=" Num)?
+static Type *enum_decl(Token **rest, Token *tok) {
+    Type *ty = enum_type();
+    tok = tok->next;
+    // Read a enum tag.
+    Token *tag = NULL;
+    if (tok->kind == TK_IDENT) {
+        tag = tok;
+        tok = tok->next;
+    }
+
+    if (tag && tok->kind != TK_LBRACE) {
+        Type *ty = find_tag(tag, 1);
+        if (!ty) error(tag->loc, "unknown enum type");
+        if (ty->kind != TY_ENUM) error(tag->loc, "not an enum tag");
+        *rest = tok;
+        return ty;
+    }
+
+    tok = skip(tok, TK_LBRACE);
+
+    // Read an enum-list.
+    int i = 0;
+    int val = 0;
+    while (tok->kind != TK_RBRACE) {
+        if (i++ > 0) tok = skip(tok, TK_COMMA);
+
+        uint32_t name = get_ident(tok);
+        tok = tok->next;
+
+        if (tok->kind == TK_AS) {
+            val = get_number(tok->next);
+            tok = tok->next->next;
+        }
+
+        VarScope *sc = push_scope(name);
+        sc->enum_ty = ty;
+        sc->enum_val = val++;
+    }
+
+    *rest = tok->next;
+
+    if (tag) push_tag_scope(tag->id, ty);
+
+    return ty;
+}
+
 // MemDecl  ::= TypeSpec+ (MemDeclr ("," MemDeclr)*)? ";"
 // MemDeclr ::= Declr
 static void struct_members(Token **rest, Token *tok, Type *ty) {
@@ -793,7 +854,10 @@ static Type *record_decl(Token **rest, Token *tok) {
 // DeclSpecs ::= DeclSpec+
 // DeclSpec  ::= SCSpec | TypeSpec
 // SCSpec    ::= "typedef"
-// TypeSpec  ::= "void" | "_Bool" | "char" | "short" | "int" | "long" | RecordSpec | TypedefName
+// TypeSpec  ::= "void" | "_Bool" | "char" | "short" | "int" | "long"
+//            | RecordSpec
+//            | EnumSpec
+//            | TypedefName
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
     Type *ty = ty_int;
     int typespec_cnt = 0;
@@ -835,6 +899,10 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
             case TK_STRUCT:
             case TK_UNION:
                 ty = record_decl(&tok, tok);
+                typespec_cnt += OTHER;
+                goto check_type;
+            case TK_ENUM:
+                ty = enum_decl(&tok, tok);
                 typespec_cnt += OTHER;
                 goto check_type;
             case TK_VOID:

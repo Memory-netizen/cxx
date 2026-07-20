@@ -16,7 +16,7 @@ Type *ty_i64 = TYPE(TY_I64, 8, 8);
 
 bool is_integer(Type *ty) {
     return ty->kind == TY_BOOL || ty->kind == TY_INT || ty->kind == TY_SHORT || ty->kind == TY_LLONG ||
-           ty->kind == TY_LONG || ty->kind == TY_CHAR || ty->kind == TY_I64 || ty->kind == TY_I1;
+           ty->kind == TY_LONG || ty->kind == TY_ENUM || ty->kind == TY_CHAR || ty->kind == TY_I64 || ty->kind == TY_I1;
 }
 
 bool is_pointer(Type *ty) { return ty->kind == TY_PTR; }
@@ -55,6 +55,15 @@ Type *array_of(Type *base, int len) {
     ty->next = NULL;
     ty->base = base;
     ty->len = len;
+    return ty;
+}
+
+Type *enum_type(void) {
+    Type *ty = emalloc(sizeof(Type));
+    memset(ty, 0, sizeof(Type));
+    ty->kind = TY_ENUM;
+    ty->size = 4;
+    ty->align = 4;
     return ty;
 }
 

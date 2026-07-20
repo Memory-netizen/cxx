@@ -17,7 +17,10 @@ ParamDecl   ::= DeclSpecs Declr
 DeclSpecs   ::= DeclSpec+
 DeclSpec    ::= SCSpec | TypeSpec
 SCSpec      ::= "typedef"
-TypeSpec    ::= "void" | "_Bool" | "char" | "short" | "int" | "long" | RecordSpec | TypedefName
+TypeSpec    ::= "void" | "_Bool" | "char" | "short" | "int" | "long"
+            | RecordSpec
+            | EnumSpec
+            | TypedefName
 TypedefName ::= Ident
 
 TypeName    ::= DeclSpecs AbsDeclr?
@@ -27,6 +30,10 @@ DirAbsDeclr ::= ("(" AbsDeclr ")")? DeclrSuf*
 RecordSpec  ::= Record Ident ("{" MemDecl+ "}")? | Record "{" MemDecl+ "}"
 MemDecl     ::= TypeSpec+ (MemDeclr ("," MemDeclr)*)? ";"
 MemDeclr    ::= Declr
+
+EnumSpec    ::= "enum" Ident? "{" Enumr ("," Enumr)* ","? "}"
+            | "enum" Ident
+Enumr       ::= Ident ("=" Num)?
 
 CompStmt    ::= "{" BlockItem* "}"
 BlockItem   ::= Stmt | Decl
