@@ -31,6 +31,7 @@ typedef struct Member Member;
 
 extern SrcFile *cur_file;
 extern Type *ty_void;
+extern Type *ty_bool;
 extern Type *ty_char;
 extern Type *ty_short;
 extern Type *ty_int;
@@ -339,6 +340,7 @@ typedef enum {
     TY_I1,
     TY_I64,
     TY_CHAR,
+    TY_BOOL,
     TY_SHORT,
     TY_INT,
     TY_LONG,

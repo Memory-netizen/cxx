@@ -793,18 +793,19 @@ static Type *record_decl(Token **rest, Token *tok) {
 // DeclSpecs ::= DeclSpec+
 // DeclSpec  ::= SCSpec | TypeSpec
 // SCSpec    ::= "typedef"
-// TypeSpec  ::= "void" | "char" | "short" | "int" | "long" | RecordSpec | TypedefName
+// TypeSpec  ::= "void" | "_Bool" | "char" | "short" | "int" | "long" | RecordSpec | TypedefName
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
     Type *ty = ty_int;
     int typespec_cnt = 0;
     enum {
         NONE,
         VOID = 1 << 0,
-        CHAR = 1 << 2,
-        SHORT = 1 << 4,
-        INT = 1 << 6,
-        LONG = 1 << 8,
-        OTHER = 1 << 10,
+        BOOL = 1 << 2,
+        CHAR = 1 << 4,
+        SHORT = 1 << 6,
+        INT = 1 << 8,
+        LONG = 1 << 10,
+        OTHER = 1 << 12,
     };
 
     while (is_typename(tok, 1)) {
@@ -839,6 +840,9 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
             case TK_VOID:
                 typespec_cnt += VOID;
                 break;
+            case TK_BOOL:
+                typespec_cnt += BOOL;
+                break;
             case TK_CHAR:
                 typespec_cnt += CHAR;
                 break;
@@ -859,6 +863,9 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
         switch (typespec_cnt) {
             case VOID:
                 ty = ty_void;
+                break;
+            case BOOL:
+                ty = ty_bool;
                 break;
             case CHAR:
                 ty = ty_char;

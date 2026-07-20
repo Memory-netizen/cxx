@@ -17,7 +17,7 @@ ParamDecl   ::= DeclSpecs Declr
 DeclSpecs   ::= DeclSpec+
 DeclSpec    ::= SCSpec | TypeSpec
 SCSpec      ::= "typedef"
-TypeSpec    ::= "void" | "char" | "short" | "int" | "long" | RecordSpec | TypedefName
+TypeSpec    ::= "void" | "_Bool" | "char" | "short" | "int" | "long" | RecordSpec | TypedefName
 TypedefName ::= Ident
 
 TypeName    ::= DeclSpecs AbsDeclr?

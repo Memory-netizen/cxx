@@ -85,26 +85,35 @@ static Ref convert(Node *node) {
         new_ins(IR_GEP, dst, (Ref[]){addr, LONG(0)}, 2);
         return dst;
     }
-    Ref ops[1] = {gen_expr(node->lhs)};
+
+    Ref val = gen_expr(node->lhs);
+    if (node->ty->kind == TY_BOOL) {
+        Ref tmp = TMP(tmp_id++, ty_i1);
+        new_ins(IR_CMP_NE, tmp, (Ref[]){val, INT(0)}, 2);
+
+        Ref dst = TMP(tmp_id++, node->ty);
+        new_ins(IR_ZEXT, dst, (Ref[]){tmp}, 1);
+        return dst;
+    }
     if (is_pointer(node->lhs->ty) && is_integer(node->ty)) {
         Ref dst = TMP(tmp_id++, node->ty);
-        new_ins(IR_PTRTOINT, dst, ops, 1);
+        new_ins(IR_PTRTOINT, dst, (Ref[]){val}, 1);
         return dst;
     }
     if (is_integer(node->lhs->ty) && is_pointer(node->ty)) {
         Ref dst = TMP(tmp_id++, node->ty);
-        new_ins(IR_INTTOPTR, dst, ops, 1);
+        new_ins(IR_INTTOPTR, dst, (Ref[]){val}, 1);
         return dst;
     }
     if (node->ty->kind == TY_VOID || node->ty->size == node->lhs->ty->size) {
-        ops[0].ty = node->ty;
-        return ops[0];
+        val.ty = node->ty;
+        return val;
     }
     Ref dst = TMP(tmp_id++, node->ty);
     if (node->ty->size > node->lhs->ty->size)
-        new_ins(IR_SEXT, dst, ops, 1);
+        new_ins(IR_SEXT, dst, (Ref[]){val}, 1);
     else
-        new_ins(IR_TRUNC, dst, ops, 1);
+        new_ins(IR_TRUNC, dst, (Ref[]){val}, 1);
     return dst;
 }
 
@@ -480,8 +489,8 @@ static const char *op_str[] = {
 };
 
 static const char *ty_str[] = {
-    [TY_VOID] = "void", [TY_I1] = "i1",    [TY_I64] = "i64",   [TY_CHAR] = "i8", [TY_SHORT] = "i16",
-    [TY_INT] = "i32",   [TY_LONG] = "i64", [TY_LLONG] = "i64", [TY_PTR] = "ptr",
+    [TY_VOID] = "void", [TY_I1] = "i1",   [TY_I64] = "i64",  [TY_BOOL] = "i8",   [TY_CHAR] = "i8",
+    [TY_SHORT] = "i16", [TY_INT] = "i32", [TY_LONG] = "i64", [TY_LLONG] = "i64", [TY_PTR] = "ptr",
 };
 
 static void print_type(Type *ty) {

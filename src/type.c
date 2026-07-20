@@ -3,6 +3,7 @@
 #define TYPE(kind, size, align) &(Type){kind, size, align, 0, 0, NULL, NULL, NULL, {0}};
 
 Type *ty_void = TYPE(TY_VOID, 1, 1);
+Type *ty_bool = TYPE(TY_BOOL, 1, 1);
 Type *ty_char = TYPE(TY_CHAR, 1, 1);
 Type *ty_short = TYPE(TY_SHORT, 2, 2);
 Type *ty_int = TYPE(TY_INT, 4, 4);
@@ -14,8 +15,8 @@ Type *ty_i64 = TYPE(TY_I64, 8, 8);
 #undef TYPE
 
 bool is_integer(Type *ty) {
-    return ty->kind == TY_INT || ty->kind == TY_SHORT || ty->kind == TY_LLONG || ty->kind == TY_LONG ||
-           ty->kind == TY_CHAR || ty->kind == TY_I64 || ty->kind == TY_I1;
+    return ty->kind == TY_BOOL || ty->kind == TY_INT || ty->kind == TY_SHORT || ty->kind == TY_LLONG ||
+           ty->kind == TY_LONG || ty->kind == TY_CHAR || ty->kind == TY_I64 || ty->kind == TY_I1;
 }
 
 bool is_pointer(Type *ty) { return ty->kind == TY_PTR; }
