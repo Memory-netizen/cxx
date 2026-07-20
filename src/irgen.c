@@ -68,6 +68,7 @@ static Ref gen_addr(Node *node) {
         }
         default:
     }
+    printf("error\n");
     exit(1);
 }
 
@@ -81,7 +82,7 @@ static Ref convert(Node *node) {
     if (node->lhs->ty->kind == TY_ARRAY && is_pointer(node->ty)) {
         Ref addr = gen_addr(node->lhs);
         Ref dst = TMP(tmp_id++, node->ty);
-        new_ins(IR_GEP, dst, (Ref[]){addr, INT(0)}, 2);
+        new_ins(IR_GEP, dst, (Ref[]){addr, LONG(0)}, 2);
         return dst;
     }
     Ref ops[1] = {gen_expr(node->lhs)};
@@ -112,7 +113,10 @@ static Ref gen_expr(Node *node) {
     Ref dst;
     switch (node->kind) {
         case ND_NUM:
-            return INT(node->val);
+            if (node->ty->size == 4)
+                return INT(node->val);
+            else
+                return LONG(node->val);
         case ND_STMT_EXPR:
             for (Node *n = node->body; n; n = n->next) dst = gen_stmt(n);
             return dst;
@@ -185,19 +189,10 @@ static Ref gen_expr(Node *node) {
     if (node->kind == ND_COMMA) return rr;
 
     switch (node->kind) {
-        case ND_PTRADD: {
-            Ref sext_reg;
-            if (node->rhs->kind == ND_NUM) {
-                sext_reg = INT(rr.val);
-                sext_reg.ty = ty_i64;
-            } else {
-                sext_reg = TMP(tmp_id++, ty_i64);
-                new_ins(IR_SEXT, sext_reg, (Ref[]){rr}, 1);
-            }
+        case ND_PTRADD:
             dst = TMP(tmp_id++, node->ty);
-            new_ins(IR_GEP, dst, (Ref[]){lr, sext_reg}, 2);
+            new_ins(IR_GEP, dst, (Ref[]){lr, rr}, 2);
             return dst;
-        }
         // binary and bit arithmetic operation
         case ND_ADD:
         case ND_SUB:

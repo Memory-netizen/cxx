@@ -326,6 +326,7 @@ struct Node {
     };
 };
 
+Node *new_imcast(Node *expr, Type *ty);
 Module *parse(Token *tok);
 
 //
@@ -459,6 +460,8 @@ enum {
     (Ref) { RSlot, x, ty }
 #define INT(x) \
     (Ref) { RInt, x, ty_int }
+#define LONG(x) \
+    (Ref) { RInt, x, ty_long }
 #define GLB(x, ty) \
     (Ref) { RGlb, x, ty }
 

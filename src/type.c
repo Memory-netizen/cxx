@@ -57,56 +57,44 @@ Type *array_of(Type *base, int len) {
     return ty;
 }
 
+static Type *get_common_type(Type *ty1, Type *ty2) {
+    if (ty1->base) return pointer_to(ty1->base);
+    if (ty1->size == 8 || ty2->size == 8) return ty_long;
+    return ty_int;
+}
+
+static void integer_promotion(Node **expr) {
+    Type *ty = get_common_type((*expr)->ty, ty_int);
+    *expr = new_imcast(*expr, ty);
+}
+
+static void usual_arith_conv(Node **lhs, Node **rhs) {
+    Type *ty = get_common_type((*lhs)->ty, (*rhs)->ty);
+    *lhs = new_imcast(*lhs, ty);
+    *rhs = new_imcast(*rhs, ty);
+}
+
 void add_type(Node *node) {
     if (!node || node->ty) return;
     switch (node->kind) {
-        case ND_FUNCALL:
-            node->ty = ty_int;
+        case ND_NUM:
+            node->ty = (node->val == (int)node->val) ? ty_int : ty_long;
             break;
-        case ND_COMMA:
-            add_type(node->lhs);
-            add_type(node->rhs);
-            node->ty = node->rhs->ty;
+        case ND_VAR:
+            node->ty = node->var->ty;
             break;
-        case ND_AS:
-        case ND_BOR:
-        case ND_XOR:
-        case ND_BAND:
-        case ND_LEFT:
-        case ND_RIGHT:
-        case ND_ADD:
-        case ND_SUB:
-        case ND_MUL:
-        case ND_DIV:
-        case ND_MOD:
-        case ND_PTRADD:
-            add_type(node->lhs);
-            add_type(node->rhs);
-            node->ty = node->lhs->ty;
-            break;
+
+        // unary
         case ND_PLUS:
         case ND_NEG:
         case ND_INVERT:
             add_type(node->lhs);
+            integer_promotion(&node->lhs);
             node->ty = node->lhs->ty;
             break;
         case ND_NOT:
             add_type(node->lhs);
             node->ty = ty_int;
-            break;
-        case ND_EQ:
-        case ND_NE:
-        case ND_LT:
-        case ND_LE:
-            add_type(node->lhs);
-            add_type(node->rhs);
-            node->ty = ty_int;
-            break;
-        case ND_NUM:
-            node->ty = ty_int;
-            break;
-        case ND_VAR:
-            node->ty = node->var->ty;
             break;
         case ND_ADDR:
             add_type(node->lhs);
@@ -117,18 +105,69 @@ void add_type(Node *node) {
             if (!is_pointer(node->lhs->ty)) exit(1);
             node->ty = node->lhs->ty->base;
             break;
+        case ND_MEMBER:
+            node->ty = node->member->ty;
+            break;
+        // binary
+        case ND_ADD:
+        case ND_SUB:
+        case ND_MUL:
+        case ND_DIV:
+        case ND_MOD:
+        case ND_BOR:
+        case ND_XOR:
+        case ND_BAND:
+            add_type(node->lhs);
+            add_type(node->rhs);
+            usual_arith_conv(&node->lhs, &node->rhs);
+            node->ty = node->lhs->ty;
+            break;
+        case ND_PTRADD:
+            add_type(node->lhs);
+            add_type(node->rhs);
+            node->rhs = new_imcast(node->rhs, ty_long);
+            node->ty = node->lhs->ty;
+            break;
+        case ND_LEFT:
+        case ND_RIGHT:
+            add_type(node->lhs);
+            add_type(node->rhs);
+            integer_promotion(&node->lhs);
+            integer_promotion(&node->rhs);
+            node->ty = node->lhs->ty;
+            break;
+        case ND_EQ:
+        case ND_NE:
+        case ND_LT:
+        case ND_LE:
+            add_type(node->lhs);
+            add_type(node->rhs);
+            usual_arith_conv(&node->lhs, &node->rhs);
+            node->ty = ty_int;
+            break;
+        case ND_AS:
+            add_type(node->lhs);
+            add_type(node->rhs);
+            if (node->lhs->ty->kind == TY_ARRAY) error(node->lhs->tok->loc, "not an lvalue");
+            if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION)
+                node->rhs = new_imcast(node->rhs, node->lhs->ty);
+            node->ty = node->lhs->ty;
+            break;
+        case ND_COMMA:
+            add_type(node->lhs);
+            add_type(node->rhs);
+            node->ty = node->rhs->ty;
+            break;
+        // other
+        case ND_FUNCALL:
+            node->ty = ty_int;
+            break;
         case ND_STMT_EXPR:
             if (node->body) {
                 Node *stmt = node->body;
                 while (stmt->next) stmt = stmt->next;
-                if (stmt->kind == ND_EXPR_STMT && stmt->lhs) {
-                    node->ty = stmt->lhs->ty;
-                    return;
-                }
+                if (stmt->kind == ND_EXPR_STMT && stmt->lhs) node->ty = stmt->lhs->ty;
             }
-            break;
-        case ND_MEMBER:
-            node->ty = node->member->ty;
             break;
         case ND_IMCAST:
         case ND_EXCAST:

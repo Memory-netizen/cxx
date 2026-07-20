@@ -24,6 +24,13 @@ static Node *new_num(int64_t val, Token *tok) {
     return node;
 }
 
+static Node *new_long(int64_t val, Token *tok) {
+    Node *node = new_node(ND_NUM, tok);
+    node->val = val;
+    node->ty = ty_long;
+    return node;
+}
+
 static Node *new_var_node(Sym *var, Token *tok) {
     Node *node = new_node(ND_VAR, tok);
     node->var = var;
@@ -43,7 +50,7 @@ static Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
     return node;
 }
 
-static Node *new_imcast(Node *expr, Type *ty) {
+Node *new_imcast(Node *expr, Type *ty) {
     add_type(expr);
     Node *node = new_node(ND_IMCAST, expr->tok);
     node->lhs = expr;
@@ -217,7 +224,7 @@ static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
     // num + num
     if (is_integer(lhs->ty) && is_integer(rhs->ty)) return new_binary(ND_ADD, lhs, rhs, tok);
 
-    if (lhs->ty->base && rhs->ty->base) exit(1);
+    if (lhs->ty->base && rhs->ty->base) error(tok->loc, "invalid operands to binary expression");
 
     // Canonicalize `num + ptr` to `ptr + num`.
     if (!lhs->ty->base && rhs->ty->base) swap(&lhs, &rhs);
@@ -234,20 +241,15 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
     if (is_integer(lhs->ty) && is_integer(rhs->ty)) return new_binary(ND_SUB, lhs, rhs, tok);
 
     // ptr - num
-    if (lhs->ty->base && is_integer(rhs->ty)) {
-        Node *node = new_binary(ND_PTRADD, lhs, new_unary(ND_NEG, rhs, rhs->tok), tok);
-        add_type(node);
-        return node;
-    }
+    if (lhs->ty->base && is_integer(rhs->ty)) return new_binary(ND_PTRADD, lhs, new_unary(ND_NEG, rhs, rhs->tok), tok);
 
     // ptr - ptr, which returns how many elements are between the two.
     if (lhs->ty->base && rhs->ty->base) {
         size_t size = lhs->ty->base->size;
-        lhs = new_imcast(lhs, ty_i64);
-        rhs = new_imcast(rhs, ty_i64);
+        lhs = new_imcast(lhs, ty_long);
+        rhs = new_imcast(rhs, ty_long);
         Node *node = new_binary(ND_SUB, lhs, rhs, tok);
-        node->ty = ty_i64;
-        return new_binary(ND_DIV, node, new_num(size, tok), tok);
+        return new_binary(ND_DIV, node, new_long(size, tok), tok);
     }
     return NULL;
 }
@@ -382,7 +384,7 @@ static Node *postfix(Token **rest, Token *tok) {
                 mem->next = NULL;
                 node = new_unary(ND_MEMBER, node, tok->next);
                 node->member = mem;
-                node->ty = mem->ty;
+                //  node->ty = mem->ty;
                 continue;
             }
             default:
