@@ -16,7 +16,7 @@ ParamDecl   ::= DeclSpecs Declr
 
 DeclSpecs   ::= DeclSpec+
 DeclSpec    ::= SCSpec | TypeSpec
-SCSpec      ::= "typedef"
+SCSpec      ::= "typedef" | "static"
 TypeSpec    ::= "void" | "_Bool" | "char" | "short" | "int" | "long"
             | RecordSpec
             | EnumSpec

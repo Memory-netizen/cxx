@@ -210,6 +210,7 @@ typedef enum {
     SC_TYPEDEF,
     SC_EXTERN,
     SC_STATIC,
+    SC_THREAD,
     SC_REG,
 } SClass;
 
@@ -227,6 +228,7 @@ struct Sym {
     bool is_function;
     bool is_definition;
     bool is_str;
+    SClass sclass;
 
     // Global variable
     uint32_t init_data;

@@ -692,8 +692,15 @@ void dump_data(Sym *data) {
 void dump_fn(Sym *fn) {
     if (!fn->is_definition) return;
     fprintf(out_file, "define ");
+
+    if (fn->sclass == SC_STATIC)
+        fprintf(out_file, "internal ");
+    else
+        fprintf(out_file, "dso_local ");
+
     print_type(fn->ty->ret);
     fprintf(out_file, " @%s(", str(fn->id));
+
     Sym *var = fn->locals;
     for (uint32_t i = 0; i < fn->nparam; i++) {
         print_type(var->ty);

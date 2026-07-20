@@ -3,7 +3,7 @@
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass);
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
-static Node *declaration(Token **rest, Token *tok, Type *ty);
+static Node *declaration(Token **rest, Token *tok, Type *ty, SClass sclass);
 static Node *stmt(Token **rest, Token *tok);
 static Node *compound_stmt(Token **rest, Token *tok);
 static Node *expr(Token **rest, Token *tok);
@@ -698,7 +698,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
                 Type *ty = declarator(&tok, tok, basety);
                 push_scope(get_ident(ty->name))->type_def = ty;
             } else {
-                cur = cur->next = declaration(&tok, tok, basety);
+                cur = cur->next = declaration(&tok, tok, basety, sclass);
             }
         } else {
             cur = cur->next = stmt(&tok, tok);
@@ -853,7 +853,7 @@ static Type *record_decl(Token **rest, Token *tok) {
 
 // DeclSpecs ::= DeclSpec+
 // DeclSpec  ::= SCSpec | TypeSpec
-// SCSpec    ::= "typedef"
+// SCSpec    ::= "typedef" | "static"
 // TypeSpec  ::= "void" | "_Bool" | "char" | "short" | "int" | "long"
 //            | RecordSpec
 //            | EnumSpec
@@ -872,19 +872,31 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
         OTHER = 1 << 12,
     };
 
+    static const SClass sc_table[] = {
+        [TK_EXTERN] = SC_EXTERN, [TK_REGISTER] = SC_REG,    [TK_STATIC] = SC_STATIC,
+        [TK_THREAD] = SC_THREAD, [TK_TYPEDEF] = SC_TYPEDEF,
+    };
+
     while (is_typename(tok, 1)) {
         Token *ty_tok = tok;
         switch (tok->kind) {
             case TK_TYPEDEF:
+            case TK_STATIC:
+            case TK_EXTERN:
+            case TK_THREAD:
+            case TK_REGISTER:
+            case TK_CONSTEXPR: {
+                SClass sc = sc_table[tok->kind];
                 if (!sclass) error(tok->loc, "storage class specifier is not allowed in this context");
                 if (*sclass) {
-                    if (*sclass == SC_TYPEDEF)
-                        error(tok->loc, "duplicate ‘typedef’");
+                    if (*sclass == sc)
+                        error(tok->loc, "duplicate ‘%.*s’", tok->len, tok->loc);
                     else
                         error(tok->loc, "multiple storage classes in declaration specifiers");
                 };
-                *sclass = SC_TYPEDEF;
+                *sclass = sc;
                 break;
+            }
             case TK_IDENT: {
                 Type *orig = find_typedef(tok, *sclass != SC_TYPEDEF);
                 if (orig) {
@@ -1025,7 +1037,7 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
 }
 
 // Decl ::= DeclSpecs (InitDeclr ("," InitDeclr)*)? ";"
-static Node *declaration(Token **rest, Token *tok, Type *basety) {
+static Node *declaration(Token **rest, Token *tok, Type *basety, SClass sclass) {
     Node *node = new_node(ND_DECL, tok);
     Node dummy, *cur = &dummy;
     int i = 0;
@@ -1036,6 +1048,7 @@ static Node *declaration(Token **rest, Token *tok, Type *basety) {
         Type *ty = declarator(&tok, tok, basety);
         if (ty->kind == TY_VOID) error(start->loc, "variable ‘%.*s’ declared void", start->len, start->loc);
         Sym *var = new_lvar(get_ident(ty->name), ty);
+        var->sclass = sclass;
         if (tok->kind == TK_AS) {
             Node *lhs = new_var_node(var, ty->name);
             Node *rhs = initializer(&tok, tok->next);
@@ -1083,6 +1096,7 @@ static Token *external_declaration(Token *tok) {
             Sym *fn = new_gvar(get_ident(ty->name), ty);
             fn->is_function = true;
             fn->is_definition = true;
+            fn->sclass = sclass;
 
             locals = NULL;
             current_fn = fn;
@@ -1118,6 +1132,7 @@ static Token *external_declaration(Token *tok) {
             if (ty->kind == TY_VOID) error(start->loc, "variable ‘%.*s’ declared void", start->len, start->loc);
             Sym *var = new_gvar(get_ident(ty->name), ty);
             var->is_function = var->ty->kind == TY_FUNC;
+            var->sclass = sclass;
             var->init = init;
         }
         if (match(&tok, tok, TK_COMMA))
