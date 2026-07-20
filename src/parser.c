@@ -615,8 +615,12 @@ static Node *for_stmt(Token **rest, Token *tok) {
     tok = skip(tok->next, TK_LPAREN);
 
     // Init
-    if (tok->kind != TK_SEMI) node->init = expr(&tok, tok);
-    tok = skip(tok, TK_SEMI);
+    if (is_typename(tok, 1)) {
+        Type *basety = declspecs(&tok, tok, NULL);
+        node->init = declaration(&tok, tok, basety, 0);
+    } else {
+        node->init = expr_stmt(&tok, tok);
+    }
 
     // Cond
     if (tok->kind != TK_SEMI) node->cond = expr(&tok, tok);

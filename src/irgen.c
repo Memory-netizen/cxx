@@ -288,7 +288,7 @@ static void gen_for(Node *node) {
     Blk *merge_blk = new_blk();
 
     // init
-    gen_expr(node->init);
+    gen_stmt(node->init);
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
 
