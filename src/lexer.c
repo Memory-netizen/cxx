@@ -210,7 +210,7 @@ static int read_escaped_char(char **new_pos, char *p) {
         case 'e':
             return 27;
         default:
-            return *p;
+            return (unsigned char)*p;
     }
 }
 
@@ -237,6 +237,23 @@ static Token *read_string_literal(char *start) {
 
     Token *tok = new_token(TK_STRLIT, start, end + 1);
     tok->id = intern(buf, len);
+    return tok;
+}
+
+static Token *read_char_literal(char *start) {
+    char *p = start + 1;
+    if (*p == '\0') error(start, "unclosed char literal");
+    int c;
+    if (*p == '\\')
+        c = read_escaped_char(&p, p + 1);
+    else
+        c = (unsigned char)*p++;
+
+    char *end = strchr(p, '\'');
+    if (!end) error(p, "unclosed char literal");
+
+    Token *tok = new_token(TK_NUM, start, end + 1);
+    tok->val = c;
     return tok;
 }
 
@@ -279,6 +296,13 @@ static Token *tokenize(char *filename, char *p) {
         // String literal
         if (*p == '"') {
             cur = cur->next = read_string_literal(p);
+            p += cur->len;
+            continue;
+        }
+
+        // Character literal
+        if (*p == '\'') {
+            cur = cur->next = read_char_literal(p);
             p += cur->len;
             continue;
         }
