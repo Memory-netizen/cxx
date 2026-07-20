@@ -99,6 +99,9 @@ static Type *types;
 
 static Scope *scope = &(Scope){0};
 
+// Points to the function object the parser is currently parsing.
+static Sym *current_fn;
+
 static void enter_scope(void) {
     Scope *sc = emalloc(sizeof(Scope));
     sc->next = scope;
@@ -296,7 +299,12 @@ static Node *fncall(Token **rest, Token *tok) {
 
     Node *node = new_node(ND_FUNCALL, tok);
     node->func = tok->id;
-    node->ty = sc->var->ty->ret;
+
+    Type *ty = sc->var->ty;
+    Type *param_ty = ty->params;
+    node->func_ty = ty;
+    node->ty = ty->ret;
+
     tok = tok->next->next;
 
     if (tok->kind == TK_RPAREN) {
@@ -305,9 +313,19 @@ static Node *fncall(Token **rest, Token *tok) {
     }
 
     Node dummy, *cur = &dummy;
-    cur = cur->next = assign(&tok, tok);
-    uint32_t i = 1;
-    for (; tok->kind == TK_COMMA; ++i) cur = cur->next = assign(&tok, tok->next);
+    uint32_t i = 0;
+
+    do {
+        Node *arg = assign(&tok, tok);
+        if (param_ty) {
+            if (param_ty->kind == TY_STRUCT || param_ty->kind == TY_UNION)
+                error(arg->tok->loc, "passing struct or union is not supported yet");
+            arg = new_imcast(arg, param_ty);
+            param_ty = param_ty->next;
+        }
+        ++i;
+        cur = cur->next = arg;
+    } while (match(&tok, tok, TK_COMMA));
 
     *rest = skip(tok, TK_RPAREN);
 
@@ -551,8 +569,11 @@ static Node *return_stmt(Token **rest, Token *tok) {
         return node;
     }
 
-    node->lhs = expr(&tok, tok->next);
+    Node *exp = expr(&tok, tok->next);
     *rest = skip(tok, TK_SEMI);
+
+    add_type(exp);
+    node->lhs = new_imcast(exp, current_fn->ty->ret);
 
     return node;
 }
@@ -989,6 +1010,7 @@ static Token *external_declaration(Token *tok) {
             fn->is_definition = true;
 
             locals = NULL;
+            current_fn = fn;
             enter_scope();
             create_param_lvars(ty->params);
             fn->params = locals;

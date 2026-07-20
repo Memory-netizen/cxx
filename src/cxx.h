@@ -318,6 +318,7 @@ struct Node {
         struct {
             // Function call
             uint32_t func;
+            Type *func_ty;
             Node *args;
             uint32_t narg;
         };

@@ -151,7 +151,10 @@ static Ref gen_expr(Node *node) {
             int idx = 1;
             for (Node *arg = node->args; arg; arg = arg->next) call_ops[idx++] = gen_expr(arg);
 
-            Ref dst = TMP(tmp_id++, ty_int);
+            if (node->ty->kind == TY_VOID)
+                dst = R;
+            else
+                dst = TMP(tmp_id++, node->ty);
             new_ins(IR_CALL, dst, call_ops, nargs + 1);
             return dst;
         }
@@ -427,7 +430,7 @@ Module *irgen(Module *md) {
         curb = fn->start;
         curb->blk_id = tmp_id++;
         // Entry
-        new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(ty_int)), NULL, 0);
+        new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(fn->ty->ret)), NULL, 0);
 
         for (Sym *var = fn->locals; var; var = var->next)
             new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty)), NULL, 0);
@@ -446,9 +449,9 @@ Module *irgen(Module *md) {
         curb = curb->succ1 = fn->end;
         curb->blk_id = tmp_id++;
 
-        new_ins(IR_LORD, TMP(tmp_id, ty_int), (Ref[]){SLOT(curf->nparam + 1, ty_int)}, 1);
+        new_ins(IR_LORD, TMP(tmp_id, fn->ty->ret), (Ref[]){SLOT(curf->nparam + 1, fn->ty->ret)}, 1);
         curb->jmp.type = IR_RET;
-        curb->jmp.arg = TMP(tmp_id, ty_int);
+        curb->jmp.arg = TMP(tmp_id, fn->ty->ret);
         tail->next = fn->end;
     }
     return md;
@@ -482,6 +485,10 @@ static const char *ty_str[] = {
 };
 
 static void print_type(Type *ty) {
+    if (!ty) {
+        fprintf(out_file, "void");
+        return;
+    }
     if (ty->kind == TY_ARRAY) {
         fprintf(out_file, "[%d x ", ty->len);
         print_type(ty->base);
@@ -510,7 +517,7 @@ void dump_blk(Blk *b) {
     Ir *ir = b->head;
     while (ir) {
         fprintf(out_file, "  ");
-        if (ir->op != IR_STR && ir->op != IR_MEMCPY) fprintf(out_file, "%%%d = ", ir->dst.val);
+        if (!refeq(ir->dst, R)) fprintf(out_file, "%%%d = ", ir->dst.val);
 
         switch (ir->op) {
             // memmory
@@ -556,7 +563,12 @@ void dump_blk(Blk *b) {
                 fprintf(out_file, ", i64 %d, i1 false)\n", ir->args[2].val);
                 break;
             case IR_CALL:
-                fprintf(out_file, "call i32 @%s(", str(ir->args[0].val));
+                fprintf(out_file, "call ");
+                if (refeq(ir->dst, R))
+                    fprintf(out_file, "void");
+                else
+                    print_type(ir->dst.ty);
+                fprintf(out_file, " @%s(", str(ir->args[0].val));
                 for (uint32_t i = 1; i < ir->narg; i++) {
                     print_type(ir->args[i].ty);
                     fprintf(out_file, " ");
@@ -611,7 +623,9 @@ void dump_blk(Blk *b) {
     fprintf(out_file, "  ");
     switch (b->jmp.type) {
         case IR_RET:
-            fprintf(out_file, "ret i32 ");
+            fprintf(out_file, "ret ");
+            print_type(b->jmp.arg.ty);
+            fprintf(out_file, " ");
             print_operand(b->jmp.arg);
             fprintf(out_file, "\n");
             break;
@@ -670,7 +684,9 @@ void dump_data(Sym *data) {
 
 void dump_fn(Sym *fn) {
     if (!fn->is_definition) return;
-    fprintf(out_file, "define i32 @%s(", str(fn->id));
+    fprintf(out_file, "define ");
+    print_type(fn->ty->ret);
+    fprintf(out_file, " @%s(", str(fn->id));
     Sym *var = fn->locals;
     for (uint32_t i = 0; i < fn->nparam; i++) {
         print_type(var->ty);
