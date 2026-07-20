@@ -91,6 +91,34 @@ int main() {
                for (int i = 0; i <= 10; i = i + 1) j = j + i;
                i;
            }));
+    ASSERT(6, ({
+               int i = 3;
+               int j = 1;
+               if (int i = 0; j) j = j + 5;
+               j;
+           }));
+    ASSERT(3, ({
+               int i = 3;
+               int j = 1;
+               if (int i = 2; j) j = j + i;
+               j;
+           }));
+    ASSERT(3, ({
+               int j = 1;
+               if (int i = 2) j = j + i;
+               j;
+           }));
+    ASSERT(1, ({
+               int j = 1;
+               if (int i = 0) j = j + 5;
+               j;
+           }));
+    ASSERT(3, ({
+               int i = 3;
+               int j = 1;
+               if (int i = 2) j = j + i;
+               j;
+           }));
 
     printf("OK\n");
     return 0;

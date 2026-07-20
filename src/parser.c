@@ -590,14 +590,57 @@ static Node *return_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// IfStmt ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
+// InitDecls ::= InitDeclr ("," InitDeclr)*
+// InitDeclr ::= Declr ("=" Init)?
+static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclass) {
+    Node dummy, *cur = &dummy;
+    do {
+        Token *start = tok;
+        Type *ty = declarator(&tok, tok, basety);
+        if (ty->kind == TY_VOID) error(start->loc, "variable ‘%.*s’ declared void", start->len, start->loc);
+        Sym *var = new_lvar(get_ident(ty->name), ty);
+        var->sclass = sclass;
+        if (tok->kind == TK_AS) {
+            Node *lhs = new_var_node(var, ty->name);
+            Node *rhs = initializer(&tok, tok->next);
+            Node *as = new_binary(ND_AS, lhs, rhs, tok);
+            add_type(as);
+            cur = cur->next = new_unary(ND_EXPR_STMT, as, tok);
+        }
+    } while (match(&tok, tok, TK_COMMA));
+
+    *rest = tok;
+    cur->next = NULL;
+    return dummy.next;
+}
+
 // SelHead ::= Exp | Decl Exp | SimDecl
+// SimDecl ::= DeclSpecs Declr "=" Init
+static Node *select_head(Token **rest, Token *tok) {
+    Node *node;
+    if (is_typename(tok, 1)) {
+        Type *basety = declspecs(&tok, tok, NULL);
+        node = new_node(ND_DECL, tok);
+        if (tok->kind != TK_SEMI) node->body = init_decl_list(&tok, tok, basety, 0);
+        if (tok->kind == TK_SEMI) {
+            Node *stmt = node->body;
+            while (stmt->next) stmt = stmt->next;
+            stmt->next = expr(&tok, tok->next);
+        }
+    } else {
+        node = expr(&tok, tok);
+    }
+    *rest = tok;
+    return node;
+}
+
+// IfStmt ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
 static Node *if_stmt(Token **rest, Token *tok) {
     enter_scope();
     Node *node = new_node(ND_IF, tok);
     tok = skip(tok->next, TK_LPAREN);
     // Cond
-    node->cond = expr(&tok, tok);
+    node->cond = select_head(&tok, tok);
     tok = skip(tok, TK_RPAREN);
     // Then
     node->then = stmt(&tok, tok);
@@ -1040,31 +1083,15 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
     return ty;
 }
 
-// Decl ::= DeclSpecs (InitDeclr ("," InitDeclr)*)? ";"
+// Decl ::= DeclSpecs InitDecls? ";"
 static Node *declaration(Token **rest, Token *tok, Type *basety, SClass sclass) {
     Node *node = new_node(ND_DECL, tok);
-    Node dummy, *cur = &dummy;
-    int i = 0;
-
-    while (tok->kind != TK_SEMI) {
-        if (i++) tok = skip(tok, TK_COMMA);
-        Token *start = tok;
-        Type *ty = declarator(&tok, tok, basety);
-        if (ty->kind == TY_VOID) error(start->loc, "variable ‘%.*s’ declared void", start->len, start->loc);
-        Sym *var = new_lvar(get_ident(ty->name), ty);
-        var->sclass = sclass;
-        if (tok->kind == TK_AS) {
-            Node *lhs = new_var_node(var, ty->name);
-            Node *rhs = initializer(&tok, tok->next);
-            Node *as = new_binary(ND_AS, lhs, rhs, tok);
-            add_type(as);
-            cur = cur->next = new_unary(ND_EXPR_STMT, as, tok);
-        }
+    if (tok->kind == TK_SEMI) {
+        *rest = tok->next;
+        return node;
     }
-    *rest = tok->next;
-    cur->next = NULL;
-
-    node->body = dummy.next;
+    node->body = init_decl_list(&tok, tok, basety, sclass);
+    *rest = skip(tok, TK_SEMI);
     return node;
 }
 
@@ -1077,7 +1104,6 @@ static void create_param_lvars(Type *param) {
 
 // ExDecl    ::= FuncDef | Decl
 // FuncDef   ::= DeclSpecs Declr CompStmt
-// InitDeclr ::= Declr ("=" Init)?
 static Token *external_declaration(Token *tok) {
     while (match(&tok, tok, TK_SEMI));
     if (tok->kind == TK_EOF) return tok;

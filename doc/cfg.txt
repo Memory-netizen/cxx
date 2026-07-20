@@ -1,8 +1,9 @@
 TransUnit   ::= ExDecl+
 ExDecl      ::= FuncDef | Decl
 FuncDef     ::= DeclSpecs Declr CompStmt
-Decl        ::= DeclSpecs (InitDeclr ("," InitDeclr)*)? ";"
+Decl        ::= DeclSpecs InitDecls? ";"
 
+InitDecls   ::= InitDeclr ("," InitDeclr)*
 InitDeclr   ::= Declr ("=" Init)?
 Init        ::= AsExp
 

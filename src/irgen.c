@@ -254,7 +254,7 @@ static void gen_if(Node *node) {
     Blk *m_blk = new_blk();
 
     // cond
-    Ref tmp = gen_expr(node->cond);
+    Ref tmp = gen_stmt(node->cond);
     Ref cond = TMP(tmp_id++, ty_i1);
     new_ins(IR_CMP_NE, cond, (Ref[]){tmp, INT(0)}, 2);
 
@@ -422,7 +422,7 @@ static Ref gen_stmt(Node *node) {
         case ND_EXPR_STMT:
             return gen_expr(node->lhs);
         default:
-            fatal("unknown node kind %d", node->kind);
+            return gen_expr(node);
     }
     return R;
 }
