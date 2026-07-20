@@ -444,8 +444,6 @@ Module *irgen(Module *md) {
         for (Sym *var = fn->locals; var; var = var->next)
             new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty)), NULL, 0);
 
-        new_ins(IR_STR, R, (Ref[]){INT(0), TMP(fn->nparam + 1, ty_int)}, 2);
-
         Sym *var = fn->locals;
         for (uint32_t i = 0; i < fn->nparam; ++i, var = var->next)
             new_ins(IR_STR, R, (Ref[]){TMP(i, var->ty), TMP(var->vreg, var->ty)}, 2);
