@@ -308,6 +308,8 @@ typedef enum {
     ND_LABEL,      // Labeled statement
     ND_BREAK,      // "break"
     ND_CONTINUE,   // "continue"
+    ND_SWITCH,     // "switch"
+    ND_CASE,       // "case"
 
     // Declare
     ND_DECL,
@@ -332,7 +334,10 @@ struct Node {
             Type *compute_ty;  // Compound assign
         };
         struct {
-            Node *init;
+            union {
+                Node *init;
+                Node *default_case;
+            };
             Node *cond;
             union {
                 Node *then;
@@ -356,12 +361,13 @@ struct Node {
                 Node *target;
                 Node *label_body;
             };
-            Node *goto_next;
             Blk *blk;
         };
-        Sym *var;     // Used if kind == ND_VAR
-        int64_t val;  // Used if kind == ND_NUM
+        Sym *var;  // Used if kind == ND_VAR
     };
+    Node *goto_next;
+    Node *case_next;
+    int64_t val;  // Used if kind == ND_NUM
 };
 
 Node *new_unary(NodeKind kind, Node *expr, Token *tok);
@@ -447,6 +453,7 @@ typedef enum {
     IR_RET,
     IR_JMP,
     IR_JNZ,
+    IR_SWITCH,
     IR_HLT,
 
     // Arithmetic
@@ -532,10 +539,12 @@ struct Blk {
     struct {
         IrKind type;
         Ref arg;
+        Ref *args;
     } jmp;
-
+    uint32_t narg;
     Blk *succ1;
     Blk *succ2;
+    Blk **succ;
     Blk *next;
 };
 

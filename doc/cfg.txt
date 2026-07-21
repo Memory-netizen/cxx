@@ -42,20 +42,23 @@ BlockItem   ::= Stmt | Decl
 Stmt        ::= ExpStmt
               | CompStmt
               | RetStmt | GotoStmt | BreakStmt | ContinueStmt
-              | IfStmt
+              | IfStmt | SwitchStmt
               | WhileStmt | DoStmt | ForStmt
-              | LabelStmt
+              | LabelStmt | CaseStmt | DefaultStmt
 
 GotoStmt    ::= "goto" Ident ";"
 BreakStmt   ::= "break" ";"
 ContinueStmt ::= "continue" ";"
 LabelStmt   ::= Ident ":" Stmt
+CaseStmt    ::= "case" Num ":"
+DefaultStmt ::= "default" ":"
 ExpStmt     ::= ";" | Exp ";"
 RetStmt     ::= "return" Exp? ";"
 
 IfStmt      ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
 SelHead     ::= Exp | Decl Exp | SimDecl
 SimDecl     ::= DeclSpecs Declr "=" Init
+SwitchStmt  ::= "switch" "(" SelHead ")" Stmt
 
 ForStmt     ::= "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt
 WhileStmt   ::= "while" "(" Exp ")" Stmt

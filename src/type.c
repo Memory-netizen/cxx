@@ -249,7 +249,12 @@ void add_type(Node *node) {
             add_type(node->lhs);
             break;
         case ND_LABEL:
+        case ND_CASE:
             add_type(node->label_body);
+            break;
+        case ND_SWITCH:
+            add_type(node->cond);
+            add_type(node->body);
             break;
         case ND_IF:
         case ND_WHILE:

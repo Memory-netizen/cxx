@@ -112,6 +112,8 @@ static Sym *current_fn;
 static Node *gotos;
 static Node *labels;
 
+static Node *cur_switch;
+
 static void enter_scope(void) {
     Scope *sc = emalloc(sizeof(Scope));
     sc->next = scope;
@@ -739,6 +741,52 @@ static Node *do_stmt(Token **rest, Token *tok) {
     return node;
 }
 
+// SwitchStmt ::= "switch" "(" SelHead ")" Stmt
+static Node *switch_stmt(Token **rest, Token *tok) {
+    enter_scope();
+    Node *node = new_node(ND_SWITCH, tok);
+    Node *sw = cur_switch;
+    cur_switch = node;
+
+    // cond
+    tok = skip(tok->next, TK_LPAREN);
+    node->cond = select_head(&tok, tok);
+    tok = skip(tok, TK_RPAREN);
+
+    // body
+    node->body = stmt(rest, tok);
+
+    leave_scope();
+    cur_switch = sw;
+    return node;
+}
+
+// CaseStmt ::= "case" Num ":" Stmt
+static Node *case_stmt(Token **rest, Token *tok) {
+    if (!cur_switch) error(tok->loc, "stray case");
+    int val = get_number(tok->next);
+
+    Node *node = new_node(ND_CASE, tok);
+    tok = skip(tok->next->next, TK_COLON);
+    node->label_body = stmt(rest, tok);
+    node->val = val;
+
+    node->case_next = cur_switch->case_next;
+    cur_switch->case_next = node;
+    return node;
+}
+
+// DefaultStmt ::= "default" ":" Stmt
+static Node *default_stmt(Token **rest, Token *tok) {
+    if (!cur_switch) error(tok->loc, "stray default");
+
+    Node *node = new_node(ND_CASE, tok);
+    tok = skip(tok->next, TK_COLON);
+    node->label_body = stmt(rest, tok);
+    cur_switch->default_case = node;
+    return node;
+}
+
 // GotoStmt ::= "goto" Ident ";"
 static Node *goto_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_GOTO, tok);
@@ -776,9 +824,9 @@ static Node *label_stmt(Token **rest, Token *tok) {
 // Stmt ::= ExpStmt
 //        | CompStmt
 //        | RetStmt | GotoStmt | BreakStmt | ContinueStmt
-//        | IfStmt
+//        | IfStmt | SwitchStmt
 //        | WhileStmt | DoStmt | ForStmt
-//        | LabelStmt
+//        | LabelStmt | CaseStmt | DefaultStmt
 static Node *stmt(Token **rest, Token *tok) {
     switch (tok->kind) {
         case TK_LBRACE:
@@ -799,6 +847,12 @@ static Node *stmt(Token **rest, Token *tok) {
             return break_stmt(rest, tok);
         case TK_CONTINUE:
             return continue_stmt(rest, tok);
+        case TK_SWITCH:
+            return switch_stmt(rest, tok);
+        case TK_CASE:
+            return case_stmt(rest, tok);
+        case TK_DEFAULT:
+            return default_stmt(rest, tok);
         case TK_IDENT:
             if (tok->next->kind == TK_COLON) return label_stmt(rest, tok);
             // fall through

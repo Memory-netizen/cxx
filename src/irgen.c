@@ -561,7 +561,57 @@ static void gen_do(Node *node) {
     cont_blk = cont;
 }
 
+static void gen_switch(Node *n) {
+    Blk *merge_blk = new_blk();
+    int i = 0;
+    for (Node *y = n->case_next; y; y = y->case_next) {
+        y->blk = new_blk();
+        ++i;
+    }
+    curb->narg = i;
+
+    if (n->default_case) n->default_case->blk = new_blk();
+
+    Blk *brk = brk_blk;
+    brk_blk = merge_blk;
+
+    Ref cond = gen_stmt(n->cond);
+    curb->jmp.type = IR_SWITCH;
+    curb->jmp.arg = cond;
+
+    curb->jmp.args = emalloc(i * sizeof(Ref));
+    curb->succ = emalloc(i * sizeof(Blk *));
+    if (n->default_case)
+        curb->succ1 = n->default_case->blk;
+    else
+        curb->succ1 = merge_blk;
+
+    Node *y = n->case_next;
+    for (int j = 0; j < i; ++j) {
+        curb->jmp.args[j] = cast(INT(y->val), ty_int, cond.ty);
+        curb->succ[j] = y->blk;
+        y = y->case_next;
+    }
+
+    curb = unreach;
+    gen_stmt(n->body);
+
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = merge_blk;
+    curb = merge_blk;
+    insert_blk(curb);
+    brk_blk = brk;
+}
+
 static void gen_label(Node *n) {
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = n->blk;
+    curb = n->blk;
+    insert_blk(curb);
+    gen_stmt(n->label_body);
+}
+
+static void gen_case(Node *n) {
     curb->jmp.type = IR_JMP;
     curb->succ1 = n->blk;
     curb = n->blk;
@@ -616,6 +666,12 @@ static Ref gen_stmt(Node *node) {
             break;
         case ND_DO:
             gen_do(node);
+            break;
+        case ND_SWITCH:
+            gen_switch(node);
+            break;
+        case ND_CASE:
+            gen_case(node);
             break;
         case ND_GOTO:
             gen_goto(node);
@@ -860,6 +916,23 @@ void dump_blk(Blk *b) {
             fprintf(out_file, "br i1 ");
             print_operand(b->jmp.arg);
             fprintf(out_file, ", label %%%d, label %%%d\n", b->succ1->blk_id, b->succ2->blk_id);
+            break;
+        case IR_SWITCH:
+            fprintf(out_file, "switch ");
+            print_type(b->jmp.arg.ty);
+            fprintf(out_file, " ");
+            print_operand(b->jmp.arg);
+            fprintf(out_file, ", label %%%d", b->succ1->blk_id);
+            if (b->narg) fprintf(out_file, " [\n");
+            for (uint32_t i = 0; i < b->narg; i++) {
+                fprintf(out_file, "    ");
+                print_type(b->jmp.args[i].ty);
+                fprintf(out_file, " ");
+                print_operand(b->jmp.args[i]);
+                fprintf(out_file, ", label %%%d\n", b->succ[i]->blk_id);
+            }
+            if (b->narg) fprintf(out_file, "  ]\n");
+
             break;
         default:
             break;
