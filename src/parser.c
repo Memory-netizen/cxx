@@ -1067,6 +1067,13 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
             Type *paramty = declarator(&tok, tok, basety);
             if (paramty->kind == TY_VOID)
                 error(start->loc, "argument may not have ‘void’ type", start->len, start->loc);
+            // "array of T" is converted to "pointer to T" in the parameter
+            // context. For example, *argv[] is converted to **argv by this.
+            if (paramty->kind == TY_ARRAY) {
+                Token *name = paramty->name;
+                paramty = pointer_to(paramty->base);
+                paramty->name = name;
+            }
             cur = cur->next = copy_type(paramty);
         }
         *rest = tok->next;
@@ -1077,8 +1084,12 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
         return ty;
     }
     if (tok->kind == TK_LBRACKET) {
-        int sz = get_number(tok->next);
-        tok = skip(tok->next->next, TK_RBRACKET);
+        int sz = -1;
+        if (tok->next->kind != TK_RBRACKET) {
+            tok = tok->next;
+            sz = get_number(tok);
+        }
+        tok = skip(tok->next, TK_RBRACKET);
         ty = decl_suffix(rest, tok, ty);
         return array_of(ty, sz);
     }
