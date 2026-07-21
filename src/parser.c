@@ -623,6 +623,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         Token *start = tok;
         Type *ty = declarator(&tok, tok, basety);
         if (ty->kind == TY_VOID) error(start->loc, "variable ‘%.*s’ declared void", start->len, start->loc);
+        if (ty->size < 0) error(start->loc, "variable '%.*s' has incomplete type", start->len, start->loc);
         Sym *var = new_lvar(get_ident(ty->name), ty);
         var->sclass = sclass;
         if (tok->kind == TK_AS) {
@@ -789,7 +790,6 @@ static Node *compound_stmt(Token **rest, Token *tok) {
 //            | "enum" Ident
 // Enumr    ::= Ident ("=" Num)?
 static Type *enum_decl(Token **rest, Token *tok) {
-    Type *ty = enum_type();
     tok = tok->next;
     // Read a enum tag.
     Token *tag = NULL;
@@ -799,14 +799,29 @@ static Type *enum_decl(Token **rest, Token *tok) {
     }
 
     if (tag && tok->kind != TK_LBRACE) {
-        Type *ty = find_tag(tag, 1);
-        if (!ty) error(tag->loc, "unknown enum type");
-        if (ty->kind != TY_ENUM) error(tag->loc, "not an enum tag");
         *rest = tok;
+        Type *ty = find_tag(tag, 1);
+        if (ty) return ty;
+
+        ty = enum_type();
+        ty->size = -1;
+        push_tag_scope(tag->id, ty);
         return ty;
     }
 
     tok = skip(tok, TK_LBRACE);
+
+    Type *ty = NULL;
+    if (tag) {
+        ty = find_tag(tag, 0);
+        if (!ty) {
+            ty = enum_type();
+            push_tag_scope(tag->id, ty);
+        }
+        ty->size = 4;
+    } else {
+        ty = enum_type();
+    }
 
     // Read an enum-list.
     int i = 0;
@@ -829,8 +844,6 @@ static Type *enum_decl(Token **rest, Token *tok) {
 
     *rest = tok->next;
 
-    if (tag) push_tag_scope(tag->id, ty);
-
     return ty;
 }
 
@@ -850,6 +863,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             Member *mem = emalloc(sizeof(Member));
             mem->ty = declarator(&tok, tok, basety);
             if (mem->ty->kind == TY_VOID) error(start->loc, "field ‘%.*s’ declared void", start->len, start->loc);
+            if (mem->ty->size < 0) error(start->loc, "variable '%.*s' has incomplete type", start->len, start->loc);
             mem->name = mem->ty->name;
             cur = cur->next = mem;
         }
@@ -884,7 +898,7 @@ static Type *record_decl(Token **rest, Token *tok) {
     // Construct a struct object.
     tok = skip(tok, TK_LBRACE);
     Type *ty = NULL;
-    // Register the struct type if a name was given.
+
     if (tag) {
         ty = find_tag(tag, 0);
         if (!ty) {
@@ -1084,6 +1098,9 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
                 paramty = pointer_to(paramty->base);
                 paramty->name = name;
             }
+            if (paramty->size < 0)
+                error(paramty->name->loc, "parameter '%.*s' has incomplete type", paramty->name->len,
+                      paramty->name->loc);
             cur = cur->next = copy_type(paramty);
         }
         *rest = tok->next;
@@ -1206,6 +1223,7 @@ static Token *external_declaration(Token *tok) {
             push_scope(get_ident(ty->name))->type_def = ty;
         } else {
             if (ty->kind == TY_VOID) error(start->loc, "variable ‘%.*s’ declared void", start->len, start->loc);
+            if (ty->size < 0) error(start->loc, "variable '%.*s' has incomplete type", start->len, start->loc);
             Sym *var = new_gvar(get_ident(ty->name), ty);
             var->is_function = var->ty->kind == TY_FUNC;
             var->sclass = sclass;

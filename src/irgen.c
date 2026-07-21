@@ -871,13 +871,13 @@ void dump_module(Module *md, FILE *out) {
     out_file = out;
     fprintf(out_file, "declare void @assert(i32, i32, ptr)\n");
     fprintf(out_file, "declare i32 @printf(ptr, ...)\n");
-    fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
+    fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n\n");
 
     for (Type *ty = md->tys; ty; ty = ty->next) dump_type(ty);
-    fprintf(out_file, "\n");
+    if (md->tys) fprintf(out_file, "\n");
 
     for (Sym *var = md->data; var; var = var->next) dump_data(var);
-    fprintf(out_file, "\n");
+    if (md->data) fprintf(out_file, "\n");
 
     for (Sym *fn = md->fns; fn; fn = fn->next) dump_fn(fn);
 }
