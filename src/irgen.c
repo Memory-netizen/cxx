@@ -78,43 +78,45 @@ static Ref load(Ref addr, Type *ty) {
     return dst;
 }
 
-static Ref convert(Node *node) {
-    if (node->lhs->ty->kind == TY_ARRAY && is_pointer(node->ty)) {
-        Ref addr = gen_addr(node->lhs);
-        Ref dst = TMP(tmp_id++, node->ty);
-        new_ins(IR_GEP, dst, (Ref[]){addr, LONG(0)}, 2);
-        return dst;
-    }
-
-    Ref val = gen_expr(node->lhs);
-    if (node->ty->kind == TY_BOOL) {
+static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
+    if (target_ty->kind == TY_BOOL) {
         Ref tmp = TMP(tmp_id++, ty_i1);
         new_ins(IR_CMP_NE, tmp, (Ref[]){val, INT(0)}, 2);
 
-        Ref dst = TMP(tmp_id++, node->ty);
+        Ref dst = TMP(tmp_id++, target_ty);
         new_ins(IR_ZEXT, dst, (Ref[]){tmp}, 1);
         return dst;
     }
-    if (is_pointer(node->lhs->ty) && is_integer(node->ty)) {
-        Ref dst = TMP(tmp_id++, node->ty);
+    if (is_pointer(src_ty) && is_integer(target_ty)) {
+        Ref dst = TMP(tmp_id++, target_ty);
         new_ins(IR_PTRTOINT, dst, (Ref[]){val}, 1);
         return dst;
     }
-    if (is_integer(node->lhs->ty) && is_pointer(node->ty)) {
-        Ref dst = TMP(tmp_id++, node->ty);
+    if (is_integer(src_ty) && is_pointer(target_ty)) {
+        Ref dst = TMP(tmp_id++, target_ty);
         new_ins(IR_INTTOPTR, dst, (Ref[]){val}, 1);
         return dst;
     }
-    if (node->ty->kind == TY_VOID || node->ty->size == node->lhs->ty->size) {
-        val.ty = node->ty;
+    if (target_ty->kind == TY_VOID || target_ty->size == src_ty->size) {
+        src_ty = target_ty;
         return val;
     }
-    Ref dst = TMP(tmp_id++, node->ty);
-    if (node->ty->size > node->lhs->ty->size)
+    Ref dst = TMP(tmp_id++, target_ty);
+    if (target_ty->size > src_ty->size)
         new_ins(IR_SEXT, dst, (Ref[]){val}, 1);
     else
         new_ins(IR_TRUNC, dst, (Ref[]){val}, 1);
     return dst;
+}
+
+static Ref convert(Node *lhs, Type *target_ty) {
+    if (lhs->ty->kind == TY_ARRAY && is_pointer(target_ty)) {
+        Ref addr = gen_addr(lhs);
+        Ref dst = TMP(tmp_id++, target_ty);
+        new_ins(IR_GEP, dst, (Ref[]){addr, LONG(0)}, 2);
+        return dst;
+    }
+    return cast(gen_expr(lhs), lhs->ty, target_ty);
 }
 
 static Ref gen_expr(Node *node) {
@@ -138,7 +140,7 @@ static Ref gen_expr(Node *node) {
             return gen_addr(node->lhs);
         case ND_IMCAST:
         case ND_EXCAST:
-            return convert(node);
+            return convert(node->lhs, node->ty);
         case ND_AS: {
             Ref addr = gen_addr(node->lhs);
             if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) {
@@ -148,7 +150,32 @@ static Ref gen_expr(Node *node) {
                 return R;
             }
             dst = gen_expr(node->rhs);
-            dst.ty = addr.ty->base;
+            new_ins(IR_STR, R, (Ref[]){dst, addr}, 2);
+            return dst;
+        }
+        case ND_ADDAS:
+        case ND_SUBAS:
+        case ND_MULAS:
+        case ND_DIVAS:
+        case ND_MODAS:
+        case ND_ANDAS:
+        case ND_ORAS:
+        case ND_XORAS:
+        case ND_LEFTAS:
+        case ND_RIGHTAS: {
+            Ref addr = gen_addr(node->lhs);
+            Ref lr = load(addr, node->ty);
+            lr = cast(lr, node->ty, node->compute_ty);
+            Ref rr = gen_expr(node->rhs);
+            rr = cast(rr, node->rhs->ty, node->compute_ty);
+            static int bin_op[] = {
+                [ND_ADDAS] = IR_ADD, [ND_SUBAS] = IR_SUB,  [ND_MULAS] = IR_MUL,   [ND_DIVAS] = IR_DIV,
+                [ND_MODAS] = IR_REM, [ND_LEFTAS] = IR_SHL, [ND_RIGHTAS] = IR_SHR, [ND_ANDAS] = IR_AND,
+                [ND_ORAS] = IR_OR,   [ND_XORAS] = IR_XOR,
+            };
+            Ref res = TMP(tmp_id++, node->compute_ty);
+            new_ins(bin_op[node->kind], res, (Ref[]){lr, rr}, 2);
+            dst = cast(res, node->compute_ty, node->ty);
             new_ins(IR_STR, R, (Ref[]){dst, addr}, 2);
             return dst;
         }

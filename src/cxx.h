@@ -247,29 +247,40 @@ struct Sym {
 
 typedef enum {
     // Expression
-    ND_COMMA,   // ,
-    ND_AS,      // =
-    ND_BOR,     // |
-    ND_XOR,     // ^
-    ND_BAND,    // &
-    ND_EQ,      // ==
-    ND_NE,      // !=
-    ND_LT,      // <
-    ND_LE,      // <=
-    ND_LEFT,    // <<
-    ND_RIGHT,   // >>
-    ND_ADD,     // +
-    ND_SUB,     // -
-    ND_MUL,     // *
-    ND_DIV,     // /
-    ND_MOD,     // %
-    ND_PLUS,    // unary +
-    ND_NEG,     // unary -
-    ND_NOT,     // !
-    ND_INVERT,  // ~
-    ND_ADDR,    // unary &
-    ND_DEREF,   // unary *
-    ND_MEMBER,  // . (struct member access)
+    ND_COMMA,  // ,
+    ND_AS,     // =
+    ND_ADDAS,  // +=
+    ND_SUBAS,  // -=
+    ND_MULAS,  // *=
+    ND_DIVAS,  // /=
+    ND_MODAS,  // %=
+
+    ND_ANDAS,    // &=
+    ND_ORAS,     // |=
+    ND_XORAS,    // ^=
+    ND_LEFTAS,   // <<=
+    ND_RIGHTAS,  // >>=
+    ND_BOR,      // |
+    ND_XOR,      // ^
+    ND_BAND,     // &
+    ND_EQ,       // ==
+    ND_NE,       // !=
+    ND_LT,       // <
+    ND_LE,       // <=
+    ND_LEFT,     // <<
+    ND_RIGHT,    // >>
+    ND_ADD,      // +
+    ND_SUB,      // -
+    ND_MUL,      // *
+    ND_DIV,      // /
+    ND_MOD,      // %
+    ND_PLUS,     // unary +
+    ND_NEG,      // unary -
+    ND_NOT,      // !
+    ND_INVERT,   // ~
+    ND_ADDR,     // unary &
+    ND_DEREF,    // unary *
+    ND_MEMBER,   // . (struct member access)
     ND_PTRADD,
     ND_FUNCALL,  // Function call
     ND_IMCAST,
@@ -302,9 +313,10 @@ struct Node {
 
     union {
         struct {
-            Node *lhs;       // Left-hand side
-            Node *rhs;       // Right-hand side
-            Member *member;  // Struct member access
+            Node *lhs;         // Left-hand side
+            Node *rhs;         // Right-hand side
+            Member *member;    // Struct member access
+            Type *compute_ty;  // Compound assign
         };
         struct {
             Node *init;

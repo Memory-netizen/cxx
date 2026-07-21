@@ -163,6 +163,30 @@ void add_type(Node *node) {
                 node->rhs = new_imcast(node->rhs, node->lhs->ty);
             node->ty = node->lhs->ty;
             break;
+        case ND_ADDAS:
+        case ND_SUBAS:
+        case ND_MULAS:
+        case ND_DIVAS:
+        case ND_MODAS:
+        case ND_ANDAS:
+        case ND_ORAS:
+        case ND_XORAS: {
+            add_type(node->lhs);
+            add_type(node->rhs);
+            Type *ty = get_common_type(node->lhs->ty, node->rhs->ty);
+            new_imcast(node->rhs, ty);
+            node->compute_ty = ty;
+            node->ty = node->lhs->ty;
+            break;
+        }
+        case ND_LEFTAS:
+        case ND_RIGHTAS:
+            add_type(node->lhs);
+            add_type(node->rhs);
+            integer_promotion(&node->rhs);
+            node->compute_ty = get_common_type(ty_int, node->lhs->ty);
+            node->ty = node->lhs->ty;
+            break;
         case ND_COMMA:
             add_type(node->lhs);
             add_type(node->rhs);

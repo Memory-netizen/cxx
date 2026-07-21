@@ -53,7 +53,9 @@ WhileStmt   ::= "while" "(" Exp ")" Stmt
 DoStmt      ::= "do" Stmt "while" "(" Exp ")" ";"
 
 Exp         ::= AsExp ("," AsExp)*
-AsExp       ::= BOrExp ("=" AsExp)?
+AsExp       ::= BOrExp (AsOP AsExp)?
+AsOP        ::= "=" | "*=" | "/=" | "%=" | "+=" | "-="
+            | "<<=" | ">>=" | "&=" | "^=" | "|="
 
 MulExp      ::= CastExp (("*" | "/" | "%") CastExp)*
 AddExp      ::= MulExp   (("+" | "-") MulExp)*

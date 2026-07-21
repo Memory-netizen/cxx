@@ -541,10 +541,19 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
     return lhs;
 }
 
-// AsExp ::= BOrExp ("=" AsExp)?
+// AsOP  ::= "=" | "*=" | "/=" | "%=" | "+=" | "-="
+//         | "<<=" | ">>=" | "&=" | "^=" | "|="
+static inline bool is_assignop(Token *tok) { return TK_AS <= tok->kind && tok->kind <= TK_RIGHTAS; }
+
+// AsExp ::= BOrExp (AsOP AsExp)?
 static Node *assign(Token **rest, Token *tok) {
     Node *node = binexpr(&tok, tok, 0);
-    while (tok->kind == TK_AS) node = new_binary(ND_AS, node, assign(&tok, tok->next), tok);
+    static int as_op[] = {
+        [TK_AS] = ND_AS,       [TK_ADDAS] = ND_ADDAS,   [TK_SUBAS] = ND_SUBAS,     [TK_MULAS] = ND_MULAS,
+        [TK_DIVAS] = ND_DIVAS, [TK_MODAS] = ND_MODAS,   [TK_ANDAS] = ND_ANDAS,     [TK_ORAS] = ND_ORAS,
+        [TK_XORAS] = ND_XORAS, [TK_LEFTAS] = ND_LEFTAS, [TK_RIGHTAS] = ND_RIGHTAS,
+    };
+    while (is_assignop(tok)) node = new_binary(as_op[tok->kind], node, assign(&tok, tok->next), tok);
     *rest = tok;
     add_type(node);
     return node;
