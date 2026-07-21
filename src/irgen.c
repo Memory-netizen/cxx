@@ -535,6 +535,20 @@ static void gen_do(Node *node) {
     insert_blk(curb);
 }
 
+static void gen_label(Node *n) {
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = n->blk;
+    curb = n->blk;
+    insert_blk(curb);
+    gen_stmt(n->label_body);
+}
+
+static void gen_goto(Node *n) {
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = n->target->blk;
+    curb = unreach;
+}
+
 static void gen_ret(Node *n) {
     Ref result = gen_expr(n->lhs);
     if (!refeq(result, R)) {
@@ -563,6 +577,12 @@ static Ref gen_stmt(Node *node) {
         case ND_DO:
             gen_do(node);
             break;
+        case ND_GOTO:
+            gen_goto(node);
+            break;
+        case ND_LABEL:
+            gen_label(node);
+            break;
         case ND_DECL:
         case ND_COMP_STMT:
             for (Node *n = node->body; n; n = n->next) reg = gen_stmt(n);
@@ -585,6 +605,7 @@ Module *irgen(Module *md) {
         tail = &dummy;
         fn->start = new_blk();
         fn->end = new_blk();
+        for (Node *y = fn->labels; y; y = y->goto_next) y->blk = new_blk();
 
         curb = fn->start;
         insert_blk(curb);

@@ -39,8 +39,15 @@ Enumr       ::= Ident ("=" Num)?
 CompStmt    ::= "{" BlockItem* "}"
 BlockItem   ::= Stmt | Decl
 
-Stmt        ::= ExpStmt | CompStmt | RetStmt | IfStmt | WhileStmt | DoStmt | ForStmt
+Stmt        ::= ExpStmt
+              | CompStmt
+              | RetStmt | GotoStmt
+              | IfStmt
+              | WhileStmt | DoStmt | ForStmt
+              | LabelStmt
 
+GotoStmt    ::= "goto" Ident ";"
+LabelStmt   ::= Ident ":" Stmt
 ExpStmt     ::= ";" | Exp ";"
 RetStmt     ::= "return" Exp? ";"
 

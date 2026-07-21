@@ -228,6 +228,7 @@ void add_type(Node *node) {
             node->ty = node->rhs->ty;
             break;
         // other
+        case ND_GOTO:
         case ND_PTRAS:
         case ND_FUNCALL:
             // Nothing to do
@@ -244,6 +245,9 @@ void add_type(Node *node) {
         case ND_RETURN:
         case ND_EXPR_STMT:
             add_type(node->lhs);
+            break;
+        case ND_LABEL:
+            add_type(node->label_body);
             break;
         case ND_IF:
         case ND_WHILE:

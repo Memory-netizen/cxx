@@ -108,6 +108,10 @@ static Scope *scope = &(Scope){0};
 // Points to the function object the parser is currently parsing.
 static Sym *current_fn;
 
+// Lists of all goto statements and labels in the curent function.
+static Node *gotos;
+static Node *labels;
+
 static void enter_scope(void) {
     Scope *sc = emalloc(sizeof(Scope));
     sc->next = scope;
@@ -735,7 +739,32 @@ static Node *do_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// Stmt ::= ExpStmt | CompStmt | RetStmt | IfStmt | WhileStmt | DoStmt | ForStmt
+// GotoStmt ::= "goto" Ident ";"
+static Node *goto_stmt(Token **rest, Token *tok) {
+    Node *node = new_node(ND_GOTO, tok);
+    node->label = get_ident(tok->next);
+    node->goto_next = gotos;
+    gotos = node;
+    *rest = skip(tok->next->next, TK_SEMI);
+    return node;
+}
+
+// LabelStmt ::= Ident ":" Stmt
+static Node *label_stmt(Token **rest, Token *tok) {
+    Node *node = new_node(ND_LABEL, tok);
+    node->label = get_ident(tok);
+    node->label_body = stmt(rest, tok->next->next);
+    node->goto_next = labels;
+    labels = node;
+    return node;
+}
+
+// Stmt ::= ExpStmt
+//        | CompStmt
+//        | RetStmt | GotoStmt
+//        | IfStmt
+//        | WhileStmt | DoStmt | ForStmt
+//        | LabelStmt
 static Node *stmt(Token **rest, Token *tok) {
     switch (tok->kind) {
         case TK_LBRACE:
@@ -750,6 +779,11 @@ static Node *stmt(Token **rest, Token *tok) {
             return while_stmt(rest, tok);
         case TK_DO:
             return do_stmt(rest, tok);
+        case TK_GOTO:
+            return goto_stmt(rest, tok);
+        case TK_IDENT:
+            if (tok->next->kind == TK_COLON) return label_stmt(rest, tok);
+            // fall through
         default:
             return expr_stmt(rest, tok);
     }
@@ -1158,6 +1192,20 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, SClass sclass) 
     return node;
 }
 
+static void resolve_goto_labels(void) {
+    for (Node *x = gotos; x; x = x->goto_next) {
+        for (Node *y = labels; y; y = y->goto_next)
+            if (x->label == y->label) {
+                x->target = y;
+                break;
+            }
+
+        if (!x->target) error(x->tok->next->loc, "use of undeclared label");
+    }
+
+    gotos = labels = NULL;
+}
+
 static void create_param_lvars(Type *param) {
     if (param) {
         create_param_lvars(param->next);
@@ -1207,7 +1255,9 @@ static Token *external_declaration(Token *tok) {
 
             fn->body = compound_stmt(&tok, tok);
             fn->locals = locals;
+            fn->labels = labels;
             leave_scope();
+            resolve_goto_labels();
             return tok;
         }
 

@@ -240,6 +240,7 @@ struct Sym {
     Sym *params;
     uint32_t nparam;
     Node *body;
+    Node *labels;
     Sym *locals;
 
     Blk *start;
@@ -303,6 +304,8 @@ typedef enum {
     ND_EXPR_STMT,  // Expression statement
     ND_STMT_EXPR,  // Statement expression
     ND_COMP_STMT,  // {...}
+    ND_GOTO,       // "goto"
+    ND_LABEL,      // Labeled statement
 
     // Declare
     ND_DECL,
@@ -344,6 +347,15 @@ struct Node {
             Type *func_ty;
             Node *args;
             uint32_t narg;
+        };
+        struct {
+            uint32_t label;
+            union {
+                Node *target;
+                Node *label_body;
+            };
+            Node *goto_next;
+            Blk *blk;
         };
         Sym *var;     // Used if kind == ND_VAR
         int64_t val;  // Used if kind == ND_NUM
