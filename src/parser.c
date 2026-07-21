@@ -798,7 +798,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
 
     tok = tok->next;
     while (tok->kind != TK_RBRACE) {
-        if (is_typename(tok, 1)) {
+        if (is_typename(tok, 1) && tok->next->kind != TK_COLON) {
             SClass sclass = 0;
             Type *basety = declspecs(&tok, tok, &sclass);
             if (sclass == SC_TYPEDEF) {
