@@ -30,8 +30,12 @@ static Ir *new_ins(IrKind op, Ref dst, Ref *args, uint32_t narg) {
 Blk *new_blk(void) {
     Blk *b = emalloc(sizeof(Blk));
     memset(b, 0, sizeof(Blk));
-    tail = tail->next = b;
     return b;
+}
+
+void insert_blk(Blk *b) {
+    b->blk_id = tmp_id++;
+    tail = tail->next = b;
 }
 
 static Ref gen_stmt(Node *node);
@@ -117,6 +121,89 @@ static Ref convert(Node *lhs, Type *target_ty) {
         return dst;
     }
     return cast(gen_expr(lhs), lhs->ty, target_ty);
+}
+
+static Ref gen_logor(Node *node) {
+    Blk *t_blk = new_blk();
+    Blk *f_blk = new_blk();
+    Blk *m_blk = new_blk();
+
+    int res_id = tmp_id++;
+    Ref res = TMP(res_id, ty_int);
+    new_ins(IR_ALLOCA, TMP(res_id, pointer_to(ty_int)), NULL, 0);
+
+    // lhs
+    Ref lr = gen_expr(node->lhs);
+    Ref cond = TMP(tmp_id++, ty_i1);
+    new_ins(IR_CMP_NE, cond, (Ref[]){lr, INT(0)}, 2);
+    curb->jmp.type = IR_JNZ;
+    curb->jmp.arg = cond;
+    curb->succ1 = t_blk;
+    curb->succ2 = f_blk;
+
+    curb = t_blk;
+    insert_blk(curb);
+    new_ins(IR_STR, R, (Ref[]){INT(1), res}, 2);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = m_blk;
+
+    // rhs
+    curb = f_blk;
+    insert_blk(curb);
+    Ref rr = gen_expr(node->rhs);
+    Ref res_r = TMP(tmp_id++, ty_i1);
+    new_ins(IR_CMP_NE, res_r, (Ref[]){rr, INT(0)}, 2);
+    Ref r_ext = TMP(tmp_id++, ty_int);
+    new_ins(IR_ZEXT, r_ext, (Ref[]){res_r}, 1);
+    new_ins(IR_STR, R, (Ref[]){r_ext, res}, 2);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = m_blk;
+
+    curb = m_blk;
+    insert_blk(curb);
+    return load(res, ty_int);
+}
+
+static Ref gen_logand(Node *node) {
+    Blk *f_blk = new_blk();
+    Blk *t_blk = new_blk();
+    Blk *m_blk = new_blk();
+
+    int res_id = tmp_id++;
+    Ref res = TMP(res_id, ty_int);
+    new_ins(IR_ALLOCA, TMP(res_id, pointer_to(ty_int)), NULL, 0);
+
+    // lhs
+    Ref lr = gen_expr(node->lhs);
+    Ref cond = TMP(tmp_id++, ty_i1);
+    new_ins(IR_CMP_EQ, cond, (Ref[]){lr, INT(0)}, 2);
+
+    curb->jmp.type = IR_JNZ;
+    curb->jmp.arg = cond;
+    curb->succ1 = f_blk;
+    curb->succ2 = t_blk;
+
+    curb = f_blk;
+    insert_blk(curb);
+    new_ins(IR_STR, R, (Ref[]){INT(0), res}, 2);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = m_blk;
+
+    // rhs
+    curb = t_blk;
+    insert_blk(curb);
+    Ref rr = gen_expr(node->rhs);
+    Ref res_r = TMP(tmp_id++, ty_i1);
+    new_ins(IR_CMP_NE, res_r, (Ref[]){rr, INT(0)}, 2);
+    Ref r_ext = TMP(tmp_id++, ty_int);
+    new_ins(IR_ZEXT, r_ext, (Ref[]){res_r}, 1);
+    new_ins(IR_STR, R, (Ref[]){r_ext, res}, 2);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = m_blk;
+
+    curb = m_blk;
+    insert_blk(curb);
+    return load(res, ty_int);
 }
 
 static Ref gen_expr(Node *node) {
@@ -206,6 +293,10 @@ static Ref gen_expr(Node *node) {
             new_ins(IR_STR, R, (Ref[]){dst, addr}, 2);
             return dst;
         }
+        case ND_LOGOR:
+            return gen_logor(node);
+        case ND_LOGAND:
+            return gen_logand(node);
         case ND_FUNCALL: {
             int nargs = node->narg;
             Ref call_ops[nargs + 1];
@@ -319,7 +410,7 @@ static void gen_if(Node *node) {
 
     // then
     curb = t_blk;
-    curb->blk_id = tmp_id++;
+    insert_blk(curb);
     gen_stmt(node->then);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
@@ -327,18 +418,19 @@ static void gen_if(Node *node) {
     // else
     if (f_blk) {
         curb = f_blk;
-        curb->blk_id = tmp_id++;
+        insert_blk(curb);
         gen_stmt(node->els);
         curb->jmp.type = IR_JMP;
         curb->succ1 = m_blk;
     }
     curb = m_blk;
-    curb->blk_id = tmp_id++;
+    insert_blk(curb);
 }
 
 static void gen_for(Node *node) {
     Blk *cond_blk = new_blk();
     Blk *body_blk = new_blk();
+    Blk *incr_blk = new_blk();
     Blk *merge_blk = new_blk();
 
     // init
@@ -348,7 +440,7 @@ static void gen_for(Node *node) {
 
     // cond
     curb = cond_blk;
-    curb->blk_id = tmp_id++;
+    insert_blk(curb);
     if (node->cond) {
         Ref tmp = gen_expr(node->cond);
         Ref cond = TMP(tmp_id++, ty_i1);
@@ -365,15 +457,20 @@ static void gen_for(Node *node) {
 
     // body
     curb = body_blk;
-    curb->blk_id = tmp_id++;
+    insert_blk(curb);
     gen_stmt(node->body);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = incr_blk;
+
     // incr
+    curb = incr_blk;
+    insert_blk(curb);
     gen_expr(node->inc);
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
 
     curb = merge_blk;
-    curb->blk_id = tmp_id++;
+    insert_blk(curb);
 }
 
 static void gen_while(Node *node) {
@@ -386,7 +483,7 @@ static void gen_while(Node *node) {
 
     // cond
     curb = cond_blk;
-    curb->blk_id = tmp_id++;
+    insert_blk(curb);
     Ref tmp = gen_expr(node->cond);
     Ref cond = TMP(tmp_id++, ty_i1);
     new_ins(IR_CMP_NE, cond, (Ref[]){tmp, INT(0)}, 2);
@@ -398,13 +495,13 @@ static void gen_while(Node *node) {
 
     // body
     curb = body_blk;
-    curb->blk_id = tmp_id++;
+    insert_blk(curb);
     gen_stmt(node->body);
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
 
     curb = merge_blk;
-    curb->blk_id = tmp_id++;
+    insert_blk(curb);
 }
 
 static void gen_do(Node *node) {
@@ -417,14 +514,14 @@ static void gen_do(Node *node) {
 
     // body
     curb = body_blk;
-    curb->blk_id = tmp_id++;
+    insert_blk(curb);
     gen_stmt(node->body);
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
 
     // cond
     curb = cond_blk;
-    curb->blk_id = tmp_id++;
+    insert_blk(curb);
     Ref tmp = gen_expr(node->cond);
     Ref cond = TMP(tmp_id++, ty_i1);
     new_ins(IR_CMP_NE, cond, (Ref[]){tmp, INT(0)}, 2);
@@ -435,7 +532,7 @@ static void gen_do(Node *node) {
     curb->succ2 = merge_blk;
 
     curb = merge_blk;
-    curb->blk_id = tmp_id++;
+    insert_blk(curb);
 }
 
 static void gen_ret(Node *n) {
@@ -487,11 +584,10 @@ Module *irgen(Module *md) {
         tmp_id = fn->nparam;
         tail = &dummy;
         fn->start = new_blk();
-        fn->end = emalloc(sizeof(Blk));
-        memset(fn->end, 0, sizeof(Blk));
+        fn->end = new_blk();
 
         curb = fn->start;
-        curb->blk_id = tmp_id++;
+        insert_blk(curb);
         // Entry
         new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(fn->ty->ret)), NULL, 0);
 
@@ -508,12 +604,11 @@ Module *irgen(Module *md) {
         // End
         curb->jmp.type = IR_JMP;
         curb = curb->succ1 = fn->end;
-        curb->blk_id = tmp_id++;
+        insert_blk(curb);
 
         new_ins(IR_LORD, TMP(tmp_id, fn->ty->ret), (Ref[]){SLOT(curf->nparam + 1, fn->ty->ret)}, 1);
         curb->jmp.type = IR_RET;
         curb->jmp.arg = TMP(tmp_id, fn->ty->ret);
-        tail->next = fn->end;
     }
     return md;
 }

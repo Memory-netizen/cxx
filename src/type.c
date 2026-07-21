@@ -106,6 +106,12 @@ void add_type(Node *node) {
             add_type(node->lhs);
             node->ty = ty_int;
             break;
+        case ND_LOGOR:
+        case ND_LOGAND:
+            add_type(node->lhs);
+            add_type(node->rhs);
+            node->ty = ty_int;
+            break;
         case ND_ADDR:
             add_type(node->lhs);
             node->ty = pointer_to(node->lhs->ty);

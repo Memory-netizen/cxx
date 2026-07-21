@@ -53,62 +53,62 @@ struct SrcFile {
 typedef enum {
     TK_EOF = -1,
     TK_PUNCT,
-    TK_COMMA,
-    TK_AS,
-    TK_ADDAS,
-    TK_SUBAS,
-    TK_MULAS,
-    TK_DIVAS,
-    TK_MODAS,
+    TK_COMMA,  // ,
+    TK_AS,     // =
+    TK_ADDAS,  // +=
+    TK_SUBAS,  // -=
+    TK_MULAS,  // *=
+    TK_DIVAS,  // /=
+    TK_MODAS,  // %=
 
-    TK_ANDAS,
-    TK_ORAS,
-    TK_XORAS,
-    TK_LEFTAS,
-    TK_RIGHTAS,
+    TK_ANDAS,    // &=
+    TK_ORAS,     // |=
+    TK_XORAS,    // ^=
+    TK_LEFTAS,   // <<=
+    TK_RIGHTAS,  // >>=
 
-    TK_OR,
-    TK_AND,
-    TK_BOR,
-    TK_XOR,
-    TK_BAND,
+    TK_OR,    // ||
+    TK_AND,   // &&
+    TK_BOR,   // |
+    TK_XOR,   // ^
+    TK_BAND,  // &
 
-    TK_EQ,
-    TK_NE,
-    TK_LT,
-    TK_GT,
-    TK_LE,
-    TK_GE,
+    TK_EQ,  // ==
+    TK_NE,  // !=
+    TK_LT,  // <
+    TK_GT,  // >
+    TK_LE,  // <=
+    TK_GE,  // >=
 
-    TK_LEFT,
-    TK_RIGHT,
+    TK_LEFT,   // <<
+    TK_RIGHT,  // >>
 
-    TK_PLUS,
-    TK_MINUS,
-    TK_STAR,
-    TK_SLASH,
-    TK_MOD,
+    TK_PLUS,   // +
+    TK_MINUS,  // -
+    TK_STAR,   // *
+    TK_SLASH,  // /
+    TK_MOD,    // %
 
-    TK_INC,
-    TK_DEC,
-    TK_INVERT,
-    TK_NOT,
-    TK_DOT,
-    TK_ARROW,
+    TK_INC,     // ++
+    TK_DEC,     // --
+    TK_INVERT,  // ~
+    TK_NOT,     // !
+    TK_DOT,     // .
+    TK_ARROW,   // ->
 
-    TK_LPAREN,
-    TK_RPAREN,
-    TK_LBRACKET,
-    TK_RBRACKET,
-    TK_LBRACE,
-    TK_RBRACE,
-    TK_SEMI,
-    TK_COLON,
-    TK_COLONCOLON,
-    TK_QUESTION,
-    TK_ELLIPSIS,
-    TK_HASH,
-    TK_HASHHASH,
+    TK_LPAREN,      // (
+    TK_RPAREN,      // )
+    TK_LBRACKET,    // [
+    TK_RBRACKET,    // ]
+    TK_LBRACE,      // {
+    TK_RBRACE,      // }
+    TK_SEMI,        // ;
+    TK_COLON,       // :
+    TK_COLONCOLON,  // ::
+    TK_QUESTION,    // ?
+    TK_ELLIPSIS,    // ...
+    TK_HASH,        // #
+    TK_HASHHASH,    // ##
     TK_PUNCTEND,
 
     TK_IDENT,
@@ -291,6 +291,8 @@ typedef enum {
     ND_FUNCALL,  // Function call
     ND_IMCAST,
     ND_EXCAST,
+    ND_LOGAND,  // &&
+    ND_LOGOR,   // ||
 
     // Statement
     ND_RETURN,     // return

@@ -519,18 +519,21 @@ static Node *cast(Token **rest, Token *tok) {
 // BAndExp  ::= EqExp    ("&" EqExp)*
 // XorExp   ::= BAndExp  ("^" BAndExp)*
 // BOrExp   ::= XorExp   ("|" XorExp)*
+// LAndExp  ::= BOrExp   ("&&" BOrExp)*;
+// LOrExp   ::= LAndExp  ("||" LAndExp)*;
 static Node *binexpr(Token **rest, Token *tok, int min_prec) {
     static int op_table[][2] = {
-        [TK_BOR] = {40, ND_BOR},    [TK_XOR] = {50, ND_XOR},   [TK_BAND] = {60, ND_BAND},   [TK_EQ] = {70, ND_EQ},
-        [TK_NE] = {70, ND_NE},      [TK_LT] = {80, ND_LT},     [TK_GT] = {80, ND_LT},       [TK_LE] = {80, ND_LE},
-        [TK_GE] = {80, ND_LE},      [TK_LEFT] = {90, ND_LEFT}, [TK_RIGHT] = {90, ND_RIGHT}, [TK_PLUS] = {100, ND_ADD},
-        [TK_MINUS] = {100, ND_SUB}, [TK_STAR] = {110, ND_MUL}, [TK_SLASH] = {110, ND_DIV},  [TK_MOD] = {110, ND_MOD},
+        [TK_OR] = {20, ND_LOGOR},    [TK_AND] = {30, ND_LOGAND}, [TK_BOR] = {40, ND_BOR},    [TK_XOR] = {50, ND_XOR},
+        [TK_BAND] = {60, ND_BAND},   [TK_EQ] = {70, ND_EQ},      [TK_NE] = {70, ND_NE},      [TK_LT] = {80, ND_LT},
+        [TK_GT] = {80, ND_LT},       [TK_LE] = {80, ND_LE},      [TK_GE] = {80, ND_LE},      [TK_LEFT] = {90, ND_LEFT},
+        [TK_RIGHT] = {90, ND_RIGHT}, [TK_PLUS] = {100, ND_ADD},  [TK_MINUS] = {100, ND_SUB}, [TK_STAR] = {110, ND_MUL},
+        [TK_SLASH] = {110, ND_DIV},  [TK_MOD] = {110, ND_MOD},
     };
 
     Node *lhs = cast(&tok, tok);
     add_type(lhs);
 
-    while (TK_BOR <= tok->kind && tok->kind <= TK_MOD) {
+    while (TK_OR <= tok->kind && tok->kind <= TK_MOD) {
         Token *op_tok = tok;
         NodeKind expr_op = op_table[op_tok->kind][1];
         int cur_prec = op_table[op_tok->kind][0];
@@ -558,7 +561,7 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
 //         | "<<=" | ">>=" | "&=" | "^=" | "|="
 static inline bool is_assignop(Token *tok) { return TK_AS <= tok->kind && tok->kind <= TK_RIGHTAS; }
 
-// AsExp ::= BOrExp (AsOP AsExp)?
+// AsExp ::= LOrExp (AsOP AsExp)?
 static Node *assign(Token **rest, Token *tok) {
     Node *node = binexpr(&tok, tok, 0);
     static int as_op[] = {
