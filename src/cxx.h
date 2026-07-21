@@ -306,6 +306,8 @@ typedef enum {
     ND_COMP_STMT,  // {...}
     ND_GOTO,       // "goto"
     ND_LABEL,      // Labeled statement
+    ND_BREAK,      // "break"
+    ND_CONTINUE,   // "continue"
 
     // Declare
     ND_DECL,

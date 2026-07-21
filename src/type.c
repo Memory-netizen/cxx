@@ -229,6 +229,8 @@ void add_type(Node *node) {
             break;
         // other
         case ND_GOTO:
+        case ND_BREAK:
+        case ND_CONTINUE:
         case ND_PTRAS:
         case ND_FUNCALL:
             // Nothing to do

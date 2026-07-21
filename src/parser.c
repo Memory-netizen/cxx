@@ -749,6 +749,20 @@ static Node *goto_stmt(Token **rest, Token *tok) {
     return node;
 }
 
+// BreakStmt ::= "break" ";"
+static Node *break_stmt(Token **rest, Token *tok) {
+    Node *node = new_node(ND_BREAK, tok);
+    *rest = skip(tok->next, TK_SEMI);
+    return node;
+}
+
+// ContinueStmt ::= "continue" ";"
+static Node *continue_stmt(Token **rest, Token *tok) {
+    Node *node = new_node(ND_CONTINUE, tok);
+    *rest = skip(tok->next, TK_SEMI);
+    return node;
+}
+
 // LabelStmt ::= Ident ":" Stmt
 static Node *label_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_LABEL, tok);
@@ -761,7 +775,7 @@ static Node *label_stmt(Token **rest, Token *tok) {
 
 // Stmt ::= ExpStmt
 //        | CompStmt
-//        | RetStmt | GotoStmt
+//        | RetStmt | GotoStmt | BreakStmt | ContinueStmt
 //        | IfStmt
 //        | WhileStmt | DoStmt | ForStmt
 //        | LabelStmt
@@ -781,6 +795,10 @@ static Node *stmt(Token **rest, Token *tok) {
             return do_stmt(rest, tok);
         case TK_GOTO:
             return goto_stmt(rest, tok);
+        case TK_BREAK:
+            return break_stmt(rest, tok);
+        case TK_CONTINUE:
+            return continue_stmt(rest, tok);
         case TK_IDENT:
             if (tok->next->kind == TK_COLON) return label_stmt(rest, tok);
             // fall through

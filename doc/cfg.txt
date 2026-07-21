@@ -41,12 +41,14 @@ BlockItem   ::= Stmt | Decl
 
 Stmt        ::= ExpStmt
               | CompStmt
-              | RetStmt | GotoStmt
+              | RetStmt | GotoStmt | BreakStmt | ContinueStmt
               | IfStmt
               | WhileStmt | DoStmt | ForStmt
               | LabelStmt
 
 GotoStmt    ::= "goto" Ident ";"
+BreakStmt   ::= "break" ";"
+ContinueStmt ::= "continue" ";"
 LabelStmt   ::= Ident ":" Stmt
 ExpStmt     ::= ";" | Exp ";"
 RetStmt     ::= "return" Exp? ";"

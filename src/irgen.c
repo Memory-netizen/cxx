@@ -7,6 +7,8 @@ static Blk dummy;
 static Blk *tail;
 static Blk *unreach = &dummy;
 static int tmp_id;
+static Blk *brk_blk;
+static Blk *cont_blk;
 
 static Ir *new_ins(IrKind op, Ref dst, Ref *args, uint32_t narg) {
     Ir *new = emalloc(sizeof(Ir));
@@ -433,6 +435,11 @@ static void gen_for(Node *node) {
     Blk *incr_blk = new_blk();
     Blk *merge_blk = new_blk();
 
+    Blk *brk = brk_blk;
+    Blk *cont = cont_blk;
+    brk_blk = merge_blk;
+    cont_blk = incr_blk;
+
     // init
     gen_stmt(node->init);
     curb->jmp.type = IR_JMP;
@@ -471,6 +478,9 @@ static void gen_for(Node *node) {
 
     curb = merge_blk;
     insert_blk(curb);
+
+    brk_blk = brk;
+    cont_blk = cont;
 }
 
 static void gen_while(Node *node) {
@@ -478,6 +488,11 @@ static void gen_while(Node *node) {
     Blk *body_blk = new_blk();
     Blk *merge_blk = new_blk();
 
+    Blk *brk = brk_blk;
+    Blk *cont = cont_blk;
+    brk_blk = merge_blk;
+    cont_blk = cond_blk;
+
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
 
@@ -502,6 +517,9 @@ static void gen_while(Node *node) {
 
     curb = merge_blk;
     insert_blk(curb);
+
+    brk_blk = brk;
+    cont_blk = cont;
 }
 
 static void gen_do(Node *node) {
@@ -509,6 +527,11 @@ static void gen_do(Node *node) {
     Blk *cond_blk = new_blk();
     Blk *merge_blk = new_blk();
 
+    Blk *brk = brk_blk;
+    Blk *cont = cont_blk;
+    brk_blk = merge_blk;
+    cont_blk = cond_blk;
+
     curb->jmp.type = IR_JMP;
     curb->succ1 = body_blk;
 
@@ -533,6 +556,9 @@ static void gen_do(Node *node) {
 
     curb = merge_blk;
     insert_blk(curb);
+
+    brk_blk = brk;
+    cont_blk = cont;
 }
 
 static void gen_label(Node *n) {
@@ -546,6 +572,20 @@ static void gen_label(Node *n) {
 static void gen_goto(Node *n) {
     curb->jmp.type = IR_JMP;
     curb->succ1 = n->target->blk;
+    curb = unreach;
+}
+
+static void gen_break(Node *n) {
+    (void)n;
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = brk_blk;
+    curb = unreach;
+}
+
+static void gen_continue(Node *n) {
+    (void)n;
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = cont_blk;
     curb = unreach;
 }
 
@@ -580,6 +620,12 @@ static Ref gen_stmt(Node *node) {
         case ND_GOTO:
             gen_goto(node);
             break;
+        case ND_BREAK:
+            gen_break(node);
+            break;
+        case ND_CONTINUE:
+            gen_continue(node);
+            break;
         case ND_LABEL:
             gen_label(node);
             break;
@@ -606,6 +652,7 @@ Module *irgen(Module *md) {
         fn->start = new_blk();
         fn->end = new_blk();
         for (Node *y = fn->labels; y; y = y->goto_next) y->blk = new_blk();
+        brk_blk = cont_blk = NULL;
 
         curb = fn->start;
         insert_blk(curb);
