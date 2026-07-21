@@ -419,6 +419,7 @@ bool is_pointer(Type *ty);
 Type *pointer_to(Type *base);
 Type *func_type(Type *return_ty);
 Type *array_of(Type *base, int size);
+Type *struct_type(void);
 Type *enum_type(void);
 Type *copy_type(Type *ty);
 void add_type(Node *node);

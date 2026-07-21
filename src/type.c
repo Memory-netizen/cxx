@@ -58,6 +58,15 @@ Type *array_of(Type *base, int len) {
     return ty;
 }
 
+Type *struct_type(void) {
+    Type *ty = emalloc(sizeof(Type));
+    memset(ty, 0, sizeof(Type));
+    ty->kind = TY_STRUCT;
+    ty->size = 0;
+    ty->align = 1;
+    return ty;
+}
+
 Type *enum_type(void) {
     Type *ty = emalloc(sizeof(Type));
     memset(ty, 0, sizeof(Type));

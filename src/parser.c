@@ -871,17 +871,32 @@ static Type *record_decl(Token **rest, Token *tok) {
     }
 
     if (tag && tok->kind != TK_LBRACE) {
-        Type *ty = find_tag(tag, 1);
-        assert(ty);
         *rest = tok;
+        Type *ty = find_tag(tag, 1);
+        if (ty) return ty;
+
+        ty = struct_type();
+        ty->size = -1;
+        push_tag_scope(tag->id, ty);
         return ty;
     }
 
     // Construct a struct object.
-    Type *ty = emalloc(sizeof(Type));
+    tok = skip(tok, TK_LBRACE);
+    Type *ty = NULL;
+    // Register the struct type if a name was given.
+    if (tag) {
+        ty = find_tag(tag, 0);
+        if (!ty) {
+            ty = struct_type();
+            push_tag_scope(tag->id, ty);
+        }
+    } else {
+        ty = struct_type();
+        ty->id = intern("anon", 4);
+    }
     ty->kind = is_union ? TY_UNION : TY_STRUCT;
-    struct_members(rest, tok->next, ty);
-    ty->align = 1;
+    struct_members(rest, tok, ty);
 
     // Assign offsets within the struct to members.
     int offset = 0;
@@ -898,11 +913,6 @@ static Type *record_decl(Token **rest, Token *tok) {
         offset += mem->ty->size;
     }
     ty->size = ALIGN_UP(offset, ty->align);
-    // Register the struct type if a name was given.
-    if (tag)
-        push_tag_scope(tag->id, ty);
-    else
-        ty->id = intern("anon", 4);
 
     int i = -1;
     Type *t = types;
@@ -970,7 +980,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
                 break;
             }
             case TK_IDENT: {
-                Type *orig = find_typedef(tok, *sclass != SC_TYPEDEF);
+                Type *orig = find_typedef(tok, !typespec_cnt);
                 if (orig) {
                     if (typespec_cnt)
                         error(tok->loc, "‘%.*s’ redeclared as different kind of symbol", tok->len, tok->loc);
