@@ -153,6 +153,33 @@ static Ref gen_expr(Node *node) {
             new_ins(IR_STR, R, (Ref[]){dst, addr}, 2);
             return dst;
         }
+        case ND_PREINC:
+        case ND_PREDEC:
+        case ND_POSTINC:
+        case ND_POSTDEC: {
+            int ir_op = is_pointer(node->ty) ? IR_GEP : IR_ADD;
+            Ref addr = gen_addr(node->lhs);
+            Ref lr = load(addr, node->ty);
+            int addend = (node->kind == ND_PREINC || node->kind == ND_POSTINC) ? 1 : -1;
+            Ref rr = INT(addend);
+            rr.ty = is_pointer(node->ty) ? ty_long : node->ty;
+            dst = TMP(tmp_id++, node->ty);
+            new_ins(ir_op, dst, (Ref[]){lr, rr}, 2);
+            new_ins(IR_STR, R, (Ref[]){dst, addr}, 2);
+            if (node->kind == ND_PREINC || node->kind == ND_PREDEC)
+                return dst;
+            else
+                return lr;
+        }
+        case ND_PTRAS: {
+            Ref addr = gen_addr(node->lhs);
+            Ref lr = load(addr, node->ty);
+            Ref rr = gen_expr(node->rhs);
+            dst = TMP(tmp_id++, node->ty);
+            new_ins(IR_GEP, dst, (Ref[]){lr, rr}, 2);
+            new_ins(IR_STR, R, (Ref[]){dst, addr}, 2);
+            return dst;
+        }
         case ND_ADDAS:
         case ND_SUBAS:
         case ND_MULAS:

@@ -44,7 +44,7 @@ static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs, Token *tok) {
     return node;
 }
 
-static Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
+Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
     Node *node = new_node(kind, tok);
     node->lhs = expr;
     return node;
@@ -394,7 +394,7 @@ static Member *copy_mem(Member *mem) {
 }
 
 // PostExp  ::= PrimExp PostFix*
-// PostFix  ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident
+// PostFix  ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident | "++" | "--"
 // ArgList  ::= AsExp ("," AsExp)*
 static Node *postfix(Token **rest, Token *tok) {
     Node *node = primary(&tok, tok);
@@ -433,6 +433,14 @@ static Node *postfix(Token **rest, Token *tok) {
                 node->member = mem;
                 continue;
             }
+            case TK_INC:
+                node = new_unary(ND_POSTINC, node, tok);
+                tok = tok->next;
+                continue;
+            case TK_DEC:
+                node = new_unary(ND_POSTDEC, node, tok);
+                tok = tok->next;
+                continue;
             default:
                 break;
         }
@@ -442,7 +450,8 @@ static Node *postfix(Token **rest, Token *tok) {
     return node;
 }
 
-// UnaryExp ::= PostExp | UnaryOP CastExp | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
+// UnaryExp ::= PostExp | UnaryOP CastExp | ("++" | "--") UnaryExp
+//          | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
 // UnaryOp  ::= "+" | "-" | "~" | "!" | "&" | "*"
 static Node *unary(Token **rest, Token *tok) {
     switch (tok->kind) {
@@ -466,6 +475,10 @@ static Node *unary(Token **rest, Token *tok) {
             if (node->ty->kind == TY_ARRAY) node = new_imcast(node, pointer_to(node->ty->base));
             return node;
         }
+        case TK_INC:
+            return new_unary(ND_PREINC, unary(rest, tok->next), tok);
+        case TK_DEC:
+            return new_unary(ND_PREDEC, unary(rest, tok->next), tok);
         case TK_SIZEOF: {
             if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, 1)) {
                 Token *start = tok;

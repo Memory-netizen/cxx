@@ -251,6 +251,7 @@ typedef enum {
     ND_AS,     // =
     ND_ADDAS,  // +=
     ND_SUBAS,  // -=
+    ND_PTRAS,  // ptr += num
     ND_MULAS,  // *=
     ND_DIVAS,  // /=
     ND_MODAS,  // %=
@@ -281,7 +282,11 @@ typedef enum {
     ND_ADDR,     // unary &
     ND_DEREF,    // unary *
     ND_MEMBER,   // . (struct member access)
-    ND_PTRADD,
+    ND_PTRADD,   // ptr + num
+    ND_PREINC,   // pre ++
+    ND_PREDEC,   // pre --
+    ND_POSTINC,  // post ++
+    ND_POSTDEC,  // post --
     ND_FUNCALL,  // Function call
     ND_IMCAST,
     ND_EXCAST,
@@ -342,6 +347,7 @@ struct Node {
     };
 };
 
+Node *new_unary(NodeKind kind, Node *expr, Token *tok);
 Node *new_imcast(Node *expr, Type *ty);
 Module *parse(Token *tok);
 

@@ -163,8 +163,28 @@ void add_type(Node *node) {
                 node->rhs = new_imcast(node->rhs, node->lhs->ty);
             node->ty = node->lhs->ty;
             break;
+        case ND_PREINC:
+        case ND_PREDEC:
+        case ND_POSTINC:
+        case ND_POSTDEC:
+            add_type(node->lhs);
+            node->ty = node->lhs->ty;
+            break;
         case ND_ADDAS:
-        case ND_SUBAS:
+        case ND_SUBAS: {
+            add_type(node->lhs);
+            bool is_ptr = is_pointer(node->lhs->ty);
+            if (is_ptr) {
+                if (node->kind == ND_SUBAS) node->rhs = new_unary(ND_NEG, node->rhs, node->rhs->tok);
+                node->kind = ND_PTRAS;
+            }
+            add_type(node->rhs);
+            Type *ty = get_common_type(node->lhs->ty, node->rhs->ty);
+            new_imcast(node->rhs, is_ptr ? ty_long : ty);
+            node->compute_ty = ty;
+            node->ty = node->lhs->ty;
+            break;
+        }
         case ND_MULAS:
         case ND_DIVAS:
         case ND_MODAS:
@@ -184,7 +204,7 @@ void add_type(Node *node) {
             add_type(node->lhs);
             add_type(node->rhs);
             integer_promotion(&node->rhs);
-            node->compute_ty = get_common_type(ty_int, node->lhs->ty);
+            node->compute_ty = get_common_type(node->lhs->ty, ty_int);
             node->ty = node->lhs->ty;
             break;
         case ND_COMMA:
@@ -193,6 +213,7 @@ void add_type(Node *node) {
             node->ty = node->rhs->ty;
             break;
         // other
+        case ND_PTRAS:
         case ND_FUNCALL:
             // Nothing to do
             break;

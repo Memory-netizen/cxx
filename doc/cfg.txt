@@ -67,11 +67,12 @@ XorExp      ::= BAndExp  ("^" BAndExp)*
 BOrExp      ::= XorExp   ("|" XorExp)*
 
 CastExp     ::= UnaryExp | "(" TypeName ")" CastExp
-UnaryExp    ::= PostExp | UnaryOP CastExp | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
+UnaryExp    ::= PostExp | UnaryOP CastExp | ("++" | "--") UnaryExp
+            | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
 UnaryOp     ::= "+" | "-" | "~" | "!" | "&" | "*"
 
 PostExp     ::= PrimExp PostFix*
-PostFix     ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident
+PostFix     ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident | "++" | "--"
 ArgList     ::= AsExp ("," AsExp)*
 
 PrimExp     ::= Num | Str | Ident | "(" Exp ")" | "(" CompStmt ")"
