@@ -65,7 +65,7 @@ WhileStmt   ::= "while" "(" Exp ")" Stmt
 DoStmt      ::= "do" Stmt "while" "(" Exp ")" ";"
 
 Exp         ::= AsExp ("," AsExp)*
-AsExp       ::= LOrExp (AsOP AsExp)?
+AsExp       ::= CondExp (AsOP AsExp)?
 AsOP        ::= "=" | "*=" | "/=" | "%=" | "+=" | "-="
             | "<<=" | ">>=" | "&=" | "^=" | "|="
 
@@ -79,6 +79,7 @@ XorExp      ::= BAndExp  ("^" BAndExp)*
 BOrExp      ::= XorExp   ("|" XorExp)*
 LAndExp     ::= BOrExp   ("&&" BOrExp)*;
 LOrExp      ::= LAndExp  ("||" LAndExp)*;
+CondExp     ::= LOrExp ("?" Exp ":" CondExp)?
 
 CastExp     ::= UnaryExp | "(" TypeName ")" CastExp
 UnaryExp    ::= PostExp | UnaryOP CastExp | ("++" | "--") UnaryExp

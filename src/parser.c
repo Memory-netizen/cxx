@@ -563,13 +563,30 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
     return lhs;
 }
 
+// CondExp ::= LOrExp ("?" Exp ":" CondExp)?
+static Node *conditional(Token **rest, Token *tok) {
+    Node *cond = binexpr(&tok, tok, 0);
+
+    if (tok->kind != TK_QUESTION) {
+        *rest = tok;
+        return cond;
+    }
+
+    Node *node = new_node(ND_COND, tok);
+    node->cond = cond;
+    node->then = expr(&tok, tok->next);
+    tok = skip(tok, TK_COLON);
+    node->els = conditional(rest, tok);
+    return node;
+}
+
 // AsOP  ::= "=" | "*=" | "/=" | "%=" | "+=" | "-="
 //         | "<<=" | ">>=" | "&=" | "^=" | "|="
 static inline bool is_assignop(Token *tok) { return TK_AS <= tok->kind && tok->kind <= TK_RIGHTAS; }
 
-// AsExp ::= LOrExp (AsOP AsExp)?
+// AsExp ::= CondExp (AsOP AsExp)?
 static Node *assign(Token **rest, Token *tok) {
-    Node *node = binexpr(&tok, tok, 0);
+    Node *node = conditional(&tok, tok);
     static int as_op[] = {
         [TK_AS] = ND_AS,       [TK_ADDAS] = ND_ADDAS,   [TK_SUBAS] = ND_SUBAS,     [TK_MULAS] = ND_MULAS,
         [TK_DIVAS] = ND_DIVAS, [TK_MODAS] = ND_MODAS,   [TK_ANDAS] = ND_ANDAS,     [TK_ORAS] = ND_ORAS,

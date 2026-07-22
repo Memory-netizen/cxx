@@ -294,6 +294,7 @@ typedef enum {
     ND_EXCAST,
     ND_LOGAND,  // &&
     ND_LOGOR,   // ||
+    ND_COND,    // ?:
 
     // Statement
     ND_RETURN,     // return

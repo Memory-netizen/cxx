@@ -227,6 +227,17 @@ void add_type(Node *node) {
             add_type(node->rhs);
             node->ty = node->rhs->ty;
             break;
+        case ND_COND:
+            add_type(node->cond);
+            add_type(node->then);
+            add_type(node->els);
+            if (node->then->ty->kind == TY_VOID || node->els->ty->kind == TY_VOID) {
+                node->ty = ty_void;
+            } else {
+                usual_arith_conv(&node->then, &node->els);
+                node->ty = node->then->ty;
+            }
+            break;
         // other
         case ND_GOTO:
         case ND_BREAK:
