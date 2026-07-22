@@ -8,6 +8,7 @@ static Node *stmt(Token **rest, Token *tok);
 static Node *compound_stmt(Token **rest, Token *tok);
 static Node *expr(Token **rest, Token *tok);
 static Node *assign(Token **rest, Token *tok);
+static int64_t const_expr(Token **rest, Token *tok);
 static Node *cast(Token **rest, Token *tok);
 
 static Node *new_node(NodeKind kind, Token *tok) {
@@ -214,11 +215,6 @@ static Type *find_typedef(Token *tok, bool search_par) {
         if (sc) return sc->type_def;
     }
     return NULL;
-}
-
-static long get_number(Token *tok) {
-    if (tok->kind != TK_NUM) error(tok->loc, "expected a number");
-    return tok->val;
 }
 
 static uint32_t get_ident(Token *tok) {
@@ -580,6 +576,84 @@ static Node *conditional(Token **rest, Token *tok) {
     return node;
 }
 
+// Evaluate a given node as a constant expression.
+static int64_t eval(Node *node) {
+    add_type(node);
+
+    switch (node->kind) {
+        case ND_ADD:
+            return eval(node->lhs) + eval(node->rhs);
+        case ND_SUB:
+            return eval(node->lhs) - eval(node->rhs);
+        case ND_MUL:
+            return eval(node->lhs) * eval(node->rhs);
+        case ND_DIV:
+            return eval(node->lhs) / eval(node->rhs);
+        case ND_PLUS:
+            return eval(node->lhs);
+        case ND_NEG:
+            return -eval(node->lhs);
+        case ND_MOD:
+            return eval(node->lhs) % eval(node->rhs);
+        case ND_BAND:
+            return eval(node->lhs) & eval(node->rhs);
+        case ND_BOR:
+            return eval(node->lhs) | eval(node->rhs);
+        case ND_XOR:
+            return eval(node->lhs) ^ eval(node->rhs);
+        case ND_LEFT:
+            return eval(node->lhs) << eval(node->rhs);
+        case ND_RIGHT:
+            return eval(node->lhs) >> eval(node->rhs);
+        case ND_EQ:
+            return eval(node->lhs) == eval(node->rhs);
+        case ND_NE:
+            return eval(node->lhs) != eval(node->rhs);
+        case ND_LT:
+            return eval(node->lhs) < eval(node->rhs);
+        case ND_LE:
+            return eval(node->lhs) <= eval(node->rhs);
+        case ND_COND:
+            return eval(node->cond) ? eval(node->then) : eval(node->els);
+        case ND_COMMA:
+            return eval(node->rhs);
+        case ND_NOT:
+            return !eval(node->lhs);
+        case ND_INVERT:
+            return ~eval(node->lhs);
+        case ND_LOGAND:
+            return eval(node->lhs) && eval(node->rhs);
+        case ND_LOGOR:
+            return eval(node->lhs) || eval(node->rhs);
+        case ND_IMCAST:
+        case ND_EXCAST:
+            if (is_integer(node->ty)) {
+                switch (node->ty->size) {
+                    case 1:
+                        return (uint8_t)eval(node->lhs);
+                    case 2:
+                        return (uint16_t)eval(node->lhs);
+                    case 4:
+                        return (uint32_t)eval(node->lhs);
+                }
+            }
+            return eval(node->lhs);
+        case ND_PTRADD:
+            return eval(node->lhs) + eval(node->rhs) * node->ty->base->size;
+        case ND_NUM:
+            return node->val;
+        default:
+            error(node->tok->loc, "not a compile-time constant");
+    }
+    return 0;
+}
+
+// ConstExp ::= CondExp
+static int64_t const_expr(Token **rest, Token *tok) {
+    Node *node = conditional(rest, tok);
+    return eval(node);
+}
+
 // AsOP  ::= "=" | "*=" | "/=" | "%=" | "+=" | "-="
 //         | "<<=" | ">>=" | "&=" | "^=" | "|="
 static inline bool is_assignop(Token *tok) { return TK_AS <= tok->kind && tok->kind <= TK_RIGHTAS; }
@@ -778,13 +852,13 @@ static Node *switch_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// CaseStmt ::= "case" Num ":" Stmt
+// CaseStmt ::= "case" ConstExp ":" Stmt
 static Node *case_stmt(Token **rest, Token *tok) {
     if (!cur_switch) error(tok->loc, "stray case");
-    int val = get_number(tok->next);
 
     Node *node = new_node(ND_CASE, tok);
-    tok = skip(tok->next->next, TK_COLON);
+    int64_t val = const_expr(&tok, tok->next);
+    tok = skip(tok, TK_COLON);
     node->label_body = stmt(rest, tok);
     node->val = val;
 
@@ -911,7 +985,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
 
 // EnumSpec ::= "enum" Ident? "{" Enumr ("," Enumr)* ","? "}"
 //            | "enum" Ident
-// Enumr    ::= Ident ("=" Num)?
+// Enumr    ::= Ident ("=" ConstExp)?
 static Type *enum_decl(Token **rest, Token *tok) {
     tok = tok->next;
     // Read a enum tag.
@@ -948,17 +1022,14 @@ static Type *enum_decl(Token **rest, Token *tok) {
 
     // Read an enum-list.
     int i = 0;
-    int val = 0;
+    int64_t val = 0;
     while (tok->kind != TK_RBRACE) {
         if (i++ > 0) tok = skip(tok, TK_COMMA);
 
         uint32_t name = get_ident(tok);
         tok = tok->next;
 
-        if (tok->kind == TK_AS) {
-            val = get_number(tok->next);
-            tok = tok->next->next;
-        }
+        if (tok->kind == TK_AS) val = const_expr(&tok, tok->next);
 
         VarScope *sc = push_scope(name);
         sc->enum_ty = ty;
@@ -1199,7 +1270,7 @@ loop_end:
     return ty;
 }
 
-// DeclrSuf  ::= "(" ParamList? ")" | "[" Num "]"
+// DeclrSuf  ::= "(" ParamList? ")" | "[" ConstExp "]"
 // ParamList ::= ParamDecl ("," ParamDecl)*
 // ParamDecl ::= DeclSpecs Declr
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
@@ -1234,12 +1305,10 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
         return ty;
     }
     if (tok->kind == TK_LBRACKET) {
+        tok = tok->next;
         int sz = -1;
-        if (tok->next->kind != TK_RBRACKET) {
-            tok = tok->next;
-            sz = get_number(tok);
-        }
-        tok = skip(tok->next, TK_RBRACKET);
+        if (tok->kind != TK_RBRACKET) sz = const_expr(&tok, tok);
+        tok = skip(tok, TK_RBRACKET);
         ty = decl_suffix(rest, tok, ty);
         return array_of(ty, sz);
     }

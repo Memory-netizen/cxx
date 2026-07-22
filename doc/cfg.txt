@@ -11,7 +11,7 @@ Declr       ::= Ptr? DirDeclr
 Ptr         ::= "*"+
 DirDeclr    ::= (Ident | "(" Declr ")") DeclrSuf*
 
-DeclrSuf    ::= "(" ParamList? ")" | "[" Num "]"
+DeclrSuf    ::= "(" ParamList? ")" | "[" ConstExp "]"
 ParamList   ::= ParamDecl ("," ParamDecl)*
 ParamDecl   ::= DeclSpecs Declr
 
@@ -34,7 +34,7 @@ MemDeclr    ::= Declr
 
 EnumSpec    ::= "enum" Ident? "{" Enumr ("," Enumr)* ","? "}"
             | "enum" Ident
-Enumr       ::= Ident ("=" Num)?
+Enumr       ::= Ident ("=" ConstExp)?
 
 CompStmt    ::= "{" BlockItem* "}"
 BlockItem   ::= Stmt | Decl
@@ -50,7 +50,7 @@ GotoStmt    ::= "goto" Ident ";"
 BreakStmt   ::= "break" ";"
 ContinueStmt ::= "continue" ";"
 LabelStmt   ::= Ident ":" Stmt
-CaseStmt    ::= "case" Num ":"
+CaseStmt    ::= "case" ConstExp ":"
 DefaultStmt ::= "default" ":"
 ExpStmt     ::= ";" | Exp ";"
 RetStmt     ::= "return" Exp? ";"
@@ -80,6 +80,7 @@ BOrExp      ::= XorExp   ("|" XorExp)*
 LAndExp     ::= BOrExp   ("&&" BOrExp)*;
 LOrExp      ::= LAndExp  ("||" LAndExp)*;
 CondExp     ::= LOrExp ("?" Exp ":" CondExp)?
+ConstExp    ::= CondExp
 
 CastExp     ::= UnaryExp | "(" TypeName ")" CastExp
 UnaryExp    ::= PostExp | UnaryOP CastExp | ("++" | "--") UnaryExp
