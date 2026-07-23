@@ -51,12 +51,11 @@ Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
     return node;
 }
 
-Node *new_imcast(Node *expr, Type *ty) {
-    add_type(expr);
-    Node *node = new_node(ND_IMCAST, expr->tok);
-    node->lhs = expr;
+void new_imcast(Node **expr, Type *ty) {
+    Node *node = new_node(ND_IMCAST, (*expr)->tok);
+    node->lhs = *expr;
     node->ty = ty;
-    return node;
+    *expr = node;
 }
 
 static Node *new_excast(Node *expr, Type *ty) {
@@ -291,8 +290,8 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
     // ptr - ptr, which returns how many elements are between the two.
     if (lhs->ty->base && rhs->ty->base) {
         size_t size = lhs->ty->base->size;
-        lhs = new_imcast(lhs, ty_long);
-        rhs = new_imcast(rhs, ty_long);
+        new_imcast(&lhs, ty_long);
+        new_imcast(&rhs, ty_long);
         Node *node = new_binary(ND_SUB, lhs, rhs, tok);
         return new_binary(ND_DIV, node, new_long(size, tok), tok);
     }
@@ -371,7 +370,7 @@ static Node *init_desg_expr(InitDesg *desg, Token *tok) {
 
     Node *lhs = init_desg_expr(desg->next, tok);
     add_type(lhs);
-    if (lhs->ty->kind == TY_ARRAY) lhs = new_imcast(lhs, pointer_to(lhs->ty->base));
+    if (lhs->ty->kind == TY_ARRAY) new_imcast(&lhs, pointer_to(lhs->ty->base));
     Node *rhs = new_num(desg->idx, tok);
     return new_unary(ND_DEREF, new_add(lhs, rhs, tok), tok);
 }
@@ -432,7 +431,7 @@ static Node *fncall(Token **rest, Token *tok) {
         if (param_ty) {
             if (param_ty->kind == TY_STRUCT || param_ty->kind == TY_UNION)
                 error(arg->tok->loc, "passing struct or union is not supported yet");
-            arg = new_imcast(arg, param_ty);
+            new_imcast(&arg, param_ty);
             param_ty = param_ty->next;
         }
         ++i;
@@ -506,7 +505,7 @@ static Node *postfix(Token **rest, Token *tok) {
     Node *node = primary(&tok, tok);
     while (1) {
         add_type(node);
-        if (node->ty->kind == TY_ARRAY) node = new_imcast(node, pointer_to(node->ty->base));
+        if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base));
         switch (tok->kind) {
                 // x[y] is short for *(x+y)
             case TK_LBRACKET: {
@@ -578,7 +577,7 @@ static Node *unary(Token **rest, Token *tok) {
         case TK_STAR: {
             Node *node = new_unary(ND_DEREF, cast(rest, tok->next), tok);
             add_type(node);
-            if (node->ty->kind == TY_ARRAY) node = new_imcast(node, pointer_to(node->ty->base));
+            if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base));
             return node;
         }
         case TK_INC:
@@ -685,6 +684,18 @@ static int64_t eval(Node *node) {
     add_type(node);
 
     switch (node->kind) {
+        case ND_NUM:
+            return node->val;
+        case ND_PLUS:
+            return eval(node->lhs);
+        case ND_NEG:
+            return -eval(node->lhs);
+        case ND_NOT:
+            return !eval(node->lhs);
+        case ND_INVERT:
+            return ~eval(node->lhs);
+        case ND_COMMA:
+            return eval(node->rhs);
         case ND_ADD:
             return eval(node->lhs) + eval(node->rhs);
         case ND_SUB:
@@ -693,10 +704,6 @@ static int64_t eval(Node *node) {
             return eval(node->lhs) * eval(node->rhs);
         case ND_DIV:
             return eval(node->lhs) / eval(node->rhs);
-        case ND_PLUS:
-            return eval(node->lhs);
-        case ND_NEG:
-            return -eval(node->lhs);
         case ND_MOD:
             return eval(node->lhs) % eval(node->rhs);
         case ND_BAND:
@@ -717,18 +724,14 @@ static int64_t eval(Node *node) {
             return eval(node->lhs) < eval(node->rhs);
         case ND_LE:
             return eval(node->lhs) <= eval(node->rhs);
-        case ND_COND:
-            return eval(node->cond) ? eval(node->then) : eval(node->els);
-        case ND_COMMA:
-            return eval(node->rhs);
-        case ND_NOT:
-            return !eval(node->lhs);
-        case ND_INVERT:
-            return ~eval(node->lhs);
         case ND_LOGAND:
             return eval(node->lhs) && eval(node->rhs);
         case ND_LOGOR:
             return eval(node->lhs) || eval(node->rhs);
+        case ND_COND:
+            return eval(node->cond) ? eval(node->then) : eval(node->els);
+        case ND_PTRADD:
+            return eval(node->lhs) + eval(node->rhs) * node->ty->base->size;
         case ND_IMCAST:
         case ND_EXCAST:
             if (is_integer(node->ty)) {
@@ -742,10 +745,6 @@ static int64_t eval(Node *node) {
                 }
             }
             return eval(node->lhs);
-        case ND_PTRADD:
-            return eval(node->lhs) + eval(node->rhs) * node->ty->base->size;
-        case ND_NUM:
-            return node->val;
         default:
             error(node->tok->loc, "not a compile-time constant");
     }
@@ -807,11 +806,11 @@ static Node *return_stmt(Token **rest, Token *tok) {
         return node;
     }
 
-    Node *exp = expr(&tok, tok->next);
+    node->lhs = expr(&tok, tok->next);
     *rest = skip(tok, TK_SEMI);
 
-    add_type(exp);
-    node->lhs = new_imcast(exp, current_fn->ty->ret);
+    add_type(node->lhs);
+    new_imcast(&node->lhs, current_fn->ty->ret);
 
     return node;
 }

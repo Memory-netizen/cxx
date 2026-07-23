@@ -84,13 +84,13 @@ static Type *get_common_type(Type *ty1, Type *ty2) {
 
 static void integer_promotion(Node **expr) {
     Type *ty = get_common_type((*expr)->ty, ty_int);
-    *expr = new_imcast(*expr, ty);
+    new_imcast(expr, ty);
 }
 
 static void usual_arith_conv(Node **lhs, Node **rhs) {
     Type *ty = get_common_type((*lhs)->ty, (*rhs)->ty);
-    *lhs = new_imcast(*lhs, ty);
-    *rhs = new_imcast(*rhs, ty);
+    new_imcast(lhs, ty);
+    new_imcast(rhs, ty);
 }
 
 void add_type(Node *node) {
@@ -150,7 +150,7 @@ void add_type(Node *node) {
         case ND_PTRADD:
             add_type(node->lhs);
             add_type(node->rhs);
-            node->rhs = new_imcast(node->rhs, ty_long);
+            new_imcast(&node->rhs, ty_long);
             node->ty = node->lhs->ty;
             break;
         case ND_LEFT:
@@ -173,9 +173,10 @@ void add_type(Node *node) {
         case ND_AS:
             add_type(node->lhs);
             add_type(node->rhs);
-            if (node->lhs->ty->kind == TY_ARRAY) error(node->lhs->tok->loc, "not an lvalue");
+            if (node->lhs->kind == ND_IMCAST && node->lhs->lhs->ty->kind == TY_ARRAY)
+                error(node->lhs->tok->loc, "not an lvalue");
             if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION)
-                node->rhs = new_imcast(node->rhs, node->lhs->ty);
+                new_imcast(&node->rhs, node->lhs->ty);
             node->ty = node->lhs->ty;
             break;
         case ND_PREINC:
@@ -195,7 +196,7 @@ void add_type(Node *node) {
             }
             add_type(node->rhs);
             Type *ty = get_common_type(node->lhs->ty, node->rhs->ty);
-            new_imcast(node->rhs, is_ptr ? ty_long : ty);
+            new_imcast(&node->rhs, is_ptr ? ty_long : ty);
             node->compute_ty = ty;
             node->ty = node->lhs->ty;
             break;
@@ -209,7 +210,7 @@ void add_type(Node *node) {
             add_type(node->lhs);
             add_type(node->rhs);
             Type *ty = get_common_type(node->lhs->ty, node->rhs->ty);
-            new_imcast(node->rhs, ty);
+            new_imcast(&node->rhs, ty);
             node->compute_ty = ty;
             node->ty = node->lhs->ty;
             break;

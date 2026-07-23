@@ -374,7 +374,7 @@ struct Node {
 };
 
 Node *new_unary(NodeKind kind, Node *expr, Token *tok);
-Node *new_imcast(Node *expr, Type *ty);
+void new_imcast(Node **expr, Type *ty);
 Module *parse(Token *tok);
 
 //
