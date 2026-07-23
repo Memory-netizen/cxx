@@ -293,9 +293,10 @@ typedef enum {
     ND_FUNCALL,  // Function call
     ND_IMCAST,
     ND_EXCAST,
-    ND_LOGAND,  // &&
-    ND_LOGOR,   // ||
-    ND_COND,    // ?:
+    ND_LOGAND,   // &&
+    ND_LOGOR,    // ||
+    ND_COND,     // ?:
+    ND_MEMZERO,  // Zero-clear a stack variable
 
     // Statement
     ND_RETURN,     // return
@@ -479,6 +480,7 @@ typedef enum {
     IR_STR,
     IR_GEP,
     IR_MEMCPY,
+    IR_MEMSET,
 
     // Conversion
     IR_ZEXT,

@@ -336,7 +336,7 @@ static void initializer2(Token **rest, Token *tok, Initializer *init) {
     if (init->ty->kind == TY_ARRAY) {
         tok = skip(tok, TK_LBRACE);
 
-        for (int i = 0; i < init->ty->len; i++) {
+        for (int i = 0; i < init->ty->len && tok->kind != TK_RBRACE; i++) {
             if (i > 0) tok = skip(tok, TK_COMMA);
             initializer2(&tok, tok, init->child[i]);
         }
@@ -374,6 +374,8 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
         return node;
     }
 
+    if (!init->expr) return new_node(ND_NOP, tok);
+
     Node *lhs = init_desg_expr(desg, tok);
     Node *rhs = init->expr;
     return new_binary(ND_AS, lhs, rhs, tok);
@@ -382,7 +384,10 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
 static Node *lvar_initializer(Token **rest, Token *tok, Sym *var) {
     Initializer *init = initializer(rest, tok, var->ty);
     InitDesg desg = {NULL, 0, var};
-    return create_lvar_init(init, var->ty, &desg, tok);
+    // zero-initialize the entire memory region of a variable
+    Node *lhs = new_unary(ND_MEMZERO, new_var_node(var, tok), tok);
+    Node *rhs = create_lvar_init(init, var->ty, &desg, tok);
+    return new_binary(ND_COMMA, lhs, rhs, tok);
 }
 
 static Node *fncall(Token **rest, Token *tok) {

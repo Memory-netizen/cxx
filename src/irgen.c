@@ -278,6 +278,12 @@ static Ref gen_expr(Node *node) {
         case ND_IMCAST:
         case ND_EXCAST:
             return convert(node->lhs, node->ty);
+        case ND_MEMZERO: {
+            Ref addr = gen_addr(node->lhs);
+            Ref ops[] = {addr, INT(0), INT(node->var->ty->size)};
+            new_ins(IR_MEMSET, R, ops, 3);
+            return R;
+        }
         case ND_AS: {
             Ref addr = gen_addr(node->lhs);
             if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) {
@@ -892,6 +898,14 @@ void dump_blk(Blk *b) {
                 print_operand(ir->args[1]);
                 fprintf(out_file, ", i64 %d, i1 false)\n", ir->args[2].val);
                 break;
+            case IR_MEMSET:
+                fprintf(out_file, "call void @llvm.memset.p0.i64(ptr ");
+                print_operand(ir->args[0]);
+                fprintf(out_file, ", i8 ");
+                print_operand(ir->args[1]);
+                fprintf(out_file, ", i64 %d, i1 false)\n", ir->args[2].val);
+                break;
+
             case IR_CALL:
                 fprintf(out_file, "call ");
                 if (refeq(ir->dst, R))
@@ -1062,7 +1076,8 @@ void dump_module(Module *md, FILE *out) {
     out_file = out;
     fprintf(out_file, "declare void @assert(i32, i32, ptr)\n");
     fprintf(out_file, "declare i32 @printf(ptr, ...)\n");
-    fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n\n");
+    fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
+    fprintf(out_file, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n\n");
 
     for (Type *ty = md->tys; ty; ty = ty->next) dump_type(ty);
     if (md->tys) fprintf(out_file, "\n");

@@ -254,6 +254,7 @@ void add_type(Node *node) {
                 if (stmt->kind == ND_EXPR_STMT && stmt->lhs) node->ty = stmt->lhs->ty;
             }
             break;
+        case ND_MEMZERO:
         case ND_IMCAST:
         case ND_EXCAST:
         case ND_RETURN:
