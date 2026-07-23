@@ -98,6 +98,40 @@ struct Scope {
     TagScope *tags;
 };
 
+// Represents a variable initializer
+typedef struct Initializer Initializer;
+struct Initializer {
+    Initializer *next;
+    Type *ty;
+    Token *tok;
+
+    // For scalar type
+    Node *expr;
+
+    // For an aggregate type
+    Initializer **child;
+};
+
+static Initializer *new_initializer(Type *ty) {
+    Initializer *init = emalloc(sizeof(Initializer));
+    init->ty = ty;
+
+    if (ty->kind == TY_ARRAY) {
+        init->child = calloc(ty->len, sizeof(Initializer *));
+        for (int i = 0; i < ty->len; i++) init->child[i] = new_initializer(ty->base);
+    }
+
+    return init;
+}
+
+// For local variable initializer.
+typedef struct InitDesg InitDesg;
+struct InitDesg {
+    InitDesg *next;
+    int idx;
+    Sym *var;
+};
+
 // All local variable instances created during parsing are
 // accumulated to this list.
 static Sym *locals;
@@ -296,8 +330,60 @@ static Type *typename(Token **rest, Token *tok) {
     return abstract_declarator(rest, tok, ty);
 }
 
-// Init ::= AsExp
-static Node *initializer(Token **rest, Token *tok) { return assign(rest, tok); }
+// Init       ::= AsExp | BracedInit
+// BracedInit ::= "{" Init ("," Init)*)? "}"
+static void initializer2(Token **rest, Token *tok, Initializer *init) {
+    if (init->ty->kind == TY_ARRAY) {
+        tok = skip(tok, TK_LBRACE);
+
+        for (int i = 0; i < init->ty->len; i++) {
+            if (i > 0) tok = skip(tok, TK_COMMA);
+            initializer2(&tok, tok, init->child[i]);
+        }
+        *rest = skip(tok, TK_RBRACE);
+        return;
+    }
+
+    init->expr = assign(rest, tok);
+}
+
+static Initializer *initializer(Token **rest, Token *tok, Type *ty) {
+    Initializer *init = new_initializer(ty);
+    initializer2(rest, tok, init);
+    return init;
+}
+
+static Node *init_desg_expr(InitDesg *desg, Token *tok) {
+    if (desg->var) return new_var_node(desg->var, tok);
+
+    Node *lhs = init_desg_expr(desg->next, tok);
+    add_type(lhs);
+    if (lhs->ty->kind == TY_ARRAY) lhs = new_imcast(lhs, pointer_to(lhs->ty->base));
+    Node *rhs = new_num(desg->idx, tok);
+    return new_unary(ND_DEREF, new_add(lhs, rhs, tok), tok);
+}
+
+static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token *tok) {
+    if (ty->kind == TY_ARRAY) {
+        Node *node = new_node(ND_NOP, tok);
+        for (int i = 0; i < ty->len; i++) {
+            InitDesg desg2 = {desg, i, NULL};
+            Node *rhs = create_lvar_init(init->child[i], ty->base, &desg2, tok);
+            node = new_binary(ND_COMMA, node, rhs, tok);
+        }
+        return node;
+    }
+
+    Node *lhs = init_desg_expr(desg, tok);
+    Node *rhs = init->expr;
+    return new_binary(ND_AS, lhs, rhs, tok);
+}
+
+static Node *lvar_initializer(Token **rest, Token *tok, Sym *var) {
+    Initializer *init = initializer(rest, tok, var->ty);
+    InitDesg desg = {NULL, 0, var};
+    return create_lvar_init(init, var->ty, &desg, tok);
+}
 
 static Node *fncall(Token **rest, Token *tok) {
     VarScope *sc = find_var(tok, 1);
@@ -724,11 +810,8 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         Sym *var = new_lvar(get_ident(ty->name), ty);
         var->sclass = sclass;
         if (tok->kind == TK_AS) {
-            Node *lhs = new_var_node(var, ty->name);
-            Node *rhs = initializer(&tok, tok->next);
-            Node *as = new_binary(ND_AS, lhs, rhs, tok);
-            add_type(as);
-            cur = cur->next = new_unary(ND_EXPR_STMT, as, tok);
+            Node *expr = lvar_initializer(&tok, tok->next, var);
+            cur = cur->next = new_unary(ND_EXPR_STMT, expr, tok);
         }
     } while (match(&tok, tok, TK_COMMA));
 
@@ -1425,7 +1508,7 @@ static Token *external_declaration(Token *tok) {
                 error(ty->name->loc,
                       "illegal initializer (only variables can be "
                       "initialized)");
-            init = initializer(&tok, tok);
+            initializer(&tok, tok, ty);
         }
         if (sclass == SC_TYPEDEF) {
             push_scope(get_ident(ty->name))->type_def = ty;

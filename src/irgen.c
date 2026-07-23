@@ -258,6 +258,8 @@ static Ref gen_expr(Node *node) {
     if (!node) return R;
     Ref dst;
     switch (node->kind) {
+        case ND_NOP:
+            return R;
         case ND_NUM:
             if (node->ty->size == 4)
                 return INT(node->val);

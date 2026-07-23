@@ -248,6 +248,7 @@ struct Sym {
 };
 
 typedef enum {
+    ND_NOP,  // do nothing
     // Expression
     ND_COMMA,  // ,
     ND_AS,     // =

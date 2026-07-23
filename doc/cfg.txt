@@ -5,7 +5,8 @@ Decl        ::= DeclSpecs InitDecls? ";"
 
 InitDecls   ::= InitDeclr ("," InitDeclr)*
 InitDeclr   ::= Declr ("=" Init)?
-Init        ::= AsExp
+Init        ::= AsExp | BracedInit
+BracedInit  ::= "{" Init ("," Init)*)? "}"
 
 Declr       ::= Ptr? DirDeclr
 Ptr         ::= "*"+
