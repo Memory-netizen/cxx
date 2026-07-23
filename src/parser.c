@@ -330,15 +330,28 @@ static Type *typename(Token **rest, Token *tok) {
     return abstract_declarator(rest, tok, ty);
 }
 
+static Token *skip_excess_element(Token *tok) {
+    if (tok->kind == TK_LBRACE) {
+        tok = skip_excess_element(tok->next);
+        return skip(tok, TK_RBRACE);
+    }
+
+    assign(&tok, tok);
+    return tok;
+}
+
 // Init       ::= AsExp | BracedInit
 // BracedInit ::= "{" Init ("," Init)*)? "}"
 static void initializer2(Token **rest, Token *tok, Initializer *init) {
     if (init->ty->kind == TY_ARRAY) {
         tok = skip(tok, TK_LBRACE);
 
-        for (int i = 0; i < init->ty->len && tok->kind != TK_RBRACE; i++) {
+        for (int i = 0; tok->kind != TK_RBRACE; i++) {
             if (i > 0) tok = skip(tok, TK_COMMA);
-            initializer2(&tok, tok, init->child[i]);
+            if (i < init->ty->len)
+                initializer2(&tok, tok, init->child[i]);
+            else
+                tok = skip_excess_element(tok);
         }
         *rest = skip(tok, TK_RBRACE);
         return;
