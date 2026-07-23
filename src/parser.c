@@ -110,6 +110,7 @@ struct Initializer {
     // For an aggregate type
     Initializer **child;
 };
+static void initializer2(Token **rest, Token *tok, Initializer *init);
 
 static Initializer *new_initializer(Type *ty) {
     Initializer *init = emalloc(sizeof(Initializer));
@@ -339,20 +340,37 @@ static Token *skip_excess_element(Token *tok) {
     return tok;
 }
 
+static void string_initializer(Token **rest, Token *tok, Initializer *init) {
+    int len = MIN(init->ty->len, (int)str_len(tok->id));
+    char *string = str(tok->id);
+    for (int i = 0; i < len; i++) init->child[i]->expr = new_num(string[i], tok);
+    *rest = tok->next;
+}
+
+static void array_initializer(Token **rest, Token *tok, Initializer *init) {
+    tok = skip(tok, TK_LBRACE);
+
+    for (int i = 0; tok->kind != TK_RBRACE; i++) {
+        if (i > 0) tok = skip(tok, TK_COMMA);
+        if (i < init->ty->len)
+            initializer2(&tok, tok, init->child[i]);
+        else
+            tok = skip_excess_element(tok);
+    }
+    *rest = skip(tok, TK_RBRACE);
+    return;
+}
+
 // Init       ::= AsExp | BracedInit
 // BracedInit ::= "{" Init ("," Init)*)? "}"
 static void initializer2(Token **rest, Token *tok, Initializer *init) {
-    if (init->ty->kind == TY_ARRAY) {
-        tok = skip(tok, TK_LBRACE);
+    if (init->ty->kind == TY_ARRAY && tok->kind == TK_STRLIT) {
+        string_initializer(rest, tok, init);
+        return;
+    }
 
-        for (int i = 0; tok->kind != TK_RBRACE; i++) {
-            if (i > 0) tok = skip(tok, TK_COMMA);
-            if (i < init->ty->len)
-                initializer2(&tok, tok, init->child[i]);
-            else
-                tok = skip_excess_element(tok);
-        }
-        *rest = skip(tok, TK_RBRACE);
+    if (init->ty->kind == TY_ARRAY) {
+        array_initializer(rest, tok, init);
         return;
     }
 
