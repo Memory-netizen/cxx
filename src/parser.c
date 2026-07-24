@@ -103,22 +103,27 @@ struct Initializer {
     Initializer *next;
     Type *ty;
     Token *tok;
+    bool is_flexible;
 
     // For scalar type
     Node *expr;
 
-    // For an aggregate type
+    // For aggregate type
     Initializer **child;
 };
 static void initializer2(Token **rest, Token *tok, Initializer *init);
 
-static Initializer *new_initializer(Type *ty) {
+static Initializer *new_initializer(Type *ty, bool is_flexible) {
     Initializer *init = emalloc(sizeof(Initializer));
     init->ty = ty;
 
     if (ty->kind == TY_ARRAY) {
+        if (is_flexible && ty->size < 0) {
+            init->is_flexible = true;
+            return init;
+        }
         init->child = calloc(ty->len, sizeof(Initializer *));
-        for (int i = 0; i < ty->len; i++) init->child[i] = new_initializer(ty->base);
+        for (int i = 0; i < ty->len; i++) init->child[i] = new_initializer(ty->base, false);
     }
 
     return init;
@@ -341,14 +346,34 @@ static Token *skip_excess_element(Token *tok) {
 }
 
 static void string_initializer(Token **rest, Token *tok, Initializer *init) {
-    int len = MIN(init->ty->len, (int)str_len(tok->id));
     char *string = str(tok->id);
+    int arrlen = str_len(tok->id) + 1;
+    if (init->is_flexible) *init = *new_initializer(array_of(init->ty->base, arrlen), false);
+
+    int len = MIN(init->ty->len, arrlen);
+
     for (int i = 0; i < len; i++) init->child[i]->expr = new_num(string[i], tok);
     *rest = tok->next;
 }
 
+static int count_array_init_elements(Token *tok, Type *ty) {
+    Initializer *dummy = new_initializer(ty->base, false);
+
+    int i;
+    for (i = 0; tok->kind != TK_RBRACE; i++) {
+        if (i > 0) tok = skip(tok, TK_COMMA);
+        initializer2(&tok, tok, dummy);
+    }
+    return i;
+}
+
 static void array_initializer(Token **rest, Token *tok, Initializer *init) {
     tok = skip(tok, TK_LBRACE);
+
+    if (init->is_flexible) {
+        int len = count_array_init_elements(tok, init->ty);
+        *init = *new_initializer(array_of(init->ty->base, len), false);
+    }
 
     for (int i = 0; tok->kind != TK_RBRACE; i++) {
         if (i > 0) tok = skip(tok, TK_COMMA);
@@ -377,9 +402,10 @@ static void initializer2(Token **rest, Token *tok, Initializer *init) {
     init->expr = assign(rest, tok);
 }
 
-static Initializer *initializer(Token **rest, Token *tok, Type *ty) {
-    Initializer *init = new_initializer(ty);
+static Initializer *initializer(Token **rest, Token *tok, Type *ty, Type **new_ty) {
+    Initializer *init = new_initializer(ty, true);
     initializer2(rest, tok, init);
+    *new_ty = init->ty;
     return init;
 }
 
@@ -412,7 +438,7 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
 }
 
 static Node *lvar_initializer(Token **rest, Token *tok, Sym *var) {
-    Initializer *init = initializer(rest, tok, var->ty);
+    Initializer *init = initializer(rest, tok, var->ty, &var->ty);
     InitDesg desg = {NULL, 0, var};
     // zero-initialize the entire memory region of a variable
     Node *lhs = new_unary(ND_MEMZERO, new_var_node(var, tok), tok);
@@ -841,13 +867,13 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         Token *start = tok;
         Type *ty = declarator(&tok, tok, basety);
         if (ty->kind == TY_VOID) error(start->loc, "variable ‘%.*s’ declared void", start->len, start->loc);
-        if (ty->size < 0) error(start->loc, "variable '%.*s' has incomplete type", start->len, start->loc);
         Sym *var = new_lvar(get_ident(ty->name), ty);
         var->sclass = sclass;
         if (tok->kind == TK_AS) {
             Node *expr = lvar_initializer(&tok, tok->next, var);
             cur = cur->next = new_unary(ND_EXPR_STMT, expr, tok);
         }
+        if (var->ty->size < 0) error(start->loc, "variable '%.*s' has incomplete type", start->len, start->loc);
     } while (match(&tok, tok, TK_COMMA));
 
     *rest = tok;
@@ -1543,7 +1569,7 @@ static Token *external_declaration(Token *tok) {
                 error(ty->name->loc,
                       "illegal initializer (only variables can be "
                       "initialized)");
-            initializer(&tok, tok, ty);
+            initializer(&tok, tok, ty, &ty);
         }
         if (sclass == SC_TYPEDEF) {
             push_scope(get_ident(ty->name))->type_def = ty;
