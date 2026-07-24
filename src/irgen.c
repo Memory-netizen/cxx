@@ -72,10 +72,12 @@ static Ref gen_addr(Node *node) {
             new_ins(IR_GEP, dst, gep_ops, nmem + 2);
             return dst;
         }
+        case ND_AS:
+            return gen_addr(node->rhs);
         default:
     }
-    printf("error\n");
-    exit(1);
+    error(node->tok->loc, "not a lvalue");
+    return R;
 }
 
 static Ref load(Ref addr, Type *ty) {
@@ -290,7 +292,7 @@ static Ref gen_expr(Node *node) {
                 Ref src = gen_addr(node->rhs);
                 Ref ops[] = {addr, src, INT(node->ty->size)};
                 new_ins(IR_MEMCPY, R, ops, 3);
-                return R;
+                return addr;
             }
             dst = gen_expr(node->rhs);
             new_ins(IR_STR, R, (Ref[]){dst, addr}, 2);

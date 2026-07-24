@@ -122,8 +122,19 @@ static Initializer *new_initializer(Type *ty, bool is_flexible) {
             init->is_flexible = true;
             return init;
         }
-        init->child = calloc(ty->len, sizeof(Initializer *));
+        init->child = emalloc(ty->len * sizeof(Initializer *));
         for (int i = 0; i < ty->len; i++) init->child[i] = new_initializer(ty->base, false);
+        return init;
+    }
+    if (ty->kind == TY_STRUCT) {
+        // Count the number of struct members.
+        int len = 0;
+        for (Member *mem = ty->members; mem; mem = mem->next) len++;
+
+        init->child = emalloc(len * sizeof(Initializer *));
+
+        for (Member *mem = ty->members; mem; mem = mem->next) init->child[mem->idx] = new_initializer(mem->ty, false);
+        return init;
     }
 
     return init;
@@ -134,6 +145,7 @@ typedef struct InitDesg InitDesg;
 struct InitDesg {
     InitDesg *next;
     int idx;
+    Member *member;
     Sym *var;
 };
 
@@ -188,6 +200,12 @@ static Type *find_tag(Token *tok, bool search_par) {
             return NULL;
     }
     return NULL;
+}
+
+static Member *copy_mem(Member *mem) {
+    Member *new = emalloc(sizeof(Member));
+    *new = *mem;
+    return new;
 }
 
 static VarScope *push_scope(uint32_t id) {
@@ -386,6 +404,25 @@ static void array_initializer(Token **rest, Token *tok, Initializer *init) {
     return;
 }
 
+static void struct_initializer(Token **rest, Token *tok, Initializer *init) {
+    tok = skip(tok, TK_LBRACE);
+
+    Member *mem = init->ty->members;
+
+    while (tok->kind != TK_RBRACE) {
+        if (mem != init->ty->members) tok = skip(tok, TK_COMMA);
+
+        if (mem) {
+            initializer2(&tok, tok, init->child[mem->idx]);
+            mem = mem->next;
+        } else {
+            tok = skip_excess_element(tok);
+        }
+    }
+    *rest = skip(tok, TK_RBRACE);
+    return;
+}
+
 // Init       ::= AsExp | BracedInit
 // BracedInit ::= "{" Init ("," Init)*)? "}"
 static void initializer2(Token **rest, Token *tok, Initializer *init) {
@@ -396,6 +433,10 @@ static void initializer2(Token **rest, Token *tok, Initializer *init) {
 
     if (init->ty->kind == TY_ARRAY) {
         array_initializer(rest, tok, init);
+        return;
+    }
+    if (init->ty->kind == TY_STRUCT) {
+        struct_initializer(rest, tok, init);
         return;
     }
 
@@ -412,6 +453,13 @@ static Initializer *initializer(Token **rest, Token *tok, Type *ty, Type **new_t
 static Node *init_desg_expr(InitDesg *desg, Token *tok) {
     if (desg->var) return new_var_node(desg->var, tok);
 
+    if (desg->member) {
+        Node *node = new_unary(ND_MEMBER, init_desg_expr(desg->next, tok), tok);
+        node->member = copy_mem(desg->member);
+        node->member->next = NULL;
+        return node;
+    }
+
     Node *lhs = init_desg_expr(desg->next, tok);
     add_type(lhs);
     if (lhs->ty->kind == TY_ARRAY) new_imcast(&lhs, pointer_to(lhs->ty->base));
@@ -423,8 +471,19 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
     if (ty->kind == TY_ARRAY) {
         Node *node = new_node(ND_NOP, tok);
         for (int i = 0; i < ty->len; i++) {
-            InitDesg desg2 = {desg, i, NULL};
+            InitDesg desg2 = {desg, i, NULL, NULL};
             Node *rhs = create_lvar_init(init->child[i], ty->base, &desg2, tok);
+            node = new_binary(ND_COMMA, node, rhs, tok);
+        }
+        return node;
+    }
+    if (ty->kind == TY_STRUCT) {
+        Node *node = new_node(ND_NOP, tok);
+
+        for (Member *mem = ty->members; mem; mem = mem->next) {
+            InitDesg desg2 = {desg, 0, mem, NULL};
+            Node *rhs = create_lvar_init(init->child[mem->idx], mem->ty, &desg2, tok);
+            add_type(rhs);
             node = new_binary(ND_COMMA, node, rhs, tok);
         }
         return node;
@@ -439,7 +498,7 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
 
 static Node *lvar_initializer(Token **rest, Token *tok, Sym *var) {
     Initializer *init = initializer(rest, tok, var->ty, &var->ty);
-    InitDesg desg = {NULL, 0, var};
+    InitDesg desg = {NULL, 0, NULL, var};
     // zero-initialize the entire memory region of a variable
     Node *lhs = new_unary(ND_MEMZERO, new_var_node(var, tok), tok);
     Node *rhs = create_lvar_init(init, var->ty, &desg, tok);
@@ -536,12 +595,6 @@ static Member *get_struct_member(Type *ty, Token *tok) {
     return NULL;
 }
 
-static Member *copy_mem(Member *mem) {
-    Member *new = emalloc(sizeof(Member));
-    *new = *mem;
-    return new;
-}
-
 // PostExp  ::= PrimExp PostFix*
 // PostFix  ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident | "++" | "--"
 // ArgList  ::= AsExp ("," AsExp)*
@@ -576,8 +629,8 @@ static Node *postfix(Token **rest, Token *tok) {
                         error(dot->loc, "expected ‘;’ after expression");
                 }
                 Member *mem = copy_mem(get_struct_member(ty, tok));
-                tok = tok->next;
                 mem->next = NULL;
+                tok = tok->next;
                 node = new_unary(ND_MEMBER, node, dot);
                 node->member = mem;
                 continue;
@@ -873,7 +926,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             Node *expr = lvar_initializer(&tok, tok->next, var);
             cur = cur->next = new_unary(ND_EXPR_STMT, expr, tok);
         }
-        if (var->ty->size < 0) error(start->loc, "variable '%.*s' has incomplete type", start->len, start->loc);
+        if (var->ty->size < 0) error(start->loc, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
     } while (match(&tok, tok, TK_COMMA));
 
     *rest = tok;
@@ -1201,7 +1254,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             Member *mem = emalloc(sizeof(Member));
             mem->ty = declarator(&tok, tok, basety);
             if (mem->ty->kind == TY_VOID) error(start->loc, "field ‘%.*s’ declared void", start->len, start->loc);
-            if (mem->ty->size < 0) error(start->loc, "variable '%.*s' has incomplete type", start->len, start->loc);
+            if (mem->ty->size < 0) error(start->loc, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
             mem->name = mem->ty->name;
             cur = cur->next = mem;
         }
@@ -1437,7 +1490,7 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
                 paramty->name = name;
             }
             if (paramty->size < 0)
-                error(paramty->name->loc, "parameter '%.*s' has incomplete type", paramty->name->len,
+                error(paramty->name->loc, "parameter ‘%.*s’ has incomplete type", paramty->name->len,
                       paramty->name->loc);
             cur = cur->next = copy_type(paramty);
         }
@@ -1575,7 +1628,7 @@ static Token *external_declaration(Token *tok) {
             push_scope(get_ident(ty->name))->type_def = ty;
         } else {
             if (ty->kind == TY_VOID) error(start->loc, "variable ‘%.*s’ declared void", start->len, start->loc);
-            if (ty->size < 0) error(start->loc, "variable '%.*s' has incomplete type", start->len, start->loc);
+            if (ty->size < 0) error(start->loc, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
             Sym *var = new_gvar(get_ident(ty->name), ty);
             var->is_function = var->ty->kind == TY_FUNC;
             var->sclass = sclass;

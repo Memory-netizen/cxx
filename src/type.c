@@ -127,10 +127,11 @@ void add_type(Node *node) {
             break;
         case ND_DEREF:
             add_type(node->lhs);
-            if (!is_pointer(node->lhs->ty)) exit(1);
+            if (!is_pointer(node->lhs->ty)) error(node->lhs->tok->loc, "unary ‘*’ requires pointer operand");
             node->ty = node->lhs->ty->base;
             break;
         case ND_MEMBER:
+            add_type(node->lhs);
             node->ty = node->member->ty;
             break;
         // binary

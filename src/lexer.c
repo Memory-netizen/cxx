@@ -29,7 +29,7 @@ static char *expect[] = {
 
 // Ensure that the current token is `kind`.
 Token *skip(Token *tok, TokenKind kind) {
-    if (tok->kind != kind) error(tok->loc, "expected '%s'", expect[kind]);
+    if (tok->kind != kind) error(tok->loc, "expected ‘%s’", expect[kind]);
     return tok->next;
 }
 
