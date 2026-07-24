@@ -126,7 +126,7 @@ static Initializer *new_initializer(Type *ty, bool is_flexible) {
         for (int i = 0; i < ty->len; i++) init->child[i] = new_initializer(ty->base, false);
         return init;
     }
-    if (ty->kind == TY_STRUCT) {
+    if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
         // Count the number of struct members.
         int len = 0;
         for (Member *mem = ty->members; mem; mem = mem->next) len++;
@@ -423,6 +423,12 @@ static void struct_initializer(Token **rest, Token *tok, Initializer *init) {
     return;
 }
 
+static void union_initializer(Token **rest, Token *tok, Initializer *init) {
+    tok = skip(tok, TK_LBRACE);
+    initializer2(&tok, tok, init->child[0]);
+    *rest = skip(tok, TK_RBRACE);
+}
+
 // Init       ::= AsExp | BracedInit
 // BracedInit ::= "{" Init ("," Init)*)? "}"
 static void initializer2(Token **rest, Token *tok, Initializer *init) {
@@ -445,6 +451,18 @@ static void initializer2(Token **rest, Token *tok, Initializer *init) {
             }
         }
         struct_initializer(rest, tok, init);
+        return;
+    }
+    if (init->ty->kind == TY_UNION) {
+        if (tok->kind != TK_LBRACE) {
+            Node *expr = assign(rest, tok);
+            add_type(expr);
+            if (expr->ty->kind == TY_UNION) {
+                init->expr = expr;
+                return;
+            }
+        }
+        union_initializer(rest, tok, init);
         return;
     }
 
@@ -495,6 +513,11 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
             node = new_binary(ND_COMMA, node, rhs, tok);
         }
         return node;
+    }
+
+    if (ty->kind == TY_UNION && !init->expr) {
+        InitDesg desg2 = {desg, 0, ty->members, NULL};
+        return create_lvar_init(init->child[0], ty->members->ty, &desg2, tok);
     }
 
     if (!init->expr) return new_node(ND_NOP, tok);
