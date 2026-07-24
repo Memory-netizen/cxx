@@ -51,15 +51,9 @@ Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
     return node;
 }
 
-void new_imcast(Node **expr, Type *ty) {
-    Node *node = new_node(ND_IMCAST, (*expr)->tok);
-    node->lhs = *expr;
-    node->ty = ty;
-    *expr = node;
-}
-
 static Node *new_excast(Node *expr, Type *ty) {
     add_type(expr);
+    lvalue_convert(&expr);
     Node *node = new_node(ND_EXCAST, expr->tok);
     node->lhs = expr;
     node->ty = ty;
@@ -314,6 +308,8 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
     // ptr - ptr, which returns how many elements are between the two.
     if (lhs->ty->base && rhs->ty->base) {
         size_t size = lhs->ty->base->size;
+        lvalue_convert(&lhs);
+        lvalue_convert(&rhs);
         new_imcast(&lhs, ty_long);
         new_imcast(&rhs, ty_long);
         Node *node = new_binary(ND_SUB, lhs, rhs, tok);
@@ -524,7 +520,9 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
 
     Node *lhs = init_desg_expr(desg, tok);
     Node *rhs = init->expr;
-    return new_binary(ND_AS, lhs, rhs, tok);
+    Node *as = new_binary(ND_AS, lhs, rhs, tok);
+    add_type(as);
+    return as;
 }
 
 static Node *lvar_initializer(Token **rest, Token *tok, Sym *var) {
@@ -565,6 +563,7 @@ static Node *fncall(Token **rest, Token *tok) {
         if (param_ty) {
             if (param_ty->kind == TY_STRUCT || param_ty->kind == TY_UNION)
                 error(arg->tok->loc, "passing struct or union is not supported yet");
+            lvalue_convert(&arg);
             new_imcast(&arg, param_ty);
             param_ty = param_ty->next;
         }
@@ -937,7 +936,7 @@ static Node *return_stmt(Token **rest, Token *tok) {
     node->lhs = expr(&tok, tok->next);
     *rest = skip(tok, TK_SEMI);
 
-    add_type(node->lhs);
+    add_type(node);
     new_imcast(&node->lhs, current_fn->ty->ret);
 
     return node;
@@ -977,6 +976,7 @@ static Node *select_head(Token **rest, Token *tok) {
             Node *stmt = node->body;
             while (stmt->next) stmt = stmt->next;
             stmt->next = expr(&tok, tok->next);
+            lvalue_convert(&stmt->next);
         }
     } else {
         node = expr(&tok, tok);

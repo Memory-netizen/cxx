@@ -71,8 +71,6 @@ static Ref gen_addr(Node *node) {
             new_ins(IR_GEP, dst, gep_ops, nmem + 2);
             return dst;
         }
-        case ND_AS:
-            return gen_addr(node->rhs);
         default:
     }
     error(node->tok->loc, "not a lvalue");
@@ -269,26 +267,28 @@ static Ref gen_expr(Node *node) {
         case ND_STMT_EXPR:
             for (Node *n = node->body; n; n = n->next) dst = gen_stmt(n);
             return dst;
+        case ND_LVTOR:
+            return load(gen_expr(node->lhs), node->ty);
         case ND_VAR:
         case ND_MEMBER:
-            return load(gen_addr(node), node->ty);
+            return gen_addr(node);
         case ND_DEREF:
-            return load(gen_expr(node->lhs), node->ty);
+            return gen_expr(node->lhs);
         case ND_ADDR:
-            return gen_addr(node->lhs);
+            return gen_expr(node->lhs);
         case ND_IMCAST:
         case ND_EXCAST:
             return convert(node->lhs, node->ty);
         case ND_MEMZERO: {
-            Ref addr = gen_addr(node->lhs);
+            Ref addr = gen_expr(node->lhs);
             Ref ops[] = {addr, INT(0), INT(node->var->ty->size)};
             new_ins(IR_MEMSET, R, ops, 3);
             return R;
         }
         case ND_AS: {
-            Ref addr = gen_addr(node->lhs);
+            Ref addr = gen_expr(node->lhs);
             if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) {
-                Ref src = gen_addr(node->rhs);
+                Ref src = gen_expr(node->rhs);
                 Ref ops[] = {addr, src, INT(node->ty->size)};
                 new_ins(IR_MEMCPY, R, ops, 3);
                 return addr;
@@ -302,7 +302,7 @@ static Ref gen_expr(Node *node) {
         case ND_POSTINC:
         case ND_POSTDEC: {
             int ir_op = is_pointer(node->ty) ? IR_GEP : IR_ADD;
-            Ref addr = gen_addr(node->lhs);
+            Ref addr = gen_expr(node->lhs);
             Ref lr = load(addr, node->ty);
             int addend = (node->kind == ND_PREINC || node->kind == ND_POSTINC) ? 1 : -1;
             Ref rr = INT(addend);
@@ -316,7 +316,7 @@ static Ref gen_expr(Node *node) {
                 return lr;
         }
         case ND_PTRAS: {
-            Ref addr = gen_addr(node->lhs);
+            Ref addr = gen_expr(node->lhs);
             Ref lr = load(addr, node->ty);
             Ref rr = gen_expr(node->rhs);
             dst = TMP(tmp_id++, node->ty);
@@ -334,7 +334,7 @@ static Ref gen_expr(Node *node) {
         case ND_XORAS:
         case ND_LEFTAS:
         case ND_RIGHTAS: {
-            Ref addr = gen_addr(node->lhs);
+            Ref addr = gen_expr(node->lhs);
             Ref lr = load(addr, node->ty);
             lr = cast(lr, node->ty, node->compute_ty);
             Ref rr = gen_expr(node->rhs);

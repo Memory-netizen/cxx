@@ -76,6 +76,19 @@ Type *enum_type(void) {
     return ty;
 }
 
+void lvalue_convert(Node **expr) {
+    if (!(*expr) || !(*expr)->is_lvalue) return;
+    Node *node = new_unary(ND_LVTOR, (*expr), (*expr)->tok);
+    node->ty = (*expr)->ty;
+    *expr = node;
+}
+
+void new_imcast(Node **expr, Type *ty) {
+    Node *node = new_unary(ND_IMCAST, *expr, (*expr)->tok);
+    node->ty = ty;
+    *expr = node;
+}
+
 static Type *get_common_type(Type *ty1, Type *ty2) {
     if (ty1->base) return pointer_to(ty1->base);
     if (ty1->size == 8 || ty2->size == 8) return ty_long;
@@ -101,6 +114,7 @@ void add_type(Node *node) {
             break;
         case ND_VAR:
             node->ty = node->var->ty;
+            node->is_lvalue = true;
             break;
 
         // unary
@@ -108,17 +122,21 @@ void add_type(Node *node) {
         case ND_NEG:
         case ND_INVERT:
             add_type(node->lhs);
+            lvalue_convert(&node->lhs);
             integer_promotion(&node->lhs);
             node->ty = node->lhs->ty;
             break;
         case ND_NOT:
             add_type(node->lhs);
+            lvalue_convert(&node->lhs);
             node->ty = ty_int;
             break;
         case ND_LOGOR:
         case ND_LOGAND:
             add_type(node->lhs);
             add_type(node->rhs);
+            lvalue_convert(&node->lhs);
+            lvalue_convert(&node->rhs);
             node->ty = ty_int;
             break;
         case ND_ADDR:
@@ -127,12 +145,15 @@ void add_type(Node *node) {
             break;
         case ND_DEREF:
             add_type(node->lhs);
+            lvalue_convert(&node->lhs);
             if (!is_pointer(node->lhs->ty)) error(node->lhs->tok->loc, "unary ‘*’ requires pointer operand");
             node->ty = node->lhs->ty->base;
+            node->is_lvalue = true;
             break;
         case ND_MEMBER:
             add_type(node->lhs);
             node->ty = node->member->ty;
+            node->is_lvalue = node->lhs->is_lvalue;
             break;
         // binary
         case ND_ADD:
@@ -145,12 +166,16 @@ void add_type(Node *node) {
         case ND_BAND:
             add_type(node->lhs);
             add_type(node->rhs);
+            lvalue_convert(&node->lhs);
+            lvalue_convert(&node->rhs);
             usual_arith_conv(&node->lhs, &node->rhs);
             node->ty = node->lhs->ty;
             break;
         case ND_PTRADD:
             add_type(node->lhs);
             add_type(node->rhs);
+            lvalue_convert(&node->lhs);
+            lvalue_convert(&node->rhs);
             new_imcast(&node->rhs, ty_long);
             node->ty = node->lhs->ty;
             break;
@@ -158,6 +183,8 @@ void add_type(Node *node) {
         case ND_RIGHT:
             add_type(node->lhs);
             add_type(node->rhs);
+            lvalue_convert(&node->lhs);
+            lvalue_convert(&node->rhs);
             integer_promotion(&node->lhs);
             integer_promotion(&node->rhs);
             node->ty = node->lhs->ty;
@@ -168,6 +195,8 @@ void add_type(Node *node) {
         case ND_LE:
             add_type(node->lhs);
             add_type(node->rhs);
+            lvalue_convert(&node->lhs);
+            lvalue_convert(&node->rhs);
             usual_arith_conv(&node->lhs, &node->rhs);
             node->ty = ty_int;
             break;
@@ -176,8 +205,10 @@ void add_type(Node *node) {
             add_type(node->rhs);
             if (node->lhs->kind == ND_IMCAST && node->lhs->lhs->ty->kind == TY_ARRAY)
                 error(node->lhs->tok->loc, "not an lvalue");
-            if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION)
+            if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION) {
+                lvalue_convert(&node->rhs);
                 new_imcast(&node->rhs, node->lhs->ty);
+            }
             node->ty = node->lhs->ty;
             break;
         case ND_PREINC:
@@ -196,6 +227,7 @@ void add_type(Node *node) {
                 node->kind = ND_PTRAS;
             }
             add_type(node->rhs);
+            lvalue_convert(&node->rhs);
             Type *ty = get_common_type(node->lhs->ty, node->rhs->ty);
             new_imcast(&node->rhs, is_ptr ? ty_long : ty);
             node->compute_ty = ty;
@@ -210,6 +242,7 @@ void add_type(Node *node) {
         case ND_XORAS: {
             add_type(node->lhs);
             add_type(node->rhs);
+            lvalue_convert(&node->rhs);
             Type *ty = get_common_type(node->lhs->ty, node->rhs->ty);
             new_imcast(&node->rhs, ty);
             node->compute_ty = ty;
@@ -220,6 +253,7 @@ void add_type(Node *node) {
         case ND_RIGHTAS:
             add_type(node->lhs);
             add_type(node->rhs);
+            lvalue_convert(&node->rhs);
             integer_promotion(&node->rhs);
             node->compute_ty = get_common_type(node->lhs->ty, ty_int);
             node->ty = node->lhs->ty;
@@ -227,12 +261,17 @@ void add_type(Node *node) {
         case ND_COMMA:
             add_type(node->lhs);
             add_type(node->rhs);
+            lvalue_convert(&node->lhs);
+            lvalue_convert(&node->rhs);
             node->ty = node->rhs->ty;
             break;
         case ND_COND:
             add_type(node->cond);
             add_type(node->then);
             add_type(node->els);
+            lvalue_convert(&node->cond);
+            lvalue_convert(&node->then);
+            lvalue_convert(&node->els);
             if (node->then->ty->kind == TY_VOID || node->els->ty->kind == TY_VOID) {
                 node->ty = ty_void;
             } else {
@@ -259,9 +298,13 @@ void add_type(Node *node) {
         case ND_MEMZERO:
         case ND_IMCAST:
         case ND_EXCAST:
+        case ND_LVTOR:
+            add_type(node->lhs);
+            break;
         case ND_RETURN:
         case ND_EXPR_STMT:
             add_type(node->lhs);
+            lvalue_convert(&node->lhs);
             break;
         case ND_LABEL:
         case ND_CASE:
@@ -270,6 +313,7 @@ void add_type(Node *node) {
         case ND_SWITCH:
             add_type(node->cond);
             add_type(node->body);
+            lvalue_convert(&node->cond);
             break;
         case ND_IF:
         case ND_WHILE:
@@ -279,6 +323,7 @@ void add_type(Node *node) {
             add_type(node->cond);
             add_type(node->then);
             add_type(node->els);
+            lvalue_convert(&node->cond);
             break;
         case ND_DECL:
         case ND_COMP_STMT:

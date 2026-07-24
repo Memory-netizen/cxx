@@ -291,8 +291,9 @@ typedef enum {
     ND_POSTINC,  // post ++
     ND_POSTDEC,  // post --
     ND_FUNCALL,  // Function call
-    ND_IMCAST,
-    ND_EXCAST,
+    ND_IMCAST,   // Implicit cast
+    ND_EXCAST,   // Cast
+    ND_LVTOR,    // LValue to rvalue
     ND_LOGAND,   // &&
     ND_LOGOR,    // ||
     ND_COND,     // ?:
@@ -324,10 +325,11 @@ typedef enum {
 
 // AST node type
 struct Node {
-    NodeKind kind;  // Node kind
-    Node *next;     // Next node
-    Type *ty;       // Type
-    Token *tok;     // Representative token
+    NodeKind kind;   // Node kind
+    Node *next;      // Next node
+    Type *ty;        // Type
+    Token *tok;      // Representative token
+    bool is_lvalue;  // LValue
 
     union {
         struct {
@@ -375,6 +377,7 @@ struct Node {
 
 Node *new_unary(NodeKind kind, Node *expr, Token *tok);
 void new_imcast(Node **expr, Type *ty);
+void lvalue_convert(Node **expr);
 Module *parse(Token *tok);
 
 //

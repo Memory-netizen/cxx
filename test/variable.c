@@ -180,16 +180,16 @@ int main() {
                int x;
                int y;
                char z;
-               char *a = &y;
-               char *b = &z;
+               char *a = (char *)&y;
+               char *b = (char *)&z;
                b - a;
            }));
     ASSERT(1, ({
                int x;
                char y;
                int z;
-               char *a = &y;
-               char *b = &z;
+               char *a = (char *)&y;
+               char *b = (char *)&z;
                b - a;
            }));
 
