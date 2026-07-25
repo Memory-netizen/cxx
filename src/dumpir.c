@@ -224,7 +224,7 @@ void dump_type(Type *ty) {
     } else if (ty->kind == TY_UNION) {
         while (mem && mem->ty->align != ty->align) mem = mem->next;
         print_type(mem->ty);
-        if (mem->ty->size < ty->size) printf(", [ %d x i8]", ty->size - mem->ty->size);
+        if (mem->ty->size < ty->size) fprintf(out_file, ", [ %d x i8]", ty->size - mem->ty->size);
     }
     fprintf(out_file, " }\n");
 }

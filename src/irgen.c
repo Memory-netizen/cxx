@@ -72,6 +72,7 @@ static Ref gen_addr(Node *node) {
             return dst;
         }
         default:
+            break;
     }
     error(node->tok->loc, "not a lvalue");
     return R;
@@ -699,7 +700,7 @@ static void gen_continue(Node *n) {
 static void gen_ret(Node *n) {
     Ref result = gen_expr(n->lhs);
     if (!refeq(result, R)) {
-        Ref ops[2] = {result, SLOT(curf->nparam + 1, ty_int)};
+        Ref ops[2] = {result, SLOT(curf->nparam + 1, curf->ty->ret)};
         new_ins(IR_STR, R, ops, 2);
     }
 

@@ -31,7 +31,7 @@ static void parse_args(int argc, char **argv) {
     if (!input_path) fatal("no input files");
 }
 
-static FILE *open_file(char *path) {
+static FILE *open_outfile(char *path) {
     if (!path || strcmp(path, "-") == 0) return stdout;
 
     FILE *out = fopen(path, "w");
@@ -48,7 +48,7 @@ int main(int argc, char **argv) {
 
     // Traverse the AST to emit assembly.
     Module *module = irgen(prog);
-    FILE *out = open_file(opt_o);
+    FILE *out = open_outfile(opt_o);
     dump_module(module, out);
 
     freeall();
