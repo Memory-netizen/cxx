@@ -563,6 +563,7 @@ struct Module {
 
 Module *irgen(Module *node);
 void dump_module(Module *module, FILE *out);
+void dump_ast(Module *prog);
 
 //
 // util.c

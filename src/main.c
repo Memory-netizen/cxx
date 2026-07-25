@@ -1,11 +1,12 @@
 #include "cxx.h"
 
 static char *opt_o;
+static bool opt_ast_dump;
 
 static char *input_path;
 
 static void usage(int status) {
-    fprintf(stderr, "cxx [ -o <path> ] <file>\n");
+    fprintf(stderr, "cxx [ -o <path> ] [ -ast-dump ] <file>\n");
     exit(status);
 }
 
@@ -16,6 +17,11 @@ static void parse_args(int argc, char **argv) {
         if (!strcmp(argv[i], "-o")) {
             if (!argv[++i]) usage(1);
             opt_o = argv[i];
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-ast-dump")) {
+            opt_ast_dump = true;
             continue;
         }
 
@@ -45,6 +51,12 @@ int main(int argc, char **argv) {
     // Tokenize and parse.
     Token *tok = tokenize_file(input_path);
     Module *prog = parse(tok);
+
+    if (opt_ast_dump) {
+        dump_ast(prog);
+        freeall();
+        return 0;
+    }
 
     // Traverse the AST to emit assembly.
     Module *module = irgen(prog);
