@@ -29,7 +29,7 @@ static char *expect[] = {
 
 // Ensure that the current token is `kind`.
 Token *skip(Token *tok, TokenKind kind) {
-    if (tok->kind != kind) error(tok->loc, "expected ‘%s’", expect[kind]);
+    if (tok->kind != kind) error(tok, "expected ‘%s’", expect[kind]);
     return tok->next;
 }
 
@@ -160,6 +160,15 @@ static Token *new_token(TokenKind kind, char *start, char *end) {
     return tok;
 }
 
+// Fill position metadata into a token.
+static void fill_tok(Token *tok, char *filename, int line, int col, bool is_sol, bool is_leadingws) {
+    tok->filename = filename;
+    tok->line = line;
+    tok->col = col;
+    tok->is_sol = is_sol;
+    tok->is_leadingws = is_leadingws;
+}
+
 static int from_hex(char c) {
     if ('0' <= c && c <= '9') return c - '0';
     if ('a' <= c && c <= 'f') return c - 'a' + 10;
@@ -181,7 +190,7 @@ static int read_escaped_char(char **new_pos, char *p) {
     if (*p == 'x') {
         // Read a hexadecimal number.
         p++;
-        if (!isxdigit(*p)) error(p, "invalid hex escape sequence");
+        if (!isxdigit(*p)) error_at(p, "invalid hex escape sequence");
 
         int c = 0;
         for (; isxdigit(*p); p++) c = (c << 4) + from_hex(*p);
@@ -208,7 +217,7 @@ static int read_escaped_char(char **new_pos, char *p) {
             return '\r';
         // [GNU] \e for the ASCII escape character is a GNU C extension.
         case 'e':
-            return 27;
+            return 27;  
         default:
             return (unsigned char)*p;
     }
@@ -217,7 +226,7 @@ static int read_escaped_char(char **new_pos, char *p) {
 // Find a closing double-quote.
 static char *string_literal_end(char *p) {
     for (char *start = p++; *p != '"'; p++) {
-        if (*p == '\n' || *p == '\0') error(start, "missing terminating \" character");
+        if (*p == '\n' || *p == '\0') error_at(start, "missing terminating \" character");
         if (*p == '\\') p++;
     }
     return p;
@@ -242,7 +251,7 @@ static Token *read_string_literal(char *start) {
 
 static Token *read_char_literal(char *start) {
     char *p = start + 1;
-    if (*p == '\0') error(start, "unclosed char literal");
+    if (*p == '\0') error_at(start, "unclosed char literal");
     int c;
     if (*p == '\\')
         c = read_escaped_char(&p, p + 1);
@@ -250,7 +259,7 @@ static Token *read_char_literal(char *start) {
         c = (unsigned char)*p++;
 
     char *end = strchr(p, '\'');
-    if (!end) error(p, "unclosed char literal");
+    if (!end) error_at(p, "unclosed char literal");
 
     Token *tok = new_token(TK_NUM, start, end + 1);
     tok->val = c;
@@ -272,58 +281,109 @@ static Token *read_int_literal(char *start) {
     }
 
     long val = strtoul(p, &p, base);
-    if (isalnum(*p)) error(p, "invalid digit");
+    if (isalnum(*p)) error_at(p, "invalid digit");
 
     Token *tok = new_token(TK_NUM, start, p);
     tok->val = val;
     return tok;
 }
 
+// Advance col, tracking newlines.
+static inline void advance_col(int *line, int *col, int n) {
+    *col += n;
+    (void)line;
+}
+
 // Tokenize a given string and returns new tokens.
 static Token *tokenize(char *filename, char *p) {
-    (void)filename;
+    int line = 1;
+    int col = 1;
     Token dummy, *cur = &dummy;
 
     while (*p) {
-        // Skip line comments.
-        if (start_with(p, "//")) {
-            p += 2;
-            while (*p != '\n') p++;
-            continue;
+        bool is_sol = (col == 1);
+        bool is_leadingws = false;
+
+        // Skip whitespace and comments.
+        for (;;) {
+            // Skip line comments.
+            if (start_with(p, "//")) {
+                is_leadingws = true;
+                p += 2;
+                col += 2;
+                while (*p != '\n' && *p != '\0') {
+                    p++;
+                    col++;
+                }
+                continue;
+            }
+
+            // Skip block comments.
+            if (start_with(p, "/*")) {
+                is_leadingws = true;
+                char *q = strstr(p + 2, "*/");
+                if (!q) error_at(p, "unterminated /* comment");
+                for (char *r = p; r < q + 2; r++) {
+                    if (*r == '\n') {
+                        line++;
+                        col = 1;
+                    } else {
+                        col++;
+                    }
+                }
+                p = q + 2;
+                continue;
+            }
+
+            if (*p == '\n') {
+                is_leadingws = true;
+                line++;
+                col = 1;
+                p++;
+                continue;
+            }
+
+            if (isspace(*p)) {
+                is_leadingws = true;
+                col++;
+                p++;
+                continue;
+            }
+
+            break;
         }
 
-        // Skip block comments.
-        if (start_with(p, "/*")) {
-            char *q = strstr(p + 2, "*/");
-            if (!q) error(p, "unterminated /* comment");
-            p = q + 2;
-            continue;
-        }
+        if (*p == '\0') break;
 
-        // Skip whitespace characters.
-        if (isspace(*p)) {
-            p++;
-            continue;
-        }
+        Token *tok;
 
         // Numeric literal
         if (isdigit(*p)) {
-            cur = cur->next = read_int_literal(p);
-            p += cur->len;
+            tok = read_int_literal(p);
+            fill_tok(tok, filename, line, col, is_sol, is_leadingws);
+            cur = cur->next = tok;
+            p += tok->len;
+            advance_col(&line, &col, tok->len);
             continue;
         }
 
         // String literal
         if (*p == '"') {
-            cur = cur->next = read_string_literal(p);
-            p += cur->len;
+            tok = read_string_literal(p);
+            fill_tok(tok, filename, line, col, is_sol, is_leadingws);
+            cur = cur->next = tok;
+            p += tok->len;
+            advance_col(&line, &col, tok->len);
             continue;
         }
 
         // Character literal
         if (*p == '\'') {
-            cur = cur->next = read_char_literal(p);
-            p += cur->len;
+            tok = read_char_literal(p);
+            fill_tok(tok, filename, line, col, is_sol, is_leadingws);
+            cur = cur->next = tok;
+            p += tok->len;
+            advance_col(&line, &col, tok->len);
             continue;
         }
 
@@ -333,26 +393,35 @@ static Token *tokenize(char *filename, char *p) {
             do {
                 p++;
             } while (is_ident1(*p));
-            Token *ident = new_token(TK_IDENT, start, p);
-            ident->id = intern(ident->loc, ident->len);
-            cur = cur->next = ident;
+            tok = new_token(TK_IDENT, start, p);
+            tok->id = intern(tok->loc, tok->len);
+            fill_tok(tok, filename, line, col, is_sol, is_leadingws);
+            cur = cur->next = tok;
+            advance_col(&line, &col, tok->len);
             continue;
         }
 
         // other char
-        if (*p == '`' || *p == '@' || *p == '$') error(p, "stray ‘%c’ in program", *p);
+        if (*p == '`' || *p == '@' || *p == '$') error_at(p, "stray ‘%s’ in program", *p);
 
         // Punctuator
         if (ispunct(*p)) {
-            cur = cur->next = new_token(TK_PUNCT, p, p);
-            p += cur->len = read_punct(p, &cur->kind);
+            tok = new_token(TK_PUNCT, p, p);
+            tok->len = read_punct(p, &tok->kind);
+            fill_tok(tok, filename, line, col, is_sol, is_leadingws);
+            cur = cur->next = tok;
+            p += tok->len;
+            advance_col(&line, &col, tok->len);
             continue;
         }
 
-        error(p, "invalid token");
+        error_at(p, "invalid token");
     }
 
-    cur->next = new_token(TK_EOF, p, p);
+    Token *eof = new_token(TK_EOF, p, p);
+    fill_tok(eof, filename, line, col, false, false);
+    eof->next = NULL;
+    cur->next = eof;
     convert_keywords(dummy.next);
     return dummy.next;
 }

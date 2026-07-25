@@ -47,7 +47,15 @@ static void emit_diag(char *loc, const char *level, const char *msg, va_list ap)
     fprintf(stderr, "^\n");
 }
 
-void error(char *loc, const char *msg, ...) {
+void error(Token *tok, const char *msg, ...) {
+    va_list ap;
+    va_start(ap, msg);
+    emit_diag(tok->loc, "error", msg, ap);
+    va_end(ap);
+    exit(1);
+}
+
+void error_at(char *loc, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
     emit_diag(loc, "error", msg, ap);
@@ -55,14 +63,14 @@ void error(char *loc, const char *msg, ...) {
     exit(1);
 }
 
-void warning(char *loc, const char *msg, ...) {
+void warning_at(char *loc, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
     emit_diag(loc, "warning", msg, ap);
     va_end(ap);
 }
 
-void note(char *loc, const char *msg, ...) {
+void note_at(char *loc, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
     emit_diag(loc, "note", msg, ap);

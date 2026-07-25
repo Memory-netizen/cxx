@@ -74,7 +74,7 @@ static Ref gen_addr(Node *node) {
         default:
             break;
     }
-    error(node->tok->loc, "not a lvalue");
+    error(node->tok, "not a lvalue");
     return R;
 }
 

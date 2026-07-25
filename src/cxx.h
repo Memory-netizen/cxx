@@ -191,6 +191,11 @@ struct Token {
     Token *next;
     char *loc;
     size_t len;
+    char *filename;
+    int line;
+    int col;
+    bool is_sol;
+    bool is_leadingws;
     union {
         uint32_t id;  // Uesd if kind == TK_IDENT;
         int64_t val;  // Uesd if kind == TK_NUM;
@@ -564,15 +569,17 @@ struct Module {
 Module *irgen(Module *node);
 void dump_module(Module *module, FILE *out);
 void dump_ast(Module *prog);
+void dump_tokens(Token *tok);
 
 //
 // util.c
 //
 
 void fatal(char *fmt, ...);
-void error(char *loc, const char *msg, ...);
-void warning(char *loc, const char *msg, ...);
-void note(char *loc, const char *msg, ...);
+void error(Token *tok, const char *msg, ...);
+void error_at(char *loc, const char *msg, ...);
+void warning_at(char *loc, const char *msg, ...);
+void note_at(char *loc, const char *msg, ...);
 
 void *emalloc(size_t n);
 void freeall(void);

@@ -269,7 +269,7 @@ static Type *find_typedef(Token *tok, bool search_par) {
 }
 
 static uint32_t get_ident(Token *tok) {
-    if (tok->kind != TK_IDENT) error(tok->loc, "expected identifier");
+    if (tok->kind != TK_IDENT) error(tok, "expected identifier");
     return tok->id;
 }
 
@@ -286,7 +286,7 @@ static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
     // num + num
     if (is_integer(lhs->ty) && is_integer(rhs->ty)) return new_binary(ND_ADD, lhs, rhs, tok);
 
-    if (lhs->ty->base && rhs->ty->base) error(tok->loc, "invalid operands to binary expression");
+    if (lhs->ty->base && rhs->ty->base) error(tok, "invalid operands to binary expression");
 
     // Canonicalize `num + ptr` to `ptr + num`.
     if (!lhs->ty->base && rhs->ty->base) swap(&lhs, &rhs);
@@ -316,7 +316,7 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
         return new_binary(ND_DIV, node, new_long(size, tok), tok);
     }
 
-    error(tok->loc, "invalid operands to binary expression");
+    error(tok, "invalid operands to binary expression");
     return NULL;
 }
 
@@ -536,9 +536,9 @@ static Node *lvar_initializer(Token **rest, Token *tok, Sym *var) {
 
 static Node *fncall(Token **rest, Token *tok) {
     VarScope *sc = find_var(tok, 1);
-    if (!sc) error(tok->loc, "implicit declaration of function ‘%.*s’", tok->len, tok->loc);
+    if (!sc) error(tok, "implicit declaration of function ‘%.*s’", tok->len, tok->loc);
     if (!sc->var || sc->var->ty->kind != TY_FUNC)
-        error(tok->loc, "called object ‘%.*s’ is not a function or function pointer", tok->len, tok->loc);
+        error(tok, "called object ‘%.*s’ is not a function or function pointer", tok->len, tok->loc);
 
     Node *node = new_node(ND_FUNCALL, tok);
     node->func = tok->id;
@@ -562,7 +562,7 @@ static Node *fncall(Token **rest, Token *tok) {
         Node *arg = assign(&tok, tok);
         if (param_ty) {
             if (param_ty->kind == TY_STRUCT || param_ty->kind == TY_UNION)
-                error(arg->tok->loc, "passing struct or union is not supported yet");
+                error(arg->tok, "passing struct or union is not supported yet");
             lvalue_convert(&arg);
             new_imcast(&arg, param_ty);
             param_ty = param_ty->next;
@@ -605,13 +605,13 @@ static Node *primary(Token **rest, Token *tok) {
         // Variable or enum constant
         VarScope *sc = find_var(tok, 1);
         if (!sc || (!sc->var && !sc->enum_ty))
-            error(tok->loc, "use of undeclared identifier ‘%.*s’", tok->len, tok->loc);
+            error(tok, "use of undeclared identifier ‘%.*s’", tok->len, tok->loc);
         if (sc->var)
             node = new_var_node(sc->var, tok);
         else
             node = new_num(sc->enum_val, tok);
     } else {
-        error(tok->loc, "expected expression");
+        error(tok, "expected expression");
         node = NULL;
     }
     *rest = tok->next;
@@ -621,7 +621,7 @@ static Node *primary(Token **rest, Token *tok) {
 static Member *get_struct_member(Type *ty, Token *tok) {
     for (Member *mem = ty->members; mem; mem = mem->next)
         if (mem->name->id == tok->id) return mem;
-    error(tok->loc, "no member named ‘%.*s’ in ‘%s’", tok->len, tok->loc, str(ty->uid));
+    error(tok, "no member named ‘%.*s’ in ‘%s’", tok->len, tok->loc, str(ty->uid));
     return NULL;
 }
 
@@ -653,10 +653,10 @@ static Node *postfix(Token **rest, Token *tok) {
                 tok = tok->next;
                 if (ty->kind != TY_STRUCT && ty->kind != TY_UNION) {
                     if (tok->kind == TK_IDENT)
-                        error(dot->loc, "request for member ‘%.*s’ in something not a structure or union", tok->len,
+                        error(dot, "request for member ‘%.*s’ in something not a structure or union", tok->len,
                               tok->loc);
                     else
-                        error(dot->loc, "expected ‘;’ after expression");
+                        error(dot, "expected ‘;’ after expression");
                 }
                 Member *mem = copy_mem(get_struct_member(ty, tok));
                 mem->next = NULL;
@@ -873,7 +873,7 @@ static int64_t eval(Node *node) {
             }
             return eval(node->lhs);
         default:
-            error(node->tok->loc, "not a compile-time constant");
+            error(node->tok, "not a compile-time constant");
     }
     return 0;
 }
@@ -949,14 +949,14 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
     do {
         Token *start = tok;
         Type *ty = declarator(&tok, tok, basety);
-        if (ty->kind == TY_VOID) error(start->loc, "variable ‘%.*s’ declared void", start->len, start->loc);
+        if (ty->kind == TY_VOID) error(start, "variable ‘%.*s’ declared void", start->len, start->loc);
         Sym *var = new_lvar(get_ident(ty->name), ty);
         var->sclass = sclass;
         if (tok->kind == TK_AS) {
             Node *expr = lvar_initializer(&tok, tok->next, var);
             cur = cur->next = new_unary(ND_EXPR_STMT, expr, tok);
         }
-        if (var->ty->size < 0) error(start->loc, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
+        if (var->ty->size < 0) error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
     } while (match(&tok, tok, TK_COMMA));
 
     *rest = tok;
@@ -1082,7 +1082,7 @@ static Node *switch_stmt(Token **rest, Token *tok) {
 
 // CaseStmt ::= "case" ConstExp ":" Stmt
 static Node *case_stmt(Token **rest, Token *tok) {
-    if (!cur_switch) error(tok->loc, "stray case");
+    if (!cur_switch) error(tok, "stray case");
 
     Node *node = new_node(ND_CASE, tok);
     int64_t val = const_expr(&tok, tok->next);
@@ -1097,7 +1097,7 @@ static Node *case_stmt(Token **rest, Token *tok) {
 
 // DefaultStmt ::= "default" ":" Stmt
 static Node *default_stmt(Token **rest, Token *tok) {
-    if (!cur_switch) error(tok->loc, "stray default");
+    if (!cur_switch) error(tok, "stray default");
 
     Node *node = new_node(ND_CASE, tok);
     tok = skip(tok->next, TK_COLON);
@@ -1284,8 +1284,8 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             Token *start = tok;
             Member *mem = emalloc(sizeof(Member));
             mem->ty = declarator(&tok, tok, basety);
-            if (mem->ty->kind == TY_VOID) error(start->loc, "field ‘%.*s’ declared void", start->len, start->loc);
-            if (mem->ty->size < 0) error(start->loc, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
+            if (mem->ty->kind == TY_VOID) error(start, "field ‘%.*s’ declared void", start->len, start->loc);
+            if (mem->ty->size < 0) error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
             mem->name = mem->ty->name;
             cur = cur->next = mem;
         }
@@ -1405,12 +1405,12 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
             case TK_REGISTER:
             case TK_CONSTEXPR: {
                 SClass sc = sc_table[tok->kind];
-                if (!sclass) error(tok->loc, "storage class specifier is not allowed in this context");
+                if (!sclass) error(tok, "storage class specifier is not allowed in this context");
                 if (*sclass) {
                     if (*sclass == sc)
-                        error(tok->loc, "duplicate ‘%.*s’", tok->len, tok->loc);
+                        error(tok, "duplicate ‘%.*s’", tok->len, tok->loc);
                     else
-                        error(tok->loc, "multiple storage classes in declaration specifiers");
+                        error(tok, "multiple storage classes in declaration specifiers");
                 };
                 *sclass = sc;
                 break;
@@ -1419,7 +1419,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
                 Type *orig = find_typedef(tok, !typespec_cnt);
                 if (orig) {
                     if (typespec_cnt)
-                        error(tok->loc, "‘%.*s’ redeclared as different kind of symbol", tok->len, tok->loc);
+                        error(tok, "‘%.*s’ redeclared as different kind of symbol", tok->len, tok->loc);
                     ty = orig;
                     typespec_cnt += OTHER;
                     break;
@@ -1487,13 +1487,13 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
             case OTHER:
                 break;
             default:
-                error(ty_tok->loc,
+                error(ty_tok,
                       "cannot combine with previous"
                       " declaration specifier");
         }
     }
 loop_end:
-    if (!typespec_cnt) error(tok->loc, "a type specifier is required for all declarations");
+    if (!typespec_cnt) error(tok, "a type specifier is required for all declarations");
     *rest = tok;
     return ty;
 }
@@ -1512,7 +1512,7 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
             Type *basety = declspecs(&tok, tok, NULL);
             Type *paramty = declarator(&tok, tok, basety);
             if (paramty->kind == TY_VOID)
-                error(start->loc, "argument may not have ‘void’ type", start->len, start->loc);
+                error(start, "argument may not have ‘void’ type", start->len, start->loc);
             // "array of T" is converted to "pointer to T" in the parameter
             // context. For example, *argv[] is converted to **argv by this.
             if (paramty->kind == TY_ARRAY) {
@@ -1521,7 +1521,7 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
                 paramty->name = name;
             }
             if (paramty->size < 0)
-                error(paramty->name->loc, "parameter ‘%.*s’ has incomplete type", paramty->name->len,
+                error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len,
                       paramty->name->loc);
             cur = cur->next = copy_type(paramty);
         }
@@ -1560,7 +1560,7 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
         return declarator(&tok, start->next, ty);
     }
 
-    if (tok->kind != TK_IDENT) error(tok->loc, "expected identifier or ‘(’");
+    if (tok->kind != TK_IDENT) error(tok, "expected identifier or ‘(’");
     ty = decl_suffix(rest, tok->next, ty);
     ty->name = tok;
     return ty;
@@ -1586,7 +1586,7 @@ static void resolve_goto_labels(void) {
                 break;
             }
 
-        if (!x->target) error(x->tok->next->loc, "use of undeclared label");
+        if (!x->target) error(x->tok->next, "use of undeclared label");
     }
 
     gotos = labels = NULL;
@@ -1619,7 +1619,7 @@ static Token *external_declaration(Token *tok) {
         // function-definition
         if (tok->kind == TK_LBRACE) {
             if (cnt || ty->kind != TY_FUNC || sclass == SC_TYPEDEF)
-                error(tok->loc, "expected ‘;’ after top level declarator");
+                error(tok, "expected ‘;’ after top level declarator");
             Sym *fn = new_gvar(get_ident(ty->name), ty);
             fn->is_function = true;
             fn->is_definition = true;
@@ -1650,7 +1650,7 @@ static Token *external_declaration(Token *tok) {
         // declaration
         if (tok->kind == TK_AS) {
             if (ty->kind == TY_FUNC || sclass == SC_TYPEDEF)
-                error(ty->name->loc,
+                error(ty->name,
                       "illegal initializer (only variables can be "
                       "initialized)");
             initializer(&tok, tok, ty, &ty);
@@ -1658,8 +1658,8 @@ static Token *external_declaration(Token *tok) {
         if (sclass == SC_TYPEDEF) {
             push_scope(get_ident(ty->name))->type_def = ty;
         } else {
-            if (ty->kind == TY_VOID) error(start->loc, "variable ‘%.*s’ declared void", start->len, start->loc);
-            if (ty->size < 0) error(start->loc, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
+            if (ty->kind == TY_VOID) error(start, "variable ‘%.*s’ declared void", start->len, start->loc);
+            if (ty->size < 0) error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
             Sym *var = new_gvar(get_ident(ty->name), ty);
             var->is_function = var->ty->kind == TY_FUNC;
             var->sclass = sclass;
@@ -1670,7 +1670,7 @@ static Token *external_declaration(Token *tok) {
         else if (tok->kind == TK_SEMI)
             return tok->next;
         else
-            error(tok->loc, "expected ‘;’ after top level declarator");
+            error(tok, "expected ‘;’ after top level declarator");
     }
 }
 

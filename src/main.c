@@ -2,11 +2,12 @@
 
 static char *opt_o;
 static bool opt_ast_dump;
+static bool opt_dump_tokens;
 
 static char *input_path;
 
 static void usage(int status) {
-    fprintf(stderr, "cxx [ -o <path> ] [ -ast-dump ] <file>\n");
+    fprintf(stderr, "cxx [ -o <path> ] [ -ast-dump ] [ -dump-tokens ] <file>\n");
     exit(status);
 }
 
@@ -22,6 +23,11 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-ast-dump")) {
             opt_ast_dump = true;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-dump-tokens")) {
+            opt_dump_tokens = true;
             continue;
         }
 
@@ -50,6 +56,13 @@ int main(int argc, char **argv) {
 
     // Tokenize and parse.
     Token *tok = tokenize_file(input_path);
+
+    if (opt_dump_tokens) {
+        dump_tokens(tok);
+        freeall();
+        return 0;
+    }
+
     Module *prog = parse(tok);
 
     if (opt_ast_dump) {

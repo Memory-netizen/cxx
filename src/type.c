@@ -146,7 +146,7 @@ void add_type(Node *node) {
         case ND_DEREF:
             add_type(node->lhs);
             lvalue_convert(&node->lhs);
-            if (!is_pointer(node->lhs->ty)) error(node->lhs->tok->loc, "unary ‘*’ requires pointer operand");
+            if (!is_pointer(node->lhs->ty)) error(node->lhs->tok, "unary ‘*’ requires pointer operand");
             node->ty = node->lhs->ty->base;
             node->is_lvalue = true;
             break;
@@ -204,7 +204,7 @@ void add_type(Node *node) {
             add_type(node->lhs);
             add_type(node->rhs);
             if (node->lhs->kind == ND_IMCAST && node->lhs->lhs->ty->kind == TY_ARRAY)
-                error(node->lhs->tok->loc, "not an lvalue");
+                error(node->lhs->tok, "not an lvalue");
             if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION) {
                 lvalue_convert(&node->rhs);
                 new_imcast(&node->rhs, node->lhs->ty);
