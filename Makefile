@@ -65,8 +65,8 @@ linecnt:
 	@cat $(ALL_SRCS) | sed 's|//.*$$||' | grep -v '^[[:space:]]*$$' | wc -l
 
 fmt:
-	@which clang-format > /dev/null || { echo "clang-format not found"; exit 1; }
-	clang-format -i $(ALL_SRCS) $(TEST_SRCS)
+	@which clang-format-21 > /dev/null || { echo "clang-format not found"; exit 1; }
+	clang-format-21 -i $(ALL_SRCS) $(TEST_SRCS)
 	@echo "Formatted $(words $(ALL_SRCS)) files."
 
 -include $(DEPS)

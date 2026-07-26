@@ -604,8 +604,7 @@ static Node *primary(Token **rest, Token *tok) {
         if (tok->next->kind == TK_LPAREN) return fncall(rest, tok);
         // Variable or enum constant
         VarScope *sc = find_var(tok, 1);
-        if (!sc || (!sc->var && !sc->enum_ty))
-            error(tok, "use of undeclared identifier ‘%.*s’", tok->len, tok->loc);
+        if (!sc || (!sc->var && !sc->enum_ty)) error(tok, "use of undeclared identifier ‘%.*s’", tok->len, tok->loc);
         if (sc->var)
             node = new_var_node(sc->var, tok);
         else
@@ -1418,8 +1417,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
             case TK_IDENT: {
                 Type *orig = find_typedef(tok, !typespec_cnt);
                 if (orig) {
-                    if (typespec_cnt)
-                        error(tok, "‘%.*s’ redeclared as different kind of symbol", tok->len, tok->loc);
+                    if (typespec_cnt) error(tok, "‘%.*s’ redeclared as different kind of symbol", tok->len, tok->loc);
                     ty = orig;
                     typespec_cnt += OTHER;
                     break;
@@ -1511,8 +1509,7 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
             Token *start = tok;
             Type *basety = declspecs(&tok, tok, NULL);
             Type *paramty = declarator(&tok, tok, basety);
-            if (paramty->kind == TY_VOID)
-                error(start, "argument may not have ‘void’ type", start->len, start->loc);
+            if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type", start->len, start->loc);
             // "array of T" is converted to "pointer to T" in the parameter
             // context. For example, *argv[] is converted to **argv by this.
             if (paramty->kind == TY_ARRAY) {
@@ -1521,8 +1518,7 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
                 paramty->name = name;
             }
             if (paramty->size < 0)
-                error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len,
-                      paramty->name->loc);
+                error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len, paramty->name->loc);
             cur = cur->next = copy_type(paramty);
         }
         *rest = tok->next;

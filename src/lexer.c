@@ -217,7 +217,7 @@ static int read_escaped_char(char **new_pos, char *p) {
             return '\r';
         // [GNU] \e for the ASCII escape character is a GNU C extension.
         case 'e':
-            return 27;  
+            return 27;
         default:
             return (unsigned char)*p;
     }
