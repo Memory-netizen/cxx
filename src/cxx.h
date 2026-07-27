@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -28,6 +29,7 @@ typedef struct Blk Blk;
 typedef struct Sym Sym;
 typedef struct Fn Fn;
 typedef struct Module Module;
+typedef struct Con Con;
 typedef struct Member Member;
 
 extern SrcFile *cur_file;
@@ -39,6 +41,7 @@ extern Type *ty_int;
 extern Type *ty_long;
 extern Type *ty_llong;
 extern Type *ty_i1;
+extern Type *ty_i32;
 extern Type *ty_i64;
 
 struct SrcFile {
@@ -242,7 +245,6 @@ struct Sym {
     Node *init;
 
     // Function
-    Sym *params;
     uint32_t nparam;
     Node *body;
     Node *labels;
@@ -392,6 +394,7 @@ Module *parse(Token *tok);
 typedef enum {
     TY_VOID,
     TY_I1,
+    TY_I32,
     TY_I64,
     TY_CHAR,
     TY_BOOL,
@@ -507,10 +510,22 @@ typedef enum {
     IR_CALL,
 } IrKind;
 
+struct Con {
+    enum {
+        CUndef,
+        CBits,
+        CAddr,
+    } type;
+    uint32_t sym;
+    union {
+        int64_t i;
+    } bits;
+};
+
 enum {
-    RSlot,
     RTmp,
-    RInt,
+    RCon,
+    RSlot,
     RGlb,
 };
 
@@ -520,16 +535,17 @@ enum {
     (Ref) { RTmp, x, ty }
 #define SLOT(x, ty) \
     (Ref) { RSlot, x, ty }
-#define INT(x) \
-    (Ref) { RInt, x, ty_int }
-#define LONG(x) \
-    (Ref) { RInt, x, ty_long }
 #define GLB(x, ty) \
     (Ref) { RGlb, x, ty }
+#define CON(x, ty) \
+    (Ref) { RCon, x, ty }
+
+#define INT(x) getcon(x, curm, ty_i32)
+#define LONG(x) getcon(x, curm, ty_i64)
 
 struct Ref {
-    uint32_t type : 3;
-    int32_t val : 29;
+    uint32_t type;
+    uint32_t val;
     Type *ty;
 };
 
@@ -564,6 +580,8 @@ struct Module {
     Sym *fns;
     Sym *data;
     Type *tys;
+    Con *con;
+    int ncon;
 };
 
 Module *irgen(Module *node);
@@ -591,5 +609,8 @@ uint32_t intern(char *s, int len);
 char *str(uint32_t id);
 uint32_t str_len(uint32_t id);
 char *escape_char_to_string(char c);
+
+Ref newcon(Con *c0, Module *md, Type *ty);
+Ref getcon(int64_t val, Module *md, Type *ty);
 
 #endif  // CXX_H_

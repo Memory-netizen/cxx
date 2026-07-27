@@ -248,3 +248,26 @@ char *escape_char_to_string(char c) {
     }
     return buffer;
 }
+
+Ref newcon(Con *c0, Module *md, Type *ty) {
+    Con *c1;
+    int i;
+
+    for (i = 1; i < md->ncon; i++) {
+        c1 = &md->con[i];
+        if (c0->type == c1->type && c0->sym == c1->sym && c0->bits.i == c1->bits.i) return CON(i, ty);
+    }
+    md->con = vgrow(md->con, ++md->ncon);
+    md->con[i] = *c0;
+    return CON(i, ty);
+}
+
+Ref getcon(int64_t val, Module *md, Type *ty) {
+    int c;
+
+    for (c = 0; c < md->ncon; c++)
+        if (md->con[c].type == CBits && md->con[c].bits.i == val) return CON(c, ty);
+    md->con = vgrow(md->con, ++md->ncon);
+    md->con[c] = (Con){.type = CBits, .bits.i = val};
+    return CON(c, ty);
+}

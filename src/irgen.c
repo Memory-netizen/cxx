@@ -1,5 +1,6 @@
 #include "cxx.h"
 
+static Module *curm;
 static Sym *curf;
 static Blk *curb;
 static Blk dummy;
@@ -104,7 +105,6 @@ static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
         return dst;
     }
     if (target_ty->kind == TY_VOID || target_ty->size == src_ty->size) {
-        src_ty = target_ty;
         return val;
     }
     Ref dst = TMP(tmp_id++, target_ty);
@@ -360,7 +360,7 @@ static Ref gen_expr(Node *node) {
         case ND_FUNCALL: {
             int nargs = node->narg;
             Ref call_ops[nargs + 1];
-            call_ops[0] = GLB(node->func, ty_int);
+            call_ops[0] = GLB(node->func, NULL);
 
             int idx = 1;
             for (Node *arg = node->args; arg; arg = arg->next) call_ops[idx++] = gen_expr(arg);
@@ -382,7 +382,6 @@ static Ref gen_expr(Node *node) {
     // unary arithmetic operation
     switch (node->kind) {
         case ND_NEG:
-            if (node->lhs->kind == ND_NUM) return INT(-lr.val);
             dst = TMP(tmp_id++, node->ty);
             new_ins(IR_SUB, dst, (Ref[]){INT(0), lr}, 2);
             return dst;
@@ -759,6 +758,8 @@ static Ref gen_stmt(Node *node) {
 }
 
 Module *irgen(Module *md) {
+    curm = md;
+    md->con = vnew(2, sizeof md->con[0]);
     for (Sym *fn = md->fns; fn; fn = fn->next) {
         curf = fn;
         tmp_id = fn->nparam;

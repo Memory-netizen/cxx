@@ -146,6 +146,7 @@ struct InitDesg {
 // All local variable instances created during parsing are
 // accumulated to this list.
 static Sym *locals;
+static uint32_t nparam;
 static Sym *globals;
 static Type *types;
 
@@ -233,6 +234,7 @@ static Sym *new_lvar(uint32_t id, Type *ty) {
     var->is_local = true;
     var->next = locals;
     locals = var;
+    nparam++;
     return var;
 }
 
@@ -1588,13 +1590,6 @@ static void resolve_goto_labels(void) {
     gotos = labels = NULL;
 }
 
-static void create_param_lvars(Type *param) {
-    if (param) {
-        create_param_lvars(param->next);
-        new_lvar(get_ident(param->name), param);
-    }
-}
-
 // ExDecl    ::= FuncDef | Decl
 // FuncDef   ::= DeclSpecs Declr CompStmt
 static Token *external_declaration(Token *tok) {
@@ -1622,24 +1617,29 @@ static Token *external_declaration(Token *tok) {
             fn->sclass = sclass;
 
             locals = NULL;
+            nparam = 0;
             current_fn = fn;
             enter_scope();
-            create_param_lvars(ty->params);
-            fn->params = locals;
-            uint32_t i = 0;
-            Sym *cur = locals;
-            while (cur) {
-                ++i;
-                cur = cur->next;
+            Type *param = ty->params;
+            while (param) {
+                new_lvar(get_ident(param->name), param);
+                param = param->next;
             }
-            fn->params = locals;
-            fn->nparam = i;
+            fn->nparam = nparam;
 
             fn->body = compound_stmt(&tok, tok);
-            fn->locals = locals;
+
+            Sym *prev = NULL, *cur = locals, *next = NULL;
+            while (cur) {
+                next = cur->next;
+                cur->next = prev;
+                prev = cur;
+                cur = next;
+            }
+            fn->locals = prev;
             fn->labels = labels;
-            leave_scope();
             resolve_goto_labels();
+            leave_scope();
             return tok;
         }
 
@@ -1689,6 +1689,13 @@ Module *parse(Token *tok) {
         }
         sym = next;
     }
-    md->tys = types;
+    Type *prev = NULL, *cur = types, *next = NULL;
+    while (cur) {
+        next = cur->next;
+        cur->next = prev;
+        prev = cur;
+        cur = next;
+    }
+    md->tys = prev;
     return md;
 }

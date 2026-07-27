@@ -14,17 +14,17 @@ int main() {
     ASSERT(5, ({
                int x = 3;
                int y = 5;
-               *(&x + 1);
+               *(&x - 1);
            }));
     ASSERT(3, ({
                int x = 3;
                int y = 5;
-               *(&y - 1);
+               *(&y + 1);
            }));
     ASSERT(5, ({
                int x = 3;
                int y = 5;
-               *(&x - (-1));
+               *(&x + (-1));
            }));
     ASSERT(5, ({
                int x = 3;
@@ -35,13 +35,13 @@ int main() {
     ASSERT(7, ({
                int x = 3;
                int y = 5;
-               *(&x + 1) = 7;
+               *(&x - 1) = 7;
                y;
            }));
     ASSERT(7, ({
                int x = 3;
                int y = 5;
-               *(&y - 2 + 1) = 7;
+               *(&y + 2 - 1) = 7;
                x;
            }));
     ASSERT(5, ({

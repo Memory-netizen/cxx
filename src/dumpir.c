@@ -1,6 +1,7 @@
 #include "cxx.h"
 
 static FILE *out_file;
+static Module *curm;
 static const char *op_str[] = {
     [IR_ADD] = "add",
     [IR_SUB] = "sub",
@@ -24,8 +25,8 @@ static const char *op_str[] = {
 };
 
 static const char *ty_str[] = {
-    [TY_VOID] = "void", [TY_I1] = "i1",    [TY_I64] = "i64",  [TY_BOOL] = "i8",   [TY_CHAR] = "i8", [TY_SHORT] = "i16",
-    [TY_INT] = "i32",   [TY_ENUM] = "i32", [TY_LONG] = "i64", [TY_LLONG] = "i64", [TY_PTR] = "ptr",
+    [TY_VOID] = "void", [TY_I1] = "i1",   [TY_I32] = "i32",  [TY_I64] = "i64",  [TY_BOOL] = "i8",   [TY_CHAR] = "i8",
+    [TY_SHORT] = "i16", [TY_INT] = "i32", [TY_ENUM] = "i32", [TY_LONG] = "i64", [TY_LLONG] = "i64", [TY_PTR] = "ptr",
 };
 
 static void print_type(Type *ty) {
@@ -46,10 +47,12 @@ static void print_type(Type *ty) {
     fprintf(out_file, "%s", ty_str[ty->kind]);
 }
 
+static void printcon(Con *c) { fprintf(out_file, "%" PRIi64, c->bits.i); }
+
 static void print_operand(Ref r) {
-    if (r.type == RInt)
-        fprintf(out_file, "%d", r.val);
-    else if (r.type == RGlb)
+    if (r.type == RCon) {
+        printcon(&curm->con[r.val]);
+    } else if (r.type == RGlb)
         fprintf(out_file, "@%s", str(r.val));
     else
         fprintf(out_file, "%%%d", r.val);
@@ -104,14 +107,18 @@ void dump_blk(Blk *b) {
                 print_operand(ir->args[0]);
                 fprintf(out_file, ", ptr ");
                 print_operand(ir->args[1]);
-                fprintf(out_file, ", i64 %d, i1 false)\n", ir->args[2].val);
+                fprintf(out_file, ", i64 ");
+                print_operand(ir->args[2]);
+                fprintf(out_file, ", i1 false)\n");
                 break;
             case IR_MEMSET:
                 fprintf(out_file, "call void @llvm.memset.p0.i64(ptr ");
                 print_operand(ir->args[0]);
                 fprintf(out_file, ", i8 ");
                 print_operand(ir->args[1]);
-                fprintf(out_file, ", i64 %d, i1 false)\n", ir->args[2].val);
+                fprintf(out_file, ", i64 ");
+                print_operand(ir->args[2]);
+                fprintf(out_file, ", i1 false)\n");
                 break;
 
             case IR_CALL:
@@ -120,7 +127,9 @@ void dump_blk(Blk *b) {
                     fprintf(out_file, "void");
                 else
                     print_type(ir->dst.ty);
-                fprintf(out_file, " @%s(", str(ir->args[0].val));
+                fprintf(out_file, " ");
+                print_operand(ir->args[0]);
+                fprintf(out_file, "(");
                 for (uint32_t i = 1; i < ir->narg; i++) {
                     print_type(ir->args[i].ty);
                     fprintf(out_file, " ");
@@ -282,6 +291,7 @@ void dump_fn(Sym *fn) {
 
 void dump_module(Module *md, FILE *out) {
     out_file = out;
+    curm = md;
     fprintf(out_file, "declare void @assert(i32, i32, ptr)\n");
     fprintf(out_file, "declare i32 @printf(ptr, ...)\n");
     fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");

@@ -176,21 +176,21 @@ int main() {
                }
                x;
            }));
-    ASSERT(7, ({
+    ASSERT(1, ({
                int x;
                int y;
                char z;
                char *a = (char *)&y;
                char *b = (char *)&z;
-               b - a;
+               a - b;
            }));
-    ASSERT(1, ({
+    ASSERT(7, ({
                int x;
                char y;
                int z;
                char *a = (char *)&y;
                char *b = (char *)&z;
-               b - a;
+               a - b;
            }));
 
     ASSERT(8, ({

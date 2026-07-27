@@ -86,6 +86,9 @@ static void print_type(Type *ty) {
         case TY_I1:
             fprintf(stdout, "i1");
             break;
+        case TY_I32:
+            fprintf(stdout, "i32");
+            break;
         case TY_I64:
             fprintf(stdout, "i64");
             break;
@@ -160,7 +163,7 @@ static void dump_node(Node *node) {
 
         case ND_VAR:
             fprintf(stdout, "  name=‘%s’", str(node->var->id));
-            fprintf(stdout, "  lvalue=%d", node->is_lvalue);
+            if (node->is_lvalue) fprintf(stdout, "  lvalue");
             fprintf(stdout, "\n");
             break;
 
@@ -251,7 +254,7 @@ static void dump_node(Node *node) {
             dump_node(node->then);
             depth--;
             print_indent();
-            fprintf(stdout, "els:\n");
+            fprintf(stdout, "else:\n");
             depth++;
             dump_node(node->els);
             depth--;
@@ -273,7 +276,7 @@ static void dump_node(Node *node) {
             depth--;
             if (node->els) {
                 print_indent();
-                fprintf(stdout, "els:\n");
+                fprintf(stdout, "else:\n");
                 depth++;
                 dump_node(node->els);
                 depth--;
@@ -332,7 +335,7 @@ static void dump_node(Node *node) {
             }
             if (node->inc) {
                 print_indent();
-                fprintf(stdout, "inc:\n");
+                fprintf(stdout, "incr:\n");
                 depth++;
                 dump_node(node->inc);
                 depth--;
@@ -422,17 +425,18 @@ void dump_ast(Module *prog) {
         }
         fprintf(stdout, "\n");
 
-        if (fn->params) {
+        Sym *p = fn->locals;
+        if (fn->nparam) {
             fprintf(stdout, "  params:\n");
-            for (Sym *p = fn->params; p; p = p->next) {
+            for (uint32_t i = 0; i < fn->nparam; p = p->next, i++) {
                 fprintf(stdout, "    %s: ", str(p->id));
                 print_type(p->ty);
                 fprintf(stdout, "\n");
             }
         }
 
-        fprintf(stdout, "  locals (%u):\n", fn->nparam);
-        for (Sym *v = fn->locals; v; v = v->next) {
+        fprintf(stdout, "  locals:\n");
+        for (Sym *v = p; v; v = v->next) {
             fprintf(stdout, "    %s: ", str(v->id));
             print_type(v->ty);
             fprintf(stdout, "\n");
