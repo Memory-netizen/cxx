@@ -534,6 +534,14 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
         return;
     }
 
+    if (ty->kind == TY_STRUCT) {
+        for (Member *mem = ty->members; mem; mem = mem->next) {
+            eval_gvar_data(init->child[mem->idx], mem->ty);
+            init->is_inited |= init->child[mem->idx]->is_inited;
+        }
+        return;
+    }
+
     if (init->expr) {
         int64_t val = eval(init->expr);
         Con *con = &(Con){CBits, 0, {val}};

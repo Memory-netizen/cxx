@@ -254,6 +254,20 @@ static void dump_init(Initializer *init, Type *ty) {
         fprintf(out_file, "]");
         return;
     }
+    if (ty->kind == TY_STRUCT) {
+        if (!init || !init->is_inited) {
+            fprintf(out_file, " zeroinitializer");
+            return;
+        }
+        fprintf(out_file, "{");
+        int i = 0;
+        for (Member *mem = ty->members; mem; mem = mem->next, i++) {
+            if (i) fprintf(out_file, ", ");
+            dump_init(init->child[mem->idx], mem->ty);
+        }
+        fprintf(out_file, "}");
+        return;
+    }
     if (!init || !init->is_inited)
         fprintf(out_file, "0");
     else
@@ -274,11 +288,6 @@ void dump_data(Sym *data) {
             for (int i = 0; i < len; i++) fprintf(out_file, "%s", escape_char_to_string(p[i]));
             fprintf(out_file, "\"");
         }
-    } else if (data->ty->kind == TY_ARRAY) {
-        dump_init(data->init, data->ty);
-    } else if (data->ty->kind == TY_STRUCT) {
-        print_type(data->ty);
-        fprintf(out_file, " zeroinitializer");
     } else {
         dump_init(data->init, data->ty);
     }
