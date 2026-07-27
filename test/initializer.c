@@ -1,5 +1,10 @@
 #include "test.h"
 
+char g3 = 3;
+short g4 = 4;
+int g5 = 5;
+long g6 = 6;
+
 int main() {
     ASSERT(1, ({
                int x[3] = {1, 2, 3};
@@ -287,6 +292,11 @@ int main() {
                } x = {0x01020304}, y = x;
                y.b[1];
            }));
+
+    ASSERT(3, g3);
+    ASSERT(4, g4);
+    ASSERT(5, g5);
+    ASSERT(6, g6);
 
     printf("OK\n");
     return 0;

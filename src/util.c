@@ -253,7 +253,7 @@ Ref newcon(Con *c0, Module *md, Type *ty) {
     Con *c1;
     int i;
 
-    for (i = 1; i < md->ncon; i++) {
+    for (i = 0; i < md->ncon; i++) {
         c1 = &md->con[i];
         if (c0->type == c1->type && c0->sym == c1->sym && c0->bits.i == c1->bits.i) return CON(i, ty);
     }

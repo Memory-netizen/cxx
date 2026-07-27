@@ -166,7 +166,7 @@ static void fill_tok(Token *tok, char *filename, int line, int col, bool is_sol,
     tok->line = line;
     tok->col = col;
     tok->is_sol = is_sol;
-    tok->is_leadingws = is_leadingws;
+    tok->is_leadingws = is_sol ? false : is_leadingws;
 }
 
 static int from_hex(char c) {
@@ -301,7 +301,6 @@ static Token *tokenize(char *filename, char *p) {
     Token dummy, *cur = &dummy;
 
     while (*p) {
-        bool is_sol = (col == 1);
         bool is_leadingws = false;
 
         // Skip whitespace and comments.
@@ -354,6 +353,7 @@ static Token *tokenize(char *filename, char *p) {
         }
 
         if (*p == '\0') break;
+        bool is_sol = (col == 1);
 
         Token *tok;
 

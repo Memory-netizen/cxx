@@ -31,6 +31,7 @@ typedef struct Fn Fn;
 typedef struct Module Module;
 typedef struct Con Con;
 typedef struct Member Member;
+typedef struct Initializer Initializer;
 
 extern SrcFile *cur_file;
 extern Type *ty_void;
@@ -242,7 +243,7 @@ struct Sym {
     // Global variable
     uint32_t init_data;
 
-    Node *init;
+    Initializer *init;
 
     // Function
     uint32_t nparam;
@@ -380,6 +381,22 @@ struct Node {
     Node *goto_next;
     Node *case_next;
     int64_t val;  // Used if kind == ND_NUM
+};
+
+// Represents a variable initializer
+struct Initializer {
+    Initializer *next;
+    Type *ty;
+    Token *tok;
+    bool is_flexible;
+    bool is_inited;
+
+    // For scalar type
+    Node *expr;
+    Con *val;
+
+    // For aggregate type
+    Initializer **child;
 };
 
 Node *new_unary(NodeKind kind, Node *expr, Token *tok);

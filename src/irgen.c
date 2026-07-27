@@ -759,7 +759,6 @@ static Ref gen_stmt(Node *node) {
 
 Module *irgen(Module *md) {
     curm = md;
-    md->con = vnew(2, sizeof md->con[0]);
     for (Sym *fn = md->fns; fn; fn = fn->next) {
         curf = fn;
         tmp_id = fn->nparam;

@@ -238,10 +238,33 @@ void dump_type(Type *ty) {
     fprintf(out_file, " }\n");
 }
 
+static void dump_init(Initializer *init, Type *ty) {
+    print_type(ty);
+    fprintf(out_file, " ");
+    if (ty->kind == TY_ARRAY) {
+        if (!init || !init->is_inited) {
+            fprintf(out_file, " zeroinitializer");
+            return;
+        }
+        fprintf(out_file, "[");
+        for (int i = 0; i < init->ty->len; i++) {
+            if (i) fprintf(out_file, ", ");
+            dump_init(init->child[i], ty->base);
+        }
+        fprintf(out_file, "]");
+        return;
+    }
+    if (!init || !init->is_inited)
+        fprintf(out_file, "0");
+    else
+        printcon(init->val);
+}
+
 void dump_data(Sym *data) {
     fprintf(out_file, "@%s = global ", str(data->id));
-    print_type(data->ty);
+
     if (data->is_str) {
+        print_type(data->ty);
         char *p = str(data->init_data);
         int len = data->ty->len;
         if (len == 1)
@@ -251,12 +274,14 @@ void dump_data(Sym *data) {
             for (int i = 0; i < len; i++) fprintf(out_file, "%s", escape_char_to_string(p[i]));
             fprintf(out_file, "\"");
         }
-    } else if (data->ty->kind == TY_ARRAY)
+    } else if (data->ty->kind == TY_ARRAY) {
+        dump_init(data->init, data->ty);
+    } else if (data->ty->kind == TY_STRUCT) {
+        print_type(data->ty);
         fprintf(out_file, " zeroinitializer");
-    else if (data->ty->kind == TY_STRUCT)
-        fprintf(out_file, " zeroinitializer");
-    else
-        fprintf(out_file, " 0");
+    } else {
+        dump_init(data->init, data->ty);
+    }
     fprintf(out_file, ", align %d\n", data->ty->align);
 }
 

@@ -1,5 +1,6 @@
 #include "cxx.h"
 
+static Module *curm;
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass);
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
@@ -8,8 +9,9 @@ static Node *stmt(Token **rest, Token *tok);
 static Node *compound_stmt(Token **rest, Token *tok);
 static Node *expr(Token **rest, Token *tok);
 static Node *assign(Token **rest, Token *tok);
-static int64_t const_expr(Token **rest, Token *tok);
 static Node *cast(Token **rest, Token *tok);
+static int64_t const_expr(Token **rest, Token *tok);
+static int64_t eval(Node *node);
 
 static Node *new_node(NodeKind kind, Token *tok) {
     Node *node = emalloc(sizeof(Node));
@@ -91,24 +93,11 @@ struct Scope {
     TagScope *tags;
 };
 
-// Represents a variable initializer
-typedef struct Initializer Initializer;
-struct Initializer {
-    Initializer *next;
-    Type *ty;
-    Token *tok;
-    bool is_flexible;
-
-    // For scalar type
-    Node *expr;
-
-    // For aggregate type
-    Initializer **child;
-};
 static void initializer2(Token **rest, Token *tok, Initializer *init);
 
 static Initializer *new_initializer(Type *ty, bool is_flexible) {
     Initializer *init = emalloc(sizeof(Initializer));
+    memset(init, 0, sizeof(Initializer));
     init->ty = ty;
 
     if (ty->kind == TY_ARRAY) {
@@ -534,6 +523,34 @@ static Node *lvar_initializer(Token **rest, Token *tok, Sym *var) {
     Node *lhs = new_unary(ND_MEMZERO, new_var_node(var, tok), tok);
     Node *rhs = create_lvar_init(init, var->ty, &desg, tok);
     return new_binary(ND_COMMA, lhs, rhs, tok);
+}
+
+static void eval_gvar_data(Initializer *init, Type *ty) {
+    if (ty->kind == TY_ARRAY) {
+        for (int i = 0; i < ty->len; i++) {
+            eval_gvar_data(init->child[i], ty->base);
+            init->is_inited |= init->child[i]->is_inited;
+        }
+        return;
+    }
+
+    if (init->expr) {
+        int64_t val = eval(init->expr);
+        Con *con = &(Con){CBits, 0, {val}};
+        Ref r = newcon(con, curm, ty);
+        init->val = &curm->con[r.val];
+        init->is_inited = true;
+    }
+}
+
+// Initializers for global variables are evaluated at compile-time and
+// embedded to .data section. It is a compile error if an
+// initializer list contains a non-constant expression.
+static void gvar_initializer(Token **rest, Token *tok, Sym *var) {
+    Initializer *init = initializer(rest, tok, var->ty, &var->ty);
+
+    eval_gvar_data(init, var->ty);
+    var->init = init;
 }
 
 static Node *fncall(Token **rest, Token *tok) {
@@ -1603,7 +1620,6 @@ static Token *external_declaration(Token *tok) {
     int cnt = -1;
     while (1) {
         cnt++;
-        Node *init = NULL;
         Token *start = tok;
         Type *ty = declarator(&tok, tok, basety);
 
@@ -1649,17 +1665,16 @@ static Token *external_declaration(Token *tok) {
                 error(ty->name,
                       "illegal initializer (only variables can be "
                       "initialized)");
-            initializer(&tok, tok, ty, &ty);
         }
         if (sclass == SC_TYPEDEF) {
             push_scope(get_ident(ty->name))->type_def = ty;
         } else {
             if (ty->kind == TY_VOID) error(start, "variable ‘%.*s’ declared void", start->len, start->loc);
-            if (ty->size < 0) error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
             Sym *var = new_gvar(get_ident(ty->name), ty);
             var->is_function = var->ty->kind == TY_FUNC;
             var->sclass = sclass;
-            var->init = init;
+            if (tok->kind == TK_AS) gvar_initializer(&tok, tok->next, var);
+            if (var->ty->size < 0) error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
         }
         if (match(&tok, tok, TK_COMMA))
             continue;
@@ -1674,6 +1689,8 @@ static Token *external_declaration(Token *tok) {
 Module *parse(Token *tok) {
     Module *md = emalloc(sizeof(Module));
     memset(md, 0, sizeof(Module));
+    md->con = vnew(2, sizeof md->con[0]);
+    curm = md;
 
     globals = NULL;
     while (tok->kind != TK_EOF) tok = external_declaration(tok);
