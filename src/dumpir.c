@@ -47,7 +47,16 @@ static void print_type(Type *ty) {
     fprintf(out_file, "%s", ty_str[ty->kind]);
 }
 
-static void printcon(Con *c) { fprintf(out_file, "%" PRIi64, c->bits.i); }
+static void printcon(Con *c) {
+    if (c->type == CBits)
+        fprintf(out_file, "%" PRIi64, c->bits.i);
+    else if (c->type == CAddr) {
+        if (c->bits.i)
+            fprintf(out_file, "getelementptr (i8, ptr @%s, i64 %" PRIi64 ")", str(c->sym), c->bits.i);
+        else
+            fprintf(out_file, "@%s", str(c->sym));
+    }
+}
 
 static void print_operand(Ref r) {
     if (r.type == RCon) {
@@ -243,11 +252,11 @@ static void dump_init(Initializer *init, Type *ty) {
     fprintf(out_file, " ");
     if (ty->kind == TY_ARRAY) {
         if (!init || !init->is_inited) {
-            fprintf(out_file, " zeroinitializer");
+            fprintf(out_file, "zeroinitializer");
             return;
         }
         if (ty->base->size == 1) {
-            fprintf(out_file, " c\"");
+            fprintf(out_file, "c\"");
             for (int i = 0; i < ty->len; i++) {
                 if (!init->child[i]->val)
                     fprintf(out_file, "\\00");
@@ -267,39 +276,52 @@ static void dump_init(Initializer *init, Type *ty) {
     }
     if (ty->kind == TY_STRUCT) {
         if (!init || !init->is_inited) {
-            fprintf(out_file, " zeroinitializer");
+            fprintf(out_file, "zeroinitializer");
             return;
         }
-        fprintf(out_file, "{");
+        fprintf(out_file, "{ ");
         int i = 0;
         for (Member *mem = ty->members; mem; mem = mem->next, i++) {
             if (i) fprintf(out_file, ", ");
             dump_init(init->child[mem->idx], mem->ty);
         }
-        fprintf(out_file, "}");
+        fprintf(out_file, " }");
         return;
     }
     if (ty->kind == TY_UNION) {
         if (!init || !init->is_inited) {
-            fprintf(out_file, " zeroinitializer");
+            fprintf(out_file, "zeroinitializer");
             return;
         }
-        fprintf(out_file, "{");
+        fprintf(out_file, "{ ");
         dump_init(init->child[0], ty->members->ty);
 
         if (ty->members->ty->size < ty->size)
             fprintf(out_file, ", [ %d x i8] zeroinitializer", ty->size - ty->members->ty->size);
-        fprintf(out_file, "}");
+        fprintf(out_file, " }");
         return;
     }
-    if (!init || !init->is_inited)
+    if (!init || !init->is_inited) {
         fprintf(out_file, "0");
-    else
+        return;
+    }
+    if (init->ty->kind == TY_PTR && init->val->type == CBits) {
+        fprintf(out_file, "inttoptr (i64 ");
         printcon(init->val);
+        fprintf(out_file, " to ptr)");
+        return;
+    }
+    if (init->ty->kind != TY_PTR && init->val->type == CAddr) {
+        fprintf(out_file, "ptrtoint (ptr ");
+        printcon(init->val);
+        fprintf(out_file, " to i64)");
+        return;
+    }
+    printcon(init->val);
 }
 
 void dump_data(Sym *data) {
-    fprintf(out_file, "@%s = global ", str(data->id));
+    fprintf(out_file, "@%s = dso_local global ", str(data->id));
 
     if (data->is_str) {
         print_type(data->ty);

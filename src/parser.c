@@ -12,6 +12,8 @@ static Node *assign(Token **rest, Token *tok);
 static Node *cast(Token **rest, Token *tok);
 static int64_t const_expr(Token **rest, Token *tok);
 static int64_t eval(Node *node);
+static int64_t eval2(Node *node, uint32_t *sym);
+static int64_t eval_rval(Node *node, uint32_t *sym);
 
 static Node *new_node(NodeKind kind, Token *tok) {
     Node *node = emalloc(sizeof(Node));
@@ -548,8 +550,9 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
     }
 
     if (init->expr) {
-        int64_t val = eval(init->expr);
-        Con *con = &(Con){CBits, 0, {val}};
+        uint32_t sym = 0;
+        int64_t val = eval2(init->expr, &sym);
+        Con *con = &(Con){sym ? CAddr : CBits, sym, {val}};
         Ref r = newcon(con, curm, ty);
         init->val = &curm->con[r.val];
         init->is_inited = true;
@@ -838,7 +841,14 @@ static Node *conditional(Token **rest, Token *tok) {
 }
 
 // Evaluate a given node as a constant expression.
-static int64_t eval(Node *node) {
+//
+// A constant expression is either just a number or ptr+n where ptr
+// is a pointer to a global variable and n is a postiive/negative
+// number. The latter form is accepted only as an initialization
+// expression for a global variable.
+static int64_t eval(Node *node) { return eval2(node, NULL); }
+
+static int64_t eval2(Node *node, uint32_t *sym) {
     add_type(node);
 
     switch (node->kind) {
@@ -853,7 +863,7 @@ static int64_t eval(Node *node) {
         case ND_INVERT:
             return ~eval(node->lhs);
         case ND_COMMA:
-            return eval(node->rhs);
+            return eval2(node->rhs, sym);
         case ND_ADD:
             return eval(node->lhs) + eval(node->rhs);
         case ND_SUB:
@@ -887,24 +897,54 @@ static int64_t eval(Node *node) {
         case ND_LOGOR:
             return eval(node->lhs) || eval(node->rhs);
         case ND_COND:
-            return eval(node->cond) ? eval(node->then) : eval(node->els);
+            return eval(node->cond) ? eval2(node->then, sym) : eval2(node->els, sym);
         case ND_PTRADD:
-            return eval(node->lhs) + eval(node->rhs) * node->ty->base->size;
+            return eval2(node->lhs, sym) + eval(node->rhs) * node->ty->base->size;
         case ND_IMCAST:
-        case ND_EXCAST:
+        case ND_EXCAST: {
+            int64_t val = eval2(node->lhs, sym);
             if (is_integer(node->ty)) {
                 switch (node->ty->size) {
                     case 1:
-                        return (uint8_t)eval(node->lhs);
+                        return (uint8_t)val;
                     case 2:
-                        return (uint16_t)eval(node->lhs);
+                        return (uint16_t)val;
                     case 4:
-                        return (uint32_t)eval(node->lhs);
+                        return (uint32_t)val;
                 }
             }
-            return eval(node->lhs);
+            return val;
+        }
+        case ND_ADDR:
+            return eval_rval(node->lhs, sym);
+        case ND_MEMBER:
+            if (!sym) error(node->tok, "not a compile-time constant");
+            if (node->ty->kind != TY_ARRAY) error(node->tok, "invalid initializer");
+            return eval_rval(node->lhs, sym) + node->member->offset;
+        case ND_VAR:
+            if (!sym) error(node->tok, "not a compile-time constant");
+            if (node->var->ty->kind != TY_ARRAY && node->var->ty->kind != TY_FUNC)
+                error(node->tok, "invalid initializer");
+            *sym = node->var->id;
+            return 0;
         default:
             error(node->tok, "not a compile-time constant");
+    }
+    return 0;
+}
+
+static int64_t eval_rval(Node *node, uint32_t *sym) {
+    switch (node->kind) {
+        case ND_VAR:
+            if (node->var->is_local) error(node->tok, "not a compile-time constant");
+            *sym = node->var->id;
+            return 0;
+        case ND_DEREF:
+            return eval2(node->lhs, sym);
+        case ND_MEMBER:
+            return eval_rval(node->lhs, sym) + node->member->offset;
+        default:
+            error(node->tok, "invalid initializer");
     }
     return 0;
 }
