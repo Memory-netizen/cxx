@@ -1423,11 +1423,14 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             Member *mem = emalloc(sizeof(Member));
             mem->ty = declarator(&tok, tok, basety);
             if (mem->ty->kind == TY_VOID) error(start, "field ‘%.*s’ declared void", start->len, start->loc);
-            if (mem->ty->size < 0) error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
+            if (mem->ty->size < 0 && tok->next->kind != TK_RBRACE)
+                error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
             mem->name = mem->ty->name;
             cur = cur->next = mem;
         }
     }
+
+    if (cur != &head && cur->ty->kind == TY_ARRAY && cur->ty->len < 0) cur->ty = array_of(cur->ty->base, 0);
 
     *rest = tok->next;
     ty->members = head.next;
