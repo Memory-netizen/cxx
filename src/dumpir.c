@@ -320,10 +320,18 @@ static void dump_init(Initializer *init, Type *ty) {
     printcon(init->val);
 }
 
-void dump_data(Sym *data) {
-    fprintf(out_file, "@%s = dso_local global ", str(data->id));
+static const char *sclass_name[] = {
+    [SC_NONE] = "dso_local",
+    [SC_EXTERN] = "external",
+    [SC_STATIC] = "internal",
+    [SC_THREAD] = "thread_local",
+};
 
-    if (data->is_str) {
+void dump_data(Sym *data) {
+    fprintf(out_file, "@%s = %s global ", str(data->id), sclass_name[data->sclass]);
+    if (data->sclass == SC_EXTERN) {
+        print_type(data->ty);
+    } else if (data->is_str) {
         print_type(data->ty);
         char *p = str(data->init_data);
         int len = data->ty->len;
