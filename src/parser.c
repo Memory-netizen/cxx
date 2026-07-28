@@ -342,6 +342,24 @@ static Type *typename(Token **rest, Token *tok) {
     return abstract_declarator(rest, tok, ty);
 }
 
+static bool is_end(Token *tok) {
+    return tok->kind == TK_RBRACE || (tok->kind == TK_COMMA && tok->next->kind == TK_RBRACE);
+}
+
+static bool consume_end(Token **rest, Token *tok) {
+    if (tok->kind == TK_RBRACE) {
+        *rest = tok->next;
+        return true;
+    }
+
+    if (tok->kind == TK_COMMA && tok->next->kind == TK_RBRACE) {
+        *rest = tok->next->next;
+        return true;
+    }
+
+    return false;
+}
+
 static Token *skip_excess_element(Token *tok) {
     if (tok->kind == TK_LBRACE) {
         tok = skip_excess_element(tok->next);
@@ -367,7 +385,7 @@ static int count_array_init_elements(Token *tok, Type *ty) {
     Initializer *dummy = new_initializer(ty->base, false);
 
     int i;
-    for (i = 0; tok->kind != TK_RBRACE; i++) {
+    for (i = 0; !consume_end(&tok, tok); i++) {
         if (i > 0) tok = skip(tok, TK_COMMA);
         initializer2(&tok, tok, dummy, false);
     }
@@ -382,14 +400,14 @@ static void array_initializer1(Token **rest, Token *tok, Initializer *init) {
         *init = *new_initializer(array_of(init->ty->base, len), false);
     }
 
-    for (int i = 0; tok->kind != TK_RBRACE; i++) {
+    for (int i = 0; !consume_end(rest, tok); i++) {
         if (i > 0) tok = skip(tok, TK_COMMA);
         if (i < init->ty->len)
             initializer2(&tok, tok, init->child[i], false);
         else
             tok = skip_excess_element(tok);
     }
-    *rest = skip(tok, TK_RBRACE);
+
     return;
 }
 
@@ -399,7 +417,7 @@ static void array_initializer2(Token **rest, Token *tok, Initializer *init) {
         *init = *new_initializer(array_of(init->ty->base, len), false);
     }
 
-    for (int i = 0; i < init->ty->len && tok->kind != TK_RBRACE; i++) {
+    for (int i = 0; i < init->ty->len && !is_end(tok); i++) {
         if (i > 0) tok = skip(tok, TK_COMMA);
         initializer2(&tok, tok, init->child[i], false);
     }
@@ -411,7 +429,7 @@ static void struct_initializer1(Token **rest, Token *tok, Initializer *init) {
 
     Member *mem = init->ty->members;
 
-    while (tok->kind != TK_RBRACE) {
+    while (!consume_end(rest, tok)) {
         if (mem != init->ty->members) tok = skip(tok, TK_COMMA);
 
         if (mem) {
@@ -421,14 +439,14 @@ static void struct_initializer1(Token **rest, Token *tok, Initializer *init) {
             tok = skip_excess_element(tok);
         }
     }
-    *rest = skip(tok, TK_RBRACE);
+
     return;
 }
 
 static void struct_initializer2(Token **rest, Token *tok, Initializer *init) {
     bool first = true;
 
-    for (Member *mem = init->ty->members; mem && tok->kind != TK_RBRACE; mem = mem->next) {
+    for (Member *mem = init->ty->members; mem && !is_end(tok); mem = mem->next) {
         if (!first) tok = skip(tok, TK_COMMA);
         first = false;
         initializer2(&tok, tok, init->child[mem->idx], false);
@@ -439,6 +457,7 @@ static void struct_initializer2(Token **rest, Token *tok, Initializer *init) {
 static void union_initializer1(Token **rest, Token *tok, Initializer *init) {
     tok = skip(tok, TK_LBRACE);
     initializer2(&tok, tok, init->child[0], false);
+    match(&tok, tok, TK_COMMA);
     *rest = skip(tok, TK_RBRACE);
 }
 
@@ -447,7 +466,7 @@ static void union_initializer2(Token **rest, Token *tok, Initializer *init) {
 }
 
 // Init       ::= AsExp | BracedInit
-// BracedInit ::= "{" Init ("," Init)*)? "}"
+// BracedInit ::= "{" Init ("," Init)*)? ","? "}"
 static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_brace) {
     if (init->ty->kind == TY_ARRAY && tok->kind == TK_STRLIT) {
         string_initializer(rest, tok, init);
@@ -1372,7 +1391,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
     // Read an enum-list.
     int i = 0;
     int64_t val = 0;
-    while (tok->kind != TK_RBRACE) {
+    while (!consume_end(rest, tok)) {
         if (i++ > 0) tok = skip(tok, TK_COMMA);
 
         uint32_t name = get_ident(tok);
@@ -1384,8 +1403,6 @@ static Type *enum_decl(Token **rest, Token *tok) {
         sc->enum_ty = ty;
         sc->enum_val = val++;
     }
-
-    *rest = tok->next;
 
     return ty;
 }
