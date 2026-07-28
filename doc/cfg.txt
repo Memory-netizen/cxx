@@ -17,13 +17,15 @@ ParamList   ::= ParamDecl ("," ParamDecl)*
 ParamDecl   ::= DeclSpecs Declr
 
 DeclSpecs   ::= DeclSpec+
-DeclSpec    ::= SCSpec | TypeSpec
-SCSpec      ::= "typedef" | "static"
+DeclSpec    ::= SCSpec | TypeSpecQual
+SCSpec      ::= "typedef" | "static" | "extern"
+TypeSpecQual ::= TypeSpec | AlignSpec
 TypeSpec    ::= "void" | "_Bool" | "char" | "short" | "int" | "long"
             | RecordSpec
             | EnumSpec
             | TypedefName
 TypedefName ::= Ident
+AlignSpec   ::= "alignas" "(" (TypeName | ConstExp) ")"
 
 TypeName    ::= DeclSpecs AbsDeclr?
 AbsDeclr    ::= Ptr DirAbsDeclr? | DirAbsDeclr;
@@ -86,6 +88,7 @@ ConstExp    ::= CondExp
 CastExp     ::= UnaryExp | "(" TypeName ")" CastExp
 UnaryExp    ::= PostExp | UnaryOP CastExp | ("++" | "--") UnaryExp
             | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
+            | "alignof" "(" TypeName ")"
 UnaryOp     ::= "+" | "-" | "~" | "!" | "&" | "*"
 
 PostExp     ::= PrimExp PostFix*

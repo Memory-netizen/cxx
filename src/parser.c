@@ -1,10 +1,10 @@
 #include "cxx.h"
 
 static Module *curm;
-static Type *declspecs(Token **rest, Token *tok, SClass *sclass);
+static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align);
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
-static Node *declaration(Token **rest, Token *tok, Type *ty, SClass sclass);
+static Node *declaration(Token **rest, Token *tok, Type *ty, SClass sclass, int align);
 static Node *stmt(Token **rest, Token *tok);
 static Node *compound_stmt(Token **rest, Token *tok);
 static Node *expr(Token **rest, Token *tok);
@@ -225,6 +225,7 @@ static Sym *new_var(uint32_t id, Type *ty) {
     memset(var, 0, sizeof(Sym));
     var->id = id;
     var->ty = ty;
+    var->align = ty->align;
     push_scope(id)->var = var;
     return var;
 }
@@ -248,8 +249,15 @@ static Sym *new_gvar(uint32_t id, Type *ty) {
 static uint32_t new_unique_strname(void) {
     static uint32_t id = 0;
     char buf[64];
-    snprintf(buf, sizeof(buf), ".str.%u", id++);
-    return intern(buf, strlen(buf));
+    uint32_t str_id;
+    if (id) {
+        snprintf(buf, sizeof(buf), ".str.%u", id);
+        str_id = intern(buf, strlen(buf));
+    } else {
+        str_id = intern(".str", 4);
+    }
+    id++;
+    return str_id;
 }
 
 static Sym *new_anon_gvar(Type *ty) { return new_gvar(new_unique_strname(), ty); }
@@ -347,7 +355,7 @@ static Type *abstract_declarator(Token **rest, Token *tok, Type *ty) {
 
 // TypeName ::= DeclSpecs AbsDeclr?
 static Type *typename(Token **rest, Token *tok) {
-    Type *ty = declspecs(&tok, tok, NULL);
+    Type *ty = declspecs(&tok, tok, NULL, NULL);
     return abstract_declarator(rest, tok, ty);
 }
 
@@ -838,6 +846,7 @@ static Node *postfix(Token **rest, Token *tok) {
 
 // UnaryExp ::= PostExp | UnaryOP CastExp | ("++" | "--") UnaryExp
 //          | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
+//          | "alignof" "(" TypeName ")"
 // UnaryOp  ::= "+" | "-" | "~" | "!" | "&" | "*"
 static Node *unary(Token **rest, Token *tok) {
     switch (tok->kind) {
@@ -876,6 +885,18 @@ static Node *unary(Token **rest, Token *tok) {
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
             return new_long(node->ty->size, tok);
+        }
+        case TK_ALIGNOF: {
+            if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, 1)) {
+                Token *start = tok;
+                Type *ty = typename(&tok, tok->next->next);
+                *rest = skip(tok, TK_RPAREN);
+                return new_num(ty->align, start);
+            }
+            Node *node = unary(rest, tok->next);
+            add_type(node);
+            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+            return new_long(node->ty->align, tok);
         }
         default:
             break;
@@ -1135,7 +1156,7 @@ static Node *return_stmt(Token **rest, Token *tok) {
 
 // InitDecls ::= InitDeclr ("," InitDeclr)*
 // InitDeclr ::= Declr ("=" Init)?
-static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclass) {
+static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclass, int align) {
     Node dummy, *cur = &dummy;
     do {
         Token *start = tok;
@@ -1147,6 +1168,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         else
             var = new_lvar(get_ident(ty->name), ty);
         var->sclass = sclass;
+        var->align = MAX(align, ty->align);
         var->is_function = var->ty->kind == TY_FUNC;
         if (tok->kind == TK_AS) {
             Node *expr = lvar_initializer(&tok, tok->next, var);
@@ -1165,9 +1187,11 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
 static Node *select_head(Token **rest, Token *tok) {
     Node *node;
     if (is_typename(tok, 1)) {
-        Type *basety = declspecs(&tok, tok, NULL);
+        SClass sclass = 0;
+        int align = 0;
+        Type *basety = declspecs(&tok, tok, &sclass, &align);
         node = new_node(ND_DECL, tok);
-        if (tok->kind != TK_SEMI) node->body = init_decl_list(&tok, tok, basety, 0);
+        if (tok->kind != TK_SEMI) node->body = init_decl_list(&tok, tok, basety, sclass, align);
         if (tok->kind == TK_SEMI) {
             Node *stmt = node->body;
             while (stmt->next) stmt = stmt->next;
@@ -1206,8 +1230,10 @@ static Node *for_stmt(Token **rest, Token *tok) {
 
     // Init
     if (is_typename(tok, 1)) {
-        Type *basety = declspecs(&tok, tok, NULL);
-        node->init = declaration(&tok, tok, basety, 0);
+        SClass sclass = 0;
+        int align = 0;
+        Type *basety = declspecs(&tok, tok, &sclass, &align);
+        node->init = declaration(&tok, tok, basety, sclass, align);
     } else {
         node->init = expr_stmt(&tok, tok);
     }
@@ -1387,12 +1413,13 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     while (tok->kind != TK_RBRACE) {
         if (is_typename(tok, 1) && tok->next->kind != TK_COLON) {
             SClass sclass = 0;
-            Type *basety = declspecs(&tok, tok, &sclass);
+            int align = 0;
+            Type *basety = declspecs(&tok, tok, &sclass, &align);
             if (sclass == SC_TYPEDEF) {
                 Type *ty = declarator(&tok, tok, basety);
                 push_scope(get_ident(ty->name))->type_def = ty;
             } else {
-                cur = cur->next = declaration(&tok, tok, basety, sclass);
+                cur = cur->next = declaration(&tok, tok, basety, sclass, align);
             }
         } else {
             cur = cur->next = stmt(&tok, tok);
@@ -1470,7 +1497,8 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
     Member *cur = &head;
 
     while (tok->kind != TK_RBRACE) {
-        Type *basety = declspecs(&tok, tok, NULL);
+        int align = 0;
+        Type *basety = declspecs(&tok, tok, NULL, &align);
         int i = 0;
 
         while (!match(&tok, tok, TK_SEMI)) {
@@ -1478,6 +1506,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             Token *start = tok;
             Member *mem = emalloc(sizeof(Member));
             mem->ty = declarator(&tok, tok, basety);
+            mem->align = MAX(align, mem->ty->align);
             if (mem->ty->kind == TY_VOID) error(start, "field ‘%.*s’ declared void", start->len, start->loc);
             if (mem->ty->size < 0 && tok->next->kind != TK_RBRACE)
                 error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
@@ -1538,13 +1567,13 @@ static Type *record_decl(Token **rest, Token *tok) {
     int offset = 0;
     uint32_t idx = 0;
     for (Member *mem = ty->members; mem; mem = mem->next) {
-        ty->align = MAX(ty->align, mem->ty->align);
+        ty->align = MAX(ty->align, mem->align);
         mem->idx = idx++;
         if (is_union) {
             offset = MAX(offset, mem->ty->size);
             continue;
         }
-        offset = ALIGN_UP(offset, mem->ty->align);
+        offset = ALIGN_UP(offset, mem->align);
         mem->offset = offset;
         offset += mem->ty->size;
     }
@@ -1554,13 +1583,15 @@ static Type *record_decl(Token **rest, Token *tok) {
 }
 
 // DeclSpecs ::= DeclSpec+
-// DeclSpec  ::= SCSpec | TypeSpec
-// SCSpec    ::= "typedef" | "static"
+// DeclSpec  ::= SCSpec | TypeSpecQual
+// SCSpec    ::= "typedef" | "static" | "extern"
+// TypeSpecQual ::= TypeSpec | AlignSpec
 // TypeSpec  ::= "void" | "_Bool" | "char" | "short" | "int" | "long"
 //            | RecordSpec
 //            | EnumSpec
 //            | TypedefName
-static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
+// AlignSpec ::= "alignas" "(" (TypeName | ConstExp) ")"
+static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align) {
     Type *ty = ty_int;
     int typespec_cnt = 0;
     enum {
@@ -1618,6 +1649,16 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass) {
                 ty = enum_decl(&tok, tok);
                 typespec_cnt += OTHER;
                 goto check_type;
+            case TK_ALIGNAS:
+                if (!align) error(tok, "alignas is not allowed in this context");
+                tok = skip(tok->next, TK_LPAREN);
+
+                if (is_typename(tok, 1))
+                    *align = typename(&tok, tok)->align;
+                else
+                    *align = const_expr(&tok, tok);
+                tok = skip(tok, TK_RPAREN);
+                continue;
             case TK_VOID:
                 typespec_cnt += VOID;
                 break;
@@ -1696,7 +1737,7 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
         while (tok->kind != TK_RPAREN) {
             if (cur != &dummy) tok = skip(tok, TK_COMMA);
             Token *start = tok;
-            Type *basety = declspecs(&tok, tok, NULL);
+            Type *basety = declspecs(&tok, tok, NULL, NULL);
             Type *paramty = declarator(&tok, tok, basety);
             if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type", start->len, start->loc);
             // "array of T" is converted to "pointer to T" in the parameter
@@ -1752,13 +1793,13 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
 }
 
 // Decl ::= DeclSpecs InitDecls? ";"
-static Node *declaration(Token **rest, Token *tok, Type *basety, SClass sclass) {
+static Node *declaration(Token **rest, Token *tok, Type *basety, SClass sclass, int align) {
     Node *node = new_node(ND_DECL, tok);
     if (tok->kind == TK_SEMI) {
         *rest = tok->next;
         return node;
     }
-    node->body = init_decl_list(&tok, tok, basety, sclass);
+    node->body = init_decl_list(&tok, tok, basety, sclass, align);
     *rest = skip(tok, TK_SEMI);
     return node;
 }
@@ -1784,7 +1825,8 @@ static Token *external_declaration(Token *tok) {
     if (tok->kind == TK_EOF) return tok;
 
     SClass sclass = 0;
-    Type *basety = declspecs(&tok, tok, &sclass);
+    int align = 0;
+    Type *basety = declspecs(&tok, tok, &sclass, &align);
     if (tok->kind == TK_SEMI) return tok->next;
 
     int cnt = -1;
@@ -1843,6 +1885,7 @@ static Token *external_declaration(Token *tok) {
             Sym *var = new_gvar(get_ident(ty->name), ty);
             var->is_function = var->ty->kind == TY_FUNC;
             var->sclass = sclass;
+            var->align = MAX(align, ty->align);
             if (tok->kind == TK_AS) gvar_initializer(&tok, tok->next, var);
             if (var->ty->size < 0) error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
         }

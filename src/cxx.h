@@ -229,6 +229,7 @@ struct Sym {
     Sym *next;
     uint32_t id;  // Variable name
     Type *ty;     // Type
+    int align;    // alignment
 
     // Local variable
     bool is_local;  // local or global/function
@@ -463,6 +464,7 @@ struct Member {
     Type *ty;
     Token *name;
     uint32_t idx;
+    int align;
     int offset;
 };
 

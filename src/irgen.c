@@ -59,17 +59,23 @@ static Ref gen_addr(Node *node) {
                 addr.ty = pointer_to(node->member->ty);
                 return addr;
             }
-            int nmem = 0;
-            for (Member *mem = node->member; mem; mem = mem->next) nmem++;
-            Ref gep_ops[nmem + 2];
-            gep_ops[0] = addr;
-            gep_ops[1] = INT(0);
-
-            int idx = 2;
-            for (Member *mem = node->member; mem; mem = mem->next) gep_ops[idx++] = INT(mem->idx);
-
+            int pos = 0;
+            int idx = 0;
+            Member *mem = node->member;
+            Member *cur = node->lhs->ty->members;
+            while (cur) {
+                if (pos == mem->offset) break;
+                pos += cur->ty->size;
+                cur = cur->next;
+                if (!cur) break;
+                if (pos != cur->offset) {
+                    pos = cur->offset;
+                    idx++;
+                }
+            }
+            Ref gep_ops[] = {addr, INT(0), INT(mem->idx + idx)};
             Ref dst = TMP(tmp_id++, pointer_to(node->ty));
-            new_ins(IR_GEP, dst, gep_ops, nmem + 2);
+            new_ins(IR_GEP, dst, gep_ops, 3);
             return dst;
         }
         default:
@@ -79,9 +85,9 @@ static Ref gen_addr(Node *node) {
     return R;
 }
 
-static Ref load(Ref addr, Type *ty) {
+static Ref load(Ref addr, Type *ty, int align) {
     Ref dst = TMP(tmp_id++, ty);
-    new_ins(IR_LORD, dst, (Ref[]){addr}, 1);
+    new_ins(IR_LORD, dst, (Ref[]){addr, INT(align)}, 2);
     return dst;
 }
 
@@ -132,10 +138,11 @@ static Ref gen_cond(Node *node) {
 
     bool is_valid = node->ty->kind != TY_VOID;
     Ref res;
+    int align = node->ty->align;
     if (is_valid) {
         int res_id = tmp_id++;
         res = TMP(res_id, node->ty);
-        new_ins(IR_ALLOCA, TMP(res_id, pointer_to(node->ty)), NULL, 0);
+        new_ins(IR_ALLOCA, TMP(res_id, pointer_to(node->ty)), (Ref[]){INT(align)}, 1);
     }
 
     // cond
@@ -151,7 +158,7 @@ static Ref gen_cond(Node *node) {
     curb = t_blk;
     insert_blk(curb);
     Ref true_r = gen_expr(node->then);
-    if (is_valid) new_ins(IR_STR, R, (Ref[]){true_r, res}, 2);
+    if (is_valid) new_ins(IR_STR, R, (Ref[]){true_r, res, INT(align)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
 
@@ -159,14 +166,14 @@ static Ref gen_cond(Node *node) {
     curb = f_blk;
     insert_blk(curb);
     Ref false_r = gen_expr(node->els);
-    if (is_valid) new_ins(IR_STR, R, (Ref[]){false_r, res}, 2);
+    if (is_valid) new_ins(IR_STR, R, (Ref[]){false_r, res, INT(align)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
 
     curb = m_blk;
     insert_blk(curb);
     if (is_valid)
-        return load(res, node->ty);
+        return load(res, node->ty, node->ty->align);
     else
         return R;
 }
@@ -178,7 +185,7 @@ static Ref gen_logor(Node *node) {
 
     int res_id = tmp_id++;
     Ref res = TMP(res_id, ty_int);
-    new_ins(IR_ALLOCA, TMP(res_id, pointer_to(ty_int)), NULL, 0);
+    new_ins(IR_ALLOCA, TMP(res_id, pointer_to(ty_int)), (Ref[]){INT(4)}, 1);
 
     // lhs
     Ref lr = gen_expr(node->lhs);
@@ -191,7 +198,7 @@ static Ref gen_logor(Node *node) {
 
     curb = t_blk;
     insert_blk(curb);
-    new_ins(IR_STR, R, (Ref[]){INT(1), res}, 2);
+    new_ins(IR_STR, R, (Ref[]){INT(1), res, INT(4)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
 
@@ -203,13 +210,13 @@ static Ref gen_logor(Node *node) {
     new_ins(IR_CMP_NE, res_r, (Ref[]){rr, INT(0)}, 2);
     Ref r_ext = TMP(tmp_id++, ty_int);
     new_ins(IR_ZEXT, r_ext, (Ref[]){res_r}, 1);
-    new_ins(IR_STR, R, (Ref[]){r_ext, res}, 2);
+    new_ins(IR_STR, R, (Ref[]){r_ext, res, INT(4)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
 
     curb = m_blk;
     insert_blk(curb);
-    return load(res, ty_int);
+    return load(res, ty_int, 4);
 }
 
 static Ref gen_logand(Node *node) {
@@ -219,7 +226,7 @@ static Ref gen_logand(Node *node) {
 
     int res_id = tmp_id++;
     Ref res = TMP(res_id, ty_int);
-    new_ins(IR_ALLOCA, TMP(res_id, pointer_to(ty_int)), NULL, 0);
+    new_ins(IR_ALLOCA, TMP(res_id, pointer_to(ty_int)), (Ref[]){INT(4)}, 1);
 
     // lhs
     Ref lr = gen_expr(node->lhs);
@@ -233,7 +240,7 @@ static Ref gen_logand(Node *node) {
 
     curb = f_blk;
     insert_blk(curb);
-    new_ins(IR_STR, R, (Ref[]){INT(0), res}, 2);
+    new_ins(IR_STR, R, (Ref[]){INT(0), res, INT(4)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
 
@@ -245,13 +252,13 @@ static Ref gen_logand(Node *node) {
     new_ins(IR_CMP_NE, res_r, (Ref[]){rr, INT(0)}, 2);
     Ref r_ext = TMP(tmp_id++, ty_int);
     new_ins(IR_ZEXT, r_ext, (Ref[]){res_r}, 1);
-    new_ins(IR_STR, R, (Ref[]){r_ext, res}, 2);
+    new_ins(IR_STR, R, (Ref[]){r_ext, res, INT(4)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
 
     curb = m_blk;
     insert_blk(curb);
-    return load(res, ty_int);
+    return load(res, ty_int, 4);
 }
 
 static Ref gen_expr(Node *node) {
@@ -268,8 +275,11 @@ static Ref gen_expr(Node *node) {
         case ND_STMT_EXPR:
             for (Node *n = node->body; n; n = n->next) dst = gen_stmt(n);
             return dst;
-        case ND_LVTOR:
-            return load(gen_expr(node->lhs), node->ty);
+        case ND_LVTOR: {
+            int align = node->ty->align;
+            if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
+            return load(gen_expr(node->lhs), node->ty, align);
+        }
         case ND_VAR:
         case ND_MEMBER:
             return gen_addr(node);
@@ -288,6 +298,8 @@ static Ref gen_expr(Node *node) {
         }
         case ND_AS: {
             Ref addr = gen_expr(node->lhs);
+            int align = node->ty->align;
+            if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
             if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) {
                 Ref src = gen_expr(node->rhs);
                 Ref ops[] = {addr, src, INT(node->ty->size)};
@@ -295,7 +307,7 @@ static Ref gen_expr(Node *node) {
                 return addr;
             }
             dst = gen_expr(node->rhs);
-            new_ins(IR_STR, R, (Ref[]){dst, addr}, 2);
+            new_ins(IR_STR, R, (Ref[]){dst, addr, INT(align)}, 3);
             return dst;
         }
         case ND_PREINC:
@@ -304,13 +316,15 @@ static Ref gen_expr(Node *node) {
         case ND_POSTDEC: {
             int ir_op = is_pointer(node->ty) ? IR_GEP : IR_ADD;
             Ref addr = gen_expr(node->lhs);
-            Ref lr = load(addr, node->ty);
+            int align = node->ty->align;
+            if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
+            Ref lr = load(addr, node->ty, align);
             int addend = (node->kind == ND_PREINC || node->kind == ND_POSTINC) ? 1 : -1;
             Ref rr = INT(addend);
             rr.ty = is_pointer(node->ty) ? ty_long : node->ty;
             dst = TMP(tmp_id++, node->ty);
             new_ins(ir_op, dst, (Ref[]){lr, rr}, 2);
-            new_ins(IR_STR, R, (Ref[]){dst, addr}, 2);
+            new_ins(IR_STR, R, (Ref[]){dst, addr, INT(align)}, 3);
             if (node->kind == ND_PREINC || node->kind == ND_PREDEC)
                 return dst;
             else
@@ -318,11 +332,13 @@ static Ref gen_expr(Node *node) {
         }
         case ND_PTRAS: {
             Ref addr = gen_expr(node->lhs);
-            Ref lr = load(addr, node->ty);
+            int align = node->ty->align;
+            if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
+            Ref lr = load(addr, node->ty, align);
             Ref rr = gen_expr(node->rhs);
             dst = TMP(tmp_id++, node->ty);
             new_ins(IR_GEP, dst, (Ref[]){lr, rr}, 2);
-            new_ins(IR_STR, R, (Ref[]){dst, addr}, 2);
+            new_ins(IR_STR, R, (Ref[]){dst, addr, INT(align)}, 3);
             return dst;
         }
         case ND_ADDAS:
@@ -336,7 +352,9 @@ static Ref gen_expr(Node *node) {
         case ND_LEFTAS:
         case ND_RIGHTAS: {
             Ref addr = gen_expr(node->lhs);
-            Ref lr = load(addr, node->ty);
+            int align = node->ty->align;
+            if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
+            Ref lr = load(addr, node->ty, align);
             lr = cast(lr, node->ty, node->compute_ty);
             Ref rr = gen_expr(node->rhs);
             rr = cast(rr, node->rhs->ty, node->compute_ty);
@@ -348,7 +366,7 @@ static Ref gen_expr(Node *node) {
             Ref res = TMP(tmp_id++, node->compute_ty);
             new_ins(bin_op[node->kind], res, (Ref[]){lr, rr}, 2);
             dst = cast(res, node->compute_ty, node->ty);
-            new_ins(IR_STR, R, (Ref[]){dst, addr}, 2);
+            new_ins(IR_STR, R, (Ref[]){dst, addr, INT(align)}, 3);
             return dst;
         }
         case ND_LOGOR:
@@ -699,8 +717,8 @@ static void gen_continue(Node *n) {
 static void gen_ret(Node *n) {
     Ref result = gen_expr(n->lhs);
     if (!refeq(result, R)) {
-        Ref ops[2] = {result, SLOT(curf->nparam + 1, curf->ty->ret)};
-        new_ins(IR_STR, R, ops, 2);
+        Ref ops[] = {result, SLOT(curf->nparam + 1, curf->ty->ret), INT(curf->ty->ret->align)};
+        new_ins(IR_STR, R, ops, 3);
     }
 
     curb->jmp.type = IR_JMP;
@@ -771,14 +789,14 @@ Module *irgen(Module *md) {
         curb = fn->start;
         insert_blk(curb);
         // Entry
-        new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(fn->ty->ret)), NULL, 0);
+        new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(fn->ty->ret)), (Ref[]){INT(fn->ty->ret->align)}, 1);
 
         for (Sym *var = fn->locals; var; var = var->next)
-            new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty)), NULL, 0);
+            new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty)), (Ref[]){INT(var->align)}, 1);
 
         Sym *var = fn->locals;
         for (uint32_t i = 0; i < fn->nparam; ++i, var = var->next)
-            new_ins(IR_STR, R, (Ref[]){TMP(i, var->ty), TMP(var->vreg, var->ty)}, 2);
+            new_ins(IR_STR, R, (Ref[]){TMP(i, var->ty), TMP(var->vreg, var->ty), INT(var->align)}, 3);
 
         // Body
         gen_stmt(fn->body);
@@ -788,7 +806,8 @@ Module *irgen(Module *md) {
         curb = curb->succ1 = fn->end;
         insert_blk(curb);
 
-        new_ins(IR_LORD, TMP(tmp_id, fn->ty->ret), (Ref[]){SLOT(curf->nparam + 1, fn->ty->ret)}, 1);
+        new_ins(IR_LORD, TMP(tmp_id, fn->ty->ret),
+                (Ref[]){SLOT(curf->nparam + 1, fn->ty->ret), INT(fn->ty->ret->align)}, 2);
         curb->jmp.type = IR_RET;
         curb->jmp.arg = TMP(tmp_id, fn->ty->ret);
     }

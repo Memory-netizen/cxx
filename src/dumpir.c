@@ -80,14 +80,18 @@ void dump_blk(Blk *b) {
             case IR_ALLOCA:
                 fprintf(out_file, "alloca ");
                 print_type(ir->dst.ty->base);
-                fprintf(out_file, ", align %d\n", ir->dst.ty->base->align);
+                fprintf(out_file, ", align ");
+                print_operand(ir->args[0]);
+                fprintf(out_file, "\n");
                 break;
             case IR_LORD:
                 fprintf(out_file, "load ");
                 print_type(ir->dst.ty);
                 fprintf(out_file, ", ptr ");
                 print_operand(ir->args[0]);
-                fprintf(out_file, ", align %d\n", ir->dst.ty->align);
+                fprintf(out_file, ", align ");
+                print_operand(ir->args[1]);
+                fprintf(out_file, "\n");
                 break;
             case IR_STR:
                 fprintf(out_file, "store ");
@@ -96,7 +100,9 @@ void dump_blk(Blk *b) {
                 print_operand(ir->args[0]);
                 fprintf(out_file, ", ptr ");
                 print_operand(ir->args[1]);
-                fprintf(out_file, ", align %d\n", ir->args[0].ty->align);
+                fprintf(out_file, ", align ");
+                print_operand(ir->args[2]);
+                fprintf(out_file, "\n");
                 break;
             case IR_GEP:
                 fprintf(out_file, "getelementptr ");
@@ -233,16 +239,22 @@ void dump_type(Type *ty) {
     fprintf(out_file, "%%%s = type { ", str(ty->uid));
     Member *mem = ty->members;
     if (ty->kind == TY_STRUCT) {
+        int pos = 0;
         while (mem) {
             print_type(mem->ty);
+            pos += mem->ty->size;
             mem = mem->next;
             if (!mem) break;
             fprintf(out_file, ", ");
+            if (pos != mem->offset) {
+                fprintf(out_file, "[%d x i8], ", mem->offset - pos);
+                pos = mem->offset;
+            }
         }
+        if (pos < ty->size) fprintf(out_file, ", [%d x i8]", ty->size - pos);
     } else if (ty->kind == TY_UNION) {
-        while (mem && mem->ty->align != ty->align) mem = mem->next;
         print_type(mem->ty);
-        if (mem->ty->size < ty->size) fprintf(out_file, ", [ %d x i8]", ty->size - mem->ty->size);
+        if (mem->ty->size < ty->size) fprintf(out_file, ", [%d x i8]", ty->size - mem->ty->size);
     }
     fprintf(out_file, " }\n");
 }
@@ -280,11 +292,20 @@ static void dump_init(Initializer *init, Type *ty) {
             return;
         }
         fprintf(out_file, "{ ");
-        int i = 0;
-        for (Member *mem = ty->members; mem; mem = mem->next, i++) {
-            if (i) fprintf(out_file, ", ");
+        Member *mem = ty->members;
+        int pos = 0;
+        while (mem) {
             dump_init(init->child[mem->idx], mem->ty);
+            pos += mem->ty->size;
+            mem = mem->next;
+            if (!mem) break;
+            fprintf(out_file, ", ");
+            if (pos != mem->offset) {
+                fprintf(out_file, "[%d x i8] zeroinitializer, ", mem->offset - pos);
+                pos = mem->offset;
+            }
         }
+        if (pos < ty->size) fprintf(out_file, "[%d x i8] zeroinitializer, ", ty->size - pos);
         fprintf(out_file, " }");
         return;
     }
@@ -297,7 +318,7 @@ static void dump_init(Initializer *init, Type *ty) {
         dump_init(init->child[0], ty->members->ty);
 
         if (ty->members->ty->size < ty->size)
-            fprintf(out_file, ", [ %d x i8] zeroinitializer", ty->size - ty->members->ty->size);
+            fprintf(out_file, ", [%d x i8] zeroinitializer", ty->size - ty->members->ty->size);
         fprintf(out_file, " }");
         return;
     }
@@ -328,13 +349,11 @@ static const char *sclass_name[] = {
 };
 
 void dump_data(Sym *data) {
-    fprintf(out_file, "@%s = %s global ", str(data->id), sclass_name[data->sclass]);
-    if (data->sclass == SC_EXTERN) {
-        print_type(data->ty);
-    } else if (data->is_str) {
-        print_type(data->ty);
+    fprintf(out_file, "@%s = ", str(data->id));
+    if (data->is_str) {
         char *p = str(data->init_data);
         int len = data->ty->len;
+        fprintf(out_file, "private unnamed_addr constant [%d x i8]", len);
         if (len == 1)
             fprintf(out_file, " zeroinitializer");
         else {
@@ -342,10 +361,16 @@ void dump_data(Sym *data) {
             for (int i = 0; i < len; i++) fprintf(out_file, "%s", escape_char_to_string(p[i]));
             fprintf(out_file, "\"");
         }
-    } else {
-        dump_init(data->init, data->ty);
+        fprintf(out_file, ", align 1\n");
+        return;
     }
-    fprintf(out_file, ", align %d\n", data->ty->align);
+    fprintf(out_file, "%s global ", sclass_name[data->sclass]);
+    if (data->sclass == SC_EXTERN)
+        print_type(data->ty);
+    else
+        dump_init(data->init, data->ty);
+
+    fprintf(out_file, ", align %d\n", data->align);
 }
 
 void dump_fn(Sym *fn) {
@@ -353,7 +378,6 @@ void dump_fn(Sym *fn) {
         fprintf(out_file, "declare ");
     } else {
         fprintf(out_file, "define ");
-
         if (fn->sclass == SC_STATIC)
             fprintf(out_file, "internal ");
         else
