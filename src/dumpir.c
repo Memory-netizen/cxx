@@ -246,12 +246,23 @@ static void dump_init(Initializer *init, Type *ty) {
             fprintf(out_file, " zeroinitializer");
             return;
         }
-        fprintf(out_file, "[");
-        for (int i = 0; i < init->ty->len; i++) {
-            if (i) fprintf(out_file, ", ");
-            dump_init(init->child[i], ty->base);
+        if (ty->base->size == 1) {
+            fprintf(out_file, " c\"");
+            for (int i = 0; i < ty->len; i++) {
+                if (!init->child[i]->val)
+                    fprintf(out_file, "\\00");
+                else
+                    fprintf(out_file, "%s", escape_char_to_string(init->child[i]->val->bits.i));
+            }
+            fprintf(out_file, "\"");
+        } else {
+            fprintf(out_file, "[");
+            for (int i = 0; i < ty->len; i++) {
+                if (i) fprintf(out_file, ", ");
+                dump_init(init->child[i], ty->base);
+            }
+            fprintf(out_file, "]");
         }
-        fprintf(out_file, "]");
         return;
     }
     if (ty->kind == TY_STRUCT) {
@@ -265,6 +276,19 @@ static void dump_init(Initializer *init, Type *ty) {
             if (i) fprintf(out_file, ", ");
             dump_init(init->child[mem->idx], mem->ty);
         }
+        fprintf(out_file, "}");
+        return;
+    }
+    if (ty->kind == TY_UNION) {
+        if (!init || !init->is_inited) {
+            fprintf(out_file, " zeroinitializer");
+            return;
+        }
+        fprintf(out_file, "{");
+        dump_init(init->child[0], ty->members->ty);
+
+        if (ty->members->ty->size < ty->size)
+            fprintf(out_file, ", [ %d x i8] zeroinitializer", ty->size - ty->members->ty->size);
         fprintf(out_file, "}");
         return;
     }
@@ -328,6 +352,8 @@ void dump_module(Module *md, FILE *out) {
     curm = md;
     fprintf(out_file, "declare void @assert(i32, i32, ptr)\n");
     fprintf(out_file, "declare i32 @printf(ptr, ...)\n");
+    fprintf(out_file, "declare i32 @strcmp(ptr, ptr)\n");
+    fprintf(out_file, "declare i32 @memcmp(ptr, ptr, i64)\n");
     fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
     fprintf(out_file, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n\n");
 

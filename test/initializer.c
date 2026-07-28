@@ -13,6 +13,14 @@ struct {
     int a[2];
 } g12[2] = {{{1, 2}}};
 
+union {
+    int a;
+    char b[8];
+} g13[2] = {{0x01020304}, {0x05060708}};
+char g17[] = "foobar";
+char g18[10] = "foobar";
+char g19[3] = "foobar";
+
 int main() {
     ASSERT(1, ({
                int x[3] = {1, 2, 3};
@@ -317,6 +325,19 @@ int main() {
     ASSERT(2, g12[0].a[1]);
     ASSERT(0, g12[1].a[0]);
     ASSERT(0, g12[1].a[1]);
+
+    ASSERT(4, g13[0].b[0]);
+    ASSERT(3, g13[0].b[1]);
+    ASSERT(8, g13[1].b[0]);
+    ASSERT(7, g13[1].b[1]);
+
+    ASSERT(7, sizeof(g17));
+    ASSERT(10, sizeof(g18));
+    ASSERT(3, sizeof(g19));
+
+    ASSERT(0, memcmp(g17, "foobar", 7));
+    ASSERT(0, memcmp(g18, "foobar\0\0\0", 10));
+    ASSERT(0, memcmp(g19, "foo", 3));
 
     printf("OK\n");
     return 0;
