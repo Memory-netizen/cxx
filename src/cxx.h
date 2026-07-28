@@ -452,6 +452,7 @@ struct Type {
         struct {
             // Struct
             Member *members;
+            bool is_flexible;
         };
     };
 };

@@ -118,7 +118,16 @@ static Initializer *new_initializer(Type *ty, bool is_flexible) {
 
         init->child = emalloc(len * sizeof(Initializer *));
 
-        for (Member *mem = ty->members; mem; mem = mem->next) init->child[mem->idx] = new_initializer(mem->ty, false);
+        for (Member *mem = ty->members; mem; mem = mem->next) {
+            if (is_flexible && ty->is_flexible && !mem->next) {
+                Initializer *child = emalloc(sizeof(Initializer));
+                child->ty = mem->ty;
+                child->is_flexible = true;
+                init->child[mem->idx] = child;
+            } else {
+                init->child[mem->idx] = new_initializer(mem->ty, false);
+            }
+        }
         return init;
     }
 
@@ -527,9 +536,51 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
     init->expr = assign(rest, tok);
 }
 
+static void insert_ty(Type *ty, bool is_union) {
+    int i = -1;
+    Type *t = types;
+    while (t) {
+        if (t->id == ty->id) i++;
+        t = t->next;
+    }
+    char *name;
+    char *kind = is_union ? "union" : "struct";
+    if (i >= 0) {
+        name = format("%s.%s.%d", kind, str(ty->id), i);
+    } else {
+        name = format("%s.%s", kind, str(ty->id));
+    }
+    ty->uid = intern(name, strlen(name));
+    ty->next = types;
+    types = ty;
+}
+
+static Type *copy_struct_type(Type *ty) {
+    ty = copy_type(ty);
+
+    Member head = {};
+    Member *cur = &head;
+    for (Member *mem = ty->members; mem; mem = mem->next) cur = cur->next = copy_mem(mem);
+
+    ty->members = head.next;
+    return ty;
+}
+
 static Initializer *initializer(Token **rest, Token *tok, Type *ty, Type **new_ty) {
     Initializer *init = new_initializer(ty, true);
     initializer2(rest, tok, init, true);
+    if ((ty->kind == TY_STRUCT || ty->kind == TY_UNION) && ty->is_flexible) {
+        ty = copy_struct_type(ty);
+        insert_ty(ty, ty->kind == TY_UNION);
+
+        Member *mem = ty->members;
+        while (mem->next) mem = mem->next;
+        mem->ty = init->child[mem->idx]->ty;
+        ty->size += mem->ty->size;
+
+        *new_ty = ty;
+        return init;
+    }
     *new_ty = init->ty;
     return init;
 }
@@ -1430,7 +1481,10 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
         }
     }
 
-    if (cur != &head && cur->ty->kind == TY_ARRAY && cur->ty->len < 0) cur->ty = array_of(cur->ty->base, 0);
+    if (cur != &head && cur->ty->kind == TY_ARRAY && cur->ty->len < 0) {
+        cur->ty = array_of(cur->ty->base, 0);
+        ty->is_flexible = true;
+    }
 
     *rest = tok->next;
     ty->members = head.next;
@@ -1490,23 +1544,7 @@ static Type *record_decl(Token **rest, Token *tok) {
         offset += mem->ty->size;
     }
     ty->size = ALIGN_UP(offset, ty->align);
-
-    int i = -1;
-    Type *t = types;
-    while (t) {
-        if (t->id == ty->id) i++;
-        t = t->next;
-    }
-    char *name;
-    char *kind = is_union ? "union" : "struct";
-    if (i >= 0) {
-        name = format("%s.%s.%d", kind, str(ty->id), i);
-    } else {
-        name = format("%s.%s", kind, str(ty->id));
-    }
-    ty->uid = intern(name, strlen(name));
-    ty->next = types;
-    types = ty;
+    insert_ty(ty, is_union);
     return ty;
 }
 
