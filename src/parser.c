@@ -95,7 +95,7 @@ struct Scope {
     TagScope *tags;
 };
 
-static void initializer2(Token **rest, Token *tok, Initializer *init);
+static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_brace);
 
 static Initializer *new_initializer(Type *ty, bool is_flexible) {
     Initializer *init = emalloc(sizeof(Initializer));
@@ -369,12 +369,12 @@ static int count_array_init_elements(Token *tok, Type *ty) {
     int i;
     for (i = 0; tok->kind != TK_RBRACE; i++) {
         if (i > 0) tok = skip(tok, TK_COMMA);
-        initializer2(&tok, tok, dummy);
+        initializer2(&tok, tok, dummy, false);
     }
     return i;
 }
 
-static void array_initializer(Token **rest, Token *tok, Initializer *init) {
+static void array_initializer1(Token **rest, Token *tok, Initializer *init) {
     tok = skip(tok, TK_LBRACE);
 
     if (init->is_flexible) {
@@ -385,7 +385,7 @@ static void array_initializer(Token **rest, Token *tok, Initializer *init) {
     for (int i = 0; tok->kind != TK_RBRACE; i++) {
         if (i > 0) tok = skip(tok, TK_COMMA);
         if (i < init->ty->len)
-            initializer2(&tok, tok, init->child[i]);
+            initializer2(&tok, tok, init->child[i], false);
         else
             tok = skip_excess_element(tok);
     }
@@ -393,7 +393,20 @@ static void array_initializer(Token **rest, Token *tok, Initializer *init) {
     return;
 }
 
-static void struct_initializer(Token **rest, Token *tok, Initializer *init) {
+static void array_initializer2(Token **rest, Token *tok, Initializer *init) {
+    if (init->is_flexible) {
+        int len = count_array_init_elements(tok, init->ty);
+        *init = *new_initializer(array_of(init->ty->base, len), false);
+    }
+
+    for (int i = 0; i < init->ty->len && tok->kind != TK_RBRACE; i++) {
+        if (i > 0) tok = skip(tok, TK_COMMA);
+        initializer2(&tok, tok, init->child[i], false);
+    }
+    *rest = tok;
+}
+
+static void struct_initializer1(Token **rest, Token *tok, Initializer *init) {
     tok = skip(tok, TK_LBRACE);
 
     Member *mem = init->ty->members;
@@ -402,7 +415,7 @@ static void struct_initializer(Token **rest, Token *tok, Initializer *init) {
         if (mem != init->ty->members) tok = skip(tok, TK_COMMA);
 
         if (mem) {
-            initializer2(&tok, tok, init->child[mem->idx]);
+            initializer2(&tok, tok, init->child[mem->idx], false);
             mem = mem->next;
         } else {
             tok = skip_excess_element(tok);
@@ -412,55 +425,92 @@ static void struct_initializer(Token **rest, Token *tok, Initializer *init) {
     return;
 }
 
-static void union_initializer(Token **rest, Token *tok, Initializer *init) {
+static void struct_initializer2(Token **rest, Token *tok, Initializer *init) {
+    bool first = true;
+
+    for (Member *mem = init->ty->members; mem && tok->kind != TK_RBRACE; mem = mem->next) {
+        if (!first) tok = skip(tok, TK_COMMA);
+        first = false;
+        initializer2(&tok, tok, init->child[mem->idx], false);
+    }
+    *rest = tok;
+}
+
+static void union_initializer1(Token **rest, Token *tok, Initializer *init) {
     tok = skip(tok, TK_LBRACE);
-    initializer2(&tok, tok, init->child[0]);
+    initializer2(&tok, tok, init->child[0], false);
     *rest = skip(tok, TK_RBRACE);
+}
+
+static void union_initializer2(Token **rest, Token *tok, Initializer *init) {
+    initializer2(rest, tok, init->child[0], false);
 }
 
 // Init       ::= AsExp | BracedInit
 // BracedInit ::= "{" Init ("," Init)*)? "}"
-static void initializer2(Token **rest, Token *tok, Initializer *init) {
+static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_brace) {
     if (init->ty->kind == TY_ARRAY && tok->kind == TK_STRLIT) {
         string_initializer(rest, tok, init);
         return;
     }
 
     if (init->ty->kind == TY_ARRAY) {
-        array_initializer(rest, tok, init);
-        return;
-    }
-    if (init->ty->kind == TY_STRUCT) {
-        if (tok->kind != TK_LBRACE) {
-            Node *expr = assign(rest, tok);
-            add_type(expr);
-            if (expr->ty->kind == TY_STRUCT) {
-                init->expr = expr;
-                return;
-            }
-        }
-        struct_initializer(rest, tok, init);
-        return;
-    }
-    if (init->ty->kind == TY_UNION) {
-        if (tok->kind != TK_LBRACE) {
-            Node *expr = assign(rest, tok);
-            add_type(expr);
-            if (expr->ty->kind == TY_UNION) {
-                init->expr = expr;
-                return;
-            }
-        }
-        union_initializer(rest, tok, init);
+        if (tok->kind == TK_LBRACE)
+            array_initializer1(rest, tok, init);
+        else if (!need_brace)
+            array_initializer2(rest, tok, init);
+        else
+            error(tok, "array initializer must be an initializer list");
         return;
     }
 
+    if (init->ty->kind == TY_STRUCT) {
+        if (tok->kind == TK_LBRACE) {
+            struct_initializer1(rest, tok, init);
+            return;
+        }
+        Node *expr = assign(rest, tok);
+        add_type(expr);
+        if (expr->ty->kind == TY_STRUCT) {
+            init->expr = expr;
+            return;
+        }
+        if (!need_brace)
+            struct_initializer2(rest, tok, init);
+        else
+            error(tok, "invalid initializer");
+        return;
+    }
+
+    if (init->ty->kind == TY_UNION) {
+        if (tok->kind == TK_LBRACE) {
+            union_initializer1(rest, tok, init);
+            return;
+        }
+        Node *expr = assign(rest, tok);
+        add_type(expr);
+        if (expr->ty->kind == TY_UNION) {
+            init->expr = expr;
+            return;
+        }
+        if (!need_brace)
+            union_initializer2(rest, tok, init);
+        else
+            error(tok, "invalid initializer");
+        return;
+    }
+
+    if (tok->kind == TK_LBRACE) {
+        init->expr = assign(&tok, tok->next);
+        *rest = skip(tok, TK_RBRACE);
+        return;
+    }
     init->expr = assign(rest, tok);
 }
 
 static Initializer *initializer(Token **rest, Token *tok, Type *ty, Type **new_ty) {
     Initializer *init = new_initializer(ty, true);
-    initializer2(rest, tok, init);
+    initializer2(rest, tok, init, true);
     *new_ty = init->ty;
     return init;
 }
