@@ -1682,6 +1682,10 @@ loop_end:
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
     if (tok->kind == TK_LPAREN) {
         tok = tok->next;
+        if (tok->kind == TK_VOID && tok->next->kind == TK_RPAREN) {
+            *rest = tok->next->next;
+            return func_type(ty);
+        }
         Type dummy, *cur = &dummy;
 
         while (tok->kind != TK_RPAREN) {

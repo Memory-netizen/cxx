@@ -1,6 +1,6 @@
 #include "test.h"
 
-int ret3() {
+int ret3(void) {
     return 3;
     return 5;
 }
@@ -26,7 +26,7 @@ int sub_short(short a, short b, short c) { return a - b - c; }
 
 int g1;
 
-int *g1_ptr() { return &g1; }
+int *g1_ptr(void) { return &g1; }
 char int_to_char(int x) { return x; }
 
 int div_long(long a, long b) { return a / b; }
