@@ -846,7 +846,7 @@ static Node *postfix(Token **rest, Token *tok) {
 
 // UnaryExp ::= PostExp | UnaryOP CastExp | ("++" | "--") UnaryExp
 //          | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
-//          | "alignof" "(" TypeName ")"
+//          | "alignof" UnaryExp | "alignof" "(" TypeName ")"
 // UnaryOp  ::= "+" | "-" | "~" | "!" | "&" | "*"
 static Node *unary(Token **rest, Token *tok) {
     switch (tok->kind) {

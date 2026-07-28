@@ -88,7 +88,7 @@ ConstExp    ::= CondExp
 CastExp     ::= UnaryExp | "(" TypeName ")" CastExp
 UnaryExp    ::= PostExp | UnaryOP CastExp | ("++" | "--") UnaryExp
             | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
-            | "alignof" "(" TypeName ")"
+            | "alignof" UnaryExp | "alignof" "(" TypeName ")"
 UnaryOp     ::= "+" | "-" | "~" | "!" | "&" | "*"
 
 PostExp     ::= PrimExp PostFix*
