@@ -2,7 +2,7 @@
 
 char g3 = 3;
 short g4 = 4;
-int g5 = 5;
+int g5 = {5};
 long g6 = 6;
 int g9[3] = {0, 1, 2};
 struct {
@@ -49,6 +49,7 @@ struct {
     int a[2];
 } g41[2] = {1, 2, 3, 4};
 char g43[][4] = {'f', 'o', 'o', 0, 'b', 'a', 'r', 0};
+char *g44 = {"foo"};
 
 int main() {
     ASSERT(1, ({
@@ -426,6 +427,7 @@ int main() {
 
     ASSERT(0, strcmp(g43[0], "foo"));
     ASSERT(0, strcmp(g43[1], "bar"));
+    ASSERT(0, strcmp(g44, "foo"));
 
     printf("OK\n");
     return 0;
