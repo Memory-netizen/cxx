@@ -349,13 +349,16 @@ void dump_data(Sym *data) {
 }
 
 void dump_fn(Sym *fn) {
-    if (!fn->is_definition) return;
-    fprintf(out_file, "define ");
+    if (!fn->is_definition) {
+        fprintf(out_file, "declare ");
+    } else {
+        fprintf(out_file, "define ");
 
-    if (fn->sclass == SC_STATIC)
-        fprintf(out_file, "internal ");
-    else
-        fprintf(out_file, "dso_local ");
+        if (fn->sclass == SC_STATIC)
+            fprintf(out_file, "internal ");
+        else
+            fprintf(out_file, "dso_local ");
+    }
 
     print_type(fn->ty->ret);
     fprintf(out_file, " @%s(", str(fn->id));
@@ -368,7 +371,12 @@ void dump_fn(Sym *fn) {
         if (i < fn->nparam - 1) fprintf(out_file, ", ");
         var = var->next;
     }
-    fprintf(out_file, ") {\n");
+    fprintf(out_file, ")");
+    if (!fn->is_definition) {
+        fprintf(out_file, "\n\n");
+        return;
+    }
+    fprintf(out_file, " {\n");
     Blk *curb = fn->start;
     while (curb) {
         dump_blk(curb);
@@ -380,10 +388,6 @@ void dump_fn(Sym *fn) {
 void dump_module(Module *md, FILE *out) {
     out_file = out;
     curm = md;
-    fprintf(out_file, "declare void @assert(i32, i32, ptr)\n");
-    fprintf(out_file, "declare i32 @printf(ptr, ...)\n");
-    fprintf(out_file, "declare i32 @strcmp(ptr, ptr)\n");
-    fprintf(out_file, "declare i32 @memcmp(ptr, ptr, i64)\n");
     fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
     fprintf(out_file, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n\n");
 

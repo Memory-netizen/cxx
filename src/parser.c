@@ -1141,8 +1141,13 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         Token *start = tok;
         Type *ty = declarator(&tok, tok, basety);
         if (ty->kind == TY_VOID) error(start, "variable ‘%.*s’ declared void", start->len, start->loc);
-        Sym *var = new_lvar(get_ident(ty->name), ty);
+        Sym *var;
+        if (sclass == SC_EXTERN || ty->kind == TY_FUNC)
+            var = new_gvar(get_ident(ty->name), ty);
+        else
+            var = new_lvar(get_ident(ty->name), ty);
         var->sclass = sclass;
+        var->is_function = var->ty->kind == TY_FUNC;
         if (tok->kind == TK_AS) {
             Node *expr = lvar_initializer(&tok, tok->next, var);
             cur = cur->next = new_unary(ND_EXPR_STMT, expr, tok);
