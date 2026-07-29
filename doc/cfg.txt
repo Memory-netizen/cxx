@@ -92,7 +92,7 @@ UnaryExp    ::= PostExp | UnaryOP CastExp | ("++" | "--") UnaryExp
 UnaryOp     ::= "+" | "-" | "~" | "!" | "&" | "*"
 
 PostExp     ::= (PrimExp | CompLit) PostFix*
-CompLit     ::= "(" TypeName ")" BracedInit
+CompLit     ::= "(" SCSpec* TypeName ")" BracedInit
 PostFix     ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident | "++" | "--"
 ArgList     ::= AsExp ("," AsExp)*
 

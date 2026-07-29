@@ -1,6 +1,12 @@
 #include "cxx.h"
 
 static Module *curm;
+
+static const SClass sc_table[] = {
+    [TK_EXTERN] = SC_EXTERN, [TK_REGISTER] = SC_REG,    [TK_STATIC] = SC_STATIC,
+    [TK_THREAD] = SC_THREAD, [TK_TYPEDEF] = SC_TYPEDEF,
+};
+
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align);
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
@@ -791,18 +797,24 @@ static Member *get_struct_member(Type *ty, Token *tok) {
 }
 
 // PostExp  ::= (PrimExp | CompLit) PostFix*
-// CompLit  ::= "(" TypeName ")" BracedInit
+// CompLit  ::= "(" SCSpec* TypeName ")" BracedInit
 // PostFix  ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident | "++" | "--"
 // ArgList  ::= AsExp ("," AsExp)*
 static Node *postfix(Token **rest, Token *tok) {
     Node *node, *init = NULL;
     Token *start = tok;
     if (tok->kind == TK_LPAREN && is_typename(tok->next, 1)) {
+        tok = tok->next;
         // Compound literal
-        Type *ty = typename(&tok, tok->next);
+        SClass sclass = 0;
+        while (TK_CONSTEXPR <= tok->kind && tok->kind <= TK_TYPEDEF) {
+            sclass = sc_table[tok->kind];
+            tok = tok->next;
+        }
+        Type *ty = typename(&tok, tok);
         tok = skip(tok, TK_RPAREN);
         Sym *var;
-        if (scope->next == NULL) {
+        if (scope->next == NULL || sclass == SC_STATIC) {
             uint32_t uid = new_unique_varname(intern(".compoundliteral", 16));
             var = new_gvar(uid, ty);
             var->sclass = SC_STATIC;
@@ -932,12 +944,19 @@ static Node *unary(Token **rest, Token *tok) {
 static Node *cast(Token **rest, Token *tok) {
     if (tok->kind == TK_LPAREN && is_typename(tok->next, 1)) {
         Token *start = tok;
-        Type *ty = typename(&tok, tok->next);
+        tok = tok->next;
+        SClass sclass = 0;
+        while (TK_CONSTEXPR <= tok->kind && tok->kind <= TK_TYPEDEF) {
+            sclass = sc_table[tok->kind];
+            tok = tok->next;
+        }
+        Type *ty = typename(&tok, tok);
         tok = skip(tok, TK_RPAREN);
         // compound literal
         if (tok->kind == TK_LBRACE) return unary(rest, start);
 
         // type cast
+        if (sclass) error(start, "storage class specifier is not allowed in this context");
         Node *node = new_excast(cast(rest, tok), ty);
         node->tok = start;
         return node;
@@ -1642,11 +1661,6 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align) {
         INT = 1 << 8,
         LONG = 1 << 10,
         OTHER = 1 << 12,
-    };
-
-    static const SClass sc_table[] = {
-        [TK_EXTERN] = SC_EXTERN, [TK_REGISTER] = SC_REG,    [TK_STATIC] = SC_STATIC,
-        [TK_THREAD] = SC_THREAD, [TK_TYPEDEF] = SC_TYPEDEF,
     };
 
     while (is_typename(tok, 1)) {
