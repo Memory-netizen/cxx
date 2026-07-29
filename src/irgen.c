@@ -46,6 +46,7 @@ static Ref gen_expr(Node *node);
 static Ref gen_addr(Node *node) {
     switch (node->kind) {
         case ND_VAR:
+            gen_expr(node->var_init);
             if (node->var->is_local)
                 return SLOT(node->var->vreg, pointer_to(node->ty));
             else
@@ -54,7 +55,7 @@ static Ref gen_addr(Node *node) {
         case ND_DEREF:
             return gen_expr(node->lhs);
         case ND_MEMBER: {
-            Ref addr = gen_addr(node->lhs);
+            Ref addr = gen_expr(node->lhs);
             if (node->lhs->ty->kind == TY_UNION) {
                 addr.ty = pointer_to(node->member->ty);
                 return addr;
@@ -123,7 +124,7 @@ static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
 
 static Ref convert(Node *lhs, Type *target_ty) {
     if (lhs->ty->kind == TY_ARRAY && is_pointer(target_ty)) {
-        Ref addr = gen_addr(lhs);
+        Ref addr = gen_expr(lhs);
         Ref dst = TMP(tmp_id++, target_ty);
         new_ins(IR_GEP, dst, (Ref[]){addr, LONG(0)}, 2);
         return dst;

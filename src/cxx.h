@@ -377,7 +377,10 @@ struct Node {
             };
             Blk *blk;
         };
-        Sym *var;  // Used if kind == ND_VAR
+        struct {
+            Sym *var;  // Used if kind == ND_VAR
+            Node *var_init;
+        };
     };
     Node *goto_next;
     Node *case_next;

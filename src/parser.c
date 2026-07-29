@@ -246,20 +246,6 @@ static Sym *new_gvar(uint32_t id, Type *ty) {
     return var;
 }
 
-static uint32_t new_unique_strname(void) {
-    static uint32_t id = 0;
-    char buf[64];
-    uint32_t str_id;
-    if (id) {
-        snprintf(buf, sizeof(buf), ".str.%u", id);
-        str_id = intern(buf, strlen(buf));
-    } else {
-        str_id = intern(".str", 4);
-    }
-    id++;
-    return str_id;
-}
-
 static uint32_t new_unique_varname(uint32_t id) {
     static int i = 1;
     bool same = false;
@@ -278,11 +264,10 @@ static uint32_t new_unique_varname(uint32_t id) {
     return id;
 }
 
-static Sym *new_anon_gvar(Type *ty) { return new_gvar(new_unique_strname(), ty); }
-
 static Sym *new_string_literal(uint32_t id) {
     Type *ty = array_of(ty_char, str_len(id) + 1);
-    Sym *var = new_anon_gvar(ty);
+    uint32_t uid = new_unique_varname(intern(".str", 4));
+    Sym *var = new_gvar(uid, ty);
     var->is_str = true;
     var->init_data = id;
     return var;
@@ -805,11 +790,32 @@ static Member *get_struct_member(Type *ty, Token *tok) {
     return NULL;
 }
 
-// PostExp  ::= PrimExp PostFix*
+// PostExp  ::= (PrimExp | CompLit) PostFix*
+// CompLit  ::= "(" TypeName ")" BracedInit
 // PostFix  ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident | "++" | "--"
 // ArgList  ::= AsExp ("," AsExp)*
 static Node *postfix(Token **rest, Token *tok) {
-    Node *node = primary(&tok, tok);
+    Node *node, *init = NULL;
+    Token *start = tok;
+    if (tok->kind == TK_LPAREN && is_typename(tok->next, 1)) {
+        // Compound literal
+        Type *ty = typename(&tok, tok->next);
+        tok = skip(tok, TK_RPAREN);
+        Sym *var;
+        if (scope->next == NULL) {
+            uint32_t uid = new_unique_varname(intern(".compoundliteral", 16));
+            var = new_gvar(uid, ty);
+            var->sclass = SC_STATIC;
+            gvar_initializer(&tok, tok, var);
+        } else {
+            var = new_lvar(intern("", 1), ty);
+            init = lvar_initializer(&tok, tok, var);
+        }
+        node = new_var_node(var, start);
+        node->var_init = init;
+    } else {
+        node = primary(&tok, tok);
+    }
     while (1) {
         add_type(node);
         if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base));
@@ -928,6 +934,10 @@ static Node *cast(Token **rest, Token *tok) {
         Token *start = tok;
         Type *ty = typename(&tok, tok->next);
         tok = skip(tok, TK_RPAREN);
+        // compound literal
+        if (tok->kind == TK_LBRACE) return unary(rest, start);
+
+        // type cast
         Node *node = new_excast(cast(rest, tok), ty);
         node->tok = start;
         return node;

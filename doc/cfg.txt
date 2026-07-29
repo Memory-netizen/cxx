@@ -91,7 +91,8 @@ UnaryExp    ::= PostExp | UnaryOP CastExp | ("++" | "--") UnaryExp
             | "alignof" UnaryExp | "alignof" "(" TypeName ")"
 UnaryOp     ::= "+" | "-" | "~" | "!" | "&" | "*"
 
-PostExp     ::= PrimExp PostFix*
+PostExp     ::= (PrimExp | CompLit) PostFix*
+CompLit     ::= "(" TypeName ")" BracedInit
 PostFix     ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident | "++" | "--"
 ArgList     ::= AsExp ("," AsExp)*
 

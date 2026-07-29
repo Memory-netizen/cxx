@@ -116,6 +116,7 @@ void add_type(Node *node) {
             node->ty = (node->val == (int)node->val) ? ty_int : ty_long;
             break;
         case ND_VAR:
+            add_type(node->var_init);
             node->ty = node->var->ty;
             node->is_lvalue = true;
             break;
