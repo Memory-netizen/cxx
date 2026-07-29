@@ -153,7 +153,7 @@ static Type *types;
 static Scope *scope = &(Scope){0};
 
 // Points to the function object the parser is currently parsing.
-static Sym *current_fn;
+static Sym *cur_fn;
 
 // Lists of all goto statements and labels in the curent function.
 static Node *gotos;
@@ -258,6 +258,24 @@ static uint32_t new_unique_strname(void) {
     }
     id++;
     return str_id;
+}
+
+static uint32_t new_unique_varname(uint32_t id) {
+    static int i = 1;
+    bool same = false;
+    Sym *t = globals;
+    while (t) {
+        if (t->id == id) {
+            same = true;
+            break;
+        }
+        t = t->next;
+    }
+    if (same) {
+        char *name = format("%s.%d", str(id), i++);
+        return intern(name, strlen(name));
+    }
+    return id;
 }
 
 static Sym *new_anon_gvar(Type *ty) { return new_gvar(new_unique_strname(), ty); }
@@ -1149,7 +1167,7 @@ static Node *return_stmt(Token **rest, Token *tok) {
     *rest = skip(tok, TK_SEMI);
 
     add_type(node);
-    new_imcast(&node->lhs, current_fn->ty->ret);
+    new_imcast(&node->lhs, cur_fn->ty->ret);
 
     return node;
 }
@@ -1163,16 +1181,27 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         Type *ty = declarator(&tok, tok, basety);
         if (ty->kind == TY_VOID) error(start, "variable ‘%.*s’ declared void", start->len, start->loc);
         Sym *var;
-        if (sclass == SC_EXTERN || ty->kind == TY_FUNC)
-            var = new_gvar(get_ident(ty->name), ty);
-        else
-            var = new_lvar(get_ident(ty->name), ty);
+        uint32_t id = get_ident(ty->name);
+        if (sclass == SC_EXTERN || ty->kind == TY_FUNC) {
+            var = new_gvar(id, ty);
+        } else if (sclass == SC_STATIC) {
+            char *name = format("%s.%s", str(cur_fn->id), str(id));
+            uint32_t uid = new_unique_varname(intern(name, strlen(name)));
+            var = new_gvar(uid, ty);
+            push_scope(id)->var = var;
+        } else {
+            var = new_lvar(id, ty);
+        }
         var->sclass = sclass;
         var->align = MAX(align, ty->align);
         var->is_function = var->ty->kind == TY_FUNC;
         if (tok->kind == TK_AS) {
-            Node *expr = lvar_initializer(&tok, tok->next, var);
-            cur = cur->next = new_unary(ND_EXPR_STMT, expr, tok);
+            if (sclass == SC_STATIC) {
+                gvar_initializer(&tok, tok->next, var);
+            } else {
+                Node *expr = lvar_initializer(&tok, tok->next, var);
+                cur = cur->next = new_unary(ND_EXPR_STMT, expr, tok);
+            }
         }
         if (var->ty->size < 0) error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
     } while (match(&tok, tok, TK_COMMA));
@@ -1846,7 +1875,7 @@ static Token *external_declaration(Token *tok) {
 
             locals = NULL;
             nparam = 0;
-            current_fn = fn;
+            cur_fn = fn;
             enter_scope();
             Type *param = ty->params;
             while (param) {
