@@ -728,6 +728,7 @@ static Node *fncall(Token **rest, Token *tok) {
     tok = tok->next->next;
 
     if (tok->kind == TK_RPAREN) {
+        if (param_ty) error(tok, "too few arguments");
         *rest = tok->next;
         return node;
     }
@@ -743,10 +744,15 @@ static Node *fncall(Token **rest, Token *tok) {
             lvalue_convert(&arg);
             new_imcast(&arg, param_ty);
             param_ty = param_ty->next;
+        } else if (ty->is_variadic) {
+            lvalue_convert(&arg);
+        } else {
+            error(tok, "too many arguments");
         }
         ++i;
         cur = cur->next = arg;
     } while (match(&tok, tok, TK_COMMA));
+    if (param_ty) error(tok, "too few arguments");
 
     *rest = skip(tok, TK_RPAREN);
 
