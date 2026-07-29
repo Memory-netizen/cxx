@@ -10,6 +10,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -38,10 +39,15 @@ extern Type *ty_void;
 extern Type *ty_bool;
 extern Type *ty_char;
 extern Type *ty_schar;
+extern Type *ty_uchar;
 extern Type *ty_short;
+extern Type *ty_ushort;
 extern Type *ty_int;
+extern Type *ty_uint;
 extern Type *ty_long;
+extern Type *ty_ulong;
 extern Type *ty_llong;
+extern Type *ty_ullong;
 extern Type *ty_i1;
 extern Type *ty_i32;
 extern Type *ty_i64;
@@ -434,8 +440,9 @@ typedef enum {
 
 struct Type {
     TypeKind kind;
-    int size;   // sizeof() value
-    int align;  // alignof() value
+    int size;          // sizeof() value
+    int align;         // alignof() value
+    bool is_unsigned;  // unsigned or signed
     uint32_t id;
     uint32_t uid;
     // Declaration
@@ -533,6 +540,7 @@ typedef enum {
 
     // Other
     IR_CALL,
+    IR_CNT,
 } IrKind;
 
 struct Con {

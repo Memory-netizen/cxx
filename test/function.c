@@ -52,6 +52,11 @@ _Bool false_fn();
 char char_fn();
 short short_fn();
 
+unsigned char uchar_fn();
+unsigned short ushort_fn();
+
+signed char schar_fn();
+short sshort_fn();
 int omit(int, int b) { return b + 5; }
 
 int add_all(int n, ...);
@@ -68,7 +73,8 @@ int main() {
     ASSERT(1, sub2(4, 3));
     ASSERT(55, fib(9));
 
-    ASSERT(1, sub_char(7, 3, 3));
+    ASSERT(1, ({ sub_char(7, 3, 3); }));
+
     ASSERT(1, sub_long(7, 3, 3));
     ASSERT(1, sub_short(7, 3, 3));
 
@@ -97,6 +103,12 @@ int main() {
                param_decay2(x);
            }));
 
+    ASSERT(3, ({
+               int x[2];
+               x[0] = 3;
+               param_decay(x);
+           }));
+
     ASSERT(2, counter());
     ASSERT(4, counter());
     ASSERT(6, counter());
@@ -117,6 +129,11 @@ int main() {
                sprintf(buf, "%d %d %s", 1, 2, "foo");
                strcmp("1 2 foo", buf);
            }));
+
+    ASSERT(251, uchar_fn());
+    ASSERT(65528, ushort_fn());
+    ASSERT(-5, schar_fn());
+    ASSERT(-8, sshort_fn());
 
     printf("OK\n");
     return 0;

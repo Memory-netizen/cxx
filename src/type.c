@@ -1,19 +1,24 @@
 #include "cxx.h"
 
-#define TYPE(kind, size, align) \
-    &(Type) { kind, size, align, 0, 0, NULL, NULL, NULL, {0} }
+#define TYPE(kind, size, align, is_unsigned) \
+    &(Type) { kind, size, align, is_unsigned, 0, 0, NULL, NULL, NULL, {0} }
 
-Type *ty_void = TYPE(TY_VOID, 1, 1);
-Type *ty_bool = TYPE(TY_BOOL, 1, 1);
-Type *ty_char = TYPE(TY_CHAR, 1, 1);
-Type *ty_schar = TYPE(TY_CHAR, 1, 1);
-Type *ty_short = TYPE(TY_SHORT, 2, 2);
-Type *ty_int = TYPE(TY_INT, 4, 4);
-Type *ty_long = TYPE(TY_LONG, 8, 8);
-Type *ty_llong = TYPE(TY_LLONG, 8, 8);
-Type *ty_i1 = TYPE(TY_I1, 1, 1);
-Type *ty_i32 = TYPE(TY_I32, 4, 4);
-Type *ty_i64 = TYPE(TY_I64, 8, 8);
+Type *ty_void = TYPE(TY_VOID, 1, 1, false);
+Type *ty_bool = TYPE(TY_BOOL, 1, 1, false);
+Type *ty_char = TYPE(TY_CHAR, 1, 1, CHAR_MIN == 0);
+Type *ty_schar = TYPE(TY_CHAR, 1, 1, false);
+Type *ty_uchar = TYPE(TY_CHAR, 1, 1, true);
+Type *ty_short = TYPE(TY_SHORT, 2, 2, false);
+Type *ty_ushort = TYPE(TY_SHORT, 2, 2, true);
+Type *ty_int = TYPE(TY_INT, 4, 4, false);
+Type *ty_uint = TYPE(TY_INT, 4, 4, true);
+Type *ty_long = TYPE(TY_LONG, 8, 8, false);
+Type *ty_ulong = TYPE(TY_LONG, 8, 8, true);
+Type *ty_llong = TYPE(TY_LLONG, 8, 8, false);
+Type *ty_ullong = TYPE(TY_LLONG, 8, 8, true);
+Type *ty_i1 = TYPE(TY_I1, 1, 1, false);
+Type *ty_i32 = TYPE(TY_I32, 4, 4, false);
+Type *ty_i64 = TYPE(TY_I64, 8, 8, false);
 
 #undef TYPE
 
@@ -95,8 +100,16 @@ void new_imcast(Node **expr, Type *ty) {
 
 static Type *get_common_type(Type *ty1, Type *ty2) {
     if (ty1->base) return pointer_to(ty1->base);
-    if (ty1->size == 8 || ty2->size == 8) return ty_long;
-    return ty_int;
+
+    if (ty1->size < 4) ty1 = ty_int;
+    if (ty2->size < 4) ty2 = ty_int;
+
+    if (ty1->size != ty2->size) return (ty1->size < ty2->size) ? ty2 : ty1;
+
+    if (ty1->kind != ty2->kind) return ty_llong;
+
+    if (ty2->is_unsigned) return ty2;
+    return ty1;
 }
 
 static void integer_promotion(Node **expr) {

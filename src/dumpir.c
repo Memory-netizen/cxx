@@ -2,26 +2,49 @@
 
 static FILE *out_file;
 static Module *curm;
-static const char *op_str[] = {
-    [IR_ADD] = "add",
-    [IR_SUB] = "sub",
-    [IR_MUL] = "mul",
-    [IR_DIV] = "sdiv",
-    [IR_REM] = "srem",
-    [IR_AND] = "and",
-    [IR_OR] = "or",
-    [IR_XOR] = "xor",
-    [IR_SHL] = "shl",
-    [IR_SHR] = "ashr",
-    [IR_CMP_EQ] = "icmp eq",
-    [IR_CMP_NE] = "icmp ne",
-    [IR_CMP_LE] = "icmp sle",
-    [IR_CMP_LT] = "icmp slt",
-    [IR_SEXT] = "sext",
-    [IR_ZEXT] = "zext",
-    [IR_TRUNC] = "trunc",
-    [IR_PTRTOINT] = "ptrtoint",
-    [IR_INTTOPTR] = "inttoptr",
+static const char *op_str[][IR_CNT] = {
+    {
+        [IR_ADD] = "add",
+        [IR_SUB] = "sub",
+        [IR_MUL] = "mul",
+        [IR_DIV] = "sdiv",
+        [IR_REM] = "srem",
+        [IR_AND] = "and",
+        [IR_OR] = "or",
+        [IR_XOR] = "xor",
+        [IR_SHL] = "shl",
+        [IR_SHR] = "ashr",
+        [IR_CMP_EQ] = "icmp eq",
+        [IR_CMP_NE] = "icmp ne",
+        [IR_CMP_LE] = "icmp sle",
+        [IR_CMP_LT] = "icmp slt",
+        [IR_SEXT] = "sext",
+        [IR_ZEXT] = "zext",
+        [IR_TRUNC] = "trunc",
+        [IR_PTRTOINT] = "ptrtoint",
+        [IR_INTTOPTR] = "inttoptr",
+    },
+    {
+        [IR_ADD] = "add",
+        [IR_SUB] = "sub",
+        [IR_MUL] = "mul",
+        [IR_DIV] = "udiv",
+        [IR_REM] = "urem",
+        [IR_AND] = "and",
+        [IR_OR] = "or",
+        [IR_XOR] = "xor",
+        [IR_SHL] = "shl",
+        [IR_SHR] = "lshr",
+        [IR_CMP_EQ] = "icmp eq",
+        [IR_CMP_NE] = "icmp ne",
+        [IR_CMP_LE] = "icmp ule",
+        [IR_CMP_LT] = "icmp ult",
+        [IR_SEXT] = "sext",
+        [IR_ZEXT] = "zext",
+        [IR_TRUNC] = "trunc",
+        [IR_PTRTOINT] = "ptrtoint",
+        [IR_INTTOPTR] = "inttoptr",
+    },
 };
 
 static const char *ty_str[] = {
@@ -159,7 +182,7 @@ void dump_blk(Blk *b) {
             case IR_TRUNC:
             case IR_PTRTOINT:
             case IR_INTTOPTR:
-                fprintf(out_file, "%s ", op_str[ir->op]);
+                fprintf(out_file, "%s ", op_str[0][ir->op]);
                 print_type(ir->args[0].ty);
                 fprintf(out_file, " ");
                 print_operand(ir->args[0]);
@@ -182,7 +205,7 @@ void dump_blk(Blk *b) {
             case IR_CMP_NE:
             case IR_CMP_LE:
             case IR_CMP_LT:
-                fprintf(out_file, "%s ", op_str[ir->op]);
+                fprintf(out_file, "%s ", op_str[ir->args[0].ty->is_unsigned][ir->op]);
                 print_type(ir->args[0].ty);
                 fprintf(out_file, " ");
                 print_operand(ir->args[0]);

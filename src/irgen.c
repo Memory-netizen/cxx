@@ -111,14 +111,20 @@ static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
         new_ins(IR_INTTOPTR, dst, (Ref[]){val}, 1);
         return dst;
     }
-    if (target_ty->kind == TY_VOID || target_ty->size == src_ty->size) {
+    if (target_ty->kind == TY_VOID) return val;
+    if (target_ty->size == src_ty->size) {
+        val.ty = target_ty;
         return val;
     }
     Ref dst = TMP(tmp_id++, target_ty);
-    if (target_ty->size > src_ty->size)
-        new_ins(IR_SEXT, dst, (Ref[]){val}, 1);
-    else
+    if (target_ty->size > src_ty->size) {
+        if (src_ty->is_unsigned)
+            new_ins(IR_ZEXT, dst, (Ref[]){val}, 1);
+        else
+            new_ins(IR_SEXT, dst, (Ref[]){val}, 1);
+    } else {
         new_ins(IR_TRUNC, dst, (Ref[]){val}, 1);
+    }
     return dst;
 }
 

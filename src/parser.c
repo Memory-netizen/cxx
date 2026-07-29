@@ -1656,7 +1656,7 @@ static Type *record_decl(Token **rest, Token *tok) {
 // SCSpec    ::= "typedef" | "static" | "extern"
 // TypeSpecQual ::= TypeSpec | AlignSpec
 // TypeSpec  ::= "void" | "_Bool" | "char" | "short" | "int" | "long"
-//            | "signed"
+//            | "signed" | "unsigned"
 //            | RecordSpec
 //            | EnumSpec
 //            | TypedefName
@@ -1674,6 +1674,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align) {
         LONG = 1 << 10,
         OTHER = 1 << 12,
         SIGNED = 1 << 13,
+        UNSIGNED = 1 << 14,
     };
 
     while (is_typename(tok, 1)) {
@@ -1746,6 +1747,9 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align) {
             case TK_SIGNED:
                 typespec_cnt |= SIGNED;
                 break;
+            case TK_UNSIGNED:
+                typespec_cnt |= UNSIGNED;
+                break;
             default:
                 break;
         }
@@ -1764,16 +1768,27 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align) {
             case SIGNED + CHAR:
                 ty = ty_schar;
                 break;
+            case UNSIGNED + CHAR:
+                ty = ty_uchar;
+                break;
             case SHORT:
             case SHORT + INT:
             case SIGNED + SHORT:
             case SIGNED + SHORT + INT:
                 ty = ty_short;
                 break;
+            case UNSIGNED + SHORT:
+            case UNSIGNED + SHORT + INT:
+                ty = ty_ushort;
+                break;
             case INT:
             case SIGNED:
             case SIGNED + INT:
                 ty = ty_int;
+                break;
+            case UNSIGNED:
+            case UNSIGNED + INT:
+                ty = ty_uint;
                 break;
             case LONG:
             case LONG + INT:
@@ -1781,11 +1796,19 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align) {
             case SIGNED + LONG + INT:
                 ty = ty_long;
                 break;
+            case UNSIGNED + LONG:
+            case UNSIGNED + LONG + INT:
+                ty = ty_ulong;
+                break;
             case LONG + LONG:
             case LONG + LONG + INT:
             case SIGNED + LONG + LONG:
             case SIGNED + LONG + LONG + INT:
                 ty = ty_llong;
+                break;
+            case UNSIGNED + LONG + LONG:
+            case UNSIGNED + LONG + LONG + INT:
+                ty = ty_ullong;
                 break;
             case NONE:
             case OTHER:
