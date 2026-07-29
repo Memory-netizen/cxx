@@ -21,6 +21,7 @@ DeclSpec    ::= SCSpec | TypeSpecQual
 SCSpec      ::= "typedef" | "static" | "extern"
 TypeSpecQual ::= TypeSpec | AlignSpec
 TypeSpec    ::= "void" | "_Bool" | "char" | "short" | "int" | "long"
+            | "signed"
             | RecordSpec
             | EnumSpec
             | TypedefName

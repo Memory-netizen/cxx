@@ -37,6 +37,7 @@ extern SrcFile *cur_file;
 extern Type *ty_void;
 extern Type *ty_bool;
 extern Type *ty_char;
+extern Type *ty_schar;
 extern Type *ty_short;
 extern Type *ty_int;
 extern Type *ty_long;

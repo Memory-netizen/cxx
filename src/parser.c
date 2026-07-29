@@ -1656,6 +1656,7 @@ static Type *record_decl(Token **rest, Token *tok) {
 // SCSpec    ::= "typedef" | "static" | "extern"
 // TypeSpecQual ::= TypeSpec | AlignSpec
 // TypeSpec  ::= "void" | "_Bool" | "char" | "short" | "int" | "long"
+//            | "signed"
 //            | RecordSpec
 //            | EnumSpec
 //            | TypedefName
@@ -1672,6 +1673,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align) {
         INT = 1 << 8,
         LONG = 1 << 10,
         OTHER = 1 << 12,
+        SIGNED = 1 << 13,
     };
 
     while (is_typename(tok, 1)) {
@@ -1741,6 +1743,9 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align) {
             case TK_LONG:
                 typespec_cnt += LONG;
                 break;
+            case TK_SIGNED:
+                typespec_cnt |= SIGNED;
+                break;
             default:
                 break;
         }
@@ -1756,19 +1761,30 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align) {
             case CHAR:
                 ty = ty_char;
                 break;
+            case SIGNED + CHAR:
+                ty = ty_schar;
+                break;
             case SHORT:
             case SHORT + INT:
+            case SIGNED + SHORT:
+            case SIGNED + SHORT + INT:
                 ty = ty_short;
                 break;
             case INT:
+            case SIGNED:
+            case SIGNED + INT:
                 ty = ty_int;
                 break;
             case LONG:
             case LONG + INT:
+            case SIGNED + LONG:
+            case SIGNED + LONG + INT:
                 ty = ty_long;
                 break;
             case LONG + LONG:
             case LONG + LONG + INT:
+            case SIGNED + LONG + LONG:
+            case SIGNED + LONG + LONG + INT:
                 ty = ty_llong;
                 break;
             case NONE:
