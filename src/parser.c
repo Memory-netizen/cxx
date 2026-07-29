@@ -1776,7 +1776,7 @@ loop_end:
 }
 
 // DeclrSuf  ::= "(" ParamList? ")" | "[" ConstExp "]"
-// ParamList ::= ParamDecl ("," ParamDecl)*
+// ParamList ::= ParamDecl ("," ParamDecl)* ("," "...")? | "..."
 // ParamDecl ::= DeclSpecs Declr
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
     if (tok->kind == TK_LPAREN) {
@@ -1785,10 +1785,17 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
             *rest = tok->next->next;
             return func_type(ty);
         }
+        bool is_variadic = false;
         Type dummy, *cur = &dummy;
 
         while (tok->kind != TK_RPAREN) {
             if (cur != &dummy) tok = skip(tok, TK_COMMA);
+            if (tok->kind == TK_ELLIPSIS) {
+                is_variadic = true;
+                tok = tok->next;
+                break;
+            }
+
             Token *start = tok;
             Type *basety = declspecs(&tok, tok, NULL, NULL);
             Type *paramty = declarator(&tok, tok, basety);
@@ -1804,10 +1811,11 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
                 error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len, paramty->name->loc);
             cur = cur->next = copy_type(paramty);
         }
-        *rest = tok->next;
+        *rest = skip(tok, TK_RPAREN);
         cur->next = NULL;
 
         ty = func_type(ty);
+        ty->is_variadic = is_variadic;
         ty->params = dummy.next;
         return ty;
     }

@@ -452,6 +452,7 @@ struct Type {
             // Function
             Type *ret;
             Type *params;
+            bool is_variadic;
         };
         struct {
             // Struct

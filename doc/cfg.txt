@@ -13,7 +13,7 @@ Ptr         ::= "*"+
 DirDeclr    ::= (Ident | "(" Declr ")") DeclrSuf*
 
 DeclrSuf    ::= "(" ParamList? ")" | "[" ConstExp "]"
-ParamList   ::= ParamDecl ("," ParamDecl)*
+ParamList   ::= ParamDecl ("," ParamDecl)* ("," "...")? | "..."
 ParamDecl   ::= DeclSpecs Declr
 
 DeclSpecs   ::= DeclSpec+
