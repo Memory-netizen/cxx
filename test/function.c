@@ -45,6 +45,8 @@ int counter() {
     return i++ + j++;
 }
 
+void ret_none() { return; }
+
 int main() {
     ASSERT(3, ret3());
     ASSERT(8, add2(3, 5));
@@ -89,6 +91,8 @@ int main() {
     ASSERT(2, counter());
     ASSERT(4, counter());
     ASSERT(6, counter());
+
+    ret_none();
 
     printf("OK\n");
     return 0;

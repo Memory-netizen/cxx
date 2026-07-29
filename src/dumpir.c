@@ -200,9 +200,13 @@ void dump_blk(Blk *b) {
     switch (b->jmp.type) {
         case IR_RET:
             fprintf(out_file, "ret ");
-            print_type(b->jmp.arg.ty);
-            fprintf(out_file, " ");
-            print_operand(b->jmp.arg);
+            if (!refeq(b->jmp.arg, R)) {
+                print_type(b->jmp.arg.ty);
+                fprintf(out_file, " ");
+                print_operand(b->jmp.arg);
+            } else {
+                fprintf(out_file, "void");
+            }
             fprintf(out_file, "\n");
             break;
         case IR_JMP:

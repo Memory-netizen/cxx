@@ -789,8 +789,11 @@ Module *irgen(Module *md) {
 
         curb = fn->start;
         insert_blk(curb);
+
+        Type *ty = fn->ty->ret;
+        bool is_valid = ty->kind != TY_VOID;
         // Entry
-        new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(fn->ty->ret)), (Ref[]){INT(fn->ty->ret->align)}, 1);
+        if (is_valid) new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(ty)), (Ref[]){INT(ty->align)}, 1);
 
         for (Sym *var = fn->locals; var; var = var->next)
             new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty)), (Ref[]){INT(var->align)}, 1);
@@ -807,10 +810,9 @@ Module *irgen(Module *md) {
         curb = curb->succ1 = fn->end;
         insert_blk(curb);
 
-        new_ins(IR_LORD, TMP(tmp_id, fn->ty->ret),
-                (Ref[]){SLOT(curf->nparam + 1, fn->ty->ret), INT(fn->ty->ret->align)}, 2);
+        if (is_valid) new_ins(IR_LORD, TMP(tmp_id, ty), (Ref[]){SLOT(curf->nparam + 1, ty), INT(ty->align)}, 2);
         curb->jmp.type = IR_RET;
-        curb->jmp.arg = TMP(tmp_id, fn->ty->ret);
+        curb->jmp.arg = is_valid ? TMP(tmp_id, fn->ty->ret) : R;
     }
     return md;
 }
