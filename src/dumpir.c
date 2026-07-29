@@ -391,14 +391,14 @@ void dump_fn(Sym *fn) {
     print_type(fn->ty->ret);
     fprintf(out_file, " @%s(", str(fn->id));
 
-    Sym *var = fn->locals;
-    for (uint32_t i = 0; i < fn->nparam; i++) {
-        print_type(var->ty);
-        fprintf(out_file, " ");
-        fprintf(out_file, "%%%d", i);
-        if (i < fn->nparam - 1) fprintf(out_file, ", ");
-        var = var->next;
+    Type *param = fn->ty->params;
+    for (uint32_t i = 0; param; i++) {
+        print_type(param);
+        if (fn->is_definition) fprintf(out_file, " %%%d", i);
+        param = param->next;
+        if (param) fprintf(out_file, ", ");
     }
+    if (fn->ty->is_variadic) fprintf(out_file, ", ...");
     fprintf(out_file, ")");
     if (!fn->is_definition) {
         fprintf(out_file, "\n\n");

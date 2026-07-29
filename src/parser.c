@@ -152,7 +152,6 @@ struct InitDesg {
 // All local variable instances created during parsing are
 // accumulated to this list.
 static Sym *locals;
-static uint32_t nparam;
 static Sym *globals;
 static Type *types;
 
@@ -241,7 +240,6 @@ static Sym *new_lvar(uint32_t id, Type *ty) {
     var->is_local = true;
     var->next = locals;
     locals = var;
-    nparam++;
     return var;
 }
 
@@ -347,25 +345,32 @@ static bool is_typename(Token *tok, bool search_par) {
 
 // AbsDeclr ::= Ptr DirAbsDeclr? | DirAbsDeclr;
 // DirAbsDeclr ::= ("(" AbsDeclr ")")? DeclrSuf*
-static Type *abstract_declarator(Token **rest, Token *tok, Type *ty) {
+static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool restric) {
     while (match(&tok, tok, TK_STAR)) ty = pointer_to(ty);
 
     if (tok->kind == TK_LPAREN) {
         Token *start = tok;
         Type dummy = {};
-        abstract_declarator(&tok, start->next, &dummy);
+        abstract_declarator(&tok, start->next, &dummy, restric);
         tok = skip(tok, TK_RPAREN);
         ty = decl_suffix(rest, tok, ty);
-        return abstract_declarator(&tok, start->next, ty);
+        return abstract_declarator(&tok, start->next, ty, restric);
     }
 
-    return decl_suffix(rest, tok, ty);
+    Token *name = NULL;
+    if (!restric && tok->kind == TK_IDENT) {
+        name = tok;
+        tok = tok->next;
+    }
+    ty = decl_suffix(rest, tok, ty);
+    ty->name = name;
+    return ty;
 }
 
 // TypeName ::= DeclSpecs AbsDeclr?
 static Type *typename(Token **rest, Token *tok) {
     Type *ty = declspecs(&tok, tok, NULL, NULL);
-    return abstract_declarator(rest, tok, ty);
+    return abstract_declarator(rest, tok, ty, true);
 }
 
 static bool is_end(Token *tok) {
@@ -1798,7 +1803,7 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
 
             Token *start = tok;
             Type *basety = declspecs(&tok, tok, NULL, NULL);
-            Type *paramty = declarator(&tok, tok, basety);
+            Type *paramty = abstract_declarator(&tok, tok, basety, false);
             if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type", start->len, start->loc);
             // "array of T" is converted to "pointer to T" in the parameter
             // context. For example, *argv[] is converted to **argv by this.
@@ -1906,12 +1911,18 @@ static Token *external_declaration(Token *tok) {
             fn->sclass = sclass;
 
             locals = NULL;
-            nparam = 0;
             cur_fn = fn;
             enter_scope();
             Type *param = ty->params;
+            uint32_t nparam = 0;
             while (param) {
-                new_lvar(get_ident(param->name), param);
+                uint32_t id;
+                nparam++;
+                if (param->name)
+                    id = get_ident(param->name);
+                else
+                    id = intern("", 1);
+                new_lvar(id, param);
                 param = param->next;
             }
             fn->nparam = nparam;

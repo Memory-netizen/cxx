@@ -52,6 +52,8 @@ _Bool false_fn();
 char char_fn();
 short short_fn();
 
+int omit(int, int b) { return b + 5; }
+
 int add_all(int n, ...);
 
 int main() {
@@ -105,6 +107,7 @@ int main() {
     ASSERT(0, false_fn());
     ASSERT(3, char_fn());
     ASSERT(5, short_fn());
+    ASSERT(12, omit(6, 7));
 
     ASSERT(6, add_all(3, 1, 2, 3));
     ASSERT(5, add_all(4, 1, 2, 3, -1));

@@ -113,17 +113,40 @@ static void print_type(Type *ty) {
         case TY_ENUM:
             fprintf(stdout, "enum");
             break;
-        case TY_PTR:
-            fprintf(stdout, "ptr to ");
-            print_type(ty->base);
+        case TY_PTR: {
+            Type *base = ty->base;
+            if (base->kind == TY_ARRAY) {
+                print_type(base->base);
+                fprintf(stdout, " (*)[%d]", base->len);
+            } else if (base->kind == TY_FUNC) {
+                print_type(base->ret);
+                fprintf(stdout, " (*)(");
+                for (Type *param = base->params; param;) {
+                    print_type(param);
+                    param = param->next;
+                    if (param) fprintf(stdout, ", ");
+                }
+                if (base->is_variadic) fprintf(stdout, ", ...");
+                fprintf(stdout, ")");
+            } else {
+                print_type(base);
+                fprintf(stdout, " *");
+            }
             break;
+        }
         case TY_ARRAY:
-            fprintf(stdout, "[%d]", ty->len);
             print_type(ty->base);
+            fprintf(stdout, "[%d]", ty->len);
             break;
         case TY_FUNC:
-            fprintf(stdout, "func(");
             print_type(ty->ret);
+            fprintf(stdout, " (");
+            for (Type *param = ty->params; param;) {
+                print_type(param);
+                param = param->next;
+                if (param) fprintf(stdout, ", ");
+            }
+            if (ty->is_variadic) fprintf(stdout, ", ...");
             fprintf(stdout, ")");
             break;
         case TY_STRUCT:
@@ -416,8 +439,8 @@ void dump_ast(Module *prog) {
     if (prog->data && prog->fns) fprintf(stdout, "\n");
 
     for (Sym *fn = prog->fns; fn; fn = fn->next) {
-        fprintf(stdout, "FUNCTION %s  ret=", str(fn->id));
-        print_type(fn->ty->ret);
+        fprintf(stdout, "FUNCTION %s  ty=", str(fn->id));
+        print_type(fn->ty);
         fprintf(stdout, "  sclass=%s", sclass_name[fn->sclass]);
         if (!fn->is_definition) {
             fprintf(stdout, "  [declaration only]\n\n");
@@ -434,6 +457,7 @@ void dump_ast(Module *prog) {
                 fprintf(stdout, "\n");
             }
         }
+        if (fn->ty->is_variadic) fprintf(stdout, "    ...\n");
 
         fprintf(stdout, "  locals:\n");
         for (Sym *v = p; v; v = v->next) {
