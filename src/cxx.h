@@ -222,6 +222,11 @@ Token *tokenize_file(char *filename);
 // Parser
 //
 
+enum {
+    Q_INLINE = 1 << 0,
+    Q_NORETURN = 1 << 1,
+};
+
 typedef enum {
     SC_NONE,
     SC_AUTO,
@@ -255,6 +260,7 @@ struct Sym {
     Initializer *init;
 
     // Function
+    uint32_t funcspec;
     uint32_t nparam;
     Node *body;
     Node *labels;
@@ -420,6 +426,13 @@ Module *parse(Token *tok);
 // type.c
 //
 
+enum {
+    Q_CONST = 1 << 0,
+    Q_VOLATILE = 1 << 1,
+    Q_RESTRICT = 1 << 2,
+    Q_MEMCONST = 1 << 3,
+};
+
 typedef enum {
     TY_VOID,
     TY_I1,
@@ -441,6 +454,7 @@ typedef enum {
 
 struct Type {
     TypeKind kind;
+    uint32_t qual;     // qualifiers
     int size;          // sizeof() value
     int align;         // alignof() value
     bool is_unsigned;  // unsigned or signed
@@ -483,12 +497,14 @@ struct Member {
 
 bool is_integer(Type *ty);
 bool is_pointer(Type *ty);
-Type *pointer_to(Type *base);
+Type *pointer_to(Type *base, uint32_t qual);
 Type *func_type(Type *return_ty);
 Type *array_of(Type *base, int size);
 Type *struct_type(void);
 Type *enum_type(void);
 Type *copy_type(Type *ty);
+Type *type_qual(Type *ty, uint32_t qual);
+Type *type_unqual(Type *ty);
 void add_type(Node *node);
 
 //

@@ -9,7 +9,7 @@ Init        ::= AsExp | BracedInit
 BracedInit  ::= "{" Init ("," Init)*)? "}"
 
 Declr       ::= Ptr? DirDeclr
-Ptr         ::= "*"+
+Ptr         ::= ("*" TypeQual*)+
 DirDeclr    ::= (Ident | "(" Declr ")") DeclrSuf*
 
 DeclrSuf    ::= "(" ParamList? ")" | "[" ConstExp "]"
@@ -17,14 +17,16 @@ ParamList   ::= ParamDecl ("," ParamDecl)* ("," "...")? | "..."
 ParamDecl   ::= DeclSpecs Declr
 
 DeclSpecs   ::= DeclSpec+
-DeclSpec    ::= SCSpec | TypeSpecQual
-SCSpec      ::= "typedef" | "static" | "extern"
-TypeSpecQual ::= TypeSpec | AlignSpec
+DeclSpec    ::= SCSpec | TypeSpecQual | FuncSpec
+SCSpec      ::= "typedef" | "static" | "extern" | "register"
+TypeSpecQual ::= TypeSpec | TypeQual | AlignSpec
 TypeSpec    ::= "void" | "_Bool" | "char" | "short" | "int" | "long"
             | "signed" | "unsigned"
             | RecordSpec
             | EnumSpec
             | TypedefName
+TypeQual    ::= "const" | "restrict" | "volatile"
+FuncSpec    ::= "inline" | "_Noreturn"
 TypedefName ::= Ident
 AlignSpec   ::= "alignas" "(" (TypeName | ConstExp) ")"
 

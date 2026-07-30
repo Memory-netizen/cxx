@@ -1,7 +1,7 @@
 #include "cxx.h"
 
 #define TYPE(kind, size, align, is_unsigned) \
-    &(Type) { kind, size, align, is_unsigned, 0, 0, NULL, NULL, NULL, {0} }
+    &(Type) { kind, 0, size, align, is_unsigned, 0, 0, NULL, NULL, NULL, {0} }
 
 Type *ty_void = TYPE(TY_VOID, 1, 1, false);
 Type *ty_bool = TYPE(TY_BOOL, 1, 1, false);
@@ -30,15 +30,28 @@ bool is_integer(Type *ty) {
 
 bool is_pointer(Type *ty) { return ty->kind == TY_PTR; }
 
+static void copy_struct_type(Type *dst, Type *src) {
+    Member head = {};
+    Member *cur = &head;
+    for (Member *mem = src->members; mem; mem = mem->next) {
+        Member *new = emalloc(sizeof(Member));
+        *new = *mem;
+        cur = cur->next = new;
+    }
+    dst->members = head.next;
+}
+
 Type *copy_type(Type *ty) {
     Type *ret = emalloc(sizeof(Type));
     *ret = *ty;
+    if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) copy_struct_type(ret, ty);
     return ret;
 }
 
-Type *pointer_to(Type *base) {
+Type *pointer_to(Type *base, uint32_t qual) {
     Type *ty = emalloc(sizeof(Type));
     ty->kind = TY_PTR;
+    ty->qual = qual;
     ty->size = 8;
     ty->align = 8;
     ty->is_unsigned = true;
@@ -86,6 +99,29 @@ Type *enum_type(void) {
     return ty;
 }
 
+Type *type_qual(Type *ty, uint32_t qual) {
+    if (!ty) return NULL;
+
+    if (qual == 0) return ty;
+
+    if ((ty->qual & qual) == qual) return ty;
+
+    ty = copy_type(ty);
+    ty->qual |= qual;
+    return ty;
+}
+
+Type *type_unqual(Type *ty) {
+    if (!ty) return NULL;
+
+    if (ty->qual == 0) return ty;
+
+    ty = copy_type(ty);
+    ty->qual = 0;
+
+    return ty;
+}
+
 void lvalue_convert(Node **expr) {
     if (!(*expr) || !(*expr)->is_lvalue) return;
     Node *node = new_unary(ND_LVTOR, (*expr), (*expr)->tok);
@@ -100,7 +136,7 @@ void new_imcast(Node **expr, Type *ty) {
 }
 
 static Type *get_common_type(Type *ty1, Type *ty2) {
-    if (ty1->base) return pointer_to(ty1->base);
+    if (ty1->base) return pointer_to(ty1->base, 0);
 
     if (ty1->size < 4) ty1 = ty_int;
     if (ty2->size < 4) ty2 = ty_int;
@@ -160,7 +196,7 @@ void add_type(Node *node) {
             break;
         case ND_ADDR:
             add_type(node->lhs);
-            node->ty = pointer_to(node->lhs->ty);
+            node->ty = pointer_to(node->lhs->ty, 0);
             break;
         case ND_DEREF:
             add_type(node->lhs);

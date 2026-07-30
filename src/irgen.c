@@ -48,16 +48,16 @@ static Ref gen_addr(Node *node) {
         case ND_VAR:
             gen_expr(node->var_init);
             if (node->var->is_local)
-                return SLOT(node->var->vreg, pointer_to(node->ty));
+                return SLOT(node->var->vreg, pointer_to(node->ty, 0));
             else
                 // Global variable
-                return GLB(node->var->id, pointer_to(node->ty));
+                return GLB(node->var->id, pointer_to(node->ty, 0));
         case ND_DEREF:
             return gen_expr(node->lhs);
         case ND_MEMBER: {
             Ref addr = gen_expr(node->lhs);
             if (node->lhs->ty->kind == TY_UNION) {
-                addr.ty = pointer_to(node->member->ty);
+                addr.ty = pointer_to(node->member->ty, 0);
                 return addr;
             }
             int pos = 0;
@@ -75,7 +75,7 @@ static Ref gen_addr(Node *node) {
                 }
             }
             Ref gep_ops[] = {addr, INT(0), INT(mem->idx + idx)};
-            Ref dst = TMP(tmp_id++, pointer_to(node->ty));
+            Ref dst = TMP(tmp_id++, pointer_to(node->ty, 0));
             new_ins(IR_GEP, dst, gep_ops, 3);
             return dst;
         }
@@ -149,7 +149,7 @@ static Ref gen_cond(Node *node) {
     if (is_valid) {
         int res_id = tmp_id++;
         res = TMP(res_id, node->ty);
-        new_ins(IR_ALLOCA, TMP(res_id, pointer_to(node->ty)), (Ref[]){INT(align)}, 1);
+        new_ins(IR_ALLOCA, TMP(res_id, pointer_to(node->ty, 0)), (Ref[]){INT(align)}, 1);
     }
 
     // cond
@@ -192,7 +192,7 @@ static Ref gen_logor(Node *node) {
 
     int res_id = tmp_id++;
     Ref res = TMP(res_id, ty_int);
-    new_ins(IR_ALLOCA, TMP(res_id, pointer_to(ty_int)), (Ref[]){INT(4)}, 1);
+    new_ins(IR_ALLOCA, TMP(res_id, pointer_to(ty_int, 0)), (Ref[]){INT(4)}, 1);
 
     // lhs
     Ref lr = gen_expr(node->lhs);
@@ -233,7 +233,7 @@ static Ref gen_logand(Node *node) {
 
     int res_id = tmp_id++;
     Ref res = TMP(res_id, ty_int);
-    new_ins(IR_ALLOCA, TMP(res_id, pointer_to(ty_int)), (Ref[]){INT(4)}, 1);
+    new_ins(IR_ALLOCA, TMP(res_id, pointer_to(ty_int, 0)), (Ref[]){INT(4)}, 1);
 
     // lhs
     Ref lr = gen_expr(node->lhs);
@@ -800,10 +800,10 @@ Module *irgen(Module *md) {
         Type *ty = fn->ty->ret;
         bool is_valid = ty->kind != TY_VOID;
         // Entry
-        if (is_valid) new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(ty)), (Ref[]){INT(ty->align)}, 1);
+        if (is_valid) new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(ty, 0)), (Ref[]){INT(ty->align)}, 1);
 
         for (Sym *var = fn->locals; var; var = var->next)
-            new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty)), (Ref[]){INT(var->align)}, 1);
+            new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty, 0)), (Ref[]){INT(var->align)}, 1);
 
         Sym *var = fn->locals;
         for (uint32_t i = 0; i < fn->nparam; ++i, var = var->next)

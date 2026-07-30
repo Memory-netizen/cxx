@@ -7,7 +7,7 @@ static const SClass sc_table[] = {
     [TK_THREAD] = SC_THREAD, [TK_TYPEDEF] = SC_TYPEDEF,
 };
 
-static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align);
+static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec);
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
 static Node *declaration(Token **rest, Token *tok, Type *ty, SClass sclass, int align);
@@ -349,10 +349,31 @@ static bool is_typename(Token *tok, bool search_par) {
     return find_typedef(tok, search_par);
 }
 
+// Ptr ::= ("*" TypeQual*)+
+static Type *pointers(Token **rest, Token *tok, Type *ty) {
+    while (match(&tok, tok, TK_STAR)) {
+        uint32_t qual = 0;
+        while (1) {
+            if (tok->kind == TK_CONST)
+                qual |= Q_CONST;
+            else if (tok->kind == TK_VOLATILE)
+                qual |= Q_VOLATILE;
+            else if (tok->kind == TK_RESTRICT)
+                qual |= Q_RESTRICT;
+            else
+                break;
+            tok = tok->next;
+        }
+        ty = pointer_to(ty, qual);
+    }
+    *rest = tok;
+    return ty;
+}
+
 // AbsDeclr ::= Ptr DirAbsDeclr? | DirAbsDeclr;
 // DirAbsDeclr ::= ("(" AbsDeclr ")")? DeclrSuf*
 static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool restric) {
-    while (match(&tok, tok, TK_STAR)) ty = pointer_to(ty);
+    ty = pointers(&tok, tok, ty);
 
     if (tok->kind == TK_LPAREN) {
         Token *start = tok;
@@ -375,7 +396,7 @@ static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool restri
 
 // TypeName ::= DeclSpecs AbsDeclr?
 static Type *typename(Token **rest, Token *tok) {
-    Type *ty = declspecs(&tok, tok, NULL, NULL);
+    Type *ty = declspecs(&tok, tok, NULL, NULL, NULL);
     return abstract_declarator(rest, tok, ty, true);
 }
 
@@ -583,22 +604,11 @@ static void insert_ty(Type *ty, bool is_union) {
     types = ty;
 }
 
-static Type *copy_struct_type(Type *ty) {
-    ty = copy_type(ty);
-
-    Member head = {};
-    Member *cur = &head;
-    for (Member *mem = ty->members; mem; mem = mem->next) cur = cur->next = copy_mem(mem);
-
-    ty->members = head.next;
-    return ty;
-}
-
 static Initializer *initializer(Token **rest, Token *tok, Type *ty, Type **new_ty) {
     Initializer *init = new_initializer(ty, true);
     initializer2(rest, tok, init, true);
     if ((ty->kind == TY_STRUCT || ty->kind == TY_UNION) && ty->is_flexible) {
-        ty = copy_struct_type(ty);
+        ty = copy_type(ty);
         insert_ty(ty, ty->kind == TY_UNION);
 
         Member *mem = ty->members;
@@ -625,7 +635,7 @@ static Node *init_desg_expr(InitDesg *desg, Token *tok) {
 
     Node *lhs = init_desg_expr(desg->next, tok);
     add_type(lhs);
-    if (lhs->ty->kind == TY_ARRAY) new_imcast(&lhs, pointer_to(lhs->ty->base));
+    if (lhs->ty->kind == TY_ARRAY) new_imcast(&lhs, pointer_to(lhs->ty->base, 0));
     Node *rhs = new_num(desg->idx, tok);
     return new_unary(ND_DEREF, new_add(lhs, rhs, tok), tok);
 }
@@ -848,7 +858,7 @@ static Node *postfix(Token **rest, Token *tok) {
     }
     while (1) {
         add_type(node);
-        if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base));
+        if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base, 0));
         switch (tok->kind) {
                 // x[y] is short for *(x+y)
             case TK_LBRACKET: {
@@ -921,7 +931,7 @@ static Node *unary(Token **rest, Token *tok) {
         case TK_STAR: {
             Node *node = new_unary(ND_DEREF, cast(rest, tok->next), tok);
             add_type(node);
-            if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base));
+            if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base, 0));
             return node;
         }
         case TK_INC:
@@ -1270,7 +1280,8 @@ static Node *select_head(Token **rest, Token *tok) {
     if (is_typename(tok, 1)) {
         SClass sclass = 0;
         int align = 0;
-        Type *basety = declspecs(&tok, tok, &sclass, &align);
+        int funcspec = 0;
+        Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
         node = new_node(ND_DECL, tok);
         if (tok->kind != TK_SEMI) node->body = init_decl_list(&tok, tok, basety, sclass, align);
         if (tok->kind == TK_SEMI) {
@@ -1313,7 +1324,8 @@ static Node *for_stmt(Token **rest, Token *tok) {
     if (is_typename(tok, 1)) {
         SClass sclass = 0;
         int align = 0;
-        Type *basety = declspecs(&tok, tok, &sclass, &align);
+        int funcspec = 0;
+        Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
         node->init = declaration(&tok, tok, basety, sclass, align);
     } else {
         node->init = expr_stmt(&tok, tok);
@@ -1495,7 +1507,8 @@ static Node *compound_stmt(Token **rest, Token *tok) {
         if (is_typename(tok, 1) && tok->next->kind != TK_COLON) {
             SClass sclass = 0;
             int align = 0;
-            Type *basety = declspecs(&tok, tok, &sclass, &align);
+            int funcspec = 0;
+            Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
             if (sclass == SC_TYPEDEF) {
                 Type *ty = declarator(&tok, tok, basety);
                 push_scope(get_ident(ty->name))->type_def = ty;
@@ -1579,7 +1592,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
 
     while (tok->kind != TK_RBRACE) {
         int align = 0;
-        Type *basety = declspecs(&tok, tok, NULL, &align);
+        Type *basety = declspecs(&tok, tok, NULL, &align, NULL);
         int i = 0;
 
         while (!match(&tok, tok, TK_SEMI)) {
@@ -1664,18 +1677,21 @@ static Type *record_decl(Token **rest, Token *tok) {
 }
 
 // DeclSpecs ::= DeclSpec+
-// DeclSpec  ::= SCSpec | TypeSpecQual
-// SCSpec    ::= "typedef" | "static" | "extern"
-// TypeSpecQual ::= TypeSpec | AlignSpec
+// DeclSpec  ::= SCSpec | TypeSpecQual | FuncSpec
+// SCSpec    ::= "typedef" | "static" | "extern" | "register"
+// TypeSpecQual ::= TypeSpec | TypeQual | AlignSpec
 // TypeSpec  ::= "void" | "_Bool" | "char" | "short" | "int" | "long"
 //            | "signed" | "unsigned"
 //            | RecordSpec
 //            | EnumSpec
 //            | TypedefName
 // AlignSpec ::= "alignas" "(" (TypeName | ConstExp) ")"
-static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align) {
+// TypeQual  ::= "const" | "restrict" | "volatile"
+// FuncSpec  ::= "inline" | "_Noreturn"
+static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec) {
     Type *ty = ty_int;
     int typespec_cnt = 0;
+    int qual = 0;
     enum {
         NONE,
         VOID = 1 << 0,
@@ -1709,6 +1725,23 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align) {
                 *sclass = sc;
                 break;
             }
+            case TK_NORETURN:
+                if (!funcspec) error(tok, "function specifier is not allowed in this context");
+                *funcspec |= Q_NORETURN;
+                break;
+            case TK_INLINE:
+                if (!funcspec) error(tok, "function specifier is not allowed in this context");
+                *funcspec |= Q_INLINE;
+                break;
+            case TK_CONST:
+                qual |= Q_CONST;
+                break;
+            case Q_VOLATILE:
+                qual |= Q_VOLATILE;
+                break;
+            case Q_RESTRICT:
+                qual |= Q_RESTRICT;
+                break;
             case TK_IDENT: {
                 Type *orig = find_typedef(tok, !typespec_cnt);
                 if (orig) {
@@ -1834,7 +1867,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align) {
 loop_end:
     if (!typespec_cnt) error(tok, "a type specifier is required for all declarations");
     *rest = tok;
-    return ty;
+    return type_qual(ty, qual);
 }
 
 // DeclrSuf  ::= "(" ParamList? ")" | "[" ConstExp "]"
@@ -1859,14 +1892,14 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
             }
 
             Token *start = tok;
-            Type *basety = declspecs(&tok, tok, NULL, NULL);
+            Type *basety = declspecs(&tok, tok, NULL, NULL, NULL);
             Type *paramty = abstract_declarator(&tok, tok, basety, false);
             if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type", start->len, start->loc);
             // "array of T" is converted to "pointer to T" in the parameter
             // context. For example, *argv[] is converted to **argv by this.
             if (paramty->kind == TY_ARRAY) {
                 Token *name = paramty->name;
-                paramty = pointer_to(paramty->base);
+                paramty = pointer_to(paramty->base, 0);
                 paramty->name = name;
             }
             if (paramty->size < 0)
@@ -1895,10 +1928,9 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
 }
 
 // Declr    ::= Ptr? DirDeclr
-// Ptr      ::= "*"+
 // DirDeclr ::= (Ident | "(" Declr ")") DeclrSuf*
 static Type *declarator(Token **rest, Token *tok, Type *ty) {
-    while (match(&tok, tok, TK_STAR)) ty = pointer_to(ty);
+    ty = pointers(&tok, tok, ty);
 
     if (tok->kind == TK_LPAREN) {
         Token *start = tok;
@@ -1949,7 +1981,8 @@ static Token *external_declaration(Token *tok) {
 
     SClass sclass = 0;
     int align = 0;
-    Type *basety = declspecs(&tok, tok, &sclass, &align);
+    int funcspec = 0;
+    Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
     if (tok->kind == TK_SEMI) return tok->next;
 
     int cnt = -1;
@@ -1966,6 +1999,7 @@ static Token *external_declaration(Token *tok) {
             fn->is_function = true;
             fn->is_definition = true;
             fn->sclass = sclass;
+            fn->funcspec = funcspec;
 
             locals = NULL;
             cur_fn = fn;
