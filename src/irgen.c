@@ -671,7 +671,7 @@ static void gen_switch(Node *n) {
 
     Node *y = n->case_next;
     for (int j = 0; j < i; ++j) {
-        curb->jmp.args[j] = cast(INT(y->val), ty_int, cond.ty);
+        curb->jmp.args[j] = cond.ty->size == 8 ? LONG(y->val) : INT(y->val);
         curb->succ[j] = y->blk;
         y = y->case_next;
     }

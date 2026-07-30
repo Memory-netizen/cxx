@@ -125,7 +125,7 @@ Type *type_unqual(Type *ty) {
 void lvalue_convert(Node **expr) {
     if (!(*expr) || !(*expr)->is_lvalue) return;
     Node *node = new_unary(ND_LVTOR, (*expr), (*expr)->tok);
-    node->ty = (*expr)->ty;
+    node->ty = type_unqual((*expr)->ty);
     *expr = node;
 }
 
@@ -367,8 +367,10 @@ void add_type(Node *node) {
             break;
         case ND_SWITCH:
             add_type(node->cond);
-            add_type(node->body);
+            if (!is_integer(node->cond->ty)) error(node->cond->tok, "switch quantity not an integer");
             lvalue_convert(&node->cond);
+            integer_promotion(&node->cond);
+            add_type(node->body);
             break;
         case ND_IF:
         case ND_WHILE:

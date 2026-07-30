@@ -1071,6 +1071,20 @@ static Node *conditional(Token **rest, Token *tok) {
 // is a pointer to a global variable and n is a postiive/negative
 // number. The latter form is accepted only as an initialization
 // expression for a global variable.
+static int64_t eval_ty(int64_t val, Type *ty) {
+    if (is_integer(ty)) {
+        switch (ty->size) {
+            case 1:
+                return ty->is_unsigned ? (int64_t)(uint8_t)val : (int8_t)val;
+            case 2:
+                return ty->is_unsigned ? (int64_t)(uint16_t)val : (int16_t)val;
+            case 4:
+                return ty->is_unsigned ? (int64_t)(uint32_t)val : (int32_t)val;
+        }
+    }
+    return val;
+}
+
 static int64_t eval(Node *node) { return eval2(node, NULL); }
 
 static int64_t eval2(Node *node, uint32_t *sym) {
@@ -1133,17 +1147,7 @@ static int64_t eval2(Node *node, uint32_t *sym) {
         case ND_IMCAST:
         case ND_EXCAST: {
             int64_t val = eval2(node->lhs, sym);
-            if (is_integer(node->ty)) {
-                switch (node->ty->size) {
-                    case 1:
-                        return node->ty->is_unsigned ? (int64_t)(uint8_t)val : (int8_t)val;
-                    case 2:
-                        return node->ty->is_unsigned ? (int64_t)(uint16_t)val : (int16_t)val;
-                    case 4:
-                        return node->ty->is_unsigned ? (int64_t)(uint32_t)val : (int32_t)val;
-                }
-            }
-            return val;
+            return eval_ty(val, node->ty);
         }
         case ND_ADDR:
             return eval_rval(node->lhs, sym);
@@ -1229,16 +1233,19 @@ static Node *expr_stmt(Token **rest, Token *tok) {
 // RetStmt ::= "return" Exp? ";"
 static Node *return_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_RETURN, tok);
+    Type *ret = cur_fn->ty->ret;
     if (tok->next->kind == TK_SEMI) {
+        if (ret->kind != TY_VOID) error(tok, "non-void function ‘%s’ should return a value", str(cur_fn->id));
         *rest = tok->next->next;
         return node;
     }
 
     node->lhs = expr(&tok, tok->next);
+    if (ret->kind == TY_VOID) error(tok, "void function ‘%s’ should not return a value", str(cur_fn->id));
     *rest = skip(tok, TK_SEMI);
 
     add_type(node);
-    new_imcast(&node->lhs, cur_fn->ty->ret);
+    new_imcast(&node->lhs, ret);
 
     return node;
 }
@@ -1410,6 +1417,7 @@ static Node *switch_stmt(Token **rest, Token *tok) {
     // cond
     tok = skip(tok->next, TK_LPAREN);
     node->cond = select_head(&tok, tok);
+    add_type(node);
     tok = skip(tok, TK_RPAREN);
 
     // body
@@ -1418,6 +1426,16 @@ static Node *switch_stmt(Token **rest, Token *tok) {
     brk_depth--;
     leave_scope();
     cur_sw = sw;
+
+    Node *prev = NULL, *cur = node->case_next, *next = NULL;
+    while (cur) {
+        next = cur->case_next;
+        cur->case_next = prev;
+        prev = cur;
+        cur = next;
+    }
+    node->case_next = prev;
+
     return node;
 }
 
@@ -1439,8 +1457,10 @@ static Node *case_stmt(Token **rest, Token *tok) {
 
     Node *node = new_node(ND_CASE, tok);
     int64_t val = const_expr(&tok, tok->next);
+    val = eval_ty(val, cur_sw->cond->ty);
     check_case(val, node->tok);
     tok = skip(tok, TK_COLON);
+
     node->label_body = stmt(rest, tok);
     node->val = val;
 
@@ -1507,7 +1527,9 @@ static Node *label_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_LABEL, tok);
     node->label = get_ident(tok);
     check_label(node->label, tok);
+
     node->label_body = stmt(rest, tok->next->next);
+
     node->goto_next = labels;
     labels = node;
     return node;
