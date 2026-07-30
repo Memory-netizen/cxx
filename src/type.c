@@ -41,6 +41,7 @@ Type *pointer_to(Type *base) {
     ty->kind = TY_PTR;
     ty->size = 8;
     ty->align = 8;
+    ty->is_unsigned = true;
     ty->name = NULL;
     ty->next = NULL;
     ty->base = base;
