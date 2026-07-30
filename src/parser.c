@@ -1077,8 +1077,10 @@ static int64_t eval2(Node *node, uint32_t *sym) {
         case ND_MUL:
             return eval(node->lhs) * eval(node->rhs);
         case ND_DIV:
+            if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) / (uint64_t)eval(node->rhs);
             return eval(node->lhs) / eval(node->rhs);
         case ND_MOD:
+            if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) % (uint64_t)eval(node->rhs);
             return eval(node->lhs) % eval(node->rhs);
         case ND_BAND:
             return eval(node->lhs) & eval(node->rhs);
@@ -1089,14 +1091,17 @@ static int64_t eval2(Node *node, uint32_t *sym) {
         case ND_LEFT:
             return eval(node->lhs) << eval(node->rhs);
         case ND_RIGHT:
+            if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) >> eval(node->rhs);
             return eval(node->lhs) >> eval(node->rhs);
         case ND_EQ:
             return eval(node->lhs) == eval(node->rhs);
         case ND_NE:
             return eval(node->lhs) != eval(node->rhs);
         case ND_LT:
+            if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) < (uint64_t)eval(node->rhs);
             return eval(node->lhs) < eval(node->rhs);
         case ND_LE:
+            if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) <= (uint64_t)eval(node->rhs);
             return eval(node->lhs) <= eval(node->rhs);
         case ND_LOGAND:
             return eval(node->lhs) && eval(node->rhs);
@@ -1112,11 +1117,11 @@ static int64_t eval2(Node *node, uint32_t *sym) {
             if (is_integer(node->ty)) {
                 switch (node->ty->size) {
                     case 1:
-                        return (uint8_t)val;
+                        return node->ty->is_unsigned ? (int64_t)(uint8_t)val : (int8_t)val;
                     case 2:
-                        return (uint16_t)val;
+                        return node->ty->is_unsigned ? (int64_t)(uint16_t)val : (int16_t)val;
                     case 4:
-                        return (uint32_t)val;
+                        return node->ty->is_unsigned ? (int64_t)(uint32_t)val : (int32_t)val;
                 }
             }
             return val;
