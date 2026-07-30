@@ -29,7 +29,7 @@ static char *expect[] = {
 
 // Ensure that the current token is `kind`.
 Token *skip(Token *tok, TokenKind kind) {
-    if (tok->kind != kind) error(tok, "expected ‘%s’", expect[kind]);
+    if (tok->kind != kind) error(tok, "expected ‘%s’ before ‘%.*s’", expect[kind], tok->len, tok->loc);
     return tok->next;
 }
 
@@ -166,7 +166,7 @@ static void fill_tok(Token *tok, char *filename, int line, int col, bool is_sol,
     tok->line = line;
     tok->col = col;
     tok->is_sol = is_sol;
-    tok->is_leadingws = is_sol ? false : is_leadingws;
+    tok->is_leadingws = is_leadingws;
 }
 
 static int from_hex(char c) {
@@ -592,7 +592,7 @@ static Token *tokenize(char *filename, char *p) {
 
     while (*p) {
         bool is_leadingws = false;
-
+        bool is_sol = cur == &dummy;
         // Skip whitespace and comments.
         for (;;) {
             // Skip line comments.
@@ -625,7 +625,8 @@ static Token *tokenize(char *filename, char *p) {
             }
 
             if (*p == '\n') {
-                is_leadingws = true;
+                is_leadingws = false;
+                is_sol = true;
                 line++;
                 col = 1;
                 p++;
@@ -643,7 +644,6 @@ static Token *tokenize(char *filename, char *p) {
         }
 
         if (*p == '\0') break;
-        bool is_sol = (col == 1);
 
         Token *tok;
 

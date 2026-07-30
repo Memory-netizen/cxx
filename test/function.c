@@ -57,6 +57,7 @@ unsigned short ushort_fn();
 
 signed char schar_fn();
 short sshort_fn();
+int omit1(int, int);
 int omit(int, int b) { return b + 5; }
 
 int add_all(int n, ...);

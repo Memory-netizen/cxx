@@ -70,10 +70,38 @@ void warning_at(char *loc, const char *msg, ...) {
     va_end(ap);
 }
 
+void warning(Token *tok, const char *msg, ...) {
+    va_list ap;
+    va_start(ap, msg);
+    emit_diag(tok->loc, "warning", msg, ap);
+    va_end(ap);
+}
+
 void note_at(char *loc, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
     emit_diag(loc, "note", msg, ap);
+    va_end(ap);
+}
+
+void note(Token *tok, const char *msg, ...) {
+    va_list ap;
+    va_start(ap, msg);
+    emit_diag(tok->loc, "note", msg, ap);
+    va_end(ap);
+}
+
+void diag_at(char *loc, char *level, const char *msg, ...) {
+    va_list ap;
+    va_start(ap, msg);
+    emit_diag(loc, level, msg, ap);
+    va_end(ap);
+}
+
+void diag(Token *tok, char *level, const char *msg, ...) {
+    va_list ap;
+    va_start(ap, msg);
+    emit_diag(tok->loc, level, msg, ap);
     va_end(ap);
 }
 

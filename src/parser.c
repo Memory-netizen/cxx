@@ -171,7 +171,7 @@ static Sym *cur_fn;
 static Node *gotos;
 static Node *labels;
 
-static Node *cur_switch;
+static Node *cur_sw;
 
 static void enter_scope(void) {
     Scope *sc = emalloc(sizeof(Scope));
@@ -1323,9 +1323,14 @@ static Node *if_stmt(Token **rest, Token *tok) {
     return node;
 }
 
+static int cont_depth;
+static int brk_depth;
+
 // ForStmt ::= "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt
 static Node *for_stmt(Token **rest, Token *tok) {
     enter_scope();
+    cont_depth++;
+    brk_depth++;
     Node *node = new_node(ND_FOR, tok);
     tok = skip(tok->next, TK_LPAREN);
 
@@ -1350,6 +1355,8 @@ static Node *for_stmt(Token **rest, Token *tok) {
 
     // Body
     node->body = stmt(rest, tok);
+    cont_depth--;
+    brk_depth--;
     leave_scope();
     return node;
 }
@@ -1357,6 +1364,8 @@ static Node *for_stmt(Token **rest, Token *tok) {
 // WhileStmt ::= "while" "(" Exp ")" Stmt
 static Node *while_stmt(Token **rest, Token *tok) {
     enter_scope();
+    cont_depth++;
+    brk_depth++;
     Node *node = new_node(ND_WHILE, tok);
     tok = skip(tok->next, TK_LPAREN);
     // Cond
@@ -1364,6 +1373,8 @@ static Node *while_stmt(Token **rest, Token *tok) {
     tok = skip(tok, TK_RPAREN);
     // Body
     node->then = stmt(rest, tok);
+    cont_depth--;
+    brk_depth--;
     leave_scope();
     return node;
 }
@@ -1371,6 +1382,8 @@ static Node *while_stmt(Token **rest, Token *tok) {
 // DoStmt ::= "do" Stmt "while" "(" Exp ")" ";"
 static Node *do_stmt(Token **rest, Token *tok) {
     enter_scope();
+    cont_depth++;
+    brk_depth++;
     Node *node = new_node(ND_DO, tok);
     // Body
     node->body = stmt(&tok, tok->next);
@@ -1380,6 +1393,8 @@ static Node *do_stmt(Token **rest, Token *tok) {
     node->cond = expr(&tok, tok);
     tok = skip(tok, TK_RPAREN);
     *rest = skip(tok, TK_SEMI);
+    cont_depth--;
+    brk_depth--;
     leave_scope();
     return node;
 }
@@ -1387,9 +1402,10 @@ static Node *do_stmt(Token **rest, Token *tok) {
 // SwitchStmt ::= "switch" "(" SelHead ")" Stmt
 static Node *switch_stmt(Token **rest, Token *tok) {
     enter_scope();
+    brk_depth++;
     Node *node = new_node(ND_SWITCH, tok);
-    Node *sw = cur_switch;
-    cur_switch = node;
+    Node *sw = cur_sw;
+    cur_sw = node;
 
     // cond
     tok = skip(tok->next, TK_LPAREN);
@@ -1399,34 +1415,52 @@ static Node *switch_stmt(Token **rest, Token *tok) {
     // body
     node->body = stmt(rest, tok);
 
+    brk_depth--;
     leave_scope();
-    cur_switch = sw;
+    cur_sw = sw;
     return node;
+}
+
+static void check_case(int64_t val, Token *tok) {
+    Node *cur = cur_sw->case_next;
+    while (cur) {
+        if (cur->val == val) {
+            diag(tok, "error", "duplicate case value ‘%ld’", val);
+            diag(cur->tok, "note", "previous case defined here");
+            exit(1);
+        }
+        cur = cur->case_next;
+    }
 }
 
 // CaseStmt ::= "case" ConstExp ":" Stmt
 static Node *case_stmt(Token **rest, Token *tok) {
-    if (!cur_switch) error(tok, "stray case");
+    if (!cur_sw) error(tok, "case label not within a switch statement");
 
     Node *node = new_node(ND_CASE, tok);
     int64_t val = const_expr(&tok, tok->next);
+    check_case(val, node->tok);
     tok = skip(tok, TK_COLON);
     node->label_body = stmt(rest, tok);
     node->val = val;
 
-    node->case_next = cur_switch->case_next;
-    cur_switch->case_next = node;
+    node->case_next = cur_sw->case_next;
+    cur_sw->case_next = node;
     return node;
 }
 
 // DefaultStmt ::= "default" ":" Stmt
 static Node *default_stmt(Token **rest, Token *tok) {
-    if (!cur_switch) error(tok, "stray default");
-
+    if (!cur_sw) error(tok, "‘default’ label not within a switch statement");
+    if (cur_sw->default_case) {
+        diag(tok, "error", "multiple default labels in one switch");
+        diag(cur_sw->default_case->tok, "note", "this is the first default label");
+        exit(1);
+    }
     Node *node = new_node(ND_CASE, tok);
     tok = skip(tok->next, TK_COLON);
     node->label_body = stmt(rest, tok);
-    cur_switch->default_case = node;
+    cur_sw->default_case = node;
     return node;
 }
 
@@ -1442,6 +1476,7 @@ static Node *goto_stmt(Token **rest, Token *tok) {
 
 // BreakStmt ::= "break" ";"
 static Node *break_stmt(Token **rest, Token *tok) {
+    if (!brk_depth) error(tok, "break statement not within loop or switch");
     Node *node = new_node(ND_BREAK, tok);
     *rest = skip(tok->next, TK_SEMI);
     return node;
@@ -1449,15 +1484,29 @@ static Node *break_stmt(Token **rest, Token *tok) {
 
 // ContinueStmt ::= "continue" ";"
 static Node *continue_stmt(Token **rest, Token *tok) {
+    if (!cont_depth) error(tok, "continue statement not within a loop");
     Node *node = new_node(ND_CONTINUE, tok);
     *rest = skip(tok->next, TK_SEMI);
     return node;
+}
+
+static void check_label(uint32_t label, Token *tok) {
+    Node *cur = labels;
+    while (cur) {
+        if (cur->label == label) {
+            diag(tok, "error", "redefinition of label ‘%.*s’", tok->len, tok->loc);
+            diag(cur->tok, "note", "previous definition is here");
+            exit(1);
+        }
+        cur = cur->goto_next;
+    }
 }
 
 // LabelStmt ::= Ident ":" Stmt
 static Node *label_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_LABEL, tok);
     node->label = get_ident(tok);
+    check_label(node->label, tok);
     node->label_body = stmt(rest, tok->next->next);
     node->goto_next = labels;
     labels = node;
@@ -2109,6 +2158,8 @@ Module *parse(Token *tok) {
     md->con = vnew(2, sizeof md->con[0]);
     curm = md;
 
+    cont_depth = 0;
+    brk_depth = 0;
     globals = NULL;
     while (tok->kind != TK_EOF) tok = external_declaration(tok);
 

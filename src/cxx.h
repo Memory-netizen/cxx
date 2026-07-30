@@ -648,8 +648,12 @@ void dump_tokens(Token *tok);
 void fatal(char *fmt, ...);
 void error(Token *tok, const char *msg, ...);
 void error_at(char *loc, const char *msg, ...);
+void warning(Token *tok, const char *msg, ...);
 void warning_at(char *loc, const char *msg, ...);
+void note(Token *tok, const char *msg, ...);
 void note_at(char *loc, const char *msg, ...);
+void diag(Token *tok, char *level, const char *msg, ...);
+void diag_at(char *loc, char *level, const char *msg, ...);
 
 void *emalloc(size_t n);
 void freeall(void);
