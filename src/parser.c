@@ -679,6 +679,8 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
     if (!init->expr) return new_node(ND_NOP, tok);
 
     Node *lhs = init_desg_expr(desg, tok);
+    add_type(lhs);
+    lhs->ty = type_unqual(lhs->ty);
     Node *rhs = init->expr;
     Node *as = new_binary(ND_AS, lhs, rhs, tok);
     add_type(as);
@@ -1201,7 +1203,10 @@ static Node *assign(Token **rest, Token *tok) {
         [TK_DIVAS] = ND_DIVAS, [TK_MODAS] = ND_MODAS,   [TK_ANDAS] = ND_ANDAS,     [TK_ORAS] = ND_ORAS,
         [TK_XORAS] = ND_XORAS, [TK_LEFTAS] = ND_LEFTAS, [TK_RIGHTAS] = ND_RIGHTAS,
     };
-    while (is_assignop(tok)) node = new_binary(as_op[tok->kind], node, assign(&tok, tok->next), tok);
+    while (is_assignop(tok)) {
+        Token *as = tok;
+        node = new_binary(as_op[as->kind], node, assign(&tok, tok->next), as);
+    }
     *rest = tok;
     add_type(node);
     return node;
@@ -1210,7 +1215,10 @@ static Node *assign(Token **rest, Token *tok) {
 // Exp ::= AsExp ("," AsExp)*
 static Node *expr(Token **rest, Token *tok) {
     Node *node = assign(&tok, tok);
-    while (tok->kind == TK_COMMA) node = new_binary(ND_COMMA, node, assign(&tok, tok->next), tok);
+    while (tok->kind == TK_COMMA) {
+        Token *comma = tok;
+        node = new_binary(ND_COMMA, node, assign(&tok, tok->next), comma);
+    }
     *rest = tok;
     add_type(node);
     return node;

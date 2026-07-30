@@ -258,8 +258,11 @@ void add_type(Node *node) {
         case ND_AS:
             add_type(node->lhs);
             add_type(node->rhs);
+            if (!node->lhs->is_lvalue) error(node->tok, "lvalue required as left operand of assignment");
+            if (node->lhs->ty->qual & Q_CONST)
+                error(node->tok, "assignment of read-only variable ‘%s’", str(node->lhs->var->id));
             if (node->lhs->kind == ND_IMCAST && node->lhs->lhs->ty->kind == TY_ARRAY)
-                error(node->lhs->tok, "not an lvalue");
+                error(node->lhs->tok, "array type is not assignable");
             if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION) {
                 lvalue_convert(&node->rhs);
                 new_imcast(&node->rhs, node->lhs->ty);
