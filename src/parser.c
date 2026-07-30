@@ -755,7 +755,9 @@ static Node *fncall(Token **rest, Token *tok) {
     tok = tok->next->next;
 
     if (tok->kind == TK_RPAREN) {
-        if (param_ty) error(tok, "too few arguments");
+        if (param_ty)
+            error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc,
+                  sc->var->nparam);
         *rest = tok->next;
         return node;
     }
@@ -774,12 +776,15 @@ static Node *fncall(Token **rest, Token *tok) {
         } else if (ty->is_variadic) {
             lvalue_convert(&arg);
         } else {
-            error(tok, "too many arguments");
+            error(tok, "too many arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc,
+                  sc->var->nparam);
         }
         ++i;
         cur = cur->next = arg;
     } while (match(&tok, tok, TK_COMMA));
-    if (param_ty) error(tok, "too few arguments");
+
+    if (param_ty)
+        error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, sc->var->nparam);
 
     *rest = skip(tok, TK_RPAREN);
 
@@ -815,7 +820,8 @@ static Node *primary(Token **rest, Token *tok) {
         if (tok->next->kind == TK_LPAREN) return fncall(rest, tok);
         // Variable or enum constant
         VarScope *sc = find_var(tok, 1);
-        if (!sc || (!sc->var && !sc->enum_ty)) error(tok, "use of undeclared identifier ‘%.*s’", tok->len, tok->loc);
+        if (!sc) error(tok, "use of undeclared identifier ‘%.*s’", tok->len, tok->loc);
+        if (sc->type_def) error(tok, "unexpected type name ‘%.*s’: expected expression", tok->len, tok->loc);
         if (sc->var)
             node = new_var_node(sc->var, tok);
         else
@@ -881,6 +887,8 @@ static Node *postfix(Token **rest, Token *tok) {
             }
             case TK_ARROW:
                 // x->y is short for (*x).y
+                get_ident(tok->next);
+                if (!is_pointer(node->ty)) error(tok, "invalid type argument of ‘->’");
                 node = new_unary(ND_DEREF, node, tok);
                 add_type(node);
                 // fall through
@@ -888,13 +896,9 @@ static Node *postfix(Token **rest, Token *tok) {
                 Type *ty = node->ty;
                 Token *dot = tok;
                 tok = tok->next;
-                if (ty->kind != TY_STRUCT && ty->kind != TY_UNION) {
-                    if (tok->kind == TK_IDENT)
-                        error(dot, "request for member ‘%.*s’ in something not a structure or union", tok->len,
-                              tok->loc);
-                    else
-                        error(dot, "expected ‘;’ after expression");
-                }
+                get_ident(tok);
+                if (ty->kind != TY_STRUCT && ty->kind != TY_UNION)
+                    error(dot, "request for member ‘%.*s’ in something not a structure or union", tok->len, tok->loc);
                 Member *mem = copy_mem(get_struct_member(ty, tok));
                 mem->next = NULL;
                 tok = tok->next;
@@ -1028,9 +1032,9 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
 
     while (TK_OR <= tok->kind && tok->kind <= TK_MOD) {
         Token *op_tok = tok;
-        NodeKind expr_op = op_table[op_tok->kind][1];
         int cur_prec = op_table[op_tok->kind][0];
         if (cur_prec <= min_prec) break;
+        NodeKind expr_op = op_table[op_tok->kind][1];
 
         Node *rhs = binexpr(&tok, tok->next, cur_prec);
         add_type(rhs);

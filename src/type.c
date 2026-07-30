@@ -258,7 +258,8 @@ void add_type(Node *node) {
         case ND_AS:
             add_type(node->lhs);
             add_type(node->rhs);
-            if (!node->lhs->is_lvalue) error(node->tok, "lvalue required as left operand of assignment");
+            if (!node->lhs->is_lvalue || node->lhs->ty->kind == TY_FUNC)
+                error(node->tok, "lvalue required as left operand of assignment");
             if (node->lhs->ty->qual & Q_CONST)
                 error(node->tok, "assignment of read-only variable ‘%s’", str(node->lhs->var->id));
             if (node->lhs->kind == ND_IMCAST && node->lhs->lhs->ty->kind == TY_ARRAY)
