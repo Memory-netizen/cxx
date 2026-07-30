@@ -93,21 +93,26 @@ static void print_type(Type *ty) {
             fprintf(stdout, "i64");
             break;
         case TY_CHAR:
+            if (ty->is_unsigned) fprintf(stdout, "unsigned ");
             fprintf(stdout, "char");
             break;
         case TY_BOOL:
             fprintf(stdout, "bool");
             break;
         case TY_SHORT:
+            if (ty->is_unsigned) fprintf(stdout, "unsigned ");
             fprintf(stdout, "short");
             break;
         case TY_INT:
+            if (ty->is_unsigned) fprintf(stdout, "unsigned ");
             fprintf(stdout, "int");
             break;
         case TY_LONG:
+            if (ty->is_unsigned) fprintf(stdout, "unsigned ");
             fprintf(stdout, "long");
             break;
         case TY_LLONG:
+            if (ty->is_unsigned) fprintf(stdout, "unsigned ");
             fprintf(stdout, "llong");
             break;
         case TY_ENUM:

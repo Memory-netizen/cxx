@@ -208,9 +208,10 @@ struct Token {
     bool is_sol;
     bool is_leadingws;
     union {
-        uint32_t id;  // Uesd if kind == TK_IDENT;
-        int64_t val;  // Uesd if kind == TK_NUM;
+        uint32_t id;   // Uesd if kind == TK_IDENT;
+        uint64_t val;  // Uesd if kind == TK_NUM;
     };
+    Type *ty;  // Used if TK_NUM or TK_STR
 };
 
 bool match(Token **rest, Token *tok, TokenKind kind);

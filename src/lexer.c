@@ -234,7 +234,7 @@ static char *string_literal_end(char *p) {
 
 static Token *read_string_literal(char *start) {
     char *end = string_literal_end(start);
-    char *buf = emalloc(end - start);
+    char buf[end - start];
     int len = 0;
 
     for (char *p = start + 1; p < end;) {
@@ -245,6 +245,7 @@ static Token *read_string_literal(char *start) {
     }
 
     Token *tok = new_token(TK_STRLIT, start, end + 1);
+    tok->ty = array_of(ty_char, len + 1);
     tok->id = intern(buf, len);
     return tok;
 }
@@ -266,25 +267,314 @@ static Token *read_char_literal(char *start) {
     return tok;
 }
 
-static Token *read_int_literal(char *start) {
-    char *p = start;
+static int is_valid_digit(int c, int base) {
+    if (base == 2)
+        return c == '0' || c == '1';
+    else if (base == 8)
+        return '0' <= c && c <= '7';
+    else if (base == 10)
+        return '0' <= c && c <= '9';
+    else
+        return ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F');
+}
+
+enum {
+    SUF_INT = 0x001,
+    SUF_UNSIGNED = 0x002,
+    SUF_LONG = 0x004,
+    SUF_LLONG = 0x008,
+    SUF_FLOAT = 0x010,
+    SUF_DOUBLE = 0x020,
+    SUF_LDOUBLE = 0x040,
+    SUF_BITINT = 0x080,
+};
+
+static Type *infer_type(uint64_t val, int flags, int base) {
+    Type *ty;
+    if (base == 10) {
+        switch (flags) {
+            case SUF_UNSIGNED | SUF_LLONG:
+                ty = ty_ullong;
+                break;
+            case SUF_LLONG:
+                ty = ty_llong;
+                break;
+            case SUF_UNSIGNED | SUF_LONG:
+                ty = val <= ULONG_MAX ? ty_ulong : ty_ullong;
+                break;
+            case SUF_LONG:
+                ty = val <= LONG_MAX ? ty_long : val <= LLONG_MAX ? ty_llong : ty_ullong;
+                break;
+            case SUF_UNSIGNED:
+                ty = val <= UINT_MAX ? ty_uint : val <= ULONG_MAX ? ty_ulong : ty_ullong;
+                break;
+            default:
+                ty = val <= INT_MAX ? ty_int : val <= LONG_MAX ? ty_long : val <= LLONG_MAX ? ty_llong : ty_ullong;
+                break;
+        }
+    } else {
+        switch (flags) {
+            case SUF_UNSIGNED | SUF_LLONG:
+                ty = ty_ullong;
+                break;
+            case SUF_LLONG:
+                ty = val <= LLONG_MAX ? ty_llong : ty_ullong;
+                break;
+            case SUF_UNSIGNED | SUF_LONG:
+                ty = val <= ULONG_MAX ? ty_ulong : ty_ullong;
+                break;
+            case SUF_LONG:
+                ty = val <= LONG_MAX ? ty_long : val <= ULONG_MAX ? ty_ulong : val <= LLONG_MAX ? ty_llong : ty_ullong;
+                break;
+            case SUF_UNSIGNED:
+                ty = val <= UINT_MAX ? ty_uint : val <= ULONG_MAX ? ty_ulong : ty_ullong;
+                break;
+            default:
+                ty = val <= INT_MAX     ? ty_int
+                     : val <= UINT_MAX  ? ty_uint
+                     : val <= LONG_MAX  ? ty_long
+                     : val <= ULONG_MAX ? ty_ulong
+                     : val <= LLONG_MAX ? ty_llong
+                                        : ty_ullong;
+                break;
+        }
+    }
+    return ty;
+}
+
+void convert_pp_number(Token *t) {
+    char *text = t->loc;
+    char *end = t->loc + t->len;
+    char first_ch = *text;
 
     int base = 10;
-    if (!strncasecmp(p, "0x", 2) && isalnum(p[2])) {
-        p += 2;
-        base = 16;
-    } else if (!strncasecmp(p, "0b", 2) && isalnum(p[2])) {
-        p += 2;
-        base = 2;
-    } else if (*p == '0') {
-        base = 8;
+    char clean[t->len + 1];
+    uint32_t ci = 0;
+
+    // Stage 1: Process literal prefixes
+    if (first_ch == '0') {
+        int pre = text[1];
+        if (pre == 'b' || pre == 'B' || pre == 'o' || pre == 'O' || pre == 'x' || pre == 'X') {
+            switch (pre) {
+                case 'b':
+                case 'B':
+                    base = 2;
+                    break;
+                case 'o':
+                case 'O':
+                    base = 8;
+                    break;
+                case 'x':
+                case 'X':
+                    base = 16;
+                    break;
+            }
+            text += 2;
+            if (!is_valid_digit(*text, base))
+                error_at(text, "invalid suffix ‘%.*s’ on integer constant", end - text, text);
+        }
+    } else if (first_ch == '.') {
+        clean[ci++] = '0';  // canonicalize
     }
 
-    long val = strtoul(p, &p, base);
-    if (isalnum(*p)) error_at(p, "invalid digit");
+    // Stage 2: Skip numeric separators ', filter out invalid characters
+    // Record positions of e, E and .
+    char c = *text++;
+    int pos_e = 0;
+    int pos_p = 0;
+    int pos_dot = 0;
+    int sign = 1;
+    int is_float = 0;
+    int prev_is_digit = 0;
+    int flags = 0;
+
+    // c = *text
+    while (text <= end) {
+        switch (c) {
+            case '.':
+                if (pos_dot || pos_e || pos_p || base == 2 || base == 8) goto error;
+                pos_dot = ci;
+                is_float = 1;
+                prev_is_digit = 0;
+                c = *text++;
+                continue;
+            case 'e':
+            case 'E':
+                if (base == 10) {
+                    if (pos_e || pos_p) goto error;
+                    pos_e = ci;
+                } else {
+                    if (base == 16)
+                        break;  // e is an ordinary number
+                    else
+                        goto error;
+                }
+                c = *text++;
+                if (c == '+' || c == '-') {
+                    sign = c == '+' ? 1 : -1;
+                    c = *text++;
+                }
+                if (!is_valid_digit(c, base)) error(t, "exponent has no digits");
+                is_float = 1;
+                break;
+            case 'p':
+            case 'P':
+                if (base != 16 || pos_p) goto error;
+                pos_p = ci;
+                base = 10;
+                c = *text++;
+                if (c == '+' || c == '-') {
+                    sign = c == '+' ? 1 : -1;
+                    c = *text++;
+                }
+                if (!is_valid_digit(c, base)) error(t, "exponent has no digits");
+                is_float = 1;
+                break;
+            case 'f':
+            case 'F':
+                if (base == 16) {
+                    break;  // f is an ordinary number
+                } else if (!is_float) {
+                    goto error;
+                } else {
+                    if (text < end) goto error;
+                    flags = SUF_FLOAT;
+                    goto extract_end;
+                }
+            case 'u':
+            case 'U':
+            case 'l':
+            case 'L':
+            case 'w':
+            case 'W':
+                if (is_float) {
+                    if (text < end) {
+                        goto error;
+                    } else if (c == 'l' || c == 'L') {
+                        flags = SUF_LDOUBLE;
+                        goto extract_end;
+                    } else {
+                        goto error;
+                    }
+                }
+                while (text <= end) {
+                    if (c == 'u' || c == 'U') {
+                        if (flags & SUF_UNSIGNED) goto error;
+                        flags |= SUF_UNSIGNED;
+                    } else if (c == 'l' || c == 'L') {
+                        if (flags & SUF_LLONG || flags & SUF_LONG || flags & SUF_BITINT) goto error;
+                        if (c == *text) {
+                            flags |= SUF_LLONG;
+                            text++;
+                        } else {
+                            flags |= SUF_LONG;
+                        }
+                    } else if (c == 'w' || c == 'W') {
+                        if (flags & SUF_LLONG || flags & SUF_LONG || flags & SUF_BITINT) goto error;
+                        if ((c == 'w' && *text == 'b') || (c == 'W' && *text == 'B')) {
+                            flags |= SUF_BITINT;
+                            text++;
+                        } else {
+                            goto error;
+                        }
+                    } else {
+                        goto error;
+                    }
+                    c = *text++;
+                }
+                goto extract_end;
+            case '\'':
+                if (prev_is_digit) {
+                    c = *text++;
+                    if (!is_valid_digit(c, base)) error(t, "digit separator ' not between digits");
+                } else {
+                    error(t, "digit separator ' not between digits");
+                }
+                break;
+            default:
+                if (!is_valid_digit(c, base)) goto error;
+        }
+        prev_is_digit = is_valid_digit(c, base);
+        clean[ci++] = c;
+        c = *text++;
+    }
+extract_end:
+    clean[ci] = '\0';
+
+    // Delayed octal check to support floating-point parsing
+    if (base == 10 && !is_float && first_ch == '0') {
+        base = 8;
+        for (int i = 0; clean[i]; i++)
+            if (clean[i] == '8' || clean[i] == '9') error(t, "invalid digit %c in octal constant", clean[i]);
+    }
+    if (base == 16 && is_float) error(t, "hexadecimal floating constant requires an exponent");
+    base = pos_p ? 16 : base;  // Restore base to hexadecimal
+
+    // Stage 3: Evaluate literals
+    uint32_t pos = 0;
+    uint64_t int_part = 0;
+    double frac_part = 0.0;
+    int exp = 0;
+    int pos_exp = base == 10 ? pos_e : pos_p;
+
+    uint32_t limit = is_float ? pos_dot ? pos_dot : pos_exp : ci;
+
+    while (pos < limit) int_part = int_part * base + from_hex(clean[pos++]);
+
+    if (!is_float) {
+        t->val = int_part;
+        t->ty = infer_type(int_part, flags, base);
+        return;
+    }
+
+    // t->ty = ty_float;
+    limit = pos_exp ? pos_exp : ci;
+
+    double divisor = base;
+    while (pos < limit) {
+        frac_part += from_hex(clean[pos++]) / divisor;
+        divisor *= base;
+    }
+
+    frac_part += int_part;
+    if (!pos_exp) {
+        t->val = frac_part;
+        t->ty = infer_type(t->val, flags, base);
+        return;
+    }
+
+    while (pos < ci) exp = exp * 10 + clean[pos++] - '0';
+
+    exp *= sign;
+    // t->val.f =
+    //     base == 16 ? fast_ldexp(frac_part, exp) : frac_part * fast_pow10(exp);
+
+    return;
+error:
+    text--;
+    error_at(text, "invalid suffix ‘%.*s’ on constant", end - text, text);
+}
+
+static Token *read_int_literal(char *start) {
+    char *p = start + 1;
+    while (1) {
+        int c = *p;
+        if (c == 'e' || c == 'E' || c == 'p' || c == 'P') {
+            c = *++p;
+            if (c == '+' || c == '-')
+                p++;
+            else
+                continue;
+        } else {
+            if (isalnum(c) || c == '.' || c == '_' || c == '\'')
+                p++;
+            else
+                break;
+        }
+    }
 
     Token *tok = new_token(TK_NUM, start, p);
-    tok->val = val;
+    convert_pp_number(tok);
     return tok;
 }
 

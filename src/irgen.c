@@ -408,7 +408,8 @@ static Ref gen_expr(Node *node) {
     switch (node->kind) {
         case ND_NEG:
             dst = TMP(tmp_id++, node->ty);
-            new_ins(IR_SUB, dst, (Ref[]){INT(0), lr}, 2);
+            Ref zr = node->ty->size == 8 ? LONG(0) : INT(0);
+            new_ins(IR_SUB, dst, (Ref[]){zr, lr}, 2);
             return dst;
         case ND_INVERT:
             dst = TMP(tmp_id++, node->ty);

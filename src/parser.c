@@ -268,12 +268,11 @@ static uint32_t new_unique_varname(uint32_t id) {
     return id;
 }
 
-static Sym *new_string_literal(uint32_t id) {
-    Type *ty = array_of(ty_char, str_len(id) + 1);
+static Sym *new_string_literal(Token *tok) {
     uint32_t uid = new_unique_varname(intern(".str", 4));
-    Sym *var = new_gvar(uid, ty);
+    Sym *var = new_gvar(uid, tok->ty);
     var->is_str = true;
-    var->init_data = id;
+    var->init_data = tok->id;
     return var;
 }
 
@@ -778,8 +777,9 @@ static Node *primary(Token **rest, Token *tok) {
         return node;
     } else if (tok->kind == TK_NUM) {
         node = new_num(tok->val, tok);
+        node->ty = tok->ty;
     } else if (tok->kind == TK_STRLIT) {
-        Sym *var = new_string_literal(tok->id);
+        Sym *var = new_string_literal(tok);
         *rest = tok->next;
         return new_var_node(var, tok);
     } else if (tok->kind == TK_IDENT) {
@@ -926,7 +926,7 @@ static Node *unary(Token **rest, Token *tok) {
                 Token *start = tok;
                 Type *ty = typename(&tok, tok->next->next);
                 *rest = skip(tok, TK_RPAREN);
-                return new_num(ty->size, start);
+                return new_long(ty->size, start);
             }
             Node *node = unary(rest, tok->next);
             add_type(node);
