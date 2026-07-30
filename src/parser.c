@@ -349,29 +349,38 @@ static bool is_typename(Token *tok, bool search_par) {
     return find_typedef(tok, search_par);
 }
 
+static uint32_t typequal(Token **rest, Token *tok) {
+    uint32_t qual = 0;
+    while (1) {
+        if (tok->kind == TK_CONST)
+            qual |= Q_CONST;
+        else if (tok->kind == TK_VOLATILE)
+            qual |= Q_VOLATILE;
+        else if (tok->kind == TK_RESTRICT)
+            qual |= Q_RESTRICT;
+        else
+            break;
+        tok = tok->next;
+    }
+    *rest = tok;
+    return qual;
+}
+
 // Ptr ::= ("*" TypeQual*)+
 static Type *pointers(Token **rest, Token *tok, Type *ty) {
-    while (match(&tok, tok, TK_STAR)) {
-        uint32_t qual = 0;
-        while (1) {
-            if (tok->kind == TK_CONST)
-                qual |= Q_CONST;
-            else if (tok->kind == TK_VOLATILE)
-                qual |= Q_VOLATILE;
-            else if (tok->kind == TK_RESTRICT)
-                qual |= Q_RESTRICT;
-            else
-                break;
-            tok = tok->next;
-        }
-        ty = pointer_to(ty, qual);
-    }
+    while (match(&tok, tok, TK_STAR)) ty = pointer_to(ty, typequal(&tok, tok));
     *rest = tok;
     return ty;
 }
 
-// AbsDeclr ::= Ptr DirAbsDeclr? | DirAbsDeclr;
-// DirAbsDeclr ::= ("(" AbsDeclr ")")? DeclrSuf*
+// AbsDeclr    ::= Ptr DirAbsDeclr? | DirAbsDeclr
+// DirAbsDeclr ::= "(" AbsDeclr ")"
+//              | ArrAbsDeclr
+//              | FuncAbsDeclr
+
+// ArrAbsDeclr  ::= DirAbsDeclr? ArrDimen
+// FuncAbsDeclr ::= DirAbsDeclr? "(" ParamList? ")"
+
 static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool restric) {
     ty = pointers(&tok, tok, ty);
 
@@ -1870,65 +1879,97 @@ loop_end:
     return type_qual(ty, qual);
 }
 
+static Type *func_param(Token **rest, Token *tok, Type *ty) {
+    tok = skip(tok, TK_LPAREN);
+    if (tok->kind == TK_VOID && tok->next->kind == TK_RPAREN) {
+        *rest = tok->next->next;
+        return func_type(ty);
+    }
+
+    bool is_variadic = false;
+    Type dummy, *cur = &dummy;
+
+    while (tok->kind != TK_RPAREN) {
+        if (cur != &dummy) tok = skip(tok, TK_COMMA);
+        if (tok->kind == TK_ELLIPSIS) {
+            is_variadic = true;
+            tok = tok->next;
+            break;
+        }
+
+        Token *start = tok;
+        Type *basety = declspecs(&tok, tok, NULL, NULL, NULL);
+        Type *paramty = abstract_declarator(&tok, tok, basety, false);
+        if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type", start->len, start->loc);
+        // "array of T" is converted to "pointer to T" in the parameter
+        // context. For example, *argv[] is converted to **argv by this.
+        if (paramty->kind == TY_ARRAY) {
+            Token *name = paramty->name;
+            paramty = pointer_to(paramty->base, 0);
+            paramty->name = name;
+        }
+        if (paramty->size < 0)
+            error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len, paramty->name->loc);
+        cur = cur->next = copy_type(paramty);
+    }
+
+    cur->next = NULL;
+    *rest = skip(tok, TK_RPAREN);
+
+    ty = func_type(ty);
+    ty->is_variadic = is_variadic;
+    ty->params = dummy.next;
+    return ty;
+}
+
+// ArrDimen ::= "[" TypeQual* AsExp? "]"
+//           | "[" "static" TypeQual* AsExp "]"
+//           | "[" TypeQual+ "static" AsExp "]"
+//           | "[" TypeQual* "*" "]"
+static Type *array_dimensions(Token **rest, Token *tok, Type *ty) {
+    int sz = -1;
+    tok = skip(tok, TK_LBRACKET);
+
+    uint32_t qual1 = typequal(&tok, tok);
+
+    bool is_static = match(&tok, tok, TK_STATIC);
+
+    uint32_t qual2 = typequal(&tok, tok);
+    if (qual1 && qual2) error(tok, "err");
+
+    bool is_star = match(&tok, tok, TK_STAR);
+    if (is_static && is_star) error(tok, "err");
+
+    if (tok->kind != TK_RBRACKET) sz = const_expr(&tok, tok);
+    if (is_static && sz == -1) error(tok, "err");
+    if (is_star && sz != -1) error(tok, "err");
+
+    tok = skip(tok, TK_RBRACKET);
+    ty = decl_suffix(rest, tok, ty);
+
+    ty = array_of(ty, sz);
+    ty->is_static = is_static;
+    ty->is_star = is_star;
+    return ty;
+}
+
 // DeclrSuf  ::= "(" ParamList? ")" | "[" ConstExp "]"
 // ParamList ::= ParamDecl ("," ParamDecl)* ("," "...")? | "..."
 // ParamDecl ::= DeclSpecs Declr
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
-    if (tok->kind == TK_LPAREN) {
-        tok = tok->next;
-        if (tok->kind == TK_VOID && tok->next->kind == TK_RPAREN) {
-            *rest = tok->next->next;
-            return func_type(ty);
-        }
-        bool is_variadic = false;
-        Type dummy, *cur = &dummy;
+    if (tok->kind == TK_LPAREN) return func_param(rest, tok, ty);
 
-        while (tok->kind != TK_RPAREN) {
-            if (cur != &dummy) tok = skip(tok, TK_COMMA);
-            if (tok->kind == TK_ELLIPSIS) {
-                is_variadic = true;
-                tok = tok->next;
-                break;
-            }
-
-            Token *start = tok;
-            Type *basety = declspecs(&tok, tok, NULL, NULL, NULL);
-            Type *paramty = abstract_declarator(&tok, tok, basety, false);
-            if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type", start->len, start->loc);
-            // "array of T" is converted to "pointer to T" in the parameter
-            // context. For example, *argv[] is converted to **argv by this.
-            if (paramty->kind == TY_ARRAY) {
-                Token *name = paramty->name;
-                paramty = pointer_to(paramty->base, 0);
-                paramty->name = name;
-            }
-            if (paramty->size < 0)
-                error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len, paramty->name->loc);
-            cur = cur->next = copy_type(paramty);
-        }
-        *rest = skip(tok, TK_RPAREN);
-        cur->next = NULL;
-
-        ty = func_type(ty);
-        ty->is_variadic = is_variadic;
-        ty->params = dummy.next;
-        return ty;
-    }
-    if (tok->kind == TK_LBRACKET) {
-        tok = tok->next;
-        int sz = -1;
-        if (tok->kind != TK_RBRACKET) sz = const_expr(&tok, tok);
-        tok = skip(tok, TK_RBRACKET);
-        ty = decl_suffix(rest, tok, ty);
-        return array_of(ty, sz);
-    }
+    if (tok->kind == TK_LBRACKET) return array_dimensions(rest, tok, ty);
 
     *rest = tok;
     return ty;
 }
 
 // Declr    ::= Ptr? DirDeclr
-// DirDeclr ::= (Ident | "(" Declr ")") DeclrSuf*
+// DirDeclr ::= Ident | "(" Declr ")" | ArrDecl | FuncDecl
+
+// ArrDecl  ::= DirDeclr ArrDimen
+// FuncDecl ::= DirDeclr "(" ParamList? ")"
 static Type *declarator(Token **rest, Token *tok, Type *ty) {
     ty = pointers(&tok, tok, ty);
 

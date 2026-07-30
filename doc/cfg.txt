@@ -10,9 +10,17 @@ BracedInit  ::= "{" Init ("," Init)*)? "}"
 
 Declr       ::= Ptr? DirDeclr
 Ptr         ::= ("*" TypeQual*)+
-DirDeclr    ::= (Ident | "(" Declr ")") DeclrSuf*
+DirDeclr    ::= Ident
+             | "(" Declr ")"
+             | ArrDecl
+             | FuncDecl
 
-DeclrSuf    ::= "(" ParamList? ")" | "[" ConstExp "]"
+ArrDecl     ::= DirDeclr "[" TypeQual* AsExp? "]"
+              | DirDeclr "[" "static" TypeQual* AsExp "]"
+              | DirDeclr "[" TypeQual+ "static" AsExp "]"
+              | DirDeclr "[" TypeQual* "*" "]"
+
+FuncDecl    ::= DirDeclr "(" ParamList? ")"
 ParamList   ::= ParamDecl ("," ParamDecl)* ("," "...")? | "..."
 ParamDecl   ::= DeclSpecs Declr
 
@@ -31,8 +39,17 @@ TypedefName ::= Ident
 AlignSpec   ::= "alignas" "(" (TypeName | ConstExp) ")"
 
 TypeName    ::= DeclSpecs AbsDeclr?
-AbsDeclr    ::= Ptr DirAbsDeclr? | DirAbsDeclr;
-DirAbsDeclr ::= ("(" AbsDeclr ")")? DeclrSuf*
+AbsDeclr    ::= Ptr DirAbsDeclr? | DirAbsDeclr
+DirAbsDeclr ::= "(" AbsDeclr ")"
+              | ArrAbsDeclr
+              | FuncAbsDeclr
+
+ArrAbsDeclr ::= DirAbsDeclr? "[" TypeQual* AsExp? "]"
+              | DirAbsDeclr? "[" "static" TypeQual* AsExp "]"
+              | DirAbsDeclr? "[" TypeQual+ "static" AsExp "]"
+              | DirAbsDeclr? "[" "*" "]"
+
+FuncAbsDeclr ::= DirAbsDeclr? "(" ParamList? ")"
 
 RecordSpec  ::= Record Ident ("{" MemDecl+ "}")? | Record "{" MemDecl+ "}"
 MemDecl     ::= TypeSpec+ (MemDeclr ("," MemDeclr)*)? ";"
@@ -75,7 +92,7 @@ AsExp       ::= CondExp (AsOP AsExp)?
 AsOP        ::= "=" | "*=" | "/=" | "%=" | "+=" | "-="
             | "<<=" | ">>=" | "&=" | "^=" | "|="
 
-MulExp      ::= CastExp (("*" | "/" | "%") CastExp)*
+MulExp      ::= CastExp  (("*" | "/" | "%") CastExp)*
 AddExp      ::= MulExp   (("+" | "-") MulExp)*
 ShiftExp    ::= AddExp   (("<<" | ">>") AddExp)*
 RelExp      ::= ShiftExp (("<" | ">" | "<=" | ">=") ShiftExp)*
@@ -85,7 +102,7 @@ XorExp      ::= BAndExp  ("^" BAndExp)*
 BOrExp      ::= XorExp   ("|" XorExp)*
 LAndExp     ::= BOrExp   ("&&" BOrExp)*;
 LOrExp      ::= LAndExp  ("||" LAndExp)*;
-CondExp     ::= LOrExp ("?" Exp ":" CondExp)?
+CondExp     ::= LOrExp   ("?" Exp ":" CondExp)?
 ConstExp    ::= CondExp
 
 CastExp     ::= UnaryExp | "(" TypeName ")" CastExp

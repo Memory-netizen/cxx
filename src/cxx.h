@@ -470,6 +470,8 @@ struct Type {
         struct {
             // Array
             int len;
+            bool is_static;
+            bool is_star;
         };
         struct {
             // Function
