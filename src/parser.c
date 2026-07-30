@@ -42,6 +42,13 @@ static Node *new_long(int64_t val, Token *tok) {
     return node;
 }
 
+static Node *new_ulong(int64_t val, Token *tok) {
+    Node *node = new_node(ND_NUM, tok);
+    node->val = val;
+    node->ty = ty_ulong;
+    return node;
+}
+
 static Node *new_var_node(Sym *var, Token *tok) {
     Node *node = new_node(ND_VAR, tok);
     node->var = var;
@@ -926,24 +933,24 @@ static Node *unary(Token **rest, Token *tok) {
                 Token *start = tok;
                 Type *ty = typename(&tok, tok->next->next);
                 *rest = skip(tok, TK_RPAREN);
-                return new_long(ty->size, start);
+                return new_ulong(ty->size, start);
             }
             Node *node = unary(rest, tok->next);
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
-            return new_long(node->ty->size, tok);
+            return new_ulong(node->ty->size, tok);
         }
         case TK_ALIGNOF: {
             if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, 1)) {
                 Token *start = tok;
                 Type *ty = typename(&tok, tok->next->next);
                 *rest = skip(tok, TK_RPAREN);
-                return new_num(ty->align, start);
+                return new_ulong(ty->align, start);
             }
             Node *node = unary(rest, tok->next);
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
-            return new_long(node->ty->align, tok);
+            return new_ulong(node->ty->align, tok);
         }
         default:
             break;
