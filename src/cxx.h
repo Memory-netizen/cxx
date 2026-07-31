@@ -229,12 +229,12 @@ enum {
 
 typedef enum {
     SC_NONE,
-    SC_AUTO,
-    SC_TYPEDEF,
-    SC_EXTERN,
-    SC_STATIC,
-    SC_THREAD,
-    SC_REG,
+    SC_AUTO = 1 << 0,
+    SC_TYPEDEF = 1 << 1,
+    SC_EXTERN = 1 << 2,
+    SC_STATIC = 1 << 3,
+    SC_THREAD = 1 << 4,
+    SC_REG = 1 << 5,
 } SClass;
 
 // Variable or function

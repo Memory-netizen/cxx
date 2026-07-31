@@ -196,12 +196,15 @@ void add_type(Node *node) {
             break;
         case ND_ADDR:
             add_type(node->lhs);
+            if (!node->lhs->is_lvalue) error(node->tok, "lvalue required as unary ‘&’ operand");
+            if (node->lhs->kind == ND_VAR && node->lhs->var->sclass & SC_REG)
+                error(node->tok, "address of register variable ‘%s’ requested", str(node->lhs->var->id));
             node->ty = pointer_to(node->lhs->ty, 0);
             break;
         case ND_DEREF:
             add_type(node->lhs);
             lvalue_convert(&node->lhs);
-            if (!is_pointer(node->lhs->ty)) error(node->lhs->tok, "unary ‘*’ requires pointer operand");
+            if (!is_pointer(node->lhs->ty)) error(node->lhs->tok, "invalid type argument of unary ‘*’");
             node->ty = node->lhs->ty->base;
             node->is_lvalue = true;
             break;
