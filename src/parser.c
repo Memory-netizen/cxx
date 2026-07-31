@@ -1657,9 +1657,12 @@ static Type *enum_decl(Token **rest, Token *tok) {
         ty->size = 4;
     } else {
         ty = enum_type();
+        ty->is_anon = true;
     }
 
     // Read an enum-list.
+    EnumVal head = {};
+    EnumVal *cur = &head;
     int i = 0;
     int64_t val = 0;
     while (!consume_end(rest, tok)) {
@@ -1672,9 +1675,13 @@ static Type *enum_decl(Token **rest, Token *tok) {
 
         VarScope *sc = push_scope(name);
         sc->enum_ty = ty;
-        sc->enum_val = val++;
+        sc->enum_val = val;
+        EnumVal *enm = emalloc(sizeof(EnumVal));
+        enm->name = name;
+        enm->val = val++;
+        cur = cur->next = enm;
     }
-
+    ty->enumvals = head.next;
     return ty;
 }
 

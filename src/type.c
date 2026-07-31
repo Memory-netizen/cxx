@@ -138,11 +138,31 @@ Type *type_unqual(Type *ty) {
     return ty;
 }
 
+static struct {
+    Type *t1;
+    Type *t2;
+} cmpset[64];
+static int depth;
+
+static void push_cmp(Type *t1, Type *t2) {
+    cmpset[depth].t1 = t1;
+    cmpset[depth++].t2 = t2;
+}
+
+static void pop_cmp() { depth--; }
+
+static bool check_set(Type *t1, Type *t2) {
+    for (int i = 0; i < depth; i++)
+        if (t1 == cmpset[i].t1 && t2 == cmpset[i].t2) return true;
+    return false;
+}
+
 bool is_compatible(Type *t1, Type *t2) {
     if (t1 == t2) return true;
 
     if (t1->kind != t2->kind) return false;
     if (t1->qual != t2->qual) return false;
+    if (check_set(t1, t2)) return true;
 
     switch (t1->kind) {
         case TY_SHORT:
@@ -150,6 +170,11 @@ bool is_compatible(Type *t1, Type *t2) {
         case TY_LONG:
         case TY_LLONG:
             return t1->is_unsigned == t2->is_unsigned;
+        case TY_I1:
+        case TY_I32:
+        case TY_I64:
+        case TY_VOID:
+        case TY_BOOL:
         case TY_CHAR:
         case TY_SCHAR:
         case TY_UCHAR:
@@ -177,15 +202,25 @@ bool is_compatible(Type *t1, Type *t2) {
             if (t1->id != t2->id) return false;
             Member *m1 = t1->members;
             Member *m2 = t2->members;
+            push_cmp(t1, t2);
             for (; m1 && m2; m1 = m1->next, m2 = m2->next) {
                 if (m1->name->id != m2->name->id) return false;
                 if (m1->is_align != m2->is_align) return false;
                 if (m1->align != m2->align) return false;
                 if (!is_compatible(m1->ty, m2->ty)) return false;
             }
+            pop_cmp();
             return m1 == NULL && m2 == NULL;
-        default:
-            break;
+        case TY_ENUM:
+            if (t1->is_anon || t2->is_anon) return false;
+            if (t1->id != t2->id) return false;
+            EnumVal *enm1 = t1->enumvals;
+            EnumVal *enm2 = t2->enumvals;
+            for (; enm1 && enm2; enm1 = enm1->next, enm2 = enm2->next) {
+                if (enm1->name != enm2->name) return false;
+                if (enm1->val != enm2->val) return false;
+            }
+            return enm1 == NULL && enm2 == NULL;
     }
     return false;
 }

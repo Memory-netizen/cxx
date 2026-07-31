@@ -32,6 +32,7 @@ typedef struct Fn Fn;
 typedef struct Module Module;
 typedef struct Con Con;
 typedef struct Member Member;
+typedef struct EnumVal EnumVal;
 typedef struct Initializer Initializer;
 
 extern SrcFile *cur_file;
@@ -485,8 +486,11 @@ struct Type {
             bool is_variadic;
         };
         struct {
-            // Struct
-            Member *members;
+            // Struct, union or enum
+            union {
+                Member *members;
+                EnumVal *enumvals;
+            };
             bool is_flexible;
             bool is_anon;
         };
@@ -502,6 +506,12 @@ struct Member {
     int align;
     int offset;
     bool is_align;
+};
+
+struct EnumVal {
+    EnumVal *next;
+    uint32_t name;
+    int64_t val;
 };
 
 bool is_integer(Type *ty);
