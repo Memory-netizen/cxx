@@ -801,7 +801,7 @@ static Node *fncall(Token **rest, Token *tok) {
     return node;
 }
 
-// PrimExp ::= Num | Str | Ident | "(" Exp ")" | "(" CompStmt ")"
+// PrimExp ::= "true" | "false" | "nullptr" | Num | Str | Ident | "(" Exp ")" | "(" CompStmt ")"
 static Node *primary(Token **rest, Token *tok) {
     Node *node;
     if (tok->kind == TK_LPAREN && tok->next->kind == TK_LBRACE) {
@@ -811,19 +811,41 @@ static Node *primary(Token **rest, Token *tok) {
         *rest = skip(tok, TK_RPAREN);
         return node;
     }
-
     if (tok->kind == TK_LPAREN) {
         node = expr(&tok, tok->next);
         *rest = skip(tok, TK_RPAREN);
         return node;
-    } else if (tok->kind == TK_NUM) {
+    }
+    if (tok->kind == TK_TRUE) {
+        node = new_num(1, tok);
+        node->ty = ty_bool;
+        *rest = tok->next;
+        return node;
+    }
+    if (tok->kind == TK_FALSE) {
+        node = new_num(0, tok);
+        node->ty = ty_bool;
+        *rest = tok->next;
+        return node;
+    }
+    if (tok->kind == TK_NULLPTR) {
+        node = new_node(ND_NULLPTR, tok);
+        node->ty = ty_nullptr;
+        *rest = tok->next;
+        return node;
+    }
+    if (tok->kind == TK_NUM) {
         node = new_num(tok->val, tok);
         node->ty = tok->ty;
-    } else if (tok->kind == TK_STRLIT) {
+        *rest = tok->next;
+        return node;
+    }
+    if (tok->kind == TK_STRLIT) {
         Sym *var = new_string_literal(tok);
         *rest = tok->next;
         return new_var_node(var, tok);
-    } else if (tok->kind == TK_IDENT) {
+    }
+    if (tok->kind == TK_IDENT) {
         // Function call
         if (tok->next->kind == TK_LPAREN) return fncall(rest, tok);
         // Variable or enum constant
@@ -834,12 +856,11 @@ static Node *primary(Token **rest, Token *tok) {
             node = new_var_node(sc->var, tok);
         else
             node = new_num(sc->enum_val, tok);
-    } else {
-        error(tok, "expected expression");
-        node = NULL;
+        *rest = tok->next;
+        return node;
     }
-    *rest = tok->next;
-    return node;
+    error(tok, "expected expression");
+    return NULL;
 }
 
 static Member *get_struct_member(Type *ty, Token *tok) {

@@ -274,11 +274,12 @@ static Ref gen_expr(Node *node) {
     switch (node->kind) {
         case ND_NOP:
             return R;
+        case ND_NULLPTR:
+            return NULLPTR;
         case ND_NUM:
-            if (node->ty->size == 4)
-                return INT(node->val);
-            else
-                return LONG(node->val);
+            if (node->ty->size == 1) return BOOL(node->val);
+            if (node->ty->size == 4) return INT(node->val);
+            return LONG(node->val);
         case ND_STMT_EXPR:
             for (Node *n = node->body; n; n = n->next) dst = gen_stmt(n);
             return dst;

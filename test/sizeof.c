@@ -92,6 +92,10 @@ int main() {
     ASSERT(1, sizeof(char) << 31 >> 31);
     ASSERT(1, sizeof(char) << 63 >> 63);
 
+    ASSERT(1, sizeof(true));
+    ASSERT(1, sizeof(false));
+    ASSERT(8, sizeof(nullptr));
+
     printf("OK\n");
     return 0;
 }

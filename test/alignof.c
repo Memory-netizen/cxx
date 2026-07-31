@@ -82,6 +82,10 @@ int main() {
                _Alignof(x) << 63 >> 63;
            }));
 
+    ASSERT(1, _Alignof(true));
+    ASSERT(1, _Alignof(false));
+    ASSERT(8, _Alignof(nullptr));
+
     printf("OK\n");
     return 0;
 }

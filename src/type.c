@@ -4,6 +4,7 @@
     &(Type) { kind, 0, size, align, is_unsigned, 0, 0, NULL, NULL, NULL, {0} }
 
 Type *ty_void = TYPE(TY_VOID, 1, 1, false);
+Type *ty_nullptr = TYPE(TY_NULLPTR, 8, 8, true);
 Type *ty_bool = TYPE(TY_BOOL, 1, 1, false);
 Type *ty_char = TYPE(TY_CHAR, 1, 1, CHAR_MIN == 0);
 Type *ty_schar = TYPE(TY_SCHAR, 1, 1, false);
@@ -22,6 +23,7 @@ Type *ty_i64 = TYPE(TY_I64, 8, 8, false);
 
 #undef TYPE
 
+bool is_bool(Type *ty) { return ty->kind == TY_BOOL; }
 bool is_void(Type *ty) { return ty->kind == TY_VOID; }
 bool is_obj(Type *ty) { return ty->kind != TY_VOID && ty->kind != TY_FUNC; }
 
@@ -52,7 +54,9 @@ bool is_arith(Type *ty) { return is_integer(ty) || is_flonum(ty); }
 
 bool is_pointer(Type *ty) { return ty->kind == TY_PTR; }
 
-bool is_scalar(Type *ty) { return is_pointer(ty) || is_arith(ty); }
+bool is_nullptr(Type *ty) { return ty->kind == TY_NULLPTR; }
+
+bool is_scalar(Type *ty) { return is_arith(ty) || is_pointer(ty) || is_nullptr(ty); }
 
 bool is_record(Type *ty) { return ty->kind == TY_STRUCT || ty->kind == TY_UNION; }
 
@@ -173,6 +177,7 @@ bool is_compatible(Type *t1, Type *t2) {
         case TY_I1:
         case TY_I32:
         case TY_I64:
+        case TY_NULLPTR:
         case TY_VOID:
         case TY_BOOL:
         case TY_CHAR:
@@ -362,6 +367,8 @@ void add_type(Node *node) {
     switch (node->kind) {
         case ND_NUM:
             node->ty = ty_int;
+            break;
+        case ND_NULLPTR:
             break;
         case ND_VAR:
             add_type(node->var_init);

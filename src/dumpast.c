@@ -72,6 +72,7 @@ static const char *node_kind_name[] = {
     [ND_DECL] = "DECL",
     [ND_VAR] = "VAR",
     [ND_NUM] = "NUM",
+    [ND_NULLPTR] = "NULLPTR",
 };
 
 static void print_type(Type *ty) {
@@ -80,6 +81,9 @@ static void print_type(Type *ty) {
         return;
     }
     switch (ty->kind) {
+        case TY_NULLPTR:
+            fprintf(stdout, "nullptr_t");
+            break;
         case TY_VOID:
             fprintf(stdout, "void");
             break;
@@ -199,8 +203,11 @@ static void dump_node(Node *node) {
 
     switch (node->kind) {
         case ND_NUM:
-            fprintf(stdout, "  val=%ld", node->val);
-            fprintf(stdout, "\n");
+            fprintf(stdout, "  val=%ld\n", node->val);
+            break;
+
+        case ND_NULLPTR:
+            fprintf(stdout, "  nullptr\n");
             break;
 
         case ND_VAR:

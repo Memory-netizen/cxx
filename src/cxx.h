@@ -37,6 +37,7 @@ typedef struct Initializer Initializer;
 
 extern SrcFile *cur_file;
 extern Type *ty_void;
+extern Type *ty_nullptr;
 extern Type *ty_bool;
 extern Type *ty_char;
 extern Type *ty_schar;
@@ -343,8 +344,9 @@ typedef enum {
     ND_DECL,
 
     // Term
-    ND_VAR,  // Variable
-    ND_NUM,  // Int
+    ND_VAR,      // Variable
+    ND_NUM,      // Int
+    ND_NULLPTR,  // nullptr
 } NodeKind;
 
 // AST node type
@@ -436,6 +438,7 @@ enum {
 
 typedef enum {
     TY_VOID,
+    TY_NULLPTR,
     TY_I1,
     TY_I32,
     TY_I64,
@@ -515,10 +518,12 @@ struct EnumVal {
 };
 
 bool is_void(Type *ty);
+bool is_bool(Type *ty);
 bool is_integer(Type *ty);
 bool is_flonum(Type *ty);
 bool is_arith(Type *ty);
 bool is_pointer(Type *ty);
+bool is_nullptr(Type *ty);
 bool is_scalar(Type *ty);
 bool is_funcptr(Type *ty);
 bool is_compatible(Type *t1, Type *t2);
@@ -615,8 +620,10 @@ enum {
 #define CON(x, ty) \
     (Ref) { RCon, x, ty }
 
+#define BOOL(x) getcon(x, curm, ty_bool)
 #define INT(x) getcon(x, curm, ty_i32)
 #define LONG(x) getcon(x, curm, ty_i64)
+#define NULLPTR newcon(&(Con){CAddr, 0, {0}}, curm, ty_nullptr)
 
 struct Ref {
     uint32_t type;
@@ -624,7 +631,7 @@ struct Ref {
     Type *ty;
 };
 
-static inline int refeq(Ref a, Ref b) { return a.type == b.type && a.val == b.val; }
+static inline int refeq(Ref a, Ref b) { return a.type == b.type && a.val == b.val && a.ty == b.ty; }
 
 struct Ir {
     IrKind op;

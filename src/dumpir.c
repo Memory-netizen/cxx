@@ -50,7 +50,7 @@ static const char *op_str[][IR_CNT] = {
 static const char *ty_str[] = {
     [TY_VOID] = "void", [TY_I1] = "i1",    [TY_I32] = "i32",   [TY_I64] = "i64",   [TY_BOOL] = "i8",
     [TY_CHAR] = "i8",   [TY_SCHAR] = "i8", [TY_UCHAR] = "i8",  [TY_SHORT] = "i16", [TY_INT] = "i32",
-    [TY_ENUM] = "i32",  [TY_LONG] = "i64", [TY_LLONG] = "i64", [TY_PTR] = "ptr",
+    [TY_ENUM] = "i32",  [TY_LONG] = "i64", [TY_LLONG] = "i64", [TY_PTR] = "ptr",   [TY_NULLPTR] = "ptr",
 };
 
 static void print_type(Type *ty) {
@@ -77,15 +77,17 @@ static void printcon(Con *c) {
     else if (c->type == CAddr) {
         if (c->bits.i)
             fprintf(out_file, "getelementptr (i8, ptr @%s, i64 %" PRIi64 ")", str(c->sym), c->bits.i);
-        else
+        else if (c->sym)
             fprintf(out_file, "@%s", str(c->sym));
+        else
+            fprintf(out_file, "null");
     }
 }
 
 static void print_operand(Ref r) {
-    if (r.type == RCon) {
+    if (r.type == RCon)
         printcon(&curm->con[r.val]);
-    } else if (r.type == RGlb)
+    else if (r.type == RGlb)
         fprintf(out_file, "@%s", str(r.val));
     else
         fprintf(out_file, "%%%d", r.val);

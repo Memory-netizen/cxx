@@ -323,6 +323,10 @@ int main() {
 
     ASSERT(1, (void *)0xffffffffffffffff > (void *)0);
 
+    ASSERT(2, true + true);
+    ASSERT(1, true + false);
+    ASSERT(6, true + 5);
+
     printf("OK\n");
     return 0;
 }
