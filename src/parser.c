@@ -68,10 +68,16 @@ Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
     return node;
 }
 
-static Node *new_excast(Node *expr, Type *ty) {
+static Node *new_excast(Node *expr, Type *ty, Token *tok) {
     add_type(expr);
     lvalue_convert(&expr);
-    Node *node = new_node(ND_EXCAST, expr->tok);
+
+    if (!is_void(ty) && !is_scalar(ty)) error(tok, "arithmetic, pointer or void type is required in here");
+    if (!is_void(ty) && !is_scalar(expr->ty)) error(tok, "arithmetic or pointer type is required in here");
+    if (is_flonum(expr->ty) && is_pointer(ty)) error(tok, "cannot cast floating-point value to pointer type");
+    if (is_flonum(ty) && is_pointer(expr->ty)) error(tok, "cannot cast pointer to floating-point type");
+
+    Node *node = new_node(ND_EXCAST, tok);
     node->lhs = expr;
     node->ty = ty;
     return node;
@@ -386,7 +392,7 @@ static Type *pointers(Token **rest, Token *tok, Type *ty) {
 static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool restric) {
     ty = pointers(&tok, tok, ty);
 
-    if (tok->kind == TK_LPAREN) {
+    if (tok->kind == TK_LPAREN && (tok->next->kind != TK_RPAREN && !is_typename(tok->next, 1))) {
         Token *start = tok;
         Type dummy = {};
         abstract_declarator(&tok, start->next, &dummy, restric);
@@ -1009,7 +1015,7 @@ static Node *cast(Token **rest, Token *tok) {
 
         // type cast
         if (sclass) error(start, "storage class specifier is not allowed in this context");
-        Node *node = new_excast(cast(rest, tok), ty);
+        Node *node = new_excast(cast(rest, tok), ty, start);
         node->tok = start;
         return node;
     }

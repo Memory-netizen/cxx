@@ -514,9 +514,12 @@ struct EnumVal {
     int64_t val;
 };
 
+bool is_void(Type *ty);
 bool is_integer(Type *ty);
+bool is_flonum(Type *ty);
 bool is_arith(Type *ty);
 bool is_pointer(Type *ty);
+bool is_scalar(Type *ty);
 bool is_funcptr(Type *ty);
 bool is_compatible(Type *t1, Type *t2);
 Type *pointer_to(Type *base, uint32_t qual);
