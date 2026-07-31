@@ -22,10 +22,28 @@ Type *ty_i64 = TYPE(TY_I64, 8, 8, false);
 
 #undef TYPE
 
+bool is_void(Type *ty) { return ty->kind == TY_VOID; }
+bool is_obj(Type *ty) { return ty->kind != TY_VOID && ty->kind != TY_FUNC; }
+
+bool is_objptr(Type *ty) {
+    if (ty->kind != TY_PTR) return false;
+    return is_obj(ty->base);
+}
+
+bool is_voidptr(Type *ty) {
+    if (ty->kind != TY_PTR) return false;
+    return is_void(ty->base);
+}
+
+bool is_funcptr(Type *ty) {
+    if (ty->kind != TY_PTR) return false;
+    return ty->base->kind == TY_FUNC;
+}
+
 bool is_integer(Type *ty) {
-    return ty->kind == TY_BOOL || ty->kind == TY_INT || ty->kind == TY_SHORT || ty->kind == TY_LLONG ||
-           ty->kind == TY_LONG || ty->kind == TY_ENUM || ty->kind == TY_CHAR || ty->kind == TY_I64 ||
-           ty->kind == TY_I32 || ty->kind == TY_I1;
+    return ty->kind == TY_BOOL || ty->kind == TY_CHAR || ty->kind == TY_SHORT || ty->kind == TY_INT ||
+           ty->kind == TY_LONG || ty->kind == TY_LLONG || ty->kind == TY_ENUM || ty->kind == TY_I1 ||
+           ty->kind == TY_I32 || ty->kind == TY_I64;
 }
 
 bool is_flonum(Type *ty) { return ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE || ty->kind == TY_LDOUBLE; }
@@ -128,6 +146,56 @@ Type *type_unqual(Type *ty) {
     return ty;
 }
 
+void add_type(Node *node);
+
+void check_binop(Node *node) {
+    add_type(node->lhs);
+    add_type(node->rhs);
+    Type *lhs = node->lhs->ty;
+    Type *rhs = node->rhs->ty;
+    switch (node->kind) {
+        case ND_ADD:
+        case ND_ADDAS:
+        case ND_SUB:
+        case ND_SUBAS:
+        case ND_MUL:
+        case ND_DIV:
+        case ND_MULAS:
+        case ND_DIVAS:
+            if (is_arith(lhs) && is_arith(rhs)) return;
+            break;
+        case ND_MOD:
+        case ND_MODAS:
+        case ND_BAND:
+        case ND_BOR:
+        case ND_XOR:
+        case ND_ANDAS:
+        case ND_ORAS:
+        case ND_XORAS:
+        case ND_LEFT:
+        case ND_RIGHT:
+        case ND_LEFTAS:
+        case ND_RIGHTAS:
+            if (is_integer(lhs) && is_integer(rhs)) return;
+            break;
+        case ND_LT:
+        case ND_LE:
+        case ND_EQ:
+        case ND_NE:
+        case ND_LOGAND:
+        case ND_LOGOR:
+            if (is_scalar(lhs) && is_scalar(rhs)) return;
+            break;
+        case ND_PTRADD:
+        case ND_PTRAS:
+            if (is_pointer(lhs) && is_integer(rhs)) return;
+            break;
+        default:
+            return;
+    }
+    error(node->tok, "invalid operands to binary ‘%.*s’", node->tok->len, node->tok->loc);
+}
+
 void lvalue_convert(Node **expr) {
     if (!(*expr) || !(*expr)->is_lvalue) return;
     Node *node = new_unary(ND_LVTOR, (*expr), (*expr)->tok);
@@ -203,8 +271,7 @@ void add_type(Node *node) {
             break;
         case ND_LOGOR:
         case ND_LOGAND:
-            add_type(node->lhs);
-            add_type(node->rhs);
+            check_binop(node);
             lvalue_convert(&node->lhs);
             lvalue_convert(&node->rhs);
             node->ty = ty_int;
@@ -237,16 +304,14 @@ void add_type(Node *node) {
         case ND_BOR:
         case ND_XOR:
         case ND_BAND:
-            add_type(node->lhs);
-            add_type(node->rhs);
+            check_binop(node);
             lvalue_convert(&node->lhs);
             lvalue_convert(&node->rhs);
             usual_arith_conv(&node->lhs, &node->rhs);
             node->ty = node->lhs->ty;
             break;
         case ND_PTRADD:
-            add_type(node->lhs);
-            add_type(node->rhs);
+            check_binop(node);
             lvalue_convert(&node->lhs);
             lvalue_convert(&node->rhs);
             new_imcast(&node->rhs, ty_long);
@@ -254,8 +319,7 @@ void add_type(Node *node) {
             break;
         case ND_LEFT:
         case ND_RIGHT:
-            add_type(node->lhs);
-            add_type(node->rhs);
+            check_binop(node);
             lvalue_convert(&node->lhs);
             lvalue_convert(&node->rhs);
             integer_promotion(&node->lhs);
@@ -266,8 +330,7 @@ void add_type(Node *node) {
         case ND_NE:
         case ND_LT:
         case ND_LE:
-            add_type(node->lhs);
-            add_type(node->rhs);
+            check_binop(node);
             lvalue_convert(&node->lhs);
             lvalue_convert(&node->rhs);
             usual_arith_conv(&node->lhs, &node->rhs);
@@ -293,6 +356,7 @@ void add_type(Node *node) {
         case ND_POSTINC:
         case ND_POSTDEC:
             add_type(node->lhs);
+
             node->ty = node->lhs->ty;
             break;
         case ND_ADDAS:
@@ -303,7 +367,7 @@ void add_type(Node *node) {
                 if (node->kind == ND_SUBAS) node->rhs = new_unary(ND_NEG, node->rhs, node->rhs->tok);
                 node->kind = ND_PTRAS;
             }
-            add_type(node->rhs);
+            check_binop(node);
             lvalue_convert(&node->rhs);
             Type *ty = get_common_type(node->lhs->ty, node->rhs->ty);
             new_imcast(&node->rhs, is_ptr ? ty_long : ty);
@@ -317,8 +381,7 @@ void add_type(Node *node) {
         case ND_ANDAS:
         case ND_ORAS:
         case ND_XORAS: {
-            add_type(node->lhs);
-            add_type(node->rhs);
+            check_binop(node);
             lvalue_convert(&node->rhs);
             Type *ty = get_common_type(node->lhs->ty, node->rhs->ty);
             new_imcast(&node->rhs, ty);
@@ -328,8 +391,7 @@ void add_type(Node *node) {
         }
         case ND_LEFTAS:
         case ND_RIGHTAS:
-            add_type(node->lhs);
-            add_type(node->rhs);
+            check_binop(node);
             lvalue_convert(&node->rhs);
             integer_promotion(&node->rhs);
             node->compute_ty = get_common_type(node->lhs->ty, ty_int);
