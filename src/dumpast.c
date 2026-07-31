@@ -115,6 +115,15 @@ static void print_type(Type *ty) {
             if (ty->is_unsigned) fprintf(stdout, "unsigned ");
             fprintf(stdout, "llong");
             break;
+        case TY_FLOAT:
+            fprintf(stdout, "float");
+            break;
+        case TY_DOUBLE:
+            fprintf(stdout, "double");
+            break;
+        case TY_LDOUBLE:
+            fprintf(stdout, "long double");
+            break;
         case TY_ENUM:
             fprintf(stdout, "enum");
             break;

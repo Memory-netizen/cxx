@@ -28,7 +28,13 @@ bool is_integer(Type *ty) {
            ty->kind == TY_I32 || ty->kind == TY_I1;
 }
 
+bool is_flonum(Type *ty) { return ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE || ty->kind == TY_LDOUBLE; }
+
+bool is_arith(Type *ty) { return is_integer(ty) || is_flonum(ty); }
+
 bool is_pointer(Type *ty) { return ty->kind == TY_PTR; }
+
+bool is_scalar(Type *ty) { return is_pointer(ty) || is_arith(ty); }
 
 static void copy_struct_type(Type *dst, Type *src) {
     Member head = {};
