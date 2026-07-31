@@ -54,6 +54,8 @@ bool is_pointer(Type *ty) { return ty->kind == TY_PTR; }
 
 bool is_scalar(Type *ty) { return is_pointer(ty) || is_arith(ty); }
 
+bool is_record(Type *ty) { return ty->kind == TY_STRUCT || ty->kind == TY_UNION; }
+
 static void copy_struct_type(Type *dst, Type *src) {
     Member head = {};
     Member *cur = &head;
@@ -109,7 +111,6 @@ Type *struct_type(void) {
     Type *ty = emalloc(sizeof(Type));
     memset(ty, 0, sizeof(Type));
     ty->kind = TY_STRUCT;
-    ty->size = 0;
     ty->align = 1;
     return ty;
 }
@@ -124,25 +125,16 @@ Type *enum_type(void) {
 }
 
 Type *type_qual(Type *ty, uint32_t qual) {
-    if (!ty) return NULL;
-
-    if (qual == 0) return ty;
-
     if ((ty->qual & qual) == qual) return ty;
-
     ty = copy_type(ty);
     ty->qual |= qual;
     return ty;
 }
 
 Type *type_unqual(Type *ty) {
-    if (!ty) return NULL;
-
     if (ty->qual == 0) return ty;
-
     ty = copy_type(ty);
     ty->qual = 0;
-
     return ty;
 }
 
@@ -150,11 +142,13 @@ bool is_compatible(Type *t1, Type *t2) {
     if (t1 == t2) return true;
 
     if (t1->kind != t2->kind) return false;
+    if (t1->qual != t2->qual) return false;
 
     switch (t1->kind) {
         case TY_SHORT:
         case TY_INT:
         case TY_LONG:
+        case TY_LLONG:
             return t1->is_unsigned == t2->is_unsigned;
         case TY_CHAR:
         case TY_SCHAR:
@@ -177,6 +171,19 @@ bool is_compatible(Type *t1, Type *t2) {
         case TY_ARRAY:
             if (!is_compatible(t1->base, t2->base)) return false;
             return t1->len < 0 || t2->len < 0 || t1->len == t2->len;
+        case TY_STRUCT:
+        case TY_UNION:
+            if (t1->is_anon || t2->is_anon) return false;
+            if (t1->id != t2->id) return false;
+            Member *m1 = t1->members;
+            Member *m2 = t2->members;
+            for (; m1 && m2; m1 = m1->next, m2 = m2->next) {
+                if (m1->name->id != m2->name->id) return false;
+                if (m1->is_align != m2->is_align) return false;
+                if (m1->align != m2->align) return false;
+                if (!is_compatible(m1->ty, m2->ty)) return false;
+            }
+            return m1 == NULL && m2 == NULL;
         default:
             break;
     }

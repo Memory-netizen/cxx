@@ -488,6 +488,7 @@ struct Type {
             // Struct
             Member *members;
             bool is_flexible;
+            bool is_anon;
         };
     };
 };
@@ -500,6 +501,7 @@ struct Member {
     uint32_t idx;
     int align;
     int offset;
+    bool is_align;
 };
 
 bool is_integer(Type *ty);

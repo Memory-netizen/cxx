@@ -329,7 +329,8 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
     if (is_pointer(lhs->ty) && is_integer(rhs->ty))
         return new_binary(ND_PTRADD, lhs, new_unary(ND_NEG, rhs, rhs->tok), tok);
 
-    if (!is_pointer(lhs->ty) || !is_pointer(rhs->ty) || !is_compatible(lhs->ty->base, rhs->ty->base))
+    if (!is_pointer(lhs->ty) || !is_pointer(rhs->ty) ||
+        !is_compatible(type_unqual(lhs->ty->base), type_unqual(rhs->ty->base)))
         error(tok, "invalid operands to binary ‘-’");
 
     // ptr - ptr, which returns how many elements are between the two.
@@ -1693,6 +1694,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             Token *start = tok;
             Member *mem = emalloc(sizeof(Member));
             mem->ty = declarator(&tok, tok, basety);
+            if (align) mem->is_align = true;
             mem->align = MAX(align, mem->ty->align);
             if (mem->ty->kind == TY_VOID) error(start, "field ‘%.*s’ declared void", start->len, start->loc);
             if (mem->ty->size < 0 && tok->next->kind != TK_RBRACE)
@@ -1745,6 +1747,7 @@ static Type *record_decl(Token **rest, Token *tok) {
         }
     } else {
         ty = struct_type();
+        ty->is_anon = true;
         ty->id = intern("anon", 4);
     }
     ty->kind = is_union ? TY_UNION : TY_STRUCT;
