@@ -181,14 +181,23 @@ void add_type(Node *node) {
         // unary
         case ND_PLUS:
         case ND_NEG:
+            add_type(node->lhs);
+            if (!is_arith(node->lhs->ty))
+                error(node->tok, "wrong type argument to unary ‘%c’", node->kind == ND_PLUS ? '+' : '-');
+            lvalue_convert(&node->lhs);
+            integer_promotion(&node->lhs);
+            node->ty = node->lhs->ty;
+            break;
         case ND_INVERT:
             add_type(node->lhs);
+            if (!is_integer(node->lhs->ty)) error(node->tok, "wrong type argument to unary ‘~’");
             lvalue_convert(&node->lhs);
             integer_promotion(&node->lhs);
             node->ty = node->lhs->ty;
             break;
         case ND_NOT:
             add_type(node->lhs);
+            if (!is_scalar(node->lhs->ty)) error(node->tok, "wrong type argument to unary ‘!’");
             lvalue_convert(&node->lhs);
             node->ty = ty_int;
             break;
