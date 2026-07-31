@@ -517,6 +517,7 @@ struct EnumVal {
 bool is_integer(Type *ty);
 bool is_arith(Type *ty);
 bool is_pointer(Type *ty);
+bool is_funcptr(Type *ty);
 bool is_compatible(Type *t1, Type *t2);
 Type *pointer_to(Type *base, uint32_t qual);
 Type *func_type(Type *return_ty);

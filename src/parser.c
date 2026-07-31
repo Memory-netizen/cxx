@@ -883,6 +883,10 @@ static Node *postfix(Token **rest, Token *tok) {
             case TK_LBRACKET: {
                 Token *start = tok;
                 Node *idx = expr(&tok, tok->next);
+                if (!is_pointer(node->ty) && is_pointer(idx->ty)) swap(&node, &idx);
+                if (!is_pointer(node->ty)) error(start, "subscripted value is neither array nor pointer");
+                if (!is_integer(idx->ty)) error(start, "array subscript is not an integer");
+                if (is_funcptr(node->ty)) error(start, "subscripted value is pointer to function");
                 tok = skip(tok, TK_RBRACKET);
                 node = new_unary(ND_DEREF, new_add(node, idx, start), start);
                 continue;
@@ -956,20 +960,22 @@ static Node *unary(Token **rest, Token *tok) {
         case TK_DEC:
             return new_unary(ND_PREDEC, unary(rest, tok->next), tok);
         case TK_SIZEOF: {
+            Token *start = tok;
             if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, 1)) {
-                Token *start = tok;
                 Type *ty = typename(&tok, tok->next->next);
                 *rest = skip(tok, TK_RPAREN);
+                if (ty->size < 0) error(start, "invalid application of ‘sizeof’ to incomplete type");
                 return new_ulong(ty->size, start);
             }
             Node *node = unary(rest, tok->next);
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+            if (node->ty->size < 0) error(start, "invalid application of ‘sizeof’ to incomplete type");
             return new_ulong(node->ty->size, tok);
         }
         case TK_ALIGNOF: {
+            Token *start = tok;
             if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, 1)) {
-                Token *start = tok;
                 Type *ty = typename(&tok, tok->next->next);
                 *rest = skip(tok, TK_RPAREN);
                 return new_ulong(ty->align, start);
@@ -977,6 +983,7 @@ static Node *unary(Token **rest, Token *tok) {
             Node *node = unary(rest, tok->next);
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+            if (node->ty->size < 0) error(start, "invalid application of ‘alignof’ to incomplete type");
             return new_ulong(node->ty->align, tok);
         }
         default:

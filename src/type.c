@@ -299,7 +299,7 @@ void check_binop(Node *node) {
     error(node->tok, "invalid operands to binary ‘%.*s’", node->tok->len, node->tok->loc);
 }
 
-static void check_assign(Node *node) {
+static void modifiable_lvalue(Node *node) {
     add_type(node->lhs);
     Node *lhs = node->lhs;
     if (!lhs->is_lvalue || lhs->ty->kind == TY_FUNC)
@@ -314,6 +314,7 @@ static void check_assign(Node *node) {
             error(node->tok, "assignment of read-only location ‘%.*s’", cur->loc - start + cur->len, start);
         }
     }
+    if (is_void(lhs->ty)) error(node->tok, "incomplete type ‘void’ is not assignable");
     if (lhs->kind == ND_IMCAST && lhs->lhs->ty->kind == TY_ARRAY)
         error(lhs->tok, "assignment to expression with array type");
 }
@@ -450,7 +451,7 @@ void add_type(Node *node) {
             node->ty = ty_int;
             break;
         case ND_AS:
-            check_assign(node);
+            modifiable_lvalue(node);
             add_type(node->rhs);
             if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION) {
                 lvalue_convert(&node->rhs);
@@ -463,7 +464,7 @@ void add_type(Node *node) {
         case ND_POSTINC:
         case ND_POSTDEC:
             check_unop(node);
-            check_assign(node);
+            modifiable_lvalue(node);
             node->ty = node->lhs->ty;
             break;
         case ND_ADDAS:
@@ -475,7 +476,7 @@ void add_type(Node *node) {
                 node->kind = ND_PTRAS;
             }
             check_binop(node);
-            check_assign(node);
+            modifiable_lvalue(node);
             lvalue_convert(&node->rhs);
             Type *ty = get_common_type(node->lhs->ty, node->rhs->ty);
             new_imcast(&node->rhs, is_ptr ? ty_long : ty);
@@ -490,7 +491,7 @@ void add_type(Node *node) {
         case ND_ORAS:
         case ND_XORAS: {
             check_binop(node);
-            check_assign(node);
+            modifiable_lvalue(node);
             lvalue_convert(&node->rhs);
             Type *ty = get_common_type(node->lhs->ty, node->rhs->ty);
             new_imcast(&node->rhs, ty);
@@ -501,7 +502,7 @@ void add_type(Node *node) {
         case ND_LEFTAS:
         case ND_RIGHTAS:
             check_binop(node);
-            check_assign(node);
+            modifiable_lvalue(node);
             lvalue_convert(&node->rhs);
             integer_promotion(&node->rhs);
             node->compute_ty = get_common_type(node->lhs->ty, ty_int);
