@@ -227,6 +227,30 @@ bool is_compatible(Type *t1, Type *t2) {
 
 void add_type(Node *node);
 
+void check_unop(Node *node) {
+    add_type(node->lhs);
+    Type *lhs = node->lhs->ty;
+    switch (node->kind) {
+        case ND_PLUS:
+        case ND_NEG:
+            if (is_arith(lhs)) return;
+            break;
+        case ND_INVERT:
+            if (is_integer(lhs)) return;
+            break;
+        case ND_NOT:
+        case ND_PREINC:
+        case ND_PREDEC:
+        case ND_POSTINC:
+        case ND_POSTDEC:
+            if (is_scalar(lhs)) return;
+            break;
+        default:
+            return;
+    }
+    error(node->tok, "wrong type argument to unary ‘%.*s’", node->tok->len, node->tok->loc);
+}
+
 void check_binop(Node *node) {
     add_type(node->lhs);
     add_type(node->rhs);
@@ -273,6 +297,25 @@ void check_binop(Node *node) {
             return;
     }
     error(node->tok, "invalid operands to binary ‘%.*s’", node->tok->len, node->tok->loc);
+}
+
+static void check_assign(Node *node) {
+    add_type(node->lhs);
+    Node *lhs = node->lhs;
+    if (!lhs->is_lvalue || lhs->ty->kind == TY_FUNC)
+        error(node->tok, "lvalue required as ‘%.*s’ operand", node->tok->len, node->tok->loc);
+    if (lhs->ty->qual & Q_CONST || lhs->ty->qual & Q_MEMCONST) {
+        if (lhs->kind == ND_VAR) {
+            error(node->tok, "assignment of read-only variable ‘%s’", str(lhs->var->id));
+        } else {
+            char *start = lhs->tok->loc;
+            Token *cur = lhs->tok;
+            while (cur->next != node->tok) cur = cur->next;
+            error(node->tok, "assignment of read-only location ‘%.*s’", cur->loc - start + cur->len, start);
+        }
+    }
+    if (lhs->kind == ND_IMCAST && lhs->lhs->ty->kind == TY_ARRAY)
+        error(lhs->tok, "assignment to expression with array type");
 }
 
 void lvalue_convert(Node **expr) {
@@ -328,23 +371,14 @@ void add_type(Node *node) {
         // unary
         case ND_PLUS:
         case ND_NEG:
-            add_type(node->lhs);
-            if (!is_arith(node->lhs->ty))
-                error(node->tok, "wrong type argument to unary ‘%c’", node->kind == ND_PLUS ? '+' : '-');
-            lvalue_convert(&node->lhs);
-            integer_promotion(&node->lhs);
-            node->ty = node->lhs->ty;
-            break;
         case ND_INVERT:
-            add_type(node->lhs);
-            if (!is_integer(node->lhs->ty)) error(node->tok, "wrong type argument to unary ‘~’");
+            check_unop(node);
             lvalue_convert(&node->lhs);
             integer_promotion(&node->lhs);
             node->ty = node->lhs->ty;
             break;
         case ND_NOT:
-            add_type(node->lhs);
-            if (!is_scalar(node->lhs->ty)) error(node->tok, "wrong type argument to unary ‘!’");
+            check_unop(node);
             lvalue_convert(&node->lhs);
             node->ty = ty_int;
             break;
@@ -416,14 +450,8 @@ void add_type(Node *node) {
             node->ty = ty_int;
             break;
         case ND_AS:
-            add_type(node->lhs);
+            check_assign(node);
             add_type(node->rhs);
-            if (!node->lhs->is_lvalue || node->lhs->ty->kind == TY_FUNC)
-                error(node->tok, "lvalue required as left operand of assignment");
-            if (node->lhs->ty->qual & Q_CONST)
-                error(node->tok, "assignment of read-only variable ‘%s’", str(node->lhs->var->id));
-            if (node->lhs->kind == ND_IMCAST && node->lhs->lhs->ty->kind == TY_ARRAY)
-                error(node->lhs->tok, "array type is not assignable");
             if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION) {
                 lvalue_convert(&node->rhs);
                 new_imcast(&node->rhs, node->lhs->ty);
@@ -434,8 +462,8 @@ void add_type(Node *node) {
         case ND_PREDEC:
         case ND_POSTINC:
         case ND_POSTDEC:
-            add_type(node->lhs);
-
+            check_unop(node);
+            check_assign(node);
             node->ty = node->lhs->ty;
             break;
         case ND_ADDAS:
@@ -447,6 +475,7 @@ void add_type(Node *node) {
                 node->kind = ND_PTRAS;
             }
             check_binop(node);
+            check_assign(node);
             lvalue_convert(&node->rhs);
             Type *ty = get_common_type(node->lhs->ty, node->rhs->ty);
             new_imcast(&node->rhs, is_ptr ? ty_long : ty);
@@ -461,6 +490,7 @@ void add_type(Node *node) {
         case ND_ORAS:
         case ND_XORAS: {
             check_binop(node);
+            check_assign(node);
             lvalue_convert(&node->rhs);
             Type *ty = get_common_type(node->lhs->ty, node->rhs->ty);
             new_imcast(&node->rhs, ty);
@@ -471,6 +501,7 @@ void add_type(Node *node) {
         case ND_LEFTAS:
         case ND_RIGHTAS:
             check_binop(node);
+            check_assign(node);
             lvalue_convert(&node->rhs);
             integer_promotion(&node->rhs);
             node->compute_ty = get_common_type(node->lhs->ty, ty_int);
