@@ -307,12 +307,12 @@ static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
     add_type(rhs);
 
     // num + num
-    if (is_integer(lhs->ty) && is_integer(rhs->ty)) return new_binary(ND_ADD, lhs, rhs, tok);
-
-    if (lhs->ty->base && rhs->ty->base) error(tok, "invalid operands to binary expression");
+    if (is_arith(lhs->ty) && is_arith(rhs->ty)) return new_binary(ND_ADD, lhs, rhs, tok);
 
     // Canonicalize `num + ptr` to `ptr + num`.
-    if (!lhs->ty->base && rhs->ty->base) swap(&lhs, &rhs);
+    if (!is_pointer(lhs->ty) && is_pointer(rhs->ty)) swap(&lhs, &rhs);
+
+    if (!is_pointer(lhs->ty) || !is_integer(rhs->ty)) error(tok, "invalid operands to binary ‘+’");
 
     // ptr + num
     return new_binary(ND_PTRADD, lhs, rhs, tok);
@@ -323,24 +323,25 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
     add_type(rhs);
 
     // num - num
-    if (is_integer(lhs->ty) && is_integer(rhs->ty)) return new_binary(ND_SUB, lhs, rhs, tok);
+    if (is_arith(lhs->ty) && is_arith(rhs->ty)) return new_binary(ND_SUB, lhs, rhs, tok);
 
     // ptr - num
-    if (lhs->ty->base && is_integer(rhs->ty)) return new_binary(ND_PTRADD, lhs, new_unary(ND_NEG, rhs, rhs->tok), tok);
+    if (is_pointer(lhs->ty) && is_integer(rhs->ty))
+        return new_binary(ND_PTRADD, lhs, new_unary(ND_NEG, rhs, rhs->tok), tok);
+
+    if (!is_pointer(lhs->ty) || !is_pointer(rhs->ty) || !is_compatible(lhs->ty->base, rhs->ty->base))
+        error(tok, "invalid operands to binary ‘-’");
 
     // ptr - ptr, which returns how many elements are between the two.
-    if (lhs->ty->base && rhs->ty->base) {
-        size_t size = lhs->ty->base->size;
-        lvalue_convert(&lhs);
-        lvalue_convert(&rhs);
-        new_imcast(&lhs, ty_long);
-        new_imcast(&rhs, ty_long);
-        Node *node = new_binary(ND_SUB, lhs, rhs, tok);
-        return new_binary(ND_DIV, node, new_long(size, tok), tok);
-    }
+    size_t size = lhs->ty->base->size;
+    lvalue_convert(&lhs);
+    lvalue_convert(&rhs);
+    new_imcast(&lhs, ty_long);
+    new_imcast(&rhs, ty_long);
+    Node *node = new_binary(ND_SUB, lhs, rhs, tok);
 
-    error(tok, "invalid operands to binary expression");
-    return NULL;
+    if (size == 1) return node;
+    return new_binary(ND_DIV, node, new_long(size, tok), tok);
 }
 
 // Returns true if a given token represents a type.

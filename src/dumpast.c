@@ -93,8 +93,13 @@ static void print_type(Type *ty) {
             fprintf(stdout, "i64");
             break;
         case TY_CHAR:
-            if (ty->is_unsigned) fprintf(stdout, "unsigned ");
             fprintf(stdout, "char");
+            break;
+        case TY_SCHAR:
+            fprintf(stdout, "signed char");
+            break;
+        case TY_UCHAR:
+            fprintf(stdout, "unsigned char");
             break;
         case TY_BOOL:
             fprintf(stdout, "bool");

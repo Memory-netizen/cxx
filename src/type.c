@@ -6,8 +6,8 @@
 Type *ty_void = TYPE(TY_VOID, 1, 1, false);
 Type *ty_bool = TYPE(TY_BOOL, 1, 1, false);
 Type *ty_char = TYPE(TY_CHAR, 1, 1, CHAR_MIN == 0);
-Type *ty_schar = TYPE(TY_CHAR, 1, 1, false);
-Type *ty_uchar = TYPE(TY_CHAR, 1, 1, true);
+Type *ty_schar = TYPE(TY_SCHAR, 1, 1, false);
+Type *ty_uchar = TYPE(TY_UCHAR, 1, 1, true);
 Type *ty_short = TYPE(TY_SHORT, 2, 2, false);
 Type *ty_ushort = TYPE(TY_SHORT, 2, 2, true);
 Type *ty_int = TYPE(TY_INT, 4, 4, false);
@@ -41,9 +41,9 @@ bool is_funcptr(Type *ty) {
 }
 
 bool is_integer(Type *ty) {
-    return ty->kind == TY_BOOL || ty->kind == TY_CHAR || ty->kind == TY_SHORT || ty->kind == TY_INT ||
-           ty->kind == TY_LONG || ty->kind == TY_LLONG || ty->kind == TY_ENUM || ty->kind == TY_I1 ||
-           ty->kind == TY_I32 || ty->kind == TY_I64;
+    return ty->kind == TY_BOOL || ty->kind == TY_CHAR || ty->kind == TY_SCHAR || ty->kind == TY_UCHAR ||
+           ty->kind == TY_SHORT || ty->kind == TY_INT || ty->kind == TY_LONG || ty->kind == TY_LLONG ||
+           ty->kind == TY_ENUM || ty->kind == TY_I1 || ty->kind == TY_I32 || ty->kind == TY_I64;
 }
 
 bool is_flonum(Type *ty) { return ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE || ty->kind == TY_LDOUBLE; }
@@ -144,6 +144,43 @@ Type *type_unqual(Type *ty) {
     ty->qual = 0;
 
     return ty;
+}
+
+bool is_compatible(Type *t1, Type *t2) {
+    if (t1 == t2) return true;
+
+    if (t1->kind != t2->kind) return false;
+
+    switch (t1->kind) {
+        case TY_SHORT:
+        case TY_INT:
+        case TY_LONG:
+            return t1->is_unsigned == t2->is_unsigned;
+        case TY_CHAR:
+        case TY_SCHAR:
+        case TY_UCHAR:
+        case TY_FLOAT:
+        case TY_DOUBLE:
+        case TY_LDOUBLE:
+            return true;
+        case TY_PTR:
+            return is_compatible(t1->base, t2->base);
+        case TY_FUNC:
+            if (!is_compatible(t1->ret, t2->ret)) return false;
+            if (t1->is_variadic != t2->is_variadic) return false;
+
+            Type *p1 = t1->params;
+            Type *p2 = t2->params;
+            for (; p1 && p2; p1 = p1->next, p2 = p2->next)
+                if (!is_compatible(p1, p2)) return false;
+            return p1 == NULL && p2 == NULL;
+        case TY_ARRAY:
+            if (!is_compatible(t1->base, t2->base)) return false;
+            return t1->len < 0 || t2->len < 0 || t1->len == t2->len;
+        default:
+            break;
+    }
+    return false;
 }
 
 void add_type(Node *node);

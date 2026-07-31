@@ -439,6 +439,8 @@ typedef enum {
     TY_I32,
     TY_I64,
     TY_CHAR,
+    TY_UCHAR,
+    TY_SCHAR,
     TY_BOOL,
     TY_SHORT,
     TY_INT,
@@ -501,7 +503,9 @@ struct Member {
 };
 
 bool is_integer(Type *ty);
+bool is_arith(Type *ty);
 bool is_pointer(Type *ty);
+bool is_compatible(Type *t1, Type *t2);
 Type *pointer_to(Type *base, uint32_t qual);
 Type *func_type(Type *return_ty);
 Type *array_of(Type *base, int size);
