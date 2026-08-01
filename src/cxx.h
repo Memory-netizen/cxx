@@ -524,6 +524,7 @@ bool is_flonum(Type *ty);
 bool is_arith(Type *ty);
 bool is_pointer(Type *ty);
 bool is_nullptr(Type *ty);
+bool is_null_constant(Node *node);
 bool is_scalar(Type *ty);
 bool is_funcptr(Type *ty);
 bool is_compatible(Type *t1, Type *t2);

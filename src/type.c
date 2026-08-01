@@ -32,6 +32,10 @@ bool is_objptr(Type *ty) {
     return is_obj(ty->base);
 }
 
+bool is_complete(Type *ty) { return ty->size > 0; }
+
+bool is_complete_objptr(Type *ty) { return is_objptr(ty) && is_complete(ty->base); }
+
 bool is_voidptr(Type *ty) {
     if (ty->kind != TY_PTR) return false;
     return is_void(ty->base);
@@ -55,6 +59,13 @@ bool is_arith(Type *ty) { return is_integer(ty) || is_flonum(ty); }
 bool is_pointer(Type *ty) { return ty->kind == TY_PTR; }
 
 bool is_nullptr(Type *ty) { return ty->kind == TY_NULLPTR; }
+
+bool is_null_constant(Node *node) {
+    if (node->kind == ND_NUM && node->val == 0 && is_integer(node->ty)) return true;
+    if (node->kind == ND_NULLPTR) return true;
+    if (node->kind == ND_EXCAST && is_voidptr(node->ty) && is_null_constant(node->lhs)) return true;
+    return false;
+}
 
 bool is_scalar(Type *ty) { return is_arith(ty) || is_pointer(ty) || is_nullptr(ty); }
 
@@ -244,11 +255,13 @@ void check_unop(Node *node) {
             if (is_integer(lhs)) return;
             break;
         case ND_NOT:
+            if (is_scalar(lhs)) return;
+            break;
         case ND_PREINC:
         case ND_PREDEC:
         case ND_POSTINC:
         case ND_POSTDEC:
-            if (is_scalar(lhs)) return;
+            if (is_arith(lhs) || is_pointer(lhs)) return;
             break;
         default:
             return;

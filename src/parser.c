@@ -77,6 +77,15 @@ static Node *new_excast(Node *expr, Type *ty, Token *tok) {
     if (is_flonum(expr->ty) && is_pointer(ty)) error(tok, "cannot cast floating-point value to pointer type");
     if (is_flonum(ty) && is_pointer(expr->ty)) error(tok, "cannot cast pointer to floating-point type");
 
+    if (is_nullptr(ty)) {
+        if (!is_null_constant(expr) && !is_nullptr(expr->ty))
+            error(tok, "only ‘typeof (nullptr)’ or a null pointer constant can be converted to ‘typeof (nullptr)’");
+    }
+    if (is_nullptr(expr->ty)) {
+        if (!is_pointer(ty) && !is_bool(ty) && !is_void(ty))
+            error(tok, "cannot cast nullptr_t to non-void, non-bool, non-pointer type");
+    }
+
     Node *node = new_node(ND_EXCAST, tok);
     node->lhs = expr;
     node->ty = ty;
