@@ -55,40 +55,16 @@ static Node *new_var_node(Sym *var, Token *tok) {
     return node;
 }
 
-static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs, Token *tok) {
-    Node *node = new_node(kind, tok);
-    node->lhs = lhs;
-    node->rhs = rhs;
-    return node;
-}
-
 Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
     Node *node = new_node(kind, tok);
     node->lhs = expr;
     return node;
 }
 
-static Node *new_excast(Node *expr, Type *ty, Token *tok) {
-    add_type(expr);
-    lvalue_convert(&expr);
-
-    if (!is_void(ty) && !is_scalar(ty)) error(tok, "scalar or void type is required in here");
-    if (!is_void(ty) && !is_scalar(expr->ty)) error(tok, "scalar type is required in here");
-    if (is_flonum(expr->ty) && is_pointer(ty)) error(tok, "cannot cast floating-point value to pointer type");
-    if (is_flonum(ty) && is_pointer(expr->ty)) error(tok, "cannot cast pointer to floating-point type");
-
-    if (is_nullptr(ty)) {
-        if (!is_null_constant(expr) && !is_nullptr(expr->ty))
-            error(tok, "only ‘typeof (nullptr)’ or a null pointer constant can be converted to ‘typeof (nullptr)’");
-    }
-    if (is_nullptr(expr->ty)) {
-        if (!is_pointer(ty) && !is_bool(ty) && !is_void(ty))
-            error(tok, "cannot cast nullptr_t to non-void, non-bool, non-pointer type");
-    }
-
-    Node *node = new_node(ND_EXCAST, tok);
-    node->lhs = expr;
-    node->ty = ty;
+static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs, Token *tok) {
+    Node *node = new_node(kind, tok);
+    node->lhs = lhs;
+    node->rhs = rhs;
     return node;
 }
 
@@ -123,61 +99,23 @@ struct Scope {
     TagScope *tags;
 };
 
-static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_brace);
+static Scope *scope = &(Scope){0};
 
-static Initializer *new_initializer(Type *ty, bool is_flexible) {
-    Initializer *init = emalloc(sizeof(Initializer));
-    memset(init, 0, sizeof(Initializer));
-    init->ty = ty;
-
-    if (ty->kind == TY_ARRAY) {
-        if (is_flexible && ty->size < 0) {
-            init->is_flexible = true;
-            return init;
-        }
-        init->child = emalloc(ty->len * sizeof(Initializer *));
-        for (int i = 0; i < ty->len; i++) init->child[i] = new_initializer(ty->base, false);
-        return init;
-    }
-    if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
-        // Count the number of struct members.
-        int len = 0;
-        for (Member *mem = ty->members; mem; mem = mem->next) len++;
-
-        init->child = emalloc(len * sizeof(Initializer *));
-
-        for (Member *mem = ty->members; mem; mem = mem->next) {
-            if (is_flexible && ty->is_flexible && !mem->next) {
-                Initializer *child = emalloc(sizeof(Initializer));
-                child->ty = mem->ty;
-                child->is_flexible = true;
-                init->child[mem->idx] = child;
-            } else {
-                init->child[mem->idx] = new_initializer(mem->ty, false);
-            }
-        }
-        return init;
-    }
-
-    return init;
+static void enter_scope(void) {
+    Scope *sc = emalloc(sizeof(Scope));
+    sc->next = scope;
+    sc->vars = NULL;
+    sc->tags = NULL;
+    scope = sc;
 }
 
-// For local variable initializer.
-typedef struct InitDesg InitDesg;
-struct InitDesg {
-    InitDesg *next;
-    int idx;
-    Member *member;
-    Sym *var;
-};
+static void leave_scope(void) { scope = scope->next; }
 
 // All local variable instances created during parsing are
 // accumulated to this list.
 static Sym *locals;
 static Sym *globals;
 static Type *types;
-
-static Scope *scope = &(Scope){0};
 
 // Points to the function object the parser is currently parsing.
 static Sym *cur_fn;
@@ -187,15 +125,6 @@ static Node *gotos;
 static Node *labels;
 
 static Node *cur_sw;
-
-static void enter_scope(void) {
-    Scope *sc = emalloc(sizeof(Scope));
-    sc->next = scope;
-    sc->vars = NULL;
-    scope = sc;
-}
-
-static void leave_scope(void) { scope = scope->next; }
 
 // Find a variable by name.
 static VarScope *find_var(Token *tok, bool search_par) {
@@ -222,12 +151,6 @@ static Type *find_tag(Token *tok, bool search_par) {
             return NULL;
     }
     return NULL;
-}
-
-static Member *copy_mem(Member *mem) {
-    Member *new = emalloc(sizeof(Member));
-    *new = *mem;
-    return new;
 }
 
 static VarScope *push_scope(uint32_t id) {
@@ -304,11 +227,6 @@ static Type *find_typedef(Token *tok, bool search_par) {
         if (sc) return sc->type_def;
     }
     return NULL;
-}
-
-static uint32_t get_ident(Token *tok) {
-    if (tok->kind != TK_IDENT) error(tok, "expected identifier");
-    return tok->id;
 }
 
 static void swap(Node **lhs, Node **rhs) {
@@ -453,6 +371,54 @@ static Token *skip_excess_element(Token *tok) {
 
     assign(&tok, tok);
     return tok;
+}
+
+// For local variable initializer.
+typedef struct InitDesg InitDesg;
+struct InitDesg {
+    InitDesg *next;
+    int idx;
+    Member *member;
+    Sym *var;
+};
+
+static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_brace);
+
+static Initializer *new_initializer(Type *ty, bool is_flexible) {
+    Initializer *init = emalloc(sizeof(Initializer));
+    memset(init, 0, sizeof(Initializer));
+    init->ty = ty;
+
+    if (ty->kind == TY_ARRAY) {
+        if (is_flexible && ty->size < 0) {
+            init->is_flexible = true;
+            return init;
+        }
+        init->child = emalloc(ty->len * sizeof(Initializer *));
+        for (int i = 0; i < ty->len; i++) init->child[i] = new_initializer(ty->base, false);
+        return init;
+    }
+    if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
+        // Count the number of struct members.
+        int len = 0;
+        for (Member *mem = ty->members; mem; mem = mem->next) len++;
+
+        init->child = emalloc(len * sizeof(Initializer *));
+
+        for (Member *mem = ty->members; mem; mem = mem->next) {
+            if (is_flexible && ty->is_flexible && !mem->next) {
+                Initializer *child = emalloc(sizeof(Initializer));
+                child->ty = mem->ty;
+                child->is_flexible = true;
+                init->child[mem->idx] = child;
+            } else {
+                init->child[mem->idx] = new_initializer(mem->ty, false);
+            }
+        }
+        return init;
+    }
+
+    return init;
 }
 
 static void string_initializer(Token **rest, Token *tok, Initializer *init) {
@@ -650,6 +616,12 @@ static Initializer *initializer(Token **rest, Token *tok, Type *ty, Type **new_t
     return init;
 }
 
+static Member *copy_mem(Member *mem) {
+    Member *new = emalloc(sizeof(Member));
+    *new = *mem;
+    return new;
+}
+
 static Node *init_desg_expr(InitDesg *desg, Token *tok) {
     if (desg->var) return new_var_node(desg->var, tok);
 
@@ -752,6 +724,11 @@ static void gvar_initializer(Token **rest, Token *tok, Sym *var) {
 
     eval_gvar_data(init, var->ty);
     var->init = init;
+}
+
+static uint32_t get_ident(Token *tok) {
+    if (tok->kind != TK_IDENT) error(tok, "expected identifier");
+    return tok->id;
 }
 
 static Node *fncall(Token **rest, Token *tok) {
@@ -897,15 +874,15 @@ static Node *postfix(Token **rest, Token *tok) {
         Type *ty = typename(&tok, tok);
         tok = skip(tok, TK_RPAREN);
         Sym *var;
-        if (scope->next == NULL || sclass == SC_STATIC) {
+        if (scope->next == NULL || sclass & SC_STATIC) {
             uint32_t uid = new_unique_varname(intern(".compoundliteral", 16));
             var = new_gvar(uid, ty);
-            var->sclass = SC_STATIC;
             gvar_initializer(&tok, tok, var);
         } else {
-            var = new_lvar(intern("", 1), ty);
+            var = new_lvar(intern("", 0), ty);
             init = lvar_initializer(&tok, tok, var);
         }
+        var->sclass = sclass;
         node = new_var_node(var, start);
         node->var_init = init;
     } else {
@@ -1026,6 +1003,30 @@ static Node *unary(Token **rest, Token *tok) {
             break;
     }
     return postfix(rest, tok);
+}
+
+static Node *new_excast(Node *expr, Type *ty, Token *tok) {
+    add_type(expr);
+    lvalue_convert(&expr);
+
+    if (!is_void(ty) && !is_scalar(ty)) error(tok, "scalar or void type is required in here");
+    if (!is_void(ty) && !is_scalar(expr->ty)) error(tok, "scalar type is required in here");
+    if (is_flonum(expr->ty) && is_pointer(ty)) error(tok, "cannot cast floating-point value to pointer type");
+    if (is_flonum(ty) && is_pointer(expr->ty)) error(tok, "cannot cast pointer to floating-point type");
+
+    if (is_nullptr(ty)) {
+        if (!is_null_constant(expr) && !is_nullptr(expr->ty))
+            error(tok, "only ‘typeof (nullptr)’ or a null pointer constant can be converted to ‘typeof (nullptr)’");
+    }
+    if (is_nullptr(expr->ty)) {
+        if (!is_pointer(ty) && !is_bool(ty) && !is_void(ty))
+            error(tok, "cannot cast nullptr_t to non-void, non-bool, non-pointer type");
+    }
+
+    Node *node = new_node(ND_EXCAST, tok);
+    node->lhs = expr;
+    node->ty = ty;
+    return node;
 }
 
 // CastExp ::= UnaryExp | "(" TypeName ")" CastExp
@@ -1318,9 +1319,9 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         if (ty->kind == TY_VOID) error(start, "variable ‘%.*s’ declared void", start->len, start->loc);
         Sym *var;
         uint32_t id = get_ident(ty->name);
-        if (sclass == SC_EXTERN || ty->kind == TY_FUNC) {
+        if (sclass & SC_EXTERN || ty->kind == TY_FUNC) {
             var = new_gvar(id, ty);
-        } else if (sclass == SC_STATIC) {
+        } else if (sclass & SC_STATIC) {
             char *name = format("%s.%s", str(cur_fn->id), str(id));
             uint32_t uid = new_unique_varname(intern(name, strlen(name)));
             var = new_gvar(uid, ty);
@@ -1332,7 +1333,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         var->align = MAX(align, ty->align);
         var->is_function = var->ty->kind == TY_FUNC;
         if (tok->kind == TK_AS) {
-            if (sclass == SC_STATIC) {
+            if (sclass & SC_STATIC) {
                 gvar_initializer(&tok, tok->next, var);
             } else {
                 Node *expr = lvar_initializer(&tok, tok->next, var);
@@ -1647,7 +1648,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
             int align = 0;
             int funcspec = 0;
             Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
-            if (sclass == SC_TYPEDEF) {
+            if (sclass & SC_TYPEDEF) {
                 Type *ty = declarator(&tok, tok, basety);
                 push_scope(get_ident(ty->name))->type_def = ty;
             } else {
@@ -1864,7 +1865,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 SClass sc = sc_table[tok->kind];
                 if (!sclass) error(tok, "storage class specifier is not allowed in this context");
                 if (*sclass) {
-                    if (*sclass == sc)
+                    if (*sclass & sc)
                         error(tok, "duplicate ‘%.*s’", tok->len, tok->loc);
                     else
                         error(tok, "multiple storage classes in declaration specifiers");
@@ -2182,12 +2183,14 @@ static Token *external_declaration(Token *tok) {
 
         // function-definition
         if (tok->kind == TK_LBRACE) {
-            if (cnt || ty->kind != TY_FUNC || sclass == SC_TYPEDEF)
-                error(tok, "expected ‘;’ after top level declarator");
+            if (cnt || ty->kind != TY_FUNC) error(tok, "expected ‘=’, ‘,’, ‘;’ before ‘{’ token");
+            if (sclass & SC_TYPEDEF) error(tok, "function definition declared ‘typedef’");
+            if (sclass & SC_THREAD) error(tok, "function definition declared ‘thread_local’");
+            if (sclass & SC_REG) error(tok, "function definition declared ‘register’");
             Sym *fn = new_gvar(get_ident(ty->name), ty);
             fn->is_function = true;
-            fn->is_definition = true;
-            fn->sclass = sclass;
+            fn->is_defined = true;
+            fn->sclass = sclass ? sclass : SC_EXTERN;
             fn->funcspec = funcspec;
 
             locals = NULL;
@@ -2201,7 +2204,7 @@ static Token *external_declaration(Token *tok) {
                 if (param->name)
                     id = get_ident(param->name);
                 else
-                    id = intern("", 1);
+                    id = intern("", 0);
                 new_lvar(id, param);
                 param = param->next;
             }
@@ -2225,12 +2228,12 @@ static Token *external_declaration(Token *tok) {
 
         // declaration
         if (tok->kind == TK_AS) {
-            if (ty->kind == TY_FUNC || sclass == SC_TYPEDEF)
+            if (ty->kind == TY_FUNC || sclass & SC_TYPEDEF)
                 error(ty->name,
                       "illegal initializer (only variables can be "
                       "initialized)");
         }
-        if (sclass == SC_TYPEDEF) {
+        if (sclass & SC_TYPEDEF) {
             push_scope(get_ident(ty->name))->type_def = ty;
         } else {
             if (ty->kind == TY_VOID) error(start, "variable ‘%.*s’ declared void", start->len, start->loc);

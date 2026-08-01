@@ -239,12 +239,11 @@ enum {
 
 typedef enum {
     SC_NONE,
-    SC_AUTO = 1 << 0,
-    SC_TYPEDEF = 1 << 1,
-    SC_EXTERN = 1 << 2,
-    SC_STATIC = 1 << 3,
-    SC_THREAD = 1 << 4,
-    SC_REG = 1 << 5,
+    SC_EXTERN = 1 << 0,
+    SC_STATIC = 1 << 1,
+    SC_REG = 1 << 2,
+    SC_THREAD = 1 << 3,
+    SC_TYPEDEF = 1 << 4,
 } SClass;
 
 // Variable or function
@@ -253,6 +252,7 @@ struct Sym {
     uint32_t id;  // Variable name
     Type *ty;     // Type
     int align;    // alignment
+    SClass sclass;
 
     // Local variable
     bool is_local;  // local or global/function
@@ -260,9 +260,8 @@ struct Sym {
 
     // Global variable or function
     bool is_function;
-    bool is_definition;
+    bool is_defined;
     bool is_str;
-    SClass sclass;
 
     // Global variable
     uint32_t init_data;

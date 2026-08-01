@@ -404,7 +404,7 @@ void dump_data(Sym *data) {
 }
 
 void dump_fn(Sym *fn) {
-    if (!fn->is_definition) {
+    if (!fn->is_defined) {
         fprintf(out_file, "declare ");
     } else {
         fprintf(out_file, "define ");
@@ -420,13 +420,13 @@ void dump_fn(Sym *fn) {
     Type *param = fn->ty->params;
     for (uint32_t i = 0; param; i++) {
         print_type(param);
-        if (fn->is_definition) fprintf(out_file, " %%%d", i);
+        if (fn->is_defined) fprintf(out_file, " %%%d", i);
         param = param->next;
         if (param) fprintf(out_file, ", ");
     }
     if (fn->ty->is_variadic) fprintf(out_file, ", ...");
     fprintf(out_file, ")");
-    if (!fn->is_definition) {
+    if (!fn->is_defined) {
         fprintf(out_file, "\n\n");
         return;
     }

@@ -451,7 +451,7 @@ static void dump_node(Node *node) {
 }
 
 static const char *sclass_name[] = {
-    [SC_NONE] = "none",     [SC_AUTO] = "auto",           [SC_TYPEDEF] = "typedef", [SC_EXTERN] = "extern",
+    [SC_NONE] = "none",     [SC_TYPEDEF] = "typedef",     [SC_EXTERN] = "extern",
     [SC_STATIC] = "static", [SC_THREAD] = "thread_local", [SC_REG] = "register",
 };
 
@@ -470,7 +470,7 @@ void dump_ast(Module *prog) {
         fprintf(stdout, "FUNCTION %s  ty=", str(fn->id));
         print_type(fn->ty);
         fprintf(stdout, "  sclass=%s", sclass_name[fn->sclass]);
-        if (!fn->is_definition) {
+        if (!fn->is_defined) {
             fprintf(stdout, "  [declaration only]\n\n");
             continue;
         }
