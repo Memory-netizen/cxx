@@ -16,7 +16,7 @@ int main() {
            }));
     ASSERT(8, ({
                const int x = 8;
-               int *const y = &x;
+               const int *const y = &x;
                *y;
            }));
     ASSERT(6, ({

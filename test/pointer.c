@@ -61,7 +61,7 @@ int main() {
 
     ASSERT(3, ({
                int x[2];
-               int *y = &x;
+               int *y = x;
                *y = 3;
                *x;
            }));
@@ -90,37 +90,37 @@ int main() {
 
     ASSERT(0, ({
                int x[2][3];
-               int *y = x;
+               int *y = &x[0][0];
                *y = 0;
                **x;
            }));
     ASSERT(1, ({
                int x[2][3];
-               int *y = x;
+               int *y = &x[0][0];
                *(y + 1) = 1;
                *(*x + 1);
            }));
     ASSERT(2, ({
                int x[2][3];
-               int *y = x;
+               int *y = &x[0][0];
                *(y + 2) = 2;
                *(*x + 2);
            }));
     ASSERT(3, ({
                int x[2][3];
-               int *y = x;
+               int *y = &x[0][0];
                *(y + 3) = 3;
                **(x + 1);
            }));
     ASSERT(4, ({
                int x[2][3];
-               int *y = x;
+               int *y = &x[0][0];
                *(y + 4) = 4;
                *(*(x + 1) + 1);
            }));
     ASSERT(5, ({
                int x[2][3];
-               int *y = x;
+               int *y = &x[0][0];
                *(y + 5) = 5;
                *(*(x + 1) + 2);
            }));
@@ -163,37 +163,37 @@ int main() {
 
     ASSERT(0, ({
                int x[2][3];
-               int *y = x;
+               int *y = &x[0][0];
                y[0] = 0;
                x[0][0];
            }));
     ASSERT(1, ({
                int x[2][3];
-               int *y = x;
+               int *y = &x[0][0];
                y[1] = 1;
                x[0][1];
            }));
     ASSERT(2, ({
                int x[2][3];
-               int *y = x;
+               int *y = &x[0][0];
                y[2] = 2;
                x[0][2];
            }));
     ASSERT(3, ({
                int x[2][3];
-               int *y = x;
+               int *y = &x[0][0];
                y[3] = 3;
                x[1][0];
            }));
     ASSERT(4, ({
                int x[2][3];
-               int *y = x;
+               int *y = &x[0][0];
                y[4] = 4;
                x[1][1];
            }));
     ASSERT(5, ({
                int x[2][3];
-               int *y = x;
+               int *y = &x[0][0];
                y[5] = 5;
                x[1][2];
            }));

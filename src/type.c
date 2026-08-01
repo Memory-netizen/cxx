@@ -378,6 +378,30 @@ void check_condop(Node *node) {
     if (is_pointer(lhs) && is_integer(rhs)) return;
 }
 
+void check_asop(Node *lhs, Node *rhs) {
+    add_type(lhs);
+    add_type(rhs);
+    Type *lty = lhs->ty;
+    Type *rty = rhs->ty;
+    if (is_arith(lty) && is_arith(rty)) return;
+    if (is_record(lty) && is_compatible(type_unqual(lty), rty)) return;
+    if (is_pointer(lty) && is_pointer(rty) && is_compatible(type_unqual(lty->base), type_unqual(rty->base)))
+        if ((lty->base->qual & rty->base->qual) == rty->base->qual) return;
+
+    if (is_objptr(lty) && is_voidptr(rty))
+        if ((lty->base->qual & rty->base->qual) == rty->base->qual) return;
+    if (is_objptr(rty) && is_voidptr(lty))
+        if ((lty->base->qual & rty->base->qual) == rty->base->qual) return;
+
+    if (is_nullptr(lty) && is_null_constant(rhs)) return;
+    if (is_nullptr(lty) && is_nullptr(rty)) return;
+    if (is_pointer(lty) && (is_null_constant(rhs) || is_nullptr(rty))) return;
+
+    if (is_bool(lty) && (is_pointer(rty) || is_nullptr(rty))) return;
+
+    error(rhs->tok, "incompatible types when assigning");
+}
+
 static void modifiable_lvalue(Node *node) {
     add_type(node->lhs);
     Node *lhs = node->lhs;
@@ -533,6 +557,7 @@ void add_type(Node *node) {
             break;
         case ND_AS:
             modifiable_lvalue(node);
+            check_asop(node->lhs, node->rhs);
             add_type(node->rhs);
             if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION) {
                 lvalue_convert(&node->rhs);
