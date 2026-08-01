@@ -379,7 +379,12 @@ void check_condop(Node *node) {
 }
 
 void check_asop(Type *dst, Node *src, int ctx) {
-    static char *msg[] = {[CTX_AS] = "assigning", [CTX_RET] = "returning"};
+    static char *msg[] = {
+        [CTX_AS] = "assigning",
+        [CTX_RET] = "returning",
+        [CTX_INIT] = "initializing",
+        [CTX_CALL] = "passing argument",
+    };
     add_type(src);
     Type *src_ty = src->ty;
     if (is_arith(dst) && is_arith(src_ty)) return;
@@ -556,7 +561,15 @@ void add_type(Node *node) {
         case ND_AS:
             modifiable_lvalue(node);
             check_asop(node->lhs->ty, node->rhs, CTX_AS);
-            add_type(node->rhs);
+            if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION) {
+                lvalue_convert(&node->rhs);
+                new_imcast(&node->rhs, node->lhs->ty);
+            }
+            node->ty = node->lhs->ty;
+            break;
+        case ND_INIT:
+            add_type(node->lhs);
+            check_asop(node->lhs->ty, node->rhs, CTX_INIT);
             if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION) {
                 lvalue_convert(&node->rhs);
                 new_imcast(&node->rhs, node->lhs->ty);

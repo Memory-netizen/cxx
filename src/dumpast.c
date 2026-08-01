@@ -70,6 +70,7 @@ static const char *node_kind_name[] = {
     [ND_SWITCH] = "SWITCH",
     [ND_CASE] = "CASE",
     [ND_DECL] = "DECL",
+    [ND_INIT] = "INIT",
     [ND_VAR] = "VAR",
     [ND_NUM] = "NUM",
     [ND_NULLPTR] = "NULLPTR",
@@ -254,6 +255,7 @@ static void dump_node(Node *node) {
 
         case ND_COMMA:
         case ND_AS:
+        case ND_INIT:
         case ND_ADDAS:
         case ND_SUBAS:
         case ND_MULAS:

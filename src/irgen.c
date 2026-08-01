@@ -304,6 +304,7 @@ static Ref gen_expr(Node *node) {
             new_ins(IR_MEMSET, R, ops, 3);
             return R;
         }
+        case ND_INIT:
         case ND_AS: {
             Ref addr = gen_expr(node->lhs);
             int align = node->ty->align;

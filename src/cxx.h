@@ -350,6 +350,7 @@ typedef enum {
 
     // Declare
     ND_DECL,
+    ND_INIT,
 
     // Term
     ND_VAR,      // Variable

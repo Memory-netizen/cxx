@@ -696,12 +696,10 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
     if (!init->expr) return new_node(ND_NOP, tok);
 
     Node *lhs = init_desg_expr(desg, tok);
-    add_type(lhs);
-    lhs->ty = type_unqual(lhs->ty);
     Node *rhs = init->expr;
-    Node *as = new_binary(ND_AS, lhs, rhs, tok);
-    add_type(as);
-    return as;
+    Node *node = new_binary(ND_INIT, lhs, rhs, tok);
+    add_type(node);
+    return node;
 }
 
 static Node *lvar_initializer(Token **rest, Token *tok, Sym *var) {
@@ -787,6 +785,7 @@ static Node *fncall(Token **rest, Token *tok) {
         if (param_ty) {
             if (param_ty->kind == TY_STRUCT || param_ty->kind == TY_UNION)
                 error(arg->tok, "passing struct or union is not supported yet");
+            check_asop(param_ty, arg, CTX_CALL);
             lvalue_convert(&arg);
             new_imcast(&arg, param_ty);
             param_ty = param_ty->next;
