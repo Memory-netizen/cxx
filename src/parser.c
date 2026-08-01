@@ -8,7 +8,7 @@ static const SClass sc_table[] = {
 };
 
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec);
-static Type *decl_suffix(Token **rest, Token *tok, Type *ty);
+static Type *decl_suffix(Token **rest, Token *tok, Type *ty, bool is_param);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
 static Node *declaration(Token **rest, Token *tok, Type *ty, SClass sclass, int align);
 static Node *stmt(Token **rest, Token *tok);
@@ -398,24 +398,25 @@ static Type *pointers(Token **rest, Token *tok, Type *ty) {
 // ArrAbsDeclr  ::= DirAbsDeclr? ArrDimen
 // FuncAbsDeclr ::= DirAbsDeclr? "(" ParamList? ")"
 
-static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool restric) {
+static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool is_param) {
     ty = pointers(&tok, tok, ty);
 
-    if (tok->kind == TK_LPAREN && (tok->next->kind != TK_RPAREN && !is_typename(tok->next, 1))) {
+    if (tok->kind == TK_LPAREN &&
+        (tok->next->kind != TK_RPAREN && tok->next->kind != TK_ELLIPSIS && !is_typename(tok->next, 1))) {
         Token *start = tok;
         Type dummy = {};
-        abstract_declarator(&tok, start->next, &dummy, restric);
+        abstract_declarator(&tok, start->next, &dummy, is_param);
         tok = skip(tok, TK_RPAREN);
-        ty = decl_suffix(rest, tok, ty);
-        return abstract_declarator(&tok, start->next, ty, restric);
+        ty = decl_suffix(rest, tok, ty, is_param);
+        return abstract_declarator(&tok, start->next, ty, is_param);
     }
 
     Token *name = NULL;
-    if (!restric && tok->kind == TK_IDENT) {
+    if (is_param && tok->kind == TK_IDENT) {
         name = tok;
         tok = tok->next;
     }
-    ty = decl_suffix(rest, tok, ty);
+    ty = decl_suffix(rest, tok, ty, is_param);
     ty->name = name;
     return ty;
 }
@@ -423,7 +424,7 @@ static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool restri
 // TypeName ::= DeclSpecs AbsDeclr?
 static Type *typename(Token **rest, Token *tok) {
     Type *ty = declspecs(&tok, tok, NULL, NULL, NULL);
-    return abstract_declarator(rest, tok, ty, true);
+    return abstract_declarator(rest, tok, ty, false);
 }
 
 static bool is_end(Token *tok) {
@@ -867,7 +868,7 @@ static Node *primary(Token **rest, Token *tok) {
         *rest = tok->next;
         return node;
     }
-    error(tok, "expected expression");
+    error(tok, "expected expression before ‘%.*s’", tok->len, tok->loc);
     return NULL;
 }
 
@@ -2036,13 +2037,13 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
 
         Token *start = tok;
         Type *basety = declspecs(&tok, tok, NULL, NULL, NULL);
-        Type *paramty = abstract_declarator(&tok, tok, basety, false);
+        Type *paramty = abstract_declarator(&tok, tok, basety, true);
         if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type", start->len, start->loc);
         // "array of T" is converted to "pointer to T" in the parameter
         // context. For example, *argv[] is converted to **argv by this.
         if (paramty->kind == TY_ARRAY) {
             Token *name = paramty->name;
-            paramty = pointer_to(paramty->base, 0);
+            paramty = pointer_to(paramty->base, paramty->qual);
             paramty->name = name;
         }
         if (paramty->size < 0)
@@ -2063,28 +2064,38 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
 //           | "[" "static" TypeQual* AsExp "]"
 //           | "[" TypeQual+ "static" AsExp "]"
 //           | "[" TypeQual* "*" "]"
-static Type *array_dimensions(Token **rest, Token *tok, Type *ty) {
+static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param) {
     int sz = -1;
+    bool is_star = false;
     tok = skip(tok, TK_LBRACKET);
 
-    uint32_t qual1 = typequal(&tok, tok);
+    Token *tmp = tok;
+    uint32_t qual = typequal(&tok, tok);
+    if (!is_param && qual) error(tmp, "type qualifier used in array declarator outside of function prototype");
 
+    tmp = tok;
     bool is_static = match(&tok, tok, TK_STATIC);
+    if (!is_param && is_static) error(tmp, "‘static’ used in array declarator outside of function prototype");
 
-    uint32_t qual2 = typequal(&tok, tok);
-    if (qual1 && qual2) error(tok, "err");
+    tmp = tok;
+    if (!qual) qual = typequal(&tok, tok);
+    if (!is_param && qual) error(tmp, "type qualifier used in array declarator outside of function prototype");
 
-    bool is_star = match(&tok, tok, TK_STAR);
-    if (is_static && is_star) error(tok, "err");
-
-    if (tok->kind != TK_RBRACKET) sz = const_expr(&tok, tok);
-    if (is_static && sz == -1) error(tok, "err");
-    if (is_star && sz != -1) error(tok, "err");
+    if (is_static) {
+        sz = const_expr(&tok, tok);
+    } else if (tok->kind == TK_STAR && tok->next->kind == TK_RBRACKET) {
+        if (!is_param) error(tok, "[*] used outside of function prototype");
+        is_star = true;
+        tok = tok->next;
+    } else if (tok->kind != TK_RBRACKET) {
+        sz = const_expr(&tok, tok);
+    }
 
     tok = skip(tok, TK_RBRACKET);
-    ty = decl_suffix(rest, tok, ty);
+    ty = decl_suffix(rest, tok, ty, is_param);
 
     ty = array_of(ty, sz);
+    ty->qual = qual;
     ty->is_static = is_static;
     ty->is_star = is_star;
     return ty;
@@ -2093,10 +2104,10 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty) {
 // DeclrSuf  ::= "(" ParamList? ")" | "[" ConstExp "]"
 // ParamList ::= ParamDecl ("," ParamDecl)* ("," "...")? | "..."
 // ParamDecl ::= DeclSpecs Declr
-static Type *decl_suffix(Token **rest, Token *tok, Type *ty) {
+static Type *decl_suffix(Token **rest, Token *tok, Type *ty, bool is_param) {
     if (tok->kind == TK_LPAREN) return func_param(rest, tok, ty);
 
-    if (tok->kind == TK_LBRACKET) return array_dimensions(rest, tok, ty);
+    if (tok->kind == TK_LBRACKET) return array_dimensions(rest, tok, ty, is_param);
 
     *rest = tok;
     return ty;
@@ -2115,12 +2126,12 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
         Type dummy = {};
         declarator(&tok, start->next, &dummy);
         tok = skip(tok, TK_RPAREN);
-        ty = decl_suffix(rest, tok, ty);
+        ty = decl_suffix(rest, tok, ty, false);
         return declarator(&tok, start->next, ty);
     }
 
     if (tok->kind != TK_IDENT) error(tok, "expected identifier or ‘(’");
-    ty = decl_suffix(rest, tok->next, ty);
+    ty = decl_suffix(rest, tok->next, ty, false);
     ty->name = tok;
     return ty;
 }
