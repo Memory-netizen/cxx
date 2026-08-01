@@ -72,8 +72,8 @@ static Node *new_excast(Node *expr, Type *ty, Token *tok) {
     add_type(expr);
     lvalue_convert(&expr);
 
-    if (!is_void(ty) && !is_scalar(ty)) error(tok, "arithmetic, pointer or void type is required in here");
-    if (!is_void(ty) && !is_scalar(expr->ty)) error(tok, "arithmetic or pointer type is required in here");
+    if (!is_void(ty) && !is_scalar(ty)) error(tok, "scalar or void type is required in here");
+    if (!is_void(ty) && !is_scalar(expr->ty)) error(tok, "scalar type is required in here");
     if (is_flonum(expr->ty) && is_pointer(ty)) error(tok, "cannot cast floating-point value to pointer type");
     if (is_flonum(ty) && is_pointer(expr->ty)) error(tok, "cannot cast pointer to floating-point type");
 

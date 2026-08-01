@@ -301,20 +301,81 @@ void check_binop(Node *node) {
             break;
         case ND_LT:
         case ND_LE:
+            if (is_arith(lhs) && is_arith(rhs)) return;
+            if (is_pointer(lhs) && is_pointer(rhs))
+                if (is_compatible(type_unqual(lhs->base), type_unqual(rhs->base))) return;
+            //-----
+            if (is_pointer(lhs) && is_pointer(rhs)) return;
+            if (is_integer(lhs) && is_pointer(rhs)) return;
+            if (is_pointer(lhs) && is_integer(rhs)) return;
+            break;
         case ND_EQ:
         case ND_NE:
+            if (is_arith(lhs) && is_arith(rhs)) return;
+            if (is_pointer(lhs) && is_pointer(rhs))
+                if (is_compatible(type_unqual(lhs->base), type_unqual(rhs->base))) return;
+
+            if (is_objptr(lhs) && is_voidptr(rhs)) return;
+            if (is_objptr(rhs) && is_voidptr(lhs)) return;
+
+            if (is_nullptr(lhs) && is_nullptr(rhs)) return;
+
+            if (is_nullptr(lhs) && is_null_constant(node->rhs)) return;
+            if (is_nullptr(rhs) && is_null_constant(node->lhs)) return;
+
+            if (is_pointer(lhs) && (is_null_constant(node->rhs) || is_nullptr(rhs))) return;
+            if (is_pointer(rhs) && (is_null_constant(node->lhs) || is_nullptr(lhs))) return;
+
+            // -----
+            if (is_pointer(lhs) && is_pointer(rhs)) return;
+            if (is_integer(lhs) && is_pointer(rhs)) return;
+            if (is_pointer(lhs) && is_integer(rhs)) return;
+            break;
         case ND_LOGAND:
         case ND_LOGOR:
             if (is_scalar(lhs) && is_scalar(rhs)) return;
             break;
         case ND_PTRADD:
         case ND_PTRAS:
+            if (is_complete_objptr(lhs) && is_integer(rhs)) return;
+            //---
             if (is_pointer(lhs) && is_integer(rhs)) return;
             break;
         default:
             return;
     }
     error(node->tok, "invalid operands to binary ‘%.*s’", node->tok->len, node->tok->loc);
+}
+
+void check_condop(Node *node) {
+    add_type(node->cond);
+    add_type(node->then);
+    add_type(node->els);
+    if (!is_scalar(node->cond->ty)) error(node->cond->tok, "scalar type is required in here");
+    Type *lhs = node->then->ty;
+    Type *rhs = node->els->ty;
+
+    if (is_arith(lhs) && is_arith(rhs)) return;
+    if (is_record(lhs) && is_compatible(lhs, rhs)) return;
+    if (is_void(lhs) && is_void(rhs)) return;
+    if (is_pointer(lhs) && is_pointer(rhs))
+        if (is_compatible(type_unqual(lhs->base), type_unqual(rhs->base))) return;
+
+    if (is_objptr(lhs) && is_voidptr(rhs)) return;
+    if (is_objptr(rhs) && is_voidptr(lhs)) return;
+
+    if (is_nullptr(lhs) && is_nullptr(rhs)) return;
+
+    if (is_pointer(lhs) && (is_null_constant(node->rhs) || is_nullptr(rhs))) return;
+    if (is_pointer(rhs) && (is_null_constant(node->lhs) || is_nullptr(lhs))) return;
+
+    // ------
+    if (is_nullptr(lhs) && is_null_constant(node->rhs)) return;
+    if (is_nullptr(rhs) && is_null_constant(node->lhs)) return;
+
+    if (is_pointer(lhs) && is_pointer(rhs)) return;
+    if (is_integer(lhs) && is_pointer(rhs)) return;
+    if (is_pointer(lhs) && is_integer(rhs)) return;
 }
 
 static void modifiable_lvalue(Node *node) {
@@ -536,9 +597,7 @@ void add_type(Node *node) {
             node->ty = node->rhs->ty;
             break;
         case ND_COND:
-            add_type(node->cond);
-            add_type(node->then);
-            add_type(node->els);
+            check_condop(node);
             lvalue_convert(&node->cond);
             lvalue_convert(&node->then);
             lvalue_convert(&node->els);
