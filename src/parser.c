@@ -1302,6 +1302,7 @@ static Node *return_stmt(Token **rest, Token *tok) {
     *rest = skip(tok, TK_SEMI);
 
     add_type(node);
+    check_asop(ret, node->lhs, CTX_RET);
     new_imcast(&node->lhs, ret);
 
     return node;

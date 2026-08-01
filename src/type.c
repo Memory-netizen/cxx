@@ -378,28 +378,26 @@ void check_condop(Node *node) {
     if (is_pointer(lhs) && is_integer(rhs)) return;
 }
 
-void check_asop(Node *lhs, Node *rhs) {
-    add_type(lhs);
-    add_type(rhs);
-    Type *lty = lhs->ty;
-    Type *rty = rhs->ty;
-    if (is_arith(lty) && is_arith(rty)) return;
-    if (is_record(lty) && is_compatible(type_unqual(lty), rty)) return;
-    if (is_pointer(lty) && is_pointer(rty) && is_compatible(type_unqual(lty->base), type_unqual(rty->base)))
-        if ((lty->base->qual & rty->base->qual) == rty->base->qual) return;
+void check_asop(Type *dst, Node *src, int ctx) {
+    static char *msg[] = {[CTX_AS] = "assigning", [CTX_RET] = "returning"};
+    add_type(src);
+    Type *src_ty = src->ty;
+    if (is_arith(dst) && is_arith(src_ty)) return;
+    if (is_record(dst) && is_compatible(type_unqual(dst), src_ty)) return;
+    if (is_pointer(dst) && is_pointer(src_ty) && is_compatible(type_unqual(dst->base), type_unqual(src_ty->base)))
+        if (BIT_SUPERSET(dst->base->qual, src_ty->base->qual)) return;
 
-    if (is_objptr(lty) && is_voidptr(rty))
-        if ((lty->base->qual & rty->base->qual) == rty->base->qual) return;
-    if (is_objptr(rty) && is_voidptr(lty))
-        if ((lty->base->qual & rty->base->qual) == rty->base->qual) return;
+    if (is_objptr(dst) && is_voidptr(src_ty))
+        if (BIT_SUPERSET(dst->base->qual, src_ty->base->qual)) return;
+    if (is_objptr(src_ty) && is_voidptr(dst))
+        if (BIT_SUPERSET(dst->base->qual, src_ty->base->qual)) return;
 
-    if (is_nullptr(lty) && is_null_constant(rhs)) return;
-    if (is_nullptr(lty) && is_nullptr(rty)) return;
-    if (is_pointer(lty) && (is_null_constant(rhs) || is_nullptr(rty))) return;
+    if (is_nullptr(dst) && is_null_constant(src)) return;
+    if (is_nullptr(dst) && is_nullptr(src_ty)) return;
+    if (is_pointer(dst) && (is_null_constant(src) || is_nullptr(src_ty))) return;
 
-    if (is_bool(lty) && (is_pointer(rty) || is_nullptr(rty))) return;
-
-    error(rhs->tok, "incompatible types when assigning");
+    if (is_bool(dst) && (is_pointer(src_ty) || is_nullptr(src_ty))) return;
+    error(src->tok, "incompatible types when %s", msg[ctx]);
 }
 
 static void modifiable_lvalue(Node *node) {
@@ -557,7 +555,7 @@ void add_type(Node *node) {
             break;
         case ND_AS:
             modifiable_lvalue(node);
-            check_asop(node->lhs, node->rhs);
+            check_asop(node->lhs->ty, node->rhs, CTX_AS);
             add_type(node->rhs);
             if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION) {
                 lvalue_convert(&node->rhs);

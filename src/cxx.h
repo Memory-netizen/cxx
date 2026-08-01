@@ -6,6 +6,14 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
+#define BIT_HAS(bits, n)      (((bits) & (n) != 0)
+#define BIT_SET(bits, n) ((bits) |= (n))
+#define BIT_INTER(a, b) ((a) & (b))
+#define BIT_UNION(a, b) ((a) | (b))
+#define BIT_DIFF(a, b) ((a) & ~(b))
+#define BIT_SUPERSET(a, b) (((a) & (b)) == (b))
+#define BIT_SUBSET(a, b) (((a) & (b)) == (a))
+
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
@@ -517,6 +525,13 @@ struct EnumVal {
     int64_t val;
 };
 
+enum {
+    CTX_AS,
+    CTX_INIT,
+    CTX_CALL,
+    CTX_RET,
+};
+
 bool is_void(Type *ty);
 bool is_bool(Type *ty);
 bool is_integer(Type *ty);
@@ -528,6 +543,7 @@ bool is_null_constant(Node *node);
 bool is_scalar(Type *ty);
 bool is_funcptr(Type *ty);
 bool is_compatible(Type *t1, Type *t2);
+void check_asop(Type *dst, Node *src, int ctx);
 Type *pointer_to(Type *base, uint32_t qual);
 Type *func_type(Type *return_ty);
 Type *array_of(Type *base, int size);
