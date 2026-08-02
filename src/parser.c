@@ -1879,6 +1879,15 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             if (mem->ty->size < 0 && tok->next->kind != TK_RBRACE)
                 error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
             mem->name = mem->ty->name;
+            Member *tmp = head.next;
+            while (tmp) {
+                if (tmp->name->id == mem->name->id) {
+                    diag(mem->name, "error", "duplicate member ‘%.*s’", mem->name->len, mem->name->loc);
+                    note(tmp->name, "previous declaration is here");
+                    exit(1);
+                }
+                tmp = tmp->next;
+            }
             cur = cur->next = mem;
         }
     }

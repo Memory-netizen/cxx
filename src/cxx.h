@@ -485,7 +485,7 @@ struct Type {
     // Data
     union {
         struct {
-            // Array
+            // Array or ptr
             int len;
             bool is_static;
             bool is_star;
