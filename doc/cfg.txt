@@ -6,7 +6,7 @@ Decl        ::= DeclSpecs InitDecls? ";"
 InitDecls   ::= InitDeclr ("," InitDeclr)*
 InitDeclr   ::= Declr ("=" Init)?
 Init        ::= AsExp | BracedInit
-BracedInit  ::= "{" Init ("," Init)*)? "}"
+BracedInit  ::= "{" Init ("," Init)*? "}"
 
 Declr       ::= Ptr? DirDeclr
 Ptr         ::= ("*" TypeQual*)+

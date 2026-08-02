@@ -143,12 +143,22 @@ static Node *labels;
 static Node *cur_sw;
 
 // Find a identifier by name in ordinary name spaces.
-static NameSpace *find_ident(Token *tok, bool search_par) {
+static NameSpace *find_ident(Token *tok, bool search_par, bool is_extern) {
     Scope *sc = scope;
     while (sc) {
         for (NameSpace *ns = sc->vars; ns; ns = ns->next)
-            if (tok->id == ns->id) return ns;
-        if (search_par)
+            if (tok->id == ns->id) {
+                if (!is_extern) return ns;
+                if (ns->lnk == LK_EXTERN || ns->lnk == LK_INTERN) return ns;
+                if (sc == scope) {
+                    diag(tok, "error", "extern declaration of ‘%.*s’ follows declaration with no linkage", tok->len,
+                         tok->loc);
+                    note(ns->loc, "previous definition is here");
+                    exit(1);
+                }
+            }
+
+        if (search_par || is_extern)
             sc = sc->next;
         else
             return NULL;
@@ -241,7 +251,7 @@ static Sym *new_string_literal(Token *tok) {
 
 static Type *find_typedef(Token *tok, bool search_par) {
     if (tok->kind == TK_IDENT) {
-        NameSpace *sc = find_ident(tok, search_par);
+        NameSpace *sc = find_ident(tok, search_par, false);
         if (sc && sc->kind == SYM_TYNAME) return sc->ty;
     }
     return NULL;
@@ -765,7 +775,7 @@ static uint32_t get_ident(Token *tok) {
 }
 
 static Node *fncall(Token **rest, Token *tok) {
-    NameSpace *ns = find_ident(tok, 1);
+    NameSpace *ns = find_ident(tok, true, false);
     if (!ns) error(tok, "implicit declaration of function ‘%.*s’", tok->len, tok->loc);
     if (ns->kind != SYM_FUNC)
         error(tok, "called object ‘%.*s’ is not a function or function pointer", tok->len, tok->loc);
@@ -868,8 +878,9 @@ static Node *primary(Token **rest, Token *tok) {
         // Function call
         if (tok->next->kind == TK_LPAREN) return fncall(rest, tok);
         // Variable or enum constant
-        NameSpace *sc = find_ident(tok, 1);
+        NameSpace *sc = find_ident(tok, true, false);
         if (!sc) error(tok, "use of undeclared identifier ‘%.*s’", tok->len, tok->loc);
+        while (sc->prev) sc = sc->prev;
         if (sc->kind == SYM_TYNAME) error(tok, "unexpected type name ‘%.*s’: expected expression", tok->len, tok->loc);
         if (sc->kind == SYM_VAR)
             node = new_var_node(sc->var, tok);
@@ -1350,26 +1361,53 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         Token *start = tok;
         Type *ty = declarator(&tok, tok, basety);
         if (ty->kind == TY_VOID) error(start, "variable ‘%.*s’ declared void", start->len, start->loc);
+
         bool is_fn = ty->kind == TY_FUNC;
+        SymKind symkind = is_fn ? SYM_FUNC : SYM_VAR;
+        bool is_static = sclass & SC_STATIC;
+        if (is_fn) {
+            if (tok->kind == TK_AS)
+                error(ty->name,
+                      "illegal initializer (only variables can be "
+                      "initialized)");
+            if (tok->kind == TK_LBRACE) error(ty->name, "function definition is not allowed here");
+            if (is_static) error(start, "function declared in block scope cannot have 'static' storage class");
+            sclass |= SC_EXTERN;
+        }
+        bool is_extern = sclass & SC_EXTERN;
+
         Sym *var;
+        NameSpace *ns = find_ident(ty->name, false, is_extern);
         uint32_t id = get_ident(ty->name);
-        if (sclass & SC_EXTERN || is_fn) {
+        if (ns) {
+            if (!is_extern) {
+                diag(ty->name, "error", "redefinition of ‘%.*s’", ty->name->len, ty->name->loc);
+                note(ns->loc, "previous definition is here");
+                exit(1);
+            }
+            check_decl_compatile(ns, symkind, ty);
+            var = new_lvar(id, ty);
+        } else if (is_extern) {
             var = new_gvar(id, ty);
-            push_namespace(id, is_fn ? SYM_FUNC : SYM_VAR, ty, ty->name)->var = var;
-        } else if (sclass & SC_STATIC) {
+        } else if (is_static) {
             char *name = format("%s.%s", str(cur_fn->id), str(id));
             uint32_t uid = new_unique_varname(intern(name, strlen(name)));
             var = new_gvar(uid, ty);
-            push_namespace(id, SYM_VAR, ty, ty->name)->var = var;
         } else {
             var = new_lvar(id, ty);
-            push_namespace(id, SYM_VAR, ty, ty->name)->var = var;
         }
+        NameSpace *new_ns = push_namespace(id, symkind, ty, ty->name);
+        new_ns->var = var;
+        new_ns->prev = ns;
+        new_ns->lnk = is_extern ? ns ? ns->lnk : LK_NONE : LK_NONE;
         var->sclass = sclass;
         var->align = MAX(align, ty->align);
-        var->is_function = var->ty->kind == TY_FUNC;
+        var->is_function = is_fn;
         if (tok->kind == TK_AS) {
-            if (sclass & SC_STATIC) {
+            if (is_extern)
+                error(ty->name, "declaration of block scope identifier ‘%.*s’ with linkage cannot have an initializer",
+                      ty->name->len, ty->name->loc);
+            if (is_static) {
                 gvar_initializer(&tok, tok->next, var);
             } else {
                 Node *expr = lvar_initializer(&tok, tok->next, var);
@@ -2217,6 +2255,7 @@ static Token *external_declaration(Token *tok) {
         cnt++;
         Token *start = tok;
         Type *ty = declarator(&tok, tok, basety);
+        NameSpace *ns = find_ident(ty->name, false, false);
         Sym *var;
         bool is_func = ty->kind == TY_FUNC;
 
@@ -2227,7 +2266,6 @@ static Token *external_declaration(Token *tok) {
             if (sclass & SC_THREAD) error(tok, "function definition declared ‘thread_local’");
             if (sclass & SC_REG) error(tok, "function definition declared ‘register’");
 
-            NameSpace *ns = find_ident(ty->name, false);
             if (ns) {
                 check_decl_compatile(ns, SYM_FUNC, ty);
                 var = ns->var;
@@ -2242,7 +2280,9 @@ static Token *external_declaration(Token *tok) {
                 }
             } else {
                 var = new_gvar(get_ident(ty->name), ty);
-                push_namespace(var->id, SYM_FUNC, ty, ty->name)->var = var;
+                ns = push_namespace(var->id, SYM_FUNC, ty, ty->name);
+                ns->var = var;
+                ns->lnk = sclass == SC_STATIC ? LK_INTERN : LK_EXTERN;
                 var->is_function = true;
                 var->sclass = sclass ? sclass : SC_EXTERN;
             }
@@ -2287,7 +2327,6 @@ static Token *external_declaration(Token *tok) {
         }
 
         // declaration
-        NameSpace *ns = find_ident(ty->name, false);
         SymKind symkind = is_func ? SYM_FUNC : SYM_VAR;
         if (tok->kind == TK_AS) {
             if (is_func || sclass & SC_TYPEDEF)
@@ -2328,7 +2367,9 @@ static Token *external_declaration(Token *tok) {
                 var->is_function = is_func;
                 var->sclass = sclass;
                 var->align = MAX(align, ty->align);
-                push_namespace(var->id, symkind, ty, ty->name)->var = var;
+                ns = push_namespace(var->id, symkind, ty, ty->name);
+                ns->var = var;
+                ns->lnk = sclass & SC_STATIC ? LK_INTERN : LK_EXTERN;
             }
 
             if (ty->kind == TY_VOID) error(start, "variable ‘%.*s’ declared void", start->len, start->loc);
