@@ -523,6 +523,7 @@ struct EnumVal {
     EnumVal *next;
     uint32_t name;
     int64_t val;
+    Token *loc;
 };
 
 enum {

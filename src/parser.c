@@ -1776,6 +1776,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
     tok = skip(tok, TK_LBRACE);
 
     Type *exist_ty = NULL;
+    bool redefine = false;
     if (tag) {
         ns = find_tag(tag, false);
         if (ns) {
@@ -1789,6 +1790,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
                 ty = exist_ty;
                 ty->size = 4;
             } else {
+                redefine = true;
                 ty = enum_type();
                 ty->id = tag->id;
             }
@@ -1811,6 +1813,23 @@ static Type *enum_decl(Token **rest, Token *tok) {
 
         Token *enm_name = tok;
         uint32_t name = get_ident(enm_name);
+        EnumVal *tmp = head.next;
+        while (tmp) {
+            if (tmp->name == name) {
+                diag(enm_name, "error", "redeclaration of enumerator ‘%.*s’", enm_name->len, enm_name->loc);
+                note(tmp->loc, "previous definition is here");
+                exit(1);
+            }
+            tmp = tmp->next;
+        }
+        if (!redefine) {
+            NameSpace *ns2 = find_ident(enm_name, false, false);
+            if (ns2) {
+                diag(enm_name, "error", "redeclaration of ‘%.*s’", enm_name->len, enm_name->loc);
+                note(ns2->loc, "previous definition is here");
+                exit(1);
+            }
+        }
         tok = tok->next;
 
         if (tok->kind == TK_AS) val = const_expr(&tok, tok->next);
@@ -1819,6 +1838,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
         EnumVal *enm = emalloc(sizeof(EnumVal));
         enm->name = name;
         enm->val = val++;
+        enm->loc = enm_name;
         cur = cur->next = enm;
     }
 
