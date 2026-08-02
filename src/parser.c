@@ -116,17 +116,23 @@ struct Scope {
     TagNameSpace *tags;
 };
 
+// Represents currently scope.
 static Scope *scope = &(Scope){0};
+// Represents function prototype scope
+static Scope *proto_scope;
 
 static void enter_scope(void) {
     Scope *sc = emalloc(sizeof(Scope));
-    sc->next = scope;
     sc->vars = NULL;
     sc->tags = NULL;
+    sc->next = scope;
     scope = sc;
 }
 
 static void leave_scope(void) { scope = scope->next; }
+
+static void push_proto_scope(void) { proto_scope = scope; }
+static void pop_proto_scope(void) { scope = proto_scope; }
 
 // All local variable instances created during parsing are
 // accumulated to this list.
@@ -1708,8 +1714,8 @@ static Node *stmt(Token **rest, Token *tok) {
 
 // CompStmt  ::= "{" BlockItem* "}"
 // BlockItem ::= Stmt | Decl
-static Node *compound_stmt(Token **rest, Token *tok) {
-    enter_scope();
+static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
+    if (!is_func_body) enter_scope();
     Node *node = new_node(ND_COMP_STMT, tok);
     Node dummy, *cur = &dummy;
 
@@ -1735,9 +1741,11 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     *rest = skip(tok, TK_RBRACE);
 
     node->body = dummy.next;
-    leave_scope();
+    if (!is_func_body) leave_scope();
     return node;
 }
+
+static Node *compound_stmt(Token **rest, Token *tok) { return compound_stmt2(rest, tok, false); }
 
 // EnumSpec ::= "enum" Ident? "{" Enumr ("," Enumr)* ","? "}"
 //            | "enum" Ident
@@ -2207,6 +2215,10 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
         return func_type(ty);
     }
 
+    enter_scope();
+    push_proto_scope();
+    locals = NULL;
+
     bool is_variadic = false;
     Type dummy, *cur = &dummy;
 
@@ -2231,9 +2243,22 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
             paramty->is_star = arr->is_star;
             paramty->is_static = arr->is_static;
         }
+
         if (paramty->size < 0)
             error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len, paramty->name->loc);
         cur = cur->next = copy_type(paramty);
+
+        uint32_t id = intern("", 0);
+        if (cur->name) {
+            id = get_ident(cur->name);
+            NameSpace *ns = find_ident(cur->name, false, false);
+            if (ns) {
+                diag(cur->name, "error", "redefinition of parameter ‘%s’", str(id));
+                note(ns->loc, "previous definition is here");
+                exit(1);
+            }
+        }
+        push_namespace(id, SYM_VAR, ty, cur->name)->var = new_lvar(id, cur);
     }
 
     cur->next = NULL;
@@ -2242,6 +2267,8 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
     ty = func_type(ty);
     ty->is_variadic = is_variadic;
     ty->params = dummy.next;
+
+    leave_scope();
     return ty;
 }
 
@@ -2398,27 +2425,18 @@ static Token *external_declaration(Token *tok) {
 
             var->is_defined = true;
             var->funcspec |= funcspec;
-
-            locals = NULL;
             cur_fn = var;
-            enter_scope();
+            pop_proto_scope();
+
             Type *param = ty->params;
-            uint32_t nparam = 0;
             while (param) {
                 if (is_pointer(param) && param->is_star)
                     error(param->name, "‘[*]’ not allowed in other than function prototype scope");
-                uint32_t id;
-                nparam++;
-                if (param->name)
-                    id = get_ident(param->name);
-                else
-                    id = intern("", 0);
-                push_namespace(id, SYM_VAR, ty, param->name)->var = new_lvar(id, param);
+                var->nparam++;
                 param = param->next;
             }
-            var->nparam = nparam;
 
-            var->body = compound_stmt(&tok, tok);
+            var->body = compound_stmt2(&tok, tok, true);
 
             Sym *prev = NULL, *cur = locals, *next = NULL;
             while (cur) {
@@ -2431,6 +2449,7 @@ static Token *external_declaration(Token *tok) {
 
             var->labels = labels;
             resolve_goto_labels();
+
             leave_scope();
             return tok;
         }
