@@ -320,7 +320,7 @@ static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool is_par
     ty = pointers(&tok, tok, ty);
 
     if (tok->kind == TK_LPAREN &&
-        (tok->next->kind != TK_RPAREN && tok->next->kind != TK_ELLIPSIS && !is_typename(tok->next, 1))) {
+        (tok->next->kind != TK_RPAREN && tok->next->kind != TK_ELLIPSIS && !is_typename(tok->next, true))) {
         Token *start = tok;
         Type dummy = {};
         abstract_declarator(&tok, start->next, &dummy, is_param);
@@ -863,7 +863,7 @@ static Member *get_struct_member(Type *ty, Token *tok) {
 static Node *postfix(Token **rest, Token *tok) {
     Node *node, *init = NULL;
     Token *start = tok;
-    if (tok->kind == TK_LPAREN && is_typename(tok->next, 1)) {
+    if (tok->kind == TK_LPAREN && is_typename(tok->next, true)) {
         tok = tok->next;
         // Compound literal
         SClass sclass = 0;
@@ -974,7 +974,7 @@ static Node *unary(Token **rest, Token *tok) {
             return new_unary(ND_PREDEC, unary(rest, tok->next), tok);
         case TK_SIZEOF: {
             Token *start = tok;
-            if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, 1)) {
+            if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, true)) {
                 Type *ty = typename(&tok, tok->next->next);
                 *rest = skip(tok, TK_RPAREN);
                 if (ty->size < 0) error(start, "invalid application of ‘sizeof’ to incomplete type");
@@ -988,7 +988,7 @@ static Node *unary(Token **rest, Token *tok) {
         }
         case TK_ALIGNOF: {
             Token *start = tok;
-            if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, 1)) {
+            if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, true)) {
                 Type *ty = typename(&tok, tok->next->next);
                 *rest = skip(tok, TK_RPAREN);
                 return new_ulong(ty->align, start);
@@ -1031,7 +1031,7 @@ static Node *new_excast(Node *expr, Type *ty, Token *tok) {
 
 // CastExp ::= UnaryExp | "(" TypeName ")" CastExp
 static Node *cast(Token **rest, Token *tok) {
-    if (tok->kind == TK_LPAREN && is_typename(tok->next, 1)) {
+    if (tok->kind == TK_LPAREN && is_typename(tok->next, true)) {
         Token *start = tok;
         tok = tok->next;
         SClass sclass = 0;
@@ -1352,7 +1352,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
 // SimDecl ::= DeclSpecs Declr "=" Init
 static Node *select_head(Token **rest, Token *tok) {
     Node *node;
-    if (is_typename(tok, 1)) {
+    if (is_typename(tok, true)) {
         SClass sclass = 0;
         int align = 0;
         int funcspec = 0;
@@ -1401,7 +1401,7 @@ static Node *for_stmt(Token **rest, Token *tok) {
     tok = skip(tok->next, TK_LPAREN);
 
     // Init
-    if (is_typename(tok, 1)) {
+    if (is_typename(tok, true)) {
         SClass sclass = 0;
         int align = 0;
         int funcspec = 0;
@@ -1503,7 +1503,7 @@ static void check_case(int64_t val, Token *tok) {
     while (cur) {
         if (cur->val == val) {
             diag(tok, "error", "duplicate case value ‘%ld’", val);
-            diag(cur->tok, "note", "previous case defined here");
+            note(cur->tok, "previous case defined here");
             exit(1);
         }
         cur = cur->case_next;
@@ -1533,7 +1533,7 @@ static Node *default_stmt(Token **rest, Token *tok) {
     if (!cur_sw) error(tok, "‘default’ label not within a switch statement");
     if (cur_sw->default_case) {
         diag(tok, "error", "multiple default labels in one switch");
-        diag(cur_sw->default_case->tok, "note", "this is the first default label");
+        note(cur_sw->default_case->tok, "this is the first default label");
         exit(1);
     }
     Node *node = new_node(ND_CASE, tok);
@@ -1574,7 +1574,7 @@ static void check_label(uint32_t label, Token *tok) {
     while (cur) {
         if (cur->label == label) {
             diag(tok, "error", "redefinition of label ‘%.*s’", tok->len, tok->loc);
-            diag(cur->tok, "note", "previous definition is here");
+            note(cur->tok, "previous definition is here");
             exit(1);
         }
         cur = cur->goto_next;
@@ -1643,7 +1643,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
 
     tok = tok->next;
     while (tok->kind != TK_RBRACE) {
-        if (is_typename(tok, 1) && tok->next->kind != TK_COLON) {
+        if (is_typename(tok, true) && tok->next->kind != TK_COLON) {
             SClass sclass = 0;
             int align = 0;
             int funcspec = 0;
@@ -1853,7 +1853,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
         UNSIGNED = 1 << 14,
     };
 
-    while (is_typename(tok, 1)) {
+    while (is_typename(tok, true)) {
         Token *ty_tok = tok;
         switch (tok->kind) {
             case TK_TYPEDEF:
@@ -1891,9 +1891,9 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 qual |= Q_RESTRICT;
                 break;
             case TK_IDENT: {
-                Type *orig = find_typedef(tok, !typespec_cnt);
+                if (typespec_cnt) goto loop_end;
+                Type *orig = find_typedef(tok, true);
                 if (orig) {
-                    if (typespec_cnt) error(tok, "‘%.*s’ redeclared as different kind of symbol", tok->len, tok->loc);
                     ty = orig;
                     typespec_cnt += OTHER;
                     break;
@@ -1913,7 +1913,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 if (!align) error(tok, "alignas is not allowed in this context");
                 tok = skip(tok->next, TK_LPAREN);
 
-                if (is_typename(tok, 1))
+                if (is_typename(tok, true))
                     *align = typename(&tok, tok)->align;
                 else
                     *align = const_expr(&tok, tok);
@@ -2187,7 +2187,22 @@ static Token *external_declaration(Token *tok) {
             if (sclass & SC_TYPEDEF) error(tok, "function definition declared ‘typedef’");
             if (sclass & SC_THREAD) error(tok, "function definition declared ‘thread_local’");
             if (sclass & SC_REG) error(tok, "function definition declared ‘register’");
-            Sym *fn = new_gvar(get_ident(ty->name), ty);
+            VarScope *sc = find_var(ty->name, false);
+            if (sc) {
+                if (!sc->var || !sc->var->is_function) {
+                    diag(ty->name, "error", "‘%.*s’ redeclared as different kind of symbol", ty->name->len,
+                         ty->name->loc);
+                    note(sc->var->ty->name, "previous definition is here");
+                    exit(1);
+                }
+                if (sc->var->is_defined) {
+                    diag(ty->name, "error", "redefinition of ‘%.*s’", ty->name->len, ty->name->loc);
+                    note(sc->var->ty->name, "previous definition is here");
+                    exit(1);
+                }
+            }
+            uint32_t fn_id = get_ident(ty->name);
+            Sym *fn = new_gvar(fn_id, ty);
             fn->is_function = true;
             fn->is_defined = true;
             fn->sclass = sclass ? sclass : SC_EXTERN;
