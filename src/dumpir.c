@@ -112,6 +112,7 @@ void dump_blk(Blk *b) {
                 break;
             case IR_LORD:
                 fprintf(out_file, "load ");
+                if (ir->args[0].ty->base->qual & Q_VOLATILE) fprintf(out_file, "volatile ");
                 print_type(ir->dst.ty);
                 fprintf(out_file, ", ptr ");
                 print_operand(ir->args[0]);
@@ -121,6 +122,7 @@ void dump_blk(Blk *b) {
                 break;
             case IR_STR:
                 fprintf(out_file, "store ");
+                if (ir->args[1].ty->base->qual & Q_VOLATILE) fprintf(out_file, "volatile ");
                 print_type(ir->args[0].ty);
                 fprintf(out_file, " ");
                 print_operand(ir->args[0]);
