@@ -101,6 +101,7 @@ struct TagNameSpace {
     TagNameSpace *prev;  // Link multiple tags using the same identifier
     uint32_t id;
     Type *ty;
+    Token *loc;
 };
 
 // Represents a block scope.
@@ -156,25 +157,22 @@ static NameSpace *find_ident(Token *tok, bool search_par, bool is_extern) {
                     note(ns->loc, "previous definition is here");
                     exit(1);
                 }
+                break;
             }
 
-        if (search_par || is_extern)
-            sc = sc->next;
-        else
-            return NULL;
+        if (!search_par && !is_extern) return NULL;
+        sc = sc->next;
     }
     return NULL;
 }
 
-static Type *find_tag(Token *tok, bool search_par) {
+static TagNameSpace *find_tag(Token *tok, bool search_par) {
     Scope *sc = scope;
     while (sc) {
         for (TagNameSpace *ns = sc->tags; ns; ns = ns->next)
-            if (tok->id == ns->id) return ns->ty;
-        if (search_par)
-            sc = sc->next;
-        else
-            return NULL;
+            if (tok->id == ns->id) return ns;
+        if (!search_par) return NULL;
+        sc = sc->next;
     }
     return NULL;
 }
@@ -190,10 +188,11 @@ static NameSpace *push_namespace(uint32_t id, SymKind kind, Type *ty, Token *loc
     return ns;
 }
 
-static void push_tag_namespace(uint32_t id, Type *ty) {
+static void push_tag_namespace(uint32_t id, Type *ty, Token *loc) {
     TagNameSpace *ns = emalloc(sizeof(TagNameSpace));
     ns->id = id;
     ns->ty = ty;
+    ns->loc = loc;
     ns->next = scope->tags;
     scope->tags = ns;
     ty->id = id;
@@ -1748,6 +1747,8 @@ static Type *enum_decl(Token **rest, Token *tok) {
     tok = tok->next;
     // Read a enum tag.
     Token *tag = NULL;
+    Type *ty = NULL;
+    TagNameSpace *ns;
     if (tok->kind == TK_IDENT) {
         tag = tok;
         tok = tok->next;
@@ -1755,25 +1756,46 @@ static Type *enum_decl(Token **rest, Token *tok) {
 
     if (tag && tok->kind != TK_LBRACE) {
         *rest = tok;
-        Type *ty = find_tag(tag, 1);
-        if (ty) return ty;
+        ns = find_tag(tag, true);
+        if (ns) {
+            ty = ns->ty;
+            if (ty->kind != TY_ENUM) {
+                diag(tag, "error", "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
+                     tag->loc);
+                goto note;
+            }
+            return ty;
+        }
 
         ty = enum_type();
         ty->size = -1;
-        push_tag_namespace(tag->id, ty);
+        push_tag_namespace(tag->id, ty, tag);
         return ty;
     }
 
     tok = skip(tok, TK_LBRACE);
 
-    Type *ty = NULL;
+    Type *exist_ty = NULL;
     if (tag) {
-        ty = find_tag(tag, 0);
-        if (!ty) {
+        ns = find_tag(tag, false);
+        if (ns) {
+            exist_ty = ns->ty;
+            if (exist_ty->kind != TY_ENUM) {
+                diag(tag, "error", "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
+                     tag->loc);
+                goto note;
+            }
+            if (exist_ty->size == -1) {
+                ty = exist_ty;
+                ty->size = 4;
+            } else {
+                ty = enum_type();
+                ty->id = tag->id;
+            }
+        } else {
             ty = enum_type();
-            push_tag_namespace(tag->id, ty);
+            push_tag_namespace(tag->id, ty, tag);
         }
-        ty->size = 4;
     } else {
         ty = enum_type();
         ty->is_anon = true;
@@ -1799,8 +1821,20 @@ static Type *enum_decl(Token **rest, Token *tok) {
         enm->val = val++;
         cur = cur->next = enm;
     }
+
     ty->enumvals = head.next;
+    if (exist_ty) {
+        if (!is_compatible(ty, exist_ty)) {
+            diag(tag, "error", "conflicting redefinition of enum ‘enum %.*s’", tag->len, tag->loc);
+            goto note;
+        }
+        return exist_ty;
+    }
     return ty;
+
+note:
+    note(ns->loc, "previous definition is here");
+    exit(1);
 }
 
 // MemDecl  ::= TypeSpec+ (MemDeclr ("," MemDeclr)*)? ";"
@@ -1851,12 +1885,13 @@ static Type *record_decl(Token **rest, Token *tok) {
 
     if (tag && tok->kind != TK_LBRACE) {
         *rest = tok;
-        Type *ty = find_tag(tag, 1);
+        TagNameSpace *ns = find_tag(tag, true);
+        Type *ty = ns ? ns->ty : NULL;
         if (ty) return ty;
 
         ty = struct_type();
         ty->size = -1;
-        push_tag_namespace(tag->id, ty);
+        push_tag_namespace(tag->id, ty, tag);
         return ty;
     }
 
@@ -1865,10 +1900,11 @@ static Type *record_decl(Token **rest, Token *tok) {
     Type *ty = NULL;
 
     if (tag) {
-        ty = find_tag(tag, 0);
+        TagNameSpace *ns = find_tag(tag, false);
+        ty = ns ? ns->ty : NULL;
         if (!ty) {
             ty = struct_type();
-            push_tag_namespace(tag->id, ty);
+            push_tag_namespace(tag->id, ty, tag);
         }
     } else {
         ty = struct_type();

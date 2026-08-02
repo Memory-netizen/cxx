@@ -53,6 +53,16 @@ int main() {
                y;
            }));
 
+    ASSERT(2, ({
+               enum t { zero, one, two };
+               enum t {
+                   zero,
+                   one,
+                   two,
+               };
+               two;
+           }));
+
     printf("OK\n");
     return 0;
 }
