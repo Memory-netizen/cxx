@@ -105,6 +105,14 @@ void diag(Token *tok, char *level, const char *msg, ...) {
     va_end(ap);
 }
 
+void diag_exit(Token *tok, char *level, const char *msg, ...) {
+    va_list ap;
+    va_start(ap, msg);
+    emit_diag(tok->loc, level, msg, ap);
+    va_end(ap);
+    exit(1);
+}
+
 static void **pool = NULL;
 static size_t free_len = 0;
 

@@ -160,8 +160,7 @@ static NameSpace *find_ident(Token *tok, bool search_par, bool is_extern) {
                 if (sc == scope) {
                     diag(tok, "error", "extern declaration of ‘%.*s’ follows declaration with no linkage", tok->len,
                          tok->loc);
-                    note(ns->loc, "previous definition is here");
-                    exit(1);
+                    diag_exit(ns->loc, "note", "previous definition is here");
                 }
                 break;
             }
@@ -273,8 +272,7 @@ static void check_decl_compatile(NameSpace *sym, SymKind kind, Type *ty) {
     }
     return;
 note:
-    note(sym->loc, "previous definition is here");
-    exit(1);
+    diag_exit(sym->loc, "note", "previous definition is here");
 }
 
 static void swap(Node **lhs, Node **rhs) {
@@ -1386,8 +1384,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         if (ns) {
             if (!is_extern) {
                 diag(ty->name, "error", "redefinition of ‘%.*s’", ty->name->len, ty->name->loc);
-                note(ns->loc, "previous definition is here");
-                exit(1);
+                diag_exit(ns->loc, "note", "previous definition is here");
             }
             check_decl_compatile(ns, symkind, ty);
             var = new_lvar(id, ty);
@@ -1581,8 +1578,7 @@ static void check_case(int64_t val, Token *tok) {
     while (cur) {
         if (cur->val == val) {
             diag(tok, "error", "duplicate case value ‘%ld’", val);
-            note(cur->tok, "previous case defined here");
-            exit(1);
+            diag_exit(cur->tok, "note", "previous case defined here");
         }
         cur = cur->case_next;
     }
@@ -1611,8 +1607,7 @@ static Node *default_stmt(Token **rest, Token *tok) {
     if (!cur_sw) error(tok, "‘default’ label not within a switch statement");
     if (cur_sw->default_case) {
         diag(tok, "error", "multiple default labels in one switch");
-        note(cur_sw->default_case->tok, "this is the first default label");
-        exit(1);
+        diag_exit(cur_sw->default_case->tok, "note", "this is the first default label");
     }
     Node *node = new_node(ND_CASE, tok);
     tok = skip(tok->next, TK_COLON);
@@ -1652,8 +1647,7 @@ static void check_label(uint32_t label, Token *tok) {
     while (cur) {
         if (cur->label == label) {
             diag(tok, "error", "redefinition of label ‘%.*s’", tok->len, tok->loc);
-            note(cur->tok, "previous definition is here");
-            exit(1);
+            diag_exit(cur->tok, "note", "previous definition is here");
         }
         cur = cur->goto_next;
     }
@@ -1824,7 +1818,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
         while (tmp) {
             if (tmp->name == name) {
                 diag(enm_name, "error", "redeclaration of enumerator ‘%.*s’", enm_name->len, enm_name->loc);
-                note(tmp->loc, "previous definition is here");
+                diag_exit(tmp->loc, "note", "previous definition is here");
                 exit(1);
             }
             tmp = tmp->next;
@@ -1833,8 +1827,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
             NameSpace *ns2 = find_ident(enm_name, false, false);
             if (ns2) {
                 diag(enm_name, "error", "redeclaration of ‘%.*s’", enm_name->len, enm_name->loc);
-                note(ns2->loc, "previous definition is here");
-                exit(1);
+                diag_exit(ns2->loc, "note", "previous definition is here");
             }
         }
         tok = tok->next;
@@ -1861,8 +1854,8 @@ static Type *enum_decl(Token **rest, Token *tok) {
     return ty;
 
 note:
-    note(ns->loc, "previous definition is here");
-    exit(1);
+    diag_exit(ns->loc, "note", "previous definition is here");
+    return NULL;
 }
 
 // MemDecl  ::= TypeSpec+ (MemDeclr ("," MemDeclr)*)? ";"
@@ -1892,8 +1885,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             while (tmp) {
                 if (tmp->name->id == mem->name->id) {
                     diag(mem->name, "error", "duplicate member ‘%.*s’", mem->name->len, mem->name->loc);
-                    note(tmp->name, "previous declaration is here");
-                    exit(1);
+                    diag_exit(tmp->name, "note", "previous declaration is here");
                 }
                 tmp = tmp->next;
             }
@@ -2012,8 +2004,8 @@ static Type *record_decl(Token **rest, Token *tok) {
     insert_ty(ty, ty_kind);
     return ty;
 note:
-    note(ns->loc, "previous definition is here");
-    exit(1);
+    diag_exit(ns->loc, "note", "previous definition is here");
+    return NULL;
 }
 
 // DeclSpecs ::= DeclSpec+
@@ -2258,8 +2250,7 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
             NameSpace *ns = find_ident(cur->name, false, false);
             if (ns) {
                 diag(cur->name, "error", "redefinition of parameter ‘%s’", str(id));
-                note(ns->loc, "previous definition is here");
-                exit(1);
+                diag_exit(ns->loc, "note", "previous definition is here");
             }
         }
         push_namespace(id, SYM_VAR, ty, cur->name)->var = new_lvar(id, cur);
@@ -2529,8 +2520,7 @@ static Token *external_declaration(Token *tok) {
         else
             error(tok, "expected ‘;’ after top level declarator");
     note:
-        note(ns->loc, "previous definition is here");
-        exit(1);
+        diag_exit(ns->loc, "note", "previous definition is here");
     }
 }
 

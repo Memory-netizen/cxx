@@ -701,6 +701,7 @@ void warning_at(char *loc, const char *msg, ...);
 void note(Token *tok, const char *msg, ...);
 void note_at(char *loc, const char *msg, ...);
 void diag(Token *tok, char *level, const char *msg, ...);
+void diag_exit(Token *tok, char *level, const char *msg, ...);
 void diag_at(char *loc, char *level, const char *msg, ...);
 
 void *emalloc(size_t n);
