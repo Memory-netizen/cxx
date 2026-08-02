@@ -1849,6 +1849,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
         cur = cur->next = enm;
     }
 
+    if (!head.next) error(tok, "empty enum is invalid");
     ty->enumvals = head.next;
     if (redefine) {
         if (!is_compatible(ty, exist_ty)) {
@@ -1883,6 +1884,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             if (align) mem->is_align = true;
             mem->align = MAX(align, mem->ty->align);
             if (mem->ty->kind == TY_VOID) error(start, "field ‘%.*s’ declared void", start->len, start->loc);
+            if (mem->ty->kind == TY_FUNC) error(start, "field ‘%.*s’ declared as a function", start->len, start->loc);
             if (mem->ty->size < 0 && tok->next->kind != TK_RBRACE)
                 error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
             mem->name = mem->ty->name;
@@ -2317,9 +2319,17 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
 // ParamList ::= ParamDecl ("," ParamDecl)* ("," "...")? | "..."
 // ParamDecl ::= DeclSpecs Declr
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty, bool is_param) {
-    if (tok->kind == TK_LPAREN) return func_param(rest, tok, ty);
+    if (tok->kind == TK_LPAREN)
+        ty = func_param(&tok, tok, ty);
+    else if (tok->kind == TK_LBRACKET)
+        ty = array_dimensions(&tok, tok, ty, is_param);
 
-    if (tok->kind == TK_LBRACKET) return array_dimensions(rest, tok, ty, is_param);
+    // int arr[]()
+    if (ty->kind == TY_ARRAY && ty->base->kind == TY_FUNC) error(tok, "declaration as array of functions");
+    // void foo()[]
+    if (tok->kind == TK_LBRACKET) error(tok, "function cannot return array type");
+    // void foo()()
+    if (tok->kind == TK_LPAREN) error(tok, "function cannot return function type");
 
     *rest = tok;
     return ty;
