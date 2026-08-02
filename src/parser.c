@@ -68,22 +68,37 @@ static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs, Token *tok) {
     return node;
 }
 
-// Scope for local variables, global variables, typedefs
+typedef enum {
+    SYM_VAR,
+    SYM_FUNC,
+    SYM_ENUM,
+    SYM_TYNAME,
+} SymKind;
+
+// NameSpace for local variables, global variables, typedefs
 // or enum constants
-typedef struct VarScope VarScope;
-struct VarScope {
-    VarScope *next;
+typedef struct NameSpace NameSpace;
+struct NameSpace {
+    NameSpace *next;
+    NameSpace *prev;  // Link multiple declarations using the same identifier
+    SymKind kind;
+    enum {
+        LK_NONE,
+        LK_EXTERN,
+        LK_INTERN,
+    } lnk;
     uint32_t id;
     Sym *var;
-    Type *type_def;
-    Type *enum_ty;
-    int enum_val;
+    Type *ty;
+    int64_t enum_val;
+    Token *loc;
 };
 
-// Scope for struct, union or enum tags
-typedef struct TagScope TagScope;
-struct TagScope {
-    TagScope *next;
+// NameSpace for struct, union or enum tags
+typedef struct TagNameSpace TagNameSpace;
+struct TagNameSpace {
+    TagNameSpace *next;
+    TagNameSpace *prev;  // Link multiple tags using the same identifier
     uint32_t id;
     Type *ty;
 };
@@ -93,10 +108,11 @@ typedef struct Scope Scope;
 struct Scope {
     Scope *next;
 
-    // C has two block scopes; one is for variables/typedefs and
-    // the other is for struct/union/enum tags.
-    VarScope *vars;
-    TagScope *tags;
+    // C has two name spaces;
+    // one is for struct/union/enum tags.
+    // the other is for variables/function/enumerator/typedefs
+    NameSpace *vars;
+    TagNameSpace *tags;
 };
 
 static Scope *scope = &(Scope){0};
@@ -126,12 +142,12 @@ static Node *labels;
 
 static Node *cur_sw;
 
-// Find a variable by name.
-static VarScope *find_var(Token *tok, bool search_par) {
+// Find a identifier by name in ordinary name spaces.
+static NameSpace *find_ident(Token *tok, bool search_par) {
     Scope *sc = scope;
     while (sc) {
-        for (VarScope *sc2 = sc->vars; sc2; sc2 = sc2->next)
-            if (tok->id == sc2->id) return sc2;
+        for (NameSpace *ns = sc->vars; ns; ns = ns->next)
+            if (tok->id == ns->id) return ns;
         if (search_par)
             sc = sc->next;
         else
@@ -143,8 +159,8 @@ static VarScope *find_var(Token *tok, bool search_par) {
 static Type *find_tag(Token *tok, bool search_par) {
     Scope *sc = scope;
     while (sc) {
-        for (TagScope *sc2 = sc->tags; sc2; sc2 = sc2->next)
-            if (tok->id == sc2->id) return sc2->ty;
+        for (TagNameSpace *ns = sc->tags; ns; ns = ns->next)
+            if (tok->id == ns->id) return ns->ty;
         if (search_par)
             sc = sc->next;
         else
@@ -153,20 +169,23 @@ static Type *find_tag(Token *tok, bool search_par) {
     return NULL;
 }
 
-static VarScope *push_scope(uint32_t id) {
-    VarScope *sc = emalloc(sizeof(VarScope));
-    sc->id = id;
-    sc->next = scope->vars;
-    scope->vars = sc;
-    return sc;
+static NameSpace *push_namespace(uint32_t id, SymKind kind, Type *ty, Token *loc) {
+    NameSpace *ns = emalloc(sizeof(NameSpace));
+    ns->id = id;
+    ns->kind = kind;
+    ns->ty = ty;
+    ns->loc = loc;
+    ns->next = scope->vars;
+    scope->vars = ns;
+    return ns;
 }
 
-static void push_tag_scope(uint32_t id, Type *ty) {
-    TagScope *sc = emalloc(sizeof(TagScope));
-    sc->id = id;
-    sc->ty = ty;
-    sc->next = scope->tags;
-    scope->tags = sc;
+static void push_tag_namespace(uint32_t id, Type *ty) {
+    TagNameSpace *ns = emalloc(sizeof(TagNameSpace));
+    ns->id = id;
+    ns->ty = ty;
+    ns->next = scope->tags;
+    scope->tags = ns;
     ty->id = id;
 }
 
@@ -176,7 +195,6 @@ static Sym *new_var(uint32_t id, Type *ty) {
     var->id = id;
     var->ty = ty;
     var->align = ty->align;
-    push_scope(id)->var = var;
     return var;
 }
 
@@ -223,10 +241,25 @@ static Sym *new_string_literal(Token *tok) {
 
 static Type *find_typedef(Token *tok, bool search_par) {
     if (tok->kind == TK_IDENT) {
-        VarScope *sc = find_var(tok, search_par);
-        if (sc) return sc->type_def;
+        NameSpace *sc = find_ident(tok, search_par);
+        if (sc && sc->kind == SYM_TYNAME) return sc->ty;
     }
     return NULL;
+}
+
+static void check_decl_compatile(NameSpace *sym, SymKind kind, Type *ty) {
+    if (sym->kind != kind) {
+        diag(ty->name, "error", "‘%.*s’ redeclared as different kind of symbol", ty->name->len, ty->name->loc);
+        goto note;
+    }
+    if (!is_compatible(sym->ty, ty)) {
+        diag(ty->name, "error", "‘%.*s’ redeclared as conflicting type", ty->name->len, ty->name->loc);
+        goto note;
+    }
+    return;
+note:
+    note(sym->loc, "previous definition is here");
+    exit(1);
 }
 
 static void swap(Node **lhs, Node **rhs) {
@@ -732,15 +765,15 @@ static uint32_t get_ident(Token *tok) {
 }
 
 static Node *fncall(Token **rest, Token *tok) {
-    VarScope *sc = find_var(tok, 1);
-    if (!sc) error(tok, "implicit declaration of function ‘%.*s’", tok->len, tok->loc);
-    if (!sc->var || sc->var->ty->kind != TY_FUNC)
+    NameSpace *ns = find_ident(tok, 1);
+    if (!ns) error(tok, "implicit declaration of function ‘%.*s’", tok->len, tok->loc);
+    if (ns->kind != SYM_FUNC)
         error(tok, "called object ‘%.*s’ is not a function or function pointer", tok->len, tok->loc);
 
     Node *node = new_node(ND_FUNCALL, tok);
     node->func = tok->id;
 
-    Type *ty = sc->var->ty;
+    Type *ty = ns->ty;
     Type *param_ty = ty->params;
     node->func_ty = ty;
     node->ty = ty->ret;
@@ -750,7 +783,7 @@ static Node *fncall(Token **rest, Token *tok) {
     if (tok->kind == TK_RPAREN) {
         if (param_ty)
             error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc,
-                  sc->var->nparam);
+                  ns->var->nparam);
         *rest = tok->next;
         return node;
     }
@@ -771,14 +804,14 @@ static Node *fncall(Token **rest, Token *tok) {
             lvalue_convert(&arg);
         } else {
             error(tok, "too many arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc,
-                  sc->var->nparam);
+                  ns->var->nparam);
         }
         ++i;
         cur = cur->next = arg;
     } while (match(&tok, tok, TK_COMMA));
 
     if (param_ty)
-        error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, sc->var->nparam);
+        error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ns->var->nparam);
 
     *rest = skip(tok, TK_RPAREN);
 
@@ -835,10 +868,10 @@ static Node *primary(Token **rest, Token *tok) {
         // Function call
         if (tok->next->kind == TK_LPAREN) return fncall(rest, tok);
         // Variable or enum constant
-        VarScope *sc = find_var(tok, 1);
+        NameSpace *sc = find_ident(tok, 1);
         if (!sc) error(tok, "use of undeclared identifier ‘%.*s’", tok->len, tok->loc);
-        if (sc->type_def) error(tok, "unexpected type name ‘%.*s’: expected expression", tok->len, tok->loc);
-        if (sc->var)
+        if (sc->kind == SYM_TYNAME) error(tok, "unexpected type name ‘%.*s’: expected expression", tok->len, tok->loc);
+        if (sc->kind == SYM_VAR)
             node = new_var_node(sc->var, tok);
         else
             node = new_num(sc->enum_val, tok);
@@ -1317,17 +1350,20 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         Token *start = tok;
         Type *ty = declarator(&tok, tok, basety);
         if (ty->kind == TY_VOID) error(start, "variable ‘%.*s’ declared void", start->len, start->loc);
+        bool is_fn = ty->kind == TY_FUNC;
         Sym *var;
         uint32_t id = get_ident(ty->name);
-        if (sclass & SC_EXTERN || ty->kind == TY_FUNC) {
+        if (sclass & SC_EXTERN || is_fn) {
             var = new_gvar(id, ty);
+            push_namespace(id, is_fn ? SYM_FUNC : SYM_VAR, ty, ty->name)->var = var;
         } else if (sclass & SC_STATIC) {
             char *name = format("%s.%s", str(cur_fn->id), str(id));
             uint32_t uid = new_unique_varname(intern(name, strlen(name)));
             var = new_gvar(uid, ty);
-            push_scope(id)->var = var;
+            push_namespace(id, SYM_VAR, ty, ty->name)->var = var;
         } else {
             var = new_lvar(id, ty);
+            push_namespace(id, SYM_VAR, ty, ty->name)->var = var;
         }
         var->sclass = sclass;
         var->align = MAX(align, ty->align);
@@ -1650,7 +1686,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
             Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
             if (sclass & SC_TYPEDEF) {
                 Type *ty = declarator(&tok, tok, basety);
-                push_scope(get_ident(ty->name))->type_def = ty;
+                push_namespace(get_ident(ty->name), SYM_TYNAME, ty, ty->name);
             } else {
                 cur = cur->next = declaration(&tok, tok, basety, sclass, align);
             }
@@ -1686,7 +1722,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
 
         ty = enum_type();
         ty->size = -1;
-        push_tag_scope(tag->id, ty);
+        push_tag_namespace(tag->id, ty);
         return ty;
     }
 
@@ -1697,7 +1733,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
         ty = find_tag(tag, 0);
         if (!ty) {
             ty = enum_type();
-            push_tag_scope(tag->id, ty);
+            push_tag_namespace(tag->id, ty);
         }
         ty->size = 4;
     } else {
@@ -1713,14 +1749,13 @@ static Type *enum_decl(Token **rest, Token *tok) {
     while (!consume_end(rest, tok)) {
         if (i++ > 0) tok = skip(tok, TK_COMMA);
 
-        uint32_t name = get_ident(tok);
+        Token *enm_name = tok;
+        uint32_t name = get_ident(enm_name);
         tok = tok->next;
 
         if (tok->kind == TK_AS) val = const_expr(&tok, tok->next);
 
-        VarScope *sc = push_scope(name);
-        sc->enum_ty = ty;
-        sc->enum_val = val;
+        push_namespace(name, SYM_ENUM, ty, enm_name)->enum_val = val;
         EnumVal *enm = emalloc(sizeof(EnumVal));
         enm->name = name;
         enm->val = val++;
@@ -1783,7 +1818,7 @@ static Type *record_decl(Token **rest, Token *tok) {
 
         ty = struct_type();
         ty->size = -1;
-        push_tag_scope(tag->id, ty);
+        push_tag_namespace(tag->id, ty);
         return ty;
     }
 
@@ -1795,7 +1830,7 @@ static Type *record_decl(Token **rest, Token *tok) {
         ty = find_tag(tag, 0);
         if (!ty) {
             ty = struct_type();
-            push_tag_scope(tag->id, ty);
+            push_tag_namespace(tag->id, ty);
         }
     } else {
         ty = struct_type();
@@ -2043,9 +2078,11 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
         // "array of T" is converted to "pointer to T" in the parameter
         // context. For example, *argv[] is converted to **argv by this.
         if (paramty->kind == TY_ARRAY) {
-            Token *name = paramty->name;
+            Type *arr = paramty;
             paramty = pointer_to(paramty->base, paramty->qual);
-            paramty->name = name;
+            paramty->name = arr->name;
+            paramty->is_star = arr->is_star;
+            paramty->is_static = arr->is_static;
         }
         if (paramty->size < 0)
             error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len, paramty->name->loc);
@@ -2180,52 +2217,59 @@ static Token *external_declaration(Token *tok) {
         cnt++;
         Token *start = tok;
         Type *ty = declarator(&tok, tok, basety);
+        Sym *var;
+        bool is_func = ty->kind == TY_FUNC;
 
         // function-definition
         if (tok->kind == TK_LBRACE) {
-            if (cnt || ty->kind != TY_FUNC) error(tok, "expected ‘=’, ‘,’, ‘;’ before ‘{’ token");
+            if (cnt || !is_func) error(tok, "expected ‘=’, ‘,’, ‘;’ before ‘{’ token");
             if (sclass & SC_TYPEDEF) error(tok, "function definition declared ‘typedef’");
             if (sclass & SC_THREAD) error(tok, "function definition declared ‘thread_local’");
             if (sclass & SC_REG) error(tok, "function definition declared ‘register’");
-            VarScope *sc = find_var(ty->name, false);
-            if (sc) {
-                if (!sc->var || !sc->var->is_function) {
-                    diag(ty->name, "error", "‘%.*s’ redeclared as different kind of symbol", ty->name->len,
-                         ty->name->loc);
-                    note(sc->var->ty->name, "previous definition is here");
-                    exit(1);
-                }
-                if (sc->var->is_defined) {
+
+            NameSpace *ns = find_ident(ty->name, false);
+            if (ns) {
+                check_decl_compatile(ns, SYM_FUNC, ty);
+                var = ns->var;
+                if (var->is_defined) {
                     diag(ty->name, "error", "redefinition of ‘%.*s’", ty->name->len, ty->name->loc);
-                    note(sc->var->ty->name, "previous definition is here");
-                    exit(1);
+                    goto note;
                 }
+                if (sclass == SC_STATIC && var->sclass != SC_STATIC) {
+                    diag(ty->name, "error", "static declaration of ‘%.*s’ follows non-static declaration",
+                         ty->name->len, ty->name->loc);
+                    goto note;
+                }
+            } else {
+                var = new_gvar(get_ident(ty->name), ty);
+                push_namespace(var->id, SYM_FUNC, ty, ty->name)->var = var;
+                var->is_function = true;
+                var->sclass = sclass ? sclass : SC_EXTERN;
             }
-            uint32_t fn_id = get_ident(ty->name);
-            Sym *fn = new_gvar(fn_id, ty);
-            fn->is_function = true;
-            fn->is_defined = true;
-            fn->sclass = sclass ? sclass : SC_EXTERN;
-            fn->funcspec = funcspec;
+
+            var->is_defined = true;
+            var->funcspec |= funcspec;
 
             locals = NULL;
-            cur_fn = fn;
+            cur_fn = var;
             enter_scope();
             Type *param = ty->params;
             uint32_t nparam = 0;
             while (param) {
+                if (is_pointer(param) && param->is_star)
+                    error(param->name, "‘[*]’ not allowed in other than function prototype scope");
                 uint32_t id;
                 nparam++;
                 if (param->name)
                     id = get_ident(param->name);
                 else
                     id = intern("", 0);
-                new_lvar(id, param);
+                push_namespace(id, SYM_VAR, ty, param->name)->var = new_lvar(id, param);
                 param = param->next;
             }
-            fn->nparam = nparam;
+            var->nparam = nparam;
 
-            fn->body = compound_stmt(&tok, tok);
+            var->body = compound_stmt(&tok, tok);
 
             Sym *prev = NULL, *cur = locals, *next = NULL;
             while (cur) {
@@ -2234,30 +2278,67 @@ static Token *external_declaration(Token *tok) {
                 prev = cur;
                 cur = next;
             }
-            fn->locals = prev;
-            fn->labels = labels;
+            var->locals = prev;
+
+            var->labels = labels;
             resolve_goto_labels();
             leave_scope();
             return tok;
         }
 
         // declaration
+        NameSpace *ns = find_ident(ty->name, false);
+        SymKind symkind = is_func ? SYM_FUNC : SYM_VAR;
         if (tok->kind == TK_AS) {
-            if (ty->kind == TY_FUNC || sclass & SC_TYPEDEF)
+            if (is_func || sclass & SC_TYPEDEF)
                 error(ty->name,
                       "illegal initializer (only variables can be "
                       "initialized)");
         }
+
         if (sclass & SC_TYPEDEF) {
-            push_scope(get_ident(ty->name))->type_def = ty;
+            if (ns)
+                check_decl_compatile(ns, SYM_TYNAME, ty);
+            else
+                push_namespace(get_ident(ty->name), SYM_TYNAME, ty, ty->name);
         } else {
+            if (ns) {
+                check_decl_compatile(ns, symkind, ty);
+                var = ns->var;
+                if (var->is_defined && tok->kind == TK_AS) {
+                    diag(ty->name, "error", "redefinition of ‘%.*s’", ty->name->len, ty->name->loc);
+                    goto note;
+                }
+                if (var->sclass & SC_STATIC) {
+                    if (!is_func && !(sclass & SC_STATIC)) {
+                        diag(ty->name, "error", "non-static declaration of ‘%.*s’ follows static declaration",
+                             ty->name->len, ty->name->loc);
+                        goto note;
+                    }
+                }
+                if (sclass & SC_STATIC) {
+                    if (!(var->sclass & SC_STATIC)) {
+                        diag(ty->name, "error", "static declaration of ‘%.*s’ follows non-static declaration",
+                             ty->name->len, ty->name->loc);
+                        goto note;
+                    }
+                }
+            } else {
+                var = new_gvar(get_ident(ty->name), ty);
+                var->is_function = is_func;
+                var->sclass = sclass;
+                var->align = MAX(align, ty->align);
+                push_namespace(var->id, symkind, ty, ty->name)->var = var;
+            }
+
             if (ty->kind == TY_VOID) error(start, "variable ‘%.*s’ declared void", start->len, start->loc);
-            Sym *var = new_gvar(get_ident(ty->name), ty);
-            var->is_function = var->ty->kind == TY_FUNC;
-            var->sclass = sclass;
-            var->align = MAX(align, ty->align);
-            if (tok->kind == TK_AS) gvar_initializer(&tok, tok->next, var);
-            if (var->ty->size < 0) error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
+
+            if (tok->kind == TK_AS) {
+                gvar_initializer(&tok, tok->next, var);
+                var->is_defined = true;
+            }
+            if (var->ty->size < 0 && var->ty->kind != TY_ARRAY)
+                error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
         }
         if (match(&tok, tok, TK_COMMA))
             continue;
@@ -2265,6 +2346,9 @@ static Token *external_declaration(Token *tok) {
             return tok->next;
         else
             error(tok, "expected ‘;’ after top level declarator");
+    note:
+        note(ns->loc, "previous definition is here");
+        exit(1);
     }
 }
 
