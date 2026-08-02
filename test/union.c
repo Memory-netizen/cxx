@@ -61,6 +61,19 @@ int main() {
                y.c.b;
            }));
 
+    ASSERT(5, ({
+               union u;
+               union u {
+                   int x;
+               };
+               union u {
+                   int x;
+               };
+               union u u1;
+               u1.x = 5;
+               u1.x;
+           }));
+
     printf("OK\n");
     return 0;
 }

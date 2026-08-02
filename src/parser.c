@@ -620,7 +620,7 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
     init->expr = assign(rest, tok);
 }
 
-static void insert_ty(Type *ty, bool is_union) {
+static void insert_ty(Type *ty, char *kind) {
     int i = -1;
     Type *t = types;
     while (t) {
@@ -628,7 +628,6 @@ static void insert_ty(Type *ty, bool is_union) {
         t = t->next;
     }
     char *name;
-    char *kind = is_union ? "union" : "struct";
     if (i >= 0) {
         name = format("%s.%s.%d", kind, str(ty->id), i);
     } else {
@@ -644,7 +643,7 @@ static Initializer *initializer(Token **rest, Token *tok, Type *ty, Type **new_t
     initializer2(rest, tok, init, true);
     if ((ty->kind == TY_STRUCT || ty->kind == TY_UNION) && ty->is_flexible) {
         ty = copy_type(ty);
-        insert_ty(ty, ty->kind == TY_UNION);
+        insert_ty(ty, ty->kind == TY_UNION ? "union" : "struct");
 
         Member *mem = ty->members;
         while (mem->next) mem = mem->next;
@@ -1843,7 +1842,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
     }
 
     ty->enumvals = head.next;
-    if (exist_ty) {
+    if (redefine) {
         if (!is_compatible(ty, exist_ty)) {
             diag(tag, "error", "conflicting redefinition of enum ‘enum %.*s’", tag->len, tag->loc);
             goto note;
@@ -1904,9 +1903,12 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
 // RecordSpec ::= Record Ident ("{" MemDecl+ "}")? | Record "{" MemDecl+ "}"
 static Type *record_decl(Token **rest, Token *tok) {
     bool is_union = tok->kind == TK_UNION;
+    char *ty_kind = tok->kind == TK_UNION ? "union" : "struct";
     tok = tok->next;
     // Read a tag.
     Token *tag = NULL;
+    TagNameSpace *ns;
+    Type *ty = NULL;
     if (tok->kind == TK_IDENT) {
         tag = tok;
         tok = tok->next;
@@ -1914,11 +1916,23 @@ static Type *record_decl(Token **rest, Token *tok) {
 
     if (tag && tok->kind != TK_LBRACE) {
         *rest = tok;
-        TagNameSpace *ns = find_tag(tag, true);
-        Type *ty = ns ? ns->ty : NULL;
-        if (ty) return ty;
+        ns = find_tag(tag, true);
+        if (ns) {
+            ty = ns->ty;
+            bool match = false;
+            if (ty->kind == TY_UNION && is_union)
+                match = true;
+            else if (ty->kind == TY_STRUCT && !is_union)
+                match = true;
+            if (!match) {
+                diag(tag, "error", "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
+                     tag->loc);
+                goto note;
+            }
+            return ty;
+        }
 
-        ty = struct_type();
+        ty = struct_type(is_union);
         ty->size = -1;
         push_tag_namespace(tag->id, ty, tag);
         return ty;
@@ -1926,21 +1940,40 @@ static Type *record_decl(Token **rest, Token *tok) {
 
     // Construct a struct object.
     tok = skip(tok, TK_LBRACE);
-    Type *ty = NULL;
 
+    Type *exist_ty = NULL;
+    bool redefine = false;
     if (tag) {
-        TagNameSpace *ns = find_tag(tag, false);
-        ty = ns ? ns->ty : NULL;
-        if (!ty) {
-            ty = struct_type();
+        ns = find_tag(tag, false);
+        if (ns) {
+            exist_ty = ns->ty;
+            bool match = false;
+            if (exist_ty->kind == TY_UNION && is_union)
+                match = true;
+            else if (exist_ty->kind == TY_STRUCT && !is_union)
+                match = true;
+            if (!match) {
+                diag(tag, "error", "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
+                     tag->loc);
+                goto note;
+            }
+            if (exist_ty->size == -1) {
+                ty = exist_ty;
+            } else {
+                redefine = true;
+                ty = struct_type(is_union);
+                ty->id = tag->id;
+            }
+        } else {
+            ty = struct_type(is_union);
             push_tag_namespace(tag->id, ty, tag);
         }
     } else {
-        ty = struct_type();
+        ty = struct_type(is_union);
         ty->is_anon = true;
         ty->id = intern("anon", 4);
     }
-    ty->kind = is_union ? TY_UNION : TY_STRUCT;
+
     struct_members(rest, tok, ty);
 
     // Assign offsets within the struct to members.
@@ -1958,8 +1991,19 @@ static Type *record_decl(Token **rest, Token *tok) {
         offset += mem->ty->size;
     }
     ty->size = ALIGN_UP(offset, ty->align);
-    insert_ty(ty, is_union);
+
+    if (redefine) {
+        if (!is_compatible(ty, exist_ty)) {
+            diag(tag, "error", "redefinition of struct or union ‘%s %.*s’", ty_kind, tag->len, tag->loc);
+            goto note;
+        }
+        return exist_ty;
+    }
+    insert_ty(ty, ty_kind);
     return ty;
+note:
+    note(ns->loc, "previous definition is here");
+    exit(1);
 }
 
 // DeclSpecs ::= DeclSpec+

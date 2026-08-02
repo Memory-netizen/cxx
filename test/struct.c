@@ -375,6 +375,19 @@ int main() {
                sizeof(T);
            }));
 
+    ASSERT(5, ({
+               struct s;
+               struct s {
+                   int x;
+               };
+               struct s {
+                   int x;
+               };
+               struct s s1;
+               s1.x = 5;
+               s1.x;
+           }));
+
     printf("OK\n");
     return 0;
 }

@@ -548,7 +548,7 @@ void check_asop(Type *dst, Node *src, int ctx);
 Type *pointer_to(Type *base, uint32_t qual);
 Type *func_type(Type *return_ty);
 Type *array_of(Type *base, int size);
-Type *struct_type(void);
+Type *struct_type(bool is_union);
 Type *enum_type(void);
 Type *copy_type(Type *ty);
 Type *type_qual(Type *ty, uint32_t qual);
