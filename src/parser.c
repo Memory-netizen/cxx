@@ -2076,11 +2076,11 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
             case TK_CONST:
                 qual |= Q_CONST;
                 break;
-            case Q_VOLATILE:
+            case TK_VOLATILE:
                 qual |= Q_VOLATILE;
                 break;
-            case Q_RESTRICT:
-                qual |= Q_RESTRICT;
+            case TK_RESTRICT:
+                error(tok, "restrict requires a pointer or reference");
                 break;
             case TK_IDENT: {
                 if (typespec_cnt) goto loop_end;
@@ -2109,6 +2109,8 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                     *align = typename(&tok, tok)->align;
                 else
                     *align = const_expr(&tok, tok);
+                if (*align & (*align - 1))
+                    error(ty_tok, "requested alignment ‘%ld’ is not a positive power of 2", *align);
                 tok = skip(tok, TK_RPAREN);
                 continue;
             case TK_VOID:
@@ -2472,6 +2474,7 @@ static Token *external_declaration(Token *tok) {
                       "illegal initializer (only variables can be "
                       "initialized)");
         }
+        if (sclass & SC_REG) error(tok, "illegal storage class ‘register’ on file-scoped variable");
 
         if (sclass & SC_TYPEDEF) {
             if (ns)
