@@ -1321,41 +1321,6 @@ static Node *expr(Token **rest, Token *tok) {
     return node;
 }
 
-// ExpStmt ::= ";" | Exp ";"
-static Node *expr_stmt(Token **rest, Token *tok) {
-    if (tok->kind == TK_SEMI) {
-        *rest = tok->next;
-        return new_node(ND_EXPR_STMT, tok);
-    }
-
-    Node *node = new_node(ND_EXPR_STMT, tok);
-    node->lhs = expr(&tok, tok);
-
-    *rest = skip(tok, TK_SEMI);
-    return node;
-}
-
-// RetStmt ::= "return" Exp? ";"
-static Node *return_stmt(Token **rest, Token *tok) {
-    Node *node = new_node(ND_RETURN, tok);
-    Type *ret = cur_fn->ty->ret;
-    if (tok->next->kind == TK_SEMI) {
-        if (ret->kind != TY_VOID) error(tok, "non-void function ‘%s’ should return a value", str(cur_fn->id));
-        *rest = tok->next->next;
-        return node;
-    }
-
-    node->lhs = expr(&tok, tok->next);
-    if (ret->kind == TY_VOID) error(tok, "void function ‘%s’ should not return a value", str(cur_fn->id));
-    *rest = skip(tok, TK_SEMI);
-
-    add_type(node);
-    check_asop(ret, node->lhs, CTX_RET);
-    new_imcast(&node->lhs, ret);
-
-    return node;
-}
-
 // InitDecls ::= InitDeclr ("," InitDeclr)*
 // InitDeclr ::= Declr ("=" Init)?
 static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclass, int align) {
@@ -1424,6 +1389,24 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
     return dummy.next;
 }
 
+// ExpStmt ::= ";" | Exp ";"
+static Node *expr_stmt(Token **rest, Token *tok) {
+    Node *node = new_node(ND_EXPR_STMT, tok);
+
+    if (tok->kind == TK_SEMI) {
+        *rest = tok->next;
+        return node;
+    }
+
+    node->lhs = expr(&tok, tok);
+
+    *rest = skip(tok, TK_SEMI);
+    return node;
+}
+
+static int cont_depth;
+static int brk_depth;
+
 // SelHead ::= Exp | Decl Exp | SimDecl
 // SimDecl ::= DeclSpecs Declr "=" Init
 static Node *select_head(Token **rest, Token *tok) {
@@ -1448,6 +1431,8 @@ static Node *select_head(Token **rest, Token *tok) {
     return node;
 }
 
+// SelStmt ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
+//          | "switch" "(" SelHead ")" Stmt
 // IfStmt ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
 static Node *if_stmt(Token **rest, Token *tok) {
     enter_scope();
@@ -1465,45 +1450,42 @@ static Node *if_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-static int cont_depth;
-static int brk_depth;
-
-// ForStmt ::= "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt
-static Node *for_stmt(Token **rest, Token *tok) {
+// SwitchStmt ::= "switch" "(" SelHead ")" Stmt
+static Node *switch_stmt(Token **rest, Token *tok) {
     enter_scope();
-    cont_depth++;
     brk_depth++;
-    Node *node = new_node(ND_FOR, tok);
+    Node *node = new_node(ND_SWITCH, tok);
+    Node *sw = cur_sw;
+    cur_sw = node;
+
+    // cond
     tok = skip(tok->next, TK_LPAREN);
-
-    // Init
-    if (is_typename(tok, true)) {
-        SClass sclass = 0;
-        int align = 0;
-        int funcspec = 0;
-        Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
-        node->init = declaration(&tok, tok, basety, sclass, align);
-    } else {
-        node->init = expr_stmt(&tok, tok);
-    }
-
-    // Cond
-    if (tok->kind != TK_SEMI) node->cond = expr(&tok, tok);
-    tok = skip(tok, TK_SEMI);
-
-    // Inc
-    if (tok->kind != TK_RPAREN) node->inc = expr(&tok, tok);
+    node->cond = select_head(&tok, tok);
+    add_type(node);
     tok = skip(tok, TK_RPAREN);
 
-    // Body
+    // body
     node->body = stmt(rest, tok);
 
-    cont_depth--;
     brk_depth--;
     leave_scope();
+    cur_sw = sw;
+
+    Node *prev = NULL, *cur = node->case_next, *next = NULL;
+    while (cur) {
+        next = cur->case_next;
+        cur->case_next = prev;
+        prev = cur;
+        cur = next;
+    }
+    node->case_next = prev;
+
     return node;
 }
 
+// IterStmt ::= "while" "(" Exp ")" Stmt
+//           | "do" Stmt "while" "(" Exp ")" ";"
+//           | "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt
 // WhileStmt ::= "while" "(" Exp ")" Stmt
 static Node *while_stmt(Token **rest, Token *tok) {
     enter_scope();
@@ -1546,88 +1528,53 @@ static Node *do_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// SwitchStmt ::= "switch" "(" SelHead ")" Stmt
-static Node *switch_stmt(Token **rest, Token *tok) {
+static Node *for_stmt(Token **rest, Token *tok) {
     enter_scope();
+    cont_depth++;
     brk_depth++;
-    Node *node = new_node(ND_SWITCH, tok);
-    Node *sw = cur_sw;
-    cur_sw = node;
-
-    // cond
+    Node *node = new_node(ND_FOR, tok);
     tok = skip(tok->next, TK_LPAREN);
-    node->cond = select_head(&tok, tok);
-    add_type(node);
+
+    // Init
+    if (is_typename(tok, true)) {
+        SClass sclass = 0;
+        int align = 0;
+        int funcspec = 0;
+        Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
+        node->init = declaration(&tok, tok, basety, sclass, align);
+    } else {
+        node->init = expr_stmt(&tok, tok);
+    }
+
+    // Cond
+    if (tok->kind != TK_SEMI) node->cond = expr(&tok, tok);
+    tok = skip(tok, TK_SEMI);
+
+    // Inc
+    if (tok->kind != TK_RPAREN) node->inc = expr(&tok, tok);
     tok = skip(tok, TK_RPAREN);
 
-    // body
+    // Body
     node->body = stmt(rest, tok);
 
+    cont_depth--;
     brk_depth--;
     leave_scope();
-    cur_sw = sw;
-
-    Node *prev = NULL, *cur = node->case_next, *next = NULL;
-    while (cur) {
-        next = cur->case_next;
-        cur->case_next = prev;
-        prev = cur;
-        cur = next;
-    }
-    node->case_next = prev;
-
     return node;
 }
 
-static void check_case(int64_t val, Token *tok) {
-    Node *cur = cur_sw->case_next;
-    while (cur) {
-        if (cur->val == val) {
-            diag(tok, "error", "duplicate case value ‘%ld’", val);
-            diag_exit(cur->tok, "note", "previous case defined here");
-        }
-        cur = cur->case_next;
-    }
-}
-
-// CaseStmt ::= "case" ConstExp ":" Stmt
-static Node *case_stmt(Token **rest, Token *tok) {
-    if (!cur_sw) error(tok, "case label not within a switch statement");
-
-    Node *node = new_node(ND_CASE, tok);
-    int64_t val = const_expr(&tok, tok->next);
-    val = eval_ty(val, cur_sw->cond->ty);
-    check_case(val, node->tok);
-    tok = skip(tok, TK_COLON);
-
-    node->body = stmt(rest, tok);
-    node->val = val;
-
-    node->case_next = cur_sw->case_next;
-    cur_sw->case_next = node;
-    return node;
-}
-
-// DefaultStmt ::= "default" ":" Stmt
-static Node *default_stmt(Token **rest, Token *tok) {
-    if (!cur_sw) error(tok, "‘default’ label not within a switch statement");
-    if (cur_sw->default_case) {
-        diag(tok, "error", "multiple default labels in one switch");
-        diag_exit(cur_sw->default_case->tok, "note", "this is the first default label");
-    }
-    Node *node = new_node(ND_CASE, tok);
-    tok = skip(tok->next, TK_COLON);
-    node->body = stmt(rest, tok);
-    cur_sw->default_case = node;
-    return node;
-}
-
+// JmpStmt ::= "goto" Ident ";"
+//          | "continue" Ident? ";"
+//          | "break" Ident? ";"
+//          | "return" Exp? ";"
 // GotoStmt ::= "goto" Ident ";"
 static Node *goto_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_GOTO, tok);
     node->label = get_ident(tok->next);
+
     node->goto_next = gotos;
     gotos = node;
+
     *rest = skip(tok->next->next, TK_SEMI);
     return node;
 }
@@ -1653,6 +1600,21 @@ static Node *get_named_loop(Token **rest, Token *tok, bool is_break) {
     return cur;
 }
 
+// ContinueStmt ::= "continue" Ident? ";"
+static Node *continue_stmt(Token **rest, Token *tok) {
+    if (!cont_depth) error(tok, "continue statement not within a loop");
+    Node *node = new_node(ND_CONTINUE, tok);
+    tok = tok->next;
+
+    if (tok->kind == TK_IDENT) {
+        node->label = tok->id;
+        node->target = get_named_loop(&tok, tok, false);
+    }
+
+    *rest = skip(tok, TK_SEMI);
+    return node;
+}
+
 // BreakStmt ::= "break" Ident? ";"
 static Node *break_stmt(Token **rest, Token *tok) {
     if (!brk_depth) error(tok, "break statement not within loop or switch");
@@ -1668,18 +1630,24 @@ static Node *break_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// ContinueStmt ::= "continue" Ident? ";"
-static Node *continue_stmt(Token **rest, Token *tok) {
-    if (!cont_depth) error(tok, "continue statement not within a loop");
-    Node *node = new_node(ND_CONTINUE, tok);
-    tok = tok->next;
-
-    if (tok->kind == TK_IDENT) {
-        node->label = tok->id;
-        node->target = get_named_loop(&tok, tok, true);
+// RetStmt ::= "return" Exp? ";"
+static Node *return_stmt(Token **rest, Token *tok) {
+    Node *node = new_node(ND_RETURN, tok);
+    Type *ret = cur_fn->ty->ret;
+    if (tok->next->kind == TK_SEMI) {
+        if (ret->kind != TY_VOID) error(tok, "non-void function ‘%s’ should return a value", str(cur_fn->id));
+        *rest = tok->next->next;
+        return node;
     }
 
+    node->lhs = expr(&tok, tok->next);
+    if (ret->kind == TY_VOID) error(tok, "void function ‘%s’ should not return a value", str(cur_fn->id));
     *rest = skip(tok, TK_SEMI);
+
+    add_type(node);
+    check_asop(ret, node->lhs, CTX_RET);
+    new_imcast(&node->lhs, ret);
+
     return node;
 }
 
@@ -1694,97 +1662,161 @@ static void check_label(uint32_t label, Token *tok) {
     }
 }
 
-// LabelStmt ::= Ident ":" Stmt
-static Node *label_stmt(Token **rest, Token *tok) {
-    Node *node = new_node(ND_LABEL, tok);
-    node->label = tok->id;
-
-    check_label(node->label, tok);
-    node->goto_next = labels;
-    labels = node;
-
-    Token *lb = tok;
-    tok = tok->next->next;
-    if (tok->kind == TK_RBRACE) node->label_body = new_node(ND_EXPR_STMT, lb);
-    if (is_typename(tok, true) && tok->next->kind != TK_COLON) node->label_body = new_node(ND_EXPR_STMT, lb);
-    if (node->label_body) {
-        *rest = tok;
-        return node;
+static void check_case(int64_t val, Token *tok) {
+    Node *cur = cur_sw->case_next;
+    while (cur) {
+        if (cur->val == val) {
+            diag(tok, "error", "duplicate case value ‘%ld’", val);
+            diag_exit(cur->tok, "note", "previous case defined here");
+        }
+        cur = cur->case_next;
     }
-
-    Token *tmp = tok;
-    while (tmp->kind == TK_IDENT && tmp->next->kind == TK_COLON) tmp = tmp->next->next;
-
-    if (tmp->kind == TK_DO || tmp->kind == TK_WHILE || tmp->kind == TK_FOR) node->is_loop = true;
-    if (tmp->kind == TK_SWITCH) node->is_switch = true;
-
-    if (node->is_switch || node->is_loop) {
-        node->loop_next = named_loop;
-        named_loop = node;
-    }
-
-    node->label_body = stmt(rest, tok);
-
-    if (node->is_switch || node->is_loop) named_loop = named_loop->loop_next;
-
-    return node;
 }
-
-// Stmt        ::= LabelStmt | UnLabelStmt
-// LabelStmt   ::= Label Stmt
-// UnLabelStmt ::= ExpStmt | PrimBlk | JmpStmt
-
-// PrimBlk ::= CompStmt | SelStmt | IterStmt
 
 // Label ::= Ident ":"
 //     | "case" ConstRangeExp ":"
 //     | "case" ConstExp ":"
 //     | "default" ":"
+// ConstRangeExp ::= ConstExp "..." ConstExp
+static Node *label(Token **rest, Token *tok) {
+    Node head = {}, *cur = &head;
+    while (1) {
+        if (tok->kind == TK_IDENT && tok->next->kind == TK_COLON) {
+            Node *node = new_node(ND_LABEL, tok);
+            node->label = tok->id;
+            check_label(node->label, tok);
+            node->goto_next = labels;
+            labels = node;
 
-// SelStmt ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
-//          | "switch" "(" SelHead ")" Stmt
+            cur = cur->label_ring = node;
+            tok = tok->next->next;
+            continue;
+        }
+        if (tok->kind == TK_DEFAULT) {
+            if (!cur_sw) error(tok, "‘default’ label not within a switch statement");
+            if (cur_sw->default_case) {
+                diag(tok, "error", "multiple default labels in one switch");
+                diag_exit(cur_sw->default_case->tok, "note", "this is the first default label");
+            }
+            Node *node = new_node(ND_CASE, tok);
+            tok = skip(tok->next, TK_COLON);
+            cur_sw->default_case = node;
+            cur = cur->label_ring = node;
+            continue;
+        }
+        if (tok->kind == TK_CASE) {
+            if (!cur_sw) error(tok, "case label not within a switch statement");
+            Token *tk_case = tok;
+            int64_t val1, val2;
+            val1 = const_expr(&tok, tok->next);
+            val1 = eval_ty(val1, cur_sw->cond->ty);
+            if (tok->kind == TK_COLON) {
+                check_case(val1, tk_case);
+                Node *node = new_node(ND_CASE, tk_case);
+                node->val = val1;
 
+                node->case_next = cur_sw->case_next;
+                cur_sw->case_next = node;
 
-// IterStmt ::= "while" "(" Exp ")" Stmt
-//           | "do" Stmt "while" "(" Exp ")" ";"
-//           | "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt
+                cur = cur->label_ring = node;
+                tok = tok->next;
+                continue;
+            }
 
-// JmpStmt ::= "goto" Ident ";"
-//          | "continue" Ident? ";"
-//          | "break" Ident? ";"
-//          | "return" Exp? ";"
+            tok = skip(tok, TK_ELLIPSIS);
+            val2 = const_expr(&tok, tok);
+            val2 = eval_ty(val2, cur_sw->cond->ty);
+            for (int64_t i = val1; i <= val2; i++) {
+                check_case(i, tk_case);
+                Node *node = new_node(ND_CASE, tk_case);
+                node->val = i;
+                node->case_next = cur_sw->case_next;
+                cur_sw->case_next = node;
+                cur = cur->label_ring = node;
+            }
+            tok = skip(tok, TK_COLON);
+            continue;
+        }
+        break;
+    }
+    *rest = tok;
+    cur->label_ring = head.label_ring;
+    return head.label_ring;
+}
+
+static uint32_t push_named_loop(Node *lb, Token *tok) {
+    if (!lb) return 0;
+    bool is_switch = false, is_loop = false;
+    if (tok->kind == TK_DO || tok->kind == TK_WHILE || tok->kind == TK_FOR) is_loop = true;
+    if (tok->kind == TK_SWITCH) is_switch = true;
+    if (!is_loop && !is_switch) return 0;
+
+    uint32_t i = 0;
+    Node *tmp = lb;
+    do {
+        if (tmp->kind == ND_LABEL) {
+            tmp->is_loop = is_loop;
+            tmp->is_switch = is_switch;
+            tmp->loop_next = named_loop;
+            named_loop = tmp;
+            i++;
+        }
+        tmp = tmp->label_ring;
+    } while (tmp != lb);
+
+    return i;
+}
+
+// Stmt        ::= LabelStmt | UnLabelStmt
+// LabelStmt   ::= Label Stmt
+// UnLabelStmt ::= ExpStmt | PrimBlk | JmpStmt
+// PrimBlk     ::= CompStmt | SelStmt | IterStmt
 static Node *stmt(Token **rest, Token *tok) {
+    Node *lb = label(&tok, tok);
+    uint32_t i = push_named_loop(lb, tok);
+    Node *stmt;
     switch (tok->kind) {
         case TK_LBRACE:
-            return compound_stmt(rest, tok);
-        case TK_RETURN:
-            return return_stmt(rest, tok);
+            stmt = compound_stmt(rest, tok);
+            break;
         case TK_IF:
-            return if_stmt(rest, tok);
-        case TK_FOR:
-            return for_stmt(rest, tok);
-        case TK_WHILE:
-            return while_stmt(rest, tok);
-        case TK_DO:
-            return do_stmt(rest, tok);
-        case TK_GOTO:
-            return goto_stmt(rest, tok);
-        case TK_BREAK:
-            return break_stmt(rest, tok);
-        case TK_CONTINUE:
-            return continue_stmt(rest, tok);
+            stmt = if_stmt(rest, tok);
+            break;
         case TK_SWITCH:
-            return switch_stmt(rest, tok);
-        case TK_CASE:
-            return case_stmt(rest, tok);
-        case TK_DEFAULT:
-            return default_stmt(rest, tok);
-        case TK_IDENT:
-            if (tok->next->kind == TK_COLON) return label_stmt(rest, tok);
-            // fall through
+            stmt = switch_stmt(rest, tok);
+            break;
+        case TK_WHILE:
+            stmt = while_stmt(rest, tok);
+            break;
+        case TK_DO:
+            stmt = do_stmt(rest, tok);
+            break;
+        case TK_FOR:
+            stmt = for_stmt(rest, tok);
+            break;
+        case TK_GOTO:
+            stmt = goto_stmt(rest, tok);
+            break;
+        case TK_CONTINUE:
+            stmt = continue_stmt(rest, tok);
+            break;
+        case TK_BREAK:
+            stmt = break_stmt(rest, tok);
+            break;
+        case TK_RETURN:
+            stmt = return_stmt(rest, tok);
+            break;
         default:
-            return expr_stmt(rest, tok);
+            stmt = expr_stmt(rest, tok);
+            break;
     }
+    while (i--) named_loop = named_loop->loop_next;
+
+    if (lb) {
+        lb->label_body = stmt;
+        return lb;
+    }
+    return stmt;
 }
 
 // CompStmt ::= "{" BlkItem* "}"
@@ -1796,20 +1828,47 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
 
     tok = tok->next;
     while (tok->kind != TK_RBRACE) {
-        if (is_typename(tok, true) && tok->next->kind != TK_COLON) {
+        Token *start = tok;
+
+        // Label
+        Node *lb = label(&tok, tok);
+        if (lb) {
+            uint32_t i = push_named_loop(lb, tok);
+
+            if (tok->kind == TK_RBRACE)
+                lb->label_body = new_node(ND_EXPR_STMT, start);
+            else if (is_typename(tok, true))
+                lb->label_body = new_node(ND_EXPR_STMT, start);
+            else
+                lb->label_body = stmt(&tok, tok);
+
+            cur = cur->next = lb;
+            add_type(cur);
+
+            while (i--) named_loop = named_loop->loop_next;
+            continue;
+        }
+
+        // Decl
+        if (is_typename(tok, true)) {
             SClass sclass = 0;
             int align = 0;
             int funcspec = 0;
             Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
+
             if (sclass & SC_TYPEDEF) {
                 Type *ty = declarator(&tok, tok, basety);
                 push_namespace(get_ident(ty->name), SYM_TYNAME, ty, ty->name);
             } else {
                 cur = cur->next = declaration(&tok, tok, basety, sclass, align);
             }
-        } else {
-            cur = cur->next = stmt(&tok, tok);
+
+            add_type(cur);
+            continue;
         }
+
+        // UnLabelStmt
+        cur = cur->next = stmt(&tok, tok);
         add_type(cur);
     }
     cur->next = NULL;

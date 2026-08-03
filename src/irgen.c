@@ -54,7 +54,9 @@ static void add_pred(Blk *bp, Blk *b) {
     if (!b || bp == curf->end || bp == unreach) {
         return;
     }
-
+    for (uint32_t i = 0; i < b->num_pred; i++) {
+        if (b->pred[i] == bp) return;
+    }
     b->pred = vgrow(b->pred, b->num_pred + 1);
     b->pred[b->num_pred++] = bp;
 }
@@ -702,12 +704,17 @@ static void gen_switch(Node *n) {
     Blk *merge_blk = new_blk();
     int i = 0;
     for (Node *y = n->case_next; y; y = y->case_next) {
-        y->blk = new_blk();
+        if (!y->blk) y->blk = new_blk();
+        Node *tmp = y->label_ring;
+        while (tmp != y) {
+            tmp->blk = y->blk;
+            tmp = tmp->label_ring;
+        }
         ++i;
     }
     curb->narg = i;
 
-    if (n->default_case) n->default_case->blk = new_blk();
+    if (n->default_case && !n->default_case->blk) n->default_case->blk = new_blk();
 
     Blk *brk = brk_blk;
     n->brk_blk = brk_blk = merge_blk;
@@ -758,7 +765,7 @@ static void gen_case(Node *n) {
     add_pred(curb, curb->succ1);
     curb = n->blk;
     insert_blk(curb);
-    gen_stmt(n->body);
+    gen_stmt(n->label_body);
 }
 
 static void gen_goto(Node *n) {
@@ -858,7 +865,14 @@ Module *irgen(Module *md) {
         tail = &dummy;
         fn->start = new_blk();
         fn->end = new_blk();
-        for (Node *y = fn->labels; y; y = y->goto_next) y->blk = new_blk();
+        for (Node *y = fn->labels; y; y = y->goto_next) {
+            if (!y->blk) y->blk = new_blk();
+            Node *tmp = y->label_ring;
+            while (tmp != y) {
+                tmp->blk = y->blk;
+                tmp = tmp->label_ring;
+            }
+        }
         brk_blk = cont_blk = NULL;
 
         curb = fn->start;

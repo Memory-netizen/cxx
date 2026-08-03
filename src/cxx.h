@@ -401,7 +401,6 @@ struct Node {
             uint32_t label;
             union {
                 Node *target;
-                Node *label_body;
             };
             Node *goto_next;
             Node *loop_next;
@@ -415,6 +414,8 @@ struct Node {
         };
         int64_t val;  // Used if kind == ND_NUM
     };
+    Node *label_ring;
+    Node *label_body;
 };
 
 // Represents a variable initializer
