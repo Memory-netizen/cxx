@@ -525,8 +525,9 @@ static void gen_for(Node *node) {
 
     Blk *brk = brk_blk;
     Blk *cont = cont_blk;
-    brk_blk = merge_blk;
-    cont_blk = incr_blk;
+
+    node->brk_blk = brk_blk = merge_blk;
+    node->cont_blk = cont_blk = incr_blk;
 
     // init
     gen_stmt(node->init);
@@ -578,8 +579,8 @@ static void gen_while(Node *node) {
 
     Blk *brk = brk_blk;
     Blk *cont = cont_blk;
-    brk_blk = merge_blk;
-    cont_blk = cond_blk;
+    node->brk_blk = brk_blk = merge_blk;
+    node->cont_blk = cont_blk = cond_blk;
 
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
@@ -617,8 +618,8 @@ static void gen_do(Node *node) {
 
     Blk *brk = brk_blk;
     Blk *cont = cont_blk;
-    brk_blk = merge_blk;
-    cont_blk = cond_blk;
+    node->brk_blk = brk_blk = merge_blk;
+    node->cont_blk = cont_blk = cond_blk;
 
     curb->jmp.type = IR_JMP;
     curb->succ1 = body_blk;
@@ -661,7 +662,7 @@ static void gen_switch(Node *n) {
     if (n->default_case) n->default_case->blk = new_blk();
 
     Blk *brk = brk_blk;
-    brk_blk = merge_blk;
+    n->brk_blk = brk_blk = merge_blk;
 
     Ref cond = gen_stmt(n->cond);
     curb->jmp.type = IR_SWITCH;
@@ -704,7 +705,7 @@ static void gen_case(Node *n) {
     curb->succ1 = n->blk;
     curb = n->blk;
     insert_blk(curb);
-    gen_stmt(n->label_body);
+    gen_stmt(n->body);
 }
 
 static void gen_goto(Node *n) {
@@ -714,16 +715,14 @@ static void gen_goto(Node *n) {
 }
 
 static void gen_break(Node *n) {
-    (void)n;
     curb->jmp.type = IR_JMP;
-    curb->succ1 = brk_blk;
+    curb->succ1 = n->target ? n->target->label_body->brk_blk : brk_blk;
     curb = unreach;
 }
 
 static void gen_continue(Node *n) {
-    (void)n;
     curb->jmp.type = IR_JMP;
-    curb->succ1 = cont_blk;
+    curb->succ1 = n->target ? n->target->label_body->cont_blk : cont_blk;
     curb = unreach;
 }
 

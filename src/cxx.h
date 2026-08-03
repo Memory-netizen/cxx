@@ -385,7 +385,10 @@ struct Node {
             union {
                 Node *els;
                 Node *inc;
+                Node *case_next;
             };
+            Blk *brk_blk;
+            Blk *cont_blk;
         };
         struct {
             // Function call
@@ -400,16 +403,18 @@ struct Node {
                 Node *target;
                 Node *label_body;
             };
+            Node *goto_next;
+            Node *loop_next;
+            bool is_loop;
+            bool is_switch;
             Blk *blk;
         };
         struct {
             Sym *var;  // Used if kind == ND_VAR
             Node *var_init;
         };
+        int64_t val;  // Used if kind == ND_NUM
     };
-    Node *goto_next;
-    Node *case_next;
-    int64_t val;  // Used if kind == ND_NUM
 };
 
 // Represents a variable initializer

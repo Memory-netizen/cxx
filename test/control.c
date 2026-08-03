@@ -393,6 +393,43 @@ int main() {
                j;
            }));
 
+    ASSERT(4, ({
+               int i, sum = 0;
+           outer1:
+               for (i = 0; i < 5; i++) {
+                   if (i % 2 == 0) continue outer1;
+                   sum += i;
+               }
+               sum;
+           }));
+
+    ASSERT(2, ({
+               int i;
+           outer2:
+               for (i = 0; i < 5; i++) {
+                   for (int j = 0; j < 5; j++) {
+                       if (i == 2 && j == 3) break outer2;
+                   }
+               }
+               i;
+           }));
+
+    ASSERT(4, ({
+               int r = 0;
+           my_switch:
+               switch (2) {
+                   case 1:
+                       r = 1;
+                       break my_switch;
+                   case 2:
+                       r = 2;
+                       break my_switch;
+                   default:
+                       r = 3;
+               }
+               r + 2;
+           }));
+
     printf("OK\n");
     return 0;
 }

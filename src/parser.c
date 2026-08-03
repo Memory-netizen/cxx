@@ -146,6 +146,7 @@ static Sym *cur_fn;
 // Lists of all goto statements and labels in the curent function.
 static Node *gotos;
 static Node *labels;
+static Node *named_loop;
 
 static Node *cur_sw;
 
@@ -1496,6 +1497,7 @@ static Node *for_stmt(Token **rest, Token *tok) {
 
     // Body
     node->body = stmt(rest, tok);
+
     cont_depth--;
     brk_depth--;
     leave_scope();
@@ -1508,12 +1510,14 @@ static Node *while_stmt(Token **rest, Token *tok) {
     cont_depth++;
     brk_depth++;
     Node *node = new_node(ND_WHILE, tok);
+
     tok = skip(tok->next, TK_LPAREN);
     // Cond
     node->cond = expr(&tok, tok);
     tok = skip(tok, TK_RPAREN);
     // Body
     node->then = stmt(rest, tok);
+
     cont_depth--;
     brk_depth--;
     leave_scope();
@@ -1526,6 +1530,7 @@ static Node *do_stmt(Token **rest, Token *tok) {
     cont_depth++;
     brk_depth++;
     Node *node = new_node(ND_DO, tok);
+
     // Body
     node->body = stmt(&tok, tok->next);
     // Cond
@@ -1534,6 +1539,7 @@ static Node *do_stmt(Token **rest, Token *tok) {
     node->cond = expr(&tok, tok);
     tok = skip(tok, TK_RPAREN);
     *rest = skip(tok, TK_SEMI);
+
     cont_depth--;
     brk_depth--;
     leave_scope();
@@ -1594,7 +1600,7 @@ static Node *case_stmt(Token **rest, Token *tok) {
     check_case(val, node->tok);
     tok = skip(tok, TK_COLON);
 
-    node->label_body = stmt(rest, tok);
+    node->body = stmt(rest, tok);
     node->val = val;
 
     node->case_next = cur_sw->case_next;
@@ -1611,7 +1617,7 @@ static Node *default_stmt(Token **rest, Token *tok) {
     }
     Node *node = new_node(ND_CASE, tok);
     tok = skip(tok->next, TK_COLON);
-    node->label_body = stmt(rest, tok);
+    node->body = stmt(rest, tok);
     cur_sw->default_case = node;
     return node;
 }
@@ -1626,19 +1632,54 @@ static Node *goto_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// BreakStmt ::= "break" ";"
+// BreakStmt ::= "break" Ident? ";"
 static Node *break_stmt(Token **rest, Token *tok) {
     if (!brk_depth) error(tok, "break statement not within loop or switch");
     Node *node = new_node(ND_BREAK, tok);
-    *rest = skip(tok->next, TK_SEMI);
+    tok = tok->next;
+
+    if (tok->kind == TK_IDENT) {
+        uint32_t label_id = get_ident(tok);
+        Node *cur = named_loop;
+        bool match = false;
+        while (cur) {
+            if (cur->label == label_id) {
+                if (cur->is_loop || cur->is_switch) match = true;
+                break;
+            }
+            cur = cur->loop_next;
+        }
+        if (!match)
+            error(tok, "‘break’ statement operand ‘%s’ does not refer to a named loop or switch", str(label_id));
+        node->target = cur;
+        tok = tok->next;
+    }
+    *rest = skip(tok, TK_SEMI);
     return node;
 }
 
-// ContinueStmt ::= "continue" ";"
+// ContinueStmt ::= "continue" Ident? ";"
 static Node *continue_stmt(Token **rest, Token *tok) {
     if (!cont_depth) error(tok, "continue statement not within a loop");
     Node *node = new_node(ND_CONTINUE, tok);
-    *rest = skip(tok->next, TK_SEMI);
+    tok = tok->next;
+
+    if (tok->kind == TK_IDENT) {
+        uint32_t label_id = get_ident(tok);
+        Node *cur = named_loop;
+        bool match = false;
+        while (cur) {
+            if (cur->label == label_id) {
+                if (cur->is_loop) match = true;
+                break;
+            }
+            cur = cur->loop_next;
+        }
+        if (!match) error(tok, "‘continue’ statement operand ‘%s’ does not refer to a named loop", str(label_id));
+        node->target = cur;
+        tok = tok->next;
+    }
+    *rest = skip(tok, TK_SEMI);
     return node;
 }
 
@@ -1658,11 +1699,21 @@ static Node *label_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_LABEL, tok);
     node->label = get_ident(tok);
     check_label(node->label, tok);
+    tok = tok->next->next;
 
-    node->label_body = stmt(rest, tok->next->next);
+    if (tok->kind == TK_DO || tok->kind == TK_WHILE || tok->kind == TK_FOR) node->is_loop = true;
+    if (tok->kind == TK_SWITCH) node->is_switch = true;
+    if (node->is_switch || node->is_loop) {
+        node->loop_next = named_loop;
+        named_loop = node;
+    }
+
+    node->label_body = stmt(rest, tok);
 
     node->goto_next = labels;
     labels = node;
+    if (node->is_switch || node->is_loop) named_loop = named_loop->next;
+
     return node;
 }
 

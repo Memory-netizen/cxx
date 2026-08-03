@@ -70,8 +70,8 @@ Stmt        ::= ExpStmt
               | LabelStmt | CaseStmt | DefaultStmt
 
 GotoStmt    ::= "goto" Ident ";"
-BreakStmt   ::= "break" ";"
-ContinueStmt ::= "continue" ";"
+BreakStmt   ::= "break" Ident? ";"
+ContinueStmt ::= "continue" Ident? ";"
 LabelStmt   ::= Ident ":" Stmt
 CaseStmt    ::= "case" ConstExp ":"
 DefaultStmt ::= "default" ":"
