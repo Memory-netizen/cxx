@@ -666,6 +666,7 @@ struct Ir {
 
 struct Blk {
     int blk_id;
+    Blk *next;
 
     Ir *head;  // First ir
     Ir *tail;  // Last ir before Terminator
@@ -678,7 +679,9 @@ struct Blk {
     Blk *succ1;
     Blk *succ2;
     Blk **succ;
-    Blk *next;
+
+    Blk **pred;
+    uint32_t num_pred;
 };
 
 struct Module {

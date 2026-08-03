@@ -28,22 +28,35 @@ static Ir *new_ins(IrKind op, Ref dst, Ref *args, uint32_t narg) {
         new->args = NULL;
     }
 
+    new->prev = curb->tail;
+    new->next = NULL;
     if (curb->head)
         curb->tail = curb->tail->next = new;
     else
         curb->head = curb->tail = new;
+
     return new;
 }
 
-Blk *new_blk(void) {
+static Blk *new_blk(void) {
     Blk *b = emalloc(sizeof(Blk));
     memset(b, 0, sizeof(Blk));
+    b->pred = vnew(2, sizeof(Blk *));
     return b;
 }
 
-void insert_blk(Blk *b) {
+static void insert_blk(Blk *b) {
     b->blk_id = tmp_id++;
     tail = tail->next = b;
+}
+
+static void add_pred(Blk *bp, Blk *b) {
+    if (!b || bp == curf->end) {
+        return;
+    }
+
+    b->pred = vgrow(b->pred, b->num_pred + 1);
+    b->pred[b->num_pred++] = bp;
 }
 
 static Ref gen_addr(Node *node) {
@@ -150,9 +163,14 @@ static Ref gen_expr(Node *node) {
         case ND_NULLPTR:
             return NULLPTR;
         case ND_NUM:
-            if (node->ty->size == 1) return BOOL(node->val);
-            if (node->ty->size == 4) return INT(node->val);
-            return LONG(node->val);
+            if (node->ty->size == 1)
+                dst = BOOL(node->val);
+            else if (node->ty->size == 4)
+                dst = INT(node->val);
+            else
+                dst = LONG(node->val);
+            dst.ty = node->ty;
+            return dst;
         case ND_STMT_EXPR:
             for (Node *n = node->body; n; n = n->next) dst = gen_stmt(n);
             return dst;
@@ -375,6 +393,8 @@ static Ref gen_cond(Node *node) {
     curb->jmp.arg = cond;
     curb->succ1 = t_blk;
     curb->succ2 = f_blk;
+    add_pred(curb, curb->succ1);
+    add_pred(curb, curb->succ2);
 
     // then
     curb = t_blk;
@@ -383,6 +403,7 @@ static Ref gen_cond(Node *node) {
     if (is_valid) new_ins(IR_STR, R, (Ref[]){true_r, res, INT(align)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
+    add_pred(curb, curb->succ1);
 
     // else
     curb = f_blk;
@@ -391,6 +412,7 @@ static Ref gen_cond(Node *node) {
     if (is_valid) new_ins(IR_STR, R, (Ref[]){false_r, res, INT(align)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
+    add_pred(curb, curb->succ1);
 
     curb = m_blk;
     insert_blk(curb);
@@ -417,12 +439,15 @@ static Ref gen_logor(Node *node) {
     curb->jmp.arg = cond;
     curb->succ1 = t_blk;
     curb->succ2 = f_blk;
+    add_pred(curb, curb->succ1);
+    add_pred(curb, curb->succ2);
 
     curb = t_blk;
     insert_blk(curb);
     new_ins(IR_STR, R, (Ref[]){INT(1), res, INT(4)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
+    add_pred(curb, curb->succ1);
 
     // rhs
     curb = f_blk;
@@ -435,6 +460,7 @@ static Ref gen_logor(Node *node) {
     new_ins(IR_STR, R, (Ref[]){r_ext, res, INT(4)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
+    add_pred(curb, curb->succ1);
 
     curb = m_blk;
     insert_blk(curb);
@@ -459,12 +485,15 @@ static Ref gen_logand(Node *node) {
     curb->jmp.arg = cond;
     curb->succ1 = f_blk;
     curb->succ2 = t_blk;
+    add_pred(curb, curb->succ1);
+    add_pred(curb, curb->succ2);
 
     curb = f_blk;
     insert_blk(curb);
     new_ins(IR_STR, R, (Ref[]){INT(0), res, INT(4)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
+    add_pred(curb, curb->succ1);
 
     // rhs
     curb = t_blk;
@@ -477,6 +506,7 @@ static Ref gen_logand(Node *node) {
     new_ins(IR_STR, R, (Ref[]){r_ext, res, INT(4)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
+    add_pred(curb, curb->succ1);
 
     curb = m_blk;
     insert_blk(curb);
@@ -497,6 +527,8 @@ static void gen_if(Node *node) {
     curb->jmp.arg = cond;
     curb->succ1 = t_blk;
     curb->succ2 = f_blk ? f_blk : m_blk;
+    add_pred(curb, curb->succ1);
+    add_pred(curb, curb->succ2);
 
     // then
     curb = t_blk;
@@ -504,6 +536,7 @@ static void gen_if(Node *node) {
     gen_stmt(node->then);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
+    add_pred(curb, curb->succ1);
 
     // else
     if (f_blk) {
@@ -512,6 +545,7 @@ static void gen_if(Node *node) {
         gen_stmt(node->els);
         curb->jmp.type = IR_JMP;
         curb->succ1 = m_blk;
+        add_pred(curb, curb->succ1);
     }
     curb = m_blk;
     insert_blk(curb);
@@ -533,6 +567,7 @@ static void gen_for(Node *node) {
     gen_stmt(node->init);
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
+    add_pred(curb, curb->succ1);
 
     // cond
     curb = cond_blk;
@@ -546,9 +581,12 @@ static void gen_for(Node *node) {
         curb->jmp.arg = cond;
         curb->succ1 = body_blk;
         curb->succ2 = merge_blk;
+        add_pred(curb, curb->succ1);
+        add_pred(curb, curb->succ2);
     } else {
         curb->jmp.type = IR_JMP;
         curb->succ1 = body_blk;
+        add_pred(curb, curb->succ1);
     }
 
     // body
@@ -557,6 +595,7 @@ static void gen_for(Node *node) {
     gen_stmt(node->body);
     curb->jmp.type = IR_JMP;
     curb->succ1 = incr_blk;
+    add_pred(curb, curb->succ1);
 
     // incr
     curb = incr_blk;
@@ -564,6 +603,7 @@ static void gen_for(Node *node) {
     gen_expr(node->inc);
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
+    add_pred(curb, curb->succ1);
 
     curb = merge_blk;
     insert_blk(curb);
@@ -584,6 +624,7 @@ static void gen_while(Node *node) {
 
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
+    add_pred(curb, curb->succ1);
 
     // cond
     curb = cond_blk;
@@ -596,6 +637,8 @@ static void gen_while(Node *node) {
     curb->jmp.arg = cond;
     curb->succ1 = body_blk;
     curb->succ2 = merge_blk;
+    add_pred(curb, curb->succ1);
+    add_pred(curb, curb->succ2);
 
     // body
     curb = body_blk;
@@ -603,6 +646,7 @@ static void gen_while(Node *node) {
     gen_stmt(node->body);
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
+    add_pred(curb, curb->succ1);
 
     curb = merge_blk;
     insert_blk(curb);
@@ -623,6 +667,7 @@ static void gen_do(Node *node) {
 
     curb->jmp.type = IR_JMP;
     curb->succ1 = body_blk;
+    add_pred(curb, curb->succ1);
 
     // body
     curb = body_blk;
@@ -630,6 +675,7 @@ static void gen_do(Node *node) {
     gen_stmt(node->body);
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
+    add_pred(curb, curb->succ1);
 
     // cond
     curb = cond_blk;
@@ -642,6 +688,8 @@ static void gen_do(Node *node) {
     curb->jmp.arg = cond;
     curb->succ1 = body_blk;
     curb->succ2 = merge_blk;
+    add_pred(curb, curb->succ1);
+    add_pred(curb, curb->succ2);
 
     curb = merge_blk;
     insert_blk(curb);
@@ -674,11 +722,13 @@ static void gen_switch(Node *n) {
         curb->succ1 = n->default_case->blk;
     else
         curb->succ1 = merge_blk;
+    add_pred(curb, curb->succ1);
 
     Node *y = n->case_next;
     for (int j = 0; j < i; ++j) {
         curb->jmp.args[j] = cond.ty->size == 8 ? LONG(y->val) : INT(y->val);
         curb->succ[j] = y->blk;
+        add_pred(curb, curb->succ[j]);
         y = y->case_next;
     }
 
@@ -687,6 +737,7 @@ static void gen_switch(Node *n) {
 
     curb->jmp.type = IR_JMP;
     curb->succ1 = merge_blk;
+    add_pred(curb, curb->succ1);
     curb = merge_blk;
     insert_blk(curb);
     brk_blk = brk;
@@ -695,6 +746,7 @@ static void gen_switch(Node *n) {
 static void gen_label(Node *n) {
     curb->jmp.type = IR_JMP;
     curb->succ1 = n->blk;
+    add_pred(curb, curb->succ1);
     curb = n->blk;
     insert_blk(curb);
     gen_stmt(n->label_body);
@@ -703,6 +755,7 @@ static void gen_label(Node *n) {
 static void gen_case(Node *n) {
     curb->jmp.type = IR_JMP;
     curb->succ1 = n->blk;
+    add_pred(curb, curb->succ1);
     curb = n->blk;
     insert_blk(curb);
     gen_stmt(n->body);
@@ -711,18 +764,21 @@ static void gen_case(Node *n) {
 static void gen_goto(Node *n) {
     curb->jmp.type = IR_JMP;
     curb->succ1 = n->target->blk;
+    add_pred(curb, curb->succ1);
     curb = unreach;
 }
 
 static void gen_break(Node *n) {
     curb->jmp.type = IR_JMP;
     curb->succ1 = n->target ? n->target->label_body->brk_blk : brk_blk;
+    add_pred(curb, curb->succ1);
     curb = unreach;
 }
 
 static void gen_continue(Node *n) {
     curb->jmp.type = IR_JMP;
     curb->succ1 = n->target ? n->target->label_body->cont_blk : cont_blk;
+    add_pred(curb, curb->succ1);
     curb = unreach;
 }
 
@@ -735,6 +791,7 @@ static void gen_ret(Node *n) {
 
     curb->jmp.type = IR_JMP;
     curb->succ1 = curf->end;
+    add_pred(curb, curb->succ1);
     curb = unreach;
 }
 

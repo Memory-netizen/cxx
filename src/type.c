@@ -433,6 +433,7 @@ void lvalue_convert(Node **expr) {
 }
 
 void new_imcast(Node **expr, Type *ty) {
+    if (is_compatible((*expr)->ty, ty)) return;
     Node *node = new_unary(ND_IMCAST, *expr, (*expr)->tok);
     node->ty = ty;
     *expr = node;
