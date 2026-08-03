@@ -644,15 +644,6 @@ void add_type(Node *node) {
                 node->ty = node->then->ty;
             }
             break;
-        // other
-        case ND_NOP:
-        case ND_GOTO:
-        case ND_BREAK:
-        case ND_CONTINUE:
-        case ND_PTRAS:
-        case ND_FUNCALL:
-            // Nothing to do
-            break;
         case ND_STMT_EXPR:
             if (node->body) {
                 Node *stmt = node->body;
@@ -704,5 +695,14 @@ void add_type(Node *node) {
             node->ty = ty;
             break;
         }
+        // other
+        case ND_NOP:
+        case ND_GOTO:
+        case ND_BREAK:
+        case ND_CONTINUE:
+        case ND_PTRAS:
+        case ND_FUNCALL:
+            // Nothing to do
+            break;
     }
 }
