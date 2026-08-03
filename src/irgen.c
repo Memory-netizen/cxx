@@ -61,6 +61,29 @@ static void add_pred(Blk *bp, Blk *b) {
     b->pred[b->num_pred++] = bp;
 }
 
+static Phi *new_phi(Ref res) {
+    Phi *new = emalloc(sizeof(Phi));
+    new->result = res;
+    new->arg = vnew(0, sizeof(Ref));
+    new->blk = vnew(0, sizeof(Blk *));
+    new->num_arg = 0;
+    new->next = NULL;
+    return new;
+}
+
+static void add_phi_arg(Phi *phi, Blk *blk, Ref arg) {
+    phi->num_arg++;
+    phi->arg = vgrow(phi->arg, phi->num_arg);
+    phi->blk = vgrow(phi->blk, phi->num_arg);
+    phi->arg[phi->num_arg - 1] = arg;
+    phi->blk[phi->num_arg - 1] = blk;
+}
+
+static void insert_phi(Blk *blk, Phi *phi) {
+    phi->next = blk->phi;
+    blk->phi = phi;
+}
+
 static Ref gen_addr(Node *node) {
     switch (node->kind) {
         case ND_VAR:
@@ -378,15 +401,6 @@ static Ref gen_cond(Node *node) {
     Blk *f_blk = new_blk();
     Blk *m_blk = new_blk();
 
-    bool is_valid = node->ty->kind != TY_VOID;
-    Ref res;
-    int align = node->ty->align;
-    if (is_valid) {
-        int res_id = tmp_id++;
-        res = TMP(res_id, pointer_to(node->ty, 0));
-        new_ins(IR_ALLOCA, res, (Ref[]){INT(align)}, 1);
-    }
-
     // cond
     Ref tmp = gen_expr(node->cond);
     Ref cond = TMP(tmp_id++, ty_i1);
@@ -402,7 +416,6 @@ static Ref gen_cond(Node *node) {
     curb = t_blk;
     insert_blk(curb);
     Ref true_r = gen_expr(node->then);
-    if (is_valid) new_ins(IR_STR, R, (Ref[]){true_r, res, INT(align)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
     add_pred(curb, curb->succ1);
@@ -411,27 +424,27 @@ static Ref gen_cond(Node *node) {
     curb = f_blk;
     insert_blk(curb);
     Ref false_r = gen_expr(node->els);
-    if (is_valid) new_ins(IR_STR, R, (Ref[]){false_r, res, INT(align)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
     add_pred(curb, curb->succ1);
 
     curb = m_blk;
     insert_blk(curb);
-    if (is_valid)
-        return load(res, node->ty, node->ty->align);
-    else
-        return R;
+
+    if (node->ty->kind != TY_VOID) {
+        Ref result = TMP(tmp_id++, node->ty);
+        Phi *phi = new_phi(result);
+        add_phi_arg(phi, t_blk, true_r);
+        add_phi_arg(phi, f_blk, false_r);
+        insert_phi(curb, phi);
+        return result;
+    }
+    return R;
 }
 
 static Ref gen_logor(Node *node) {
-    Blk *t_blk = new_blk();
     Blk *f_blk = new_blk();
     Blk *m_blk = new_blk();
-
-    int res_id = tmp_id++;
-    Ref res = TMP(res_id, pointer_to(ty_int, 0));
-    new_ins(IR_ALLOCA, res, (Ref[]){INT(4)}, 1);
 
     // lhs
     Ref lr = gen_expr(node->lhs);
@@ -439,17 +452,11 @@ static Ref gen_logor(Node *node) {
     new_ins(IR_CMP_NE, cond, (Ref[]){lr, INT(0)}, 2);
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;
-    curb->succ1 = t_blk;
+    curb->succ1 = m_blk;
     curb->succ2 = f_blk;
     add_pred(curb, curb->succ1);
     add_pred(curb, curb->succ2);
-
-    curb = t_blk;
-    insert_blk(curb);
-    new_ins(IR_STR, R, (Ref[]){INT(1), res, INT(4)}, 3);
-    curb->jmp.type = IR_JMP;
-    curb->succ1 = m_blk;
-    add_pred(curb, curb->succ1);
+    Blk *sel = curb;
 
     // rhs
     curb = f_blk;
@@ -459,43 +466,36 @@ static Ref gen_logor(Node *node) {
     new_ins(IR_CMP_NE, res_r, (Ref[]){rr, INT(0)}, 2);
     Ref r_ext = TMP(tmp_id++, ty_int);
     new_ins(IR_ZEXT, r_ext, (Ref[]){res_r}, 1);
-    new_ins(IR_STR, R, (Ref[]){r_ext, res, INT(4)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
     add_pred(curb, curb->succ1);
 
     curb = m_blk;
     insert_blk(curb);
-    return load(res, ty_int, 4);
+
+    Ref result = TMP(tmp_id++, ty_int);
+    Phi *phi = new_phi(result);
+    add_phi_arg(phi, sel, INT(1));
+    add_phi_arg(phi, f_blk, r_ext);
+    insert_phi(curb, phi);
+    return result;
 }
 
 static Ref gen_logand(Node *node) {
-    Blk *f_blk = new_blk();
     Blk *t_blk = new_blk();
     Blk *m_blk = new_blk();
-
-    int res_id = tmp_id++;
-    Ref res = TMP(res_id, pointer_to(ty_int, 0));
-    new_ins(IR_ALLOCA, res, (Ref[]){INT(4)}, 1);
-
     // lhs
     Ref lr = gen_expr(node->lhs);
     Ref cond = TMP(tmp_id++, ty_i1);
-    new_ins(IR_CMP_EQ, cond, (Ref[]){lr, INT(0)}, 2);
+    new_ins(IR_CMP_NE, cond, (Ref[]){lr, INT(0)}, 2);
 
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;
-    curb->succ1 = f_blk;
-    curb->succ2 = t_blk;
+    curb->succ1 = t_blk;
+    curb->succ2 = m_blk;
     add_pred(curb, curb->succ1);
     add_pred(curb, curb->succ2);
-
-    curb = f_blk;
-    insert_blk(curb);
-    new_ins(IR_STR, R, (Ref[]){INT(0), res, INT(4)}, 3);
-    curb->jmp.type = IR_JMP;
-    curb->succ1 = m_blk;
-    add_pred(curb, curb->succ1);
+    Blk *sel = curb;
 
     // rhs
     curb = t_blk;
@@ -505,14 +505,18 @@ static Ref gen_logand(Node *node) {
     new_ins(IR_CMP_NE, res_r, (Ref[]){rr, INT(0)}, 2);
     Ref r_ext = TMP(tmp_id++, ty_int);
     new_ins(IR_ZEXT, r_ext, (Ref[]){res_r}, 1);
-    new_ins(IR_STR, R, (Ref[]){r_ext, res, INT(4)}, 3);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
     add_pred(curb, curb->succ1);
 
     curb = m_blk;
     insert_blk(curb);
-    return load(res, ty_int, 4);
+    Ref result = TMP(tmp_id++, ty_int);
+    Phi *phi = new_phi(result);
+    add_phi_arg(phi, t_blk, r_ext);
+    add_phi_arg(phi, sel, INT(0));
+    insert_phi(curb, phi);
+    return result;
 }
 
 static void gen_if(Node *node) {

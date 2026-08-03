@@ -34,6 +34,7 @@ typedef struct Node Node;
 typedef struct Type Type;
 typedef struct Ref Ref;
 typedef struct Ir Ir;
+typedef struct Phi Phi;
 typedef struct Blk Blk;
 typedef struct Sym Sym;
 typedef struct Fn Fn;
@@ -665,9 +666,18 @@ struct Ir {
     Ir *prev, *next;
 };
 
+struct Phi {
+    Ref result;
+    Ref *arg;
+    Blk **blk;
+    int num_arg;
+    Phi *next;
+};
+
 struct Blk {
     int blk_id;
     Blk *next;
+    Phi *phi;
 
     Ir *head;  // First ir
     Ir *tail;  // Last ir before Terminator

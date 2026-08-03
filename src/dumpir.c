@@ -103,6 +103,19 @@ void dump_blk(Blk *b) {
         }
     }
     fprintf(out_file, "\n");
+    Phi *p = b->phi;
+    while (p) {
+        fprintf(out_file, "  %%%d = phi ", p->result.val);
+        print_type(p->result.ty);
+        for (int i = 0; i < p->num_arg; i++) {
+            fprintf(out_file, " [ ");
+            print_operand(p->arg[i]);
+            fprintf(out_file, ", %%%d ]", p->blk[i]->blk_id);
+            if (i < p->num_arg - 1) fprintf(out_file, ", ");
+        }
+        fprintf(out_file, "\n");
+        p = p->next;
+    }
 
     Ir *ir = b->head;
     while (ir) {
