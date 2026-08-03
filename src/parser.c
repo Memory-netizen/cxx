@@ -1,5 +1,17 @@
 #include "cxx.h"
 
+#define reverse_list(type, init, next_field)          \
+    ({                                                \
+        type *prev = NULL, *cur = init, *next = NULL; \
+        while (cur) {                                 \
+            next = cur->next_field;                   \
+            cur->next_field = prev;                   \
+            prev = cur;                               \
+            cur = next;                               \
+        }                                             \
+        prev;                                         \
+    })
+
 static Module *curm;
 
 static const SClass sc_table[] = {
@@ -1471,14 +1483,7 @@ static Node *switch_stmt(Token **rest, Token *tok) {
     leave_scope();
     cur_sw = sw;
 
-    Node *prev = NULL, *cur = node->case_next, *next = NULL;
-    while (cur) {
-        next = cur->case_next;
-        cur->case_next = prev;
-        prev = cur;
-        cur = next;
-    }
-    node->case_next = prev;
+    node->case_next = reverse_list(Node, node->case_next, case_next);
 
     return node;
 }
@@ -2581,15 +2586,7 @@ static Token *external_declaration(Token *tok) {
 
             var->body = compound_stmt2(&tok, tok, true);
 
-            Sym *prev = NULL, *cur = locals, *next = NULL;
-            while (cur) {
-                next = cur->next;
-                cur->next = prev;
-                prev = cur;
-                cur = next;
-            }
-            var->locals = prev;
-
+            var->locals = reverse_list(Sym, locals, next);
             var->labels = labels;
             resolve_goto_labels();
 
@@ -2687,13 +2684,6 @@ Module *parse(Token *tok) {
         }
         sym = next;
     }
-    Type *prev = NULL, *cur = types, *next = NULL;
-    while (cur) {
-        next = cur->next;
-        cur->next = prev;
-        prev = cur;
-        cur = next;
-    }
-    md->tys = prev;
+    md->tys = reverse_list(Type, types, next);
     return md;
 }
