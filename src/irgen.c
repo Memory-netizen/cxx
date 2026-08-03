@@ -770,7 +770,13 @@ static void gen_goto(Node *n) {
 
 static void gen_break(Node *n) {
     curb->jmp.type = IR_JMP;
-    curb->succ1 = n->target ? n->target->label_body->brk_blk : brk_blk;
+    if (n->target) {
+        Node *target = n->target;
+        while (target->kind == ND_LABEL) target = target->label_body;
+        curb->succ1 = target->brk_blk;
+    } else {
+        curb->succ1 = brk_blk;
+    }
     add_pred(curb, curb->succ1);
     curb = unreach;
 }

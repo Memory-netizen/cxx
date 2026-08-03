@@ -1633,7 +1633,7 @@ static Node *goto_stmt(Token **rest, Token *tok) {
 }
 
 static Node *get_named_loop(Token **rest, Token *tok, bool is_break) {
-    uint32_t label_id = get_ident(tok);
+    uint32_t label_id = tok->id;
     Node *cur = named_loop;
     bool match = false;
     while (cur) {
@@ -1659,7 +1659,10 @@ static Node *break_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_BREAK, tok);
     tok = tok->next;
 
-    if (tok->kind == TK_IDENT) node->target = get_named_loop(&tok, tok, true);
+    if (tok->kind == TK_IDENT) {
+        node->label = tok->id;
+        node->target = get_named_loop(&tok, tok, true);
+    }
 
     *rest = skip(tok, TK_SEMI);
     return node;
@@ -1671,7 +1674,10 @@ static Node *continue_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_CONTINUE, tok);
     tok = tok->next;
 
-    if (tok->kind == TK_IDENT) node->target = get_named_loop(&tok, tok, false);
+    if (tok->kind == TK_IDENT) {
+        node->label = tok->id;
+        node->target = get_named_loop(&tok, tok, true);
+    }
 
     *rest = skip(tok, TK_SEMI);
     return node;
@@ -1691,12 +1697,16 @@ static void check_label(uint32_t label, Token *tok) {
 // LabelStmt ::= Ident ":" Stmt
 static Node *label_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_LABEL, tok);
-    node->label = get_ident(tok);
+    node->label = tok->id;
     check_label(node->label, tok);
     tok = tok->next->next;
 
-    if (tok->kind == TK_DO || tok->kind == TK_WHILE || tok->kind == TK_FOR) node->is_loop = true;
-    if (tok->kind == TK_SWITCH) node->is_switch = true;
+    Token *tmp = tok;
+    while (tmp->kind == TK_IDENT && tmp->next->kind == TK_COLON) tmp = tmp->next->next;
+
+    if (tmp->kind == TK_DO || tmp->kind == TK_WHILE || tmp->kind == TK_FOR) node->is_loop = true;
+    if (tmp->kind == TK_SWITCH) node->is_switch = true;
+
     if (node->is_switch || node->is_loop) {
         node->loop_next = named_loop;
         named_loop = node;
@@ -1706,7 +1716,7 @@ static Node *label_stmt(Token **rest, Token *tok) {
 
     node->goto_next = labels;
     labels = node;
-    if (node->is_switch || node->is_loop) named_loop = named_loop->next;
+    if (node->is_switch || node->is_loop) named_loop = named_loop->loop_next;
 
     return node;
 }

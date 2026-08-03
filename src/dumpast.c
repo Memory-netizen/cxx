@@ -435,6 +435,8 @@ static void dump_node(Node *node) {
 
         case ND_BREAK:
         case ND_CONTINUE:
+            if (node->label) fprintf(stdout, "  label=‘%s’\n", str(node->label));
+            break;
         case ND_NOP:
             fprintf(stdout, "\n");
             break;
