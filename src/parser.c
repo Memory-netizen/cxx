@@ -1632,28 +1632,35 @@ static Node *goto_stmt(Token **rest, Token *tok) {
     return node;
 }
 
+static Node *get_named_loop(Token **rest, Token *tok, bool is_break) {
+    uint32_t label_id = get_ident(tok);
+    Node *cur = named_loop;
+    bool match = false;
+    while (cur) {
+        if (cur->label == label_id) {
+            if (cur->is_loop) match = true;
+            if (cur->is_switch && is_break) match = true;
+            break;
+        }
+        cur = cur->loop_next;
+    }
+    if (!match) {
+        char *kind = is_break ? "break" : "continue";
+        char *suf = is_break ? " or ‘switch’" : "";
+        error(tok, "‘%s’ statement operand ‘%s’ does not refer to a named loop%s", kind, str(label_id), suf);
+    }
+    *rest = tok->next;
+    return cur;
+}
+
 // BreakStmt ::= "break" Ident? ";"
 static Node *break_stmt(Token **rest, Token *tok) {
     if (!brk_depth) error(tok, "break statement not within loop or switch");
     Node *node = new_node(ND_BREAK, tok);
     tok = tok->next;
 
-    if (tok->kind == TK_IDENT) {
-        uint32_t label_id = get_ident(tok);
-        Node *cur = named_loop;
-        bool match = false;
-        while (cur) {
-            if (cur->label == label_id) {
-                if (cur->is_loop || cur->is_switch) match = true;
-                break;
-            }
-            cur = cur->loop_next;
-        }
-        if (!match)
-            error(tok, "‘break’ statement operand ‘%s’ does not refer to a named loop or switch", str(label_id));
-        node->target = cur;
-        tok = tok->next;
-    }
+    if (tok->kind == TK_IDENT) node->target = get_named_loop(&tok, tok, true);
+
     *rest = skip(tok, TK_SEMI);
     return node;
 }
@@ -1664,21 +1671,8 @@ static Node *continue_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_CONTINUE, tok);
     tok = tok->next;
 
-    if (tok->kind == TK_IDENT) {
-        uint32_t label_id = get_ident(tok);
-        Node *cur = named_loop;
-        bool match = false;
-        while (cur) {
-            if (cur->label == label_id) {
-                if (cur->is_loop) match = true;
-                break;
-            }
-            cur = cur->loop_next;
-        }
-        if (!match) error(tok, "‘continue’ statement operand ‘%s’ does not refer to a named loop", str(label_id));
-        node->target = cur;
-        tok = tok->next;
-    }
+    if (tok->kind == TK_IDENT) node->target = get_named_loop(&tok, tok, false);
+
     *rest = skip(tok, TK_SEMI);
     return node;
 }
