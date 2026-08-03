@@ -94,7 +94,15 @@ static void print_operand(Ref r) {
 }
 
 void dump_blk(Blk *b) {
-    fprintf(out_file, "%d:\n", b->blk_id);
+    fprintf(out_file, "%d:", b->blk_id);
+    if (b->num_pred) {
+        fprintf(out_file, "\t\t\t\t\t; preds = ");
+        for (uint32_t i = 0; i < b->num_pred; i++) {
+            fprintf(out_file, "%%%d", b->pred[i]->blk_id);
+            if (i < b->num_pred - 1) fprintf(out_file, ", ");
+        }
+    }
+    fprintf(out_file, "\n");
 
     Ir *ir = b->head;
     while (ir) {
@@ -437,6 +445,7 @@ void dump_fn(Sym *fn) {
     while (curb) {
         dump_blk(curb);
         curb = curb->next;
+        if (curb) fprintf(out_file, "\n");
     }
     fprintf(out_file, "}\n\n");
 }

@@ -5,7 +5,7 @@ static Sym *curf;
 static Blk *curb;
 static Blk dummy;
 static Blk *tail;
-static Blk *unreach = &dummy;
+static Blk *unreach = &(Blk){};
 static int tmp_id;
 static Blk *brk_blk;
 static Blk *cont_blk;
@@ -51,7 +51,7 @@ static void insert_blk(Blk *b) {
 }
 
 static void add_pred(Blk *bp, Blk *b) {
-    if (!b || bp == curf->end) {
+    if (!b || bp == curf->end || bp == unreach) {
         return;
     }
 

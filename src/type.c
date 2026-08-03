@@ -562,19 +562,15 @@ void add_type(Node *node) {
         case ND_AS:
             modifiable_lvalue(node);
             check_asop(node->lhs->ty, node->rhs, CTX_AS);
-            if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION) {
-                lvalue_convert(&node->rhs);
-                new_imcast(&node->rhs, node->lhs->ty);
-            }
+            if (!is_record(node->lhs->ty)) lvalue_convert(&node->rhs);
+            new_imcast(&node->rhs, node->lhs->ty);
             node->ty = node->lhs->ty;
             break;
         case ND_INIT:
             add_type(node->lhs);
             check_asop(node->lhs->ty, node->rhs, CTX_INIT);
-            if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION) {
-                lvalue_convert(&node->rhs);
-                new_imcast(&node->rhs, node->lhs->ty);
-            }
+            if (!is_record(node->lhs->ty)) lvalue_convert(&node->rhs);
+            new_imcast(&node->rhs, node->lhs->ty);
             node->ty = node->lhs->ty;
             break;
         case ND_PREINC:
@@ -638,7 +634,7 @@ void add_type(Node *node) {
             lvalue_convert(&node->cond);
             lvalue_convert(&node->then);
             lvalue_convert(&node->els);
-            if (node->then->ty->kind == TY_VOID || node->els->ty->kind == TY_VOID) {
+            if (is_void(node->then->ty) || is_void(node->els->ty)) {
                 node->ty = ty_void;
             } else {
                 usual_arith_conv(&node->then, &node->els);
