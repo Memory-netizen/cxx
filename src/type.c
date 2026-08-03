@@ -670,6 +670,7 @@ void add_type(Node *node) {
         case ND_EXPR_STMT:
             add_type(node->lhs);
             lvalue_convert(&node->lhs);
+            if (node->lhs) node->ty = node->lhs->ty;
             break;
         case ND_LABEL:
         case ND_CASE:
@@ -688,13 +689,20 @@ void add_type(Node *node) {
         case ND_FOR:
             add_type(node->init);
             add_type(node->cond);
+            if (node->cond && !is_scalar(node->cond->ty)) error(node->cond->tok, "scalar type is required in here");
             add_type(node->then);
             add_type(node->els);
             lvalue_convert(&node->cond);
             break;
         case ND_DECL:
-        case ND_COMP_STMT:
-            for (Node *n = node->body; n; n = n->next) add_type(n);
+        case ND_COMP_STMT: {
+            Type *ty;
+            for (Node *n = node->body; n; n = n->next) {
+                add_type(n);
+                ty = n->ty;
+            }
+            node->ty = ty;
             break;
+        }
     }
 }
