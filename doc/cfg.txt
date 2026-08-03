@@ -59,33 +59,34 @@ EnumSpec    ::= "enum" Ident? "{" Enumr ("," Enumr)* ","? "}"
             | "enum" Ident
 Enumr       ::= Ident ("=" ConstExp)?
 
-CompStmt    ::= "{" BlockItem* "}"
-BlockItem   ::= Stmt | Decl
+Stmt        ::= LabelStmt | UnLabelStmt
+LabelStmt   ::= Label Stmt
+UnLabelStmt ::= ExpStmt | PrimBlk | JmpStmt
 
-Stmt        ::= ExpStmt
-              | CompStmt
-              | RetStmt | GotoStmt | BreakStmt | ContinueStmt
-              | IfStmt | SwitchStmt
-              | WhileStmt | DoStmt | ForStmt
-              | LabelStmt | CaseStmt | DefaultStmt
+PrimBlk     ::= CompStmt | SelStmt | IterStmt
 
-GotoStmt    ::= "goto" Ident ";"
-BreakStmt   ::= "break" Ident? ";"
-ContinueStmt ::= "continue" Ident? ";"
-LabelStmt   ::= Ident ":" Stmt
-CaseStmt    ::= "case" ConstExp ":"
-DefaultStmt ::= "default" ":"
+Label       ::= Ident ":"
+              | "case" ConstRangeExp ":"
+              | "case" ConstExp ":"
+              | "default" ":"
+
+CompStmt    ::= "{" BlkItem* "}"
+BlkItem     ::= Decl | UnLabelStmt | Label
+
 ExpStmt     ::= ";" | Exp ";"
-RetStmt     ::= "return" Exp? ";"
 
-IfStmt      ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
+SelStmt     ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
+              | "switch" "(" SelHead ")" Stmt
 SelHead     ::= Exp | Decl Exp | SimDecl
-SimDecl     ::= DeclSpecs Declr "=" Init
-SwitchStmt  ::= "switch" "(" SelHead ")" Stmt
 
-ForStmt     ::= "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt
-WhileStmt   ::= "while" "(" Exp ")" Stmt
-DoStmt      ::= "do" Stmt "while" "(" Exp ")" ";"
+IterStmt    ::= "while" "(" Exp ")" Stmt
+              | "do" Stmt "while" "(" Exp ")" ";"
+              | "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt
+
+JmpStmt     ::= "goto" Ident ";"
+              | "continue" Ident? ";"
+              | "break" Ident? ";"
+              | "return" Exp? ";"
 
 Exp         ::= AsExp ("," AsExp)*
 AsExp       ::= CondExp (AsOP AsExp)?

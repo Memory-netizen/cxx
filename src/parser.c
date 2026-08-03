@@ -1698,8 +1698,19 @@ static void check_label(uint32_t label, Token *tok) {
 static Node *label_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_LABEL, tok);
     node->label = tok->id;
+
     check_label(node->label, tok);
+    node->goto_next = labels;
+    labels = node;
+
+    Token *lb = tok;
     tok = tok->next->next;
+    if (tok->kind == TK_RBRACE) node->label_body = new_node(ND_EXPR_STMT, lb);
+    if (is_typename(tok, true) && tok->next->kind != TK_COLON) node->label_body = new_node(ND_EXPR_STMT, lb);
+    if (node->label_body) {
+        *rest = tok;
+        return node;
+    }
 
     Token *tmp = tok;
     while (tmp->kind == TK_IDENT && tmp->next->kind == TK_COLON) tmp = tmp->next->next;
@@ -1714,19 +1725,34 @@ static Node *label_stmt(Token **rest, Token *tok) {
 
     node->label_body = stmt(rest, tok);
 
-    node->goto_next = labels;
-    labels = node;
     if (node->is_switch || node->is_loop) named_loop = named_loop->loop_next;
 
     return node;
 }
 
-// Stmt ::= ExpStmt
-//        | CompStmt
-//        | RetStmt | GotoStmt | BreakStmt | ContinueStmt
-//        | IfStmt | SwitchStmt
-//        | WhileStmt | DoStmt | ForStmt
-//        | LabelStmt | CaseStmt | DefaultStmt
+// Stmt        ::= LabelStmt | UnLabelStmt
+// LabelStmt   ::= Label Stmt
+// UnLabelStmt ::= ExpStmt | PrimBlk | JmpStmt
+
+// PrimBlk ::= CompStmt | SelStmt | IterStmt
+
+// Label ::= Ident ":"
+//     | "case" ConstRangeExp ":"
+//     | "case" ConstExp ":"
+//     | "default" ":"
+
+// SelStmt ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
+//          | "switch" "(" SelHead ")" Stmt
+
+
+// IterStmt ::= "while" "(" Exp ")" Stmt
+//           | "do" Stmt "while" "(" Exp ")" ";"
+//           | "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt
+
+// JmpStmt ::= "goto" Ident ";"
+//          | "continue" Ident? ";"
+//          | "break" Ident? ";"
+//          | "return" Exp? ";"
 static Node *stmt(Token **rest, Token *tok) {
     switch (tok->kind) {
         case TK_LBRACE:
@@ -1761,8 +1787,8 @@ static Node *stmt(Token **rest, Token *tok) {
     }
 }
 
-// CompStmt  ::= "{" BlockItem* "}"
-// BlockItem ::= Stmt | Decl
+// CompStmt ::= "{" BlkItem* "}"
+// BlkItem  ::= Decl | UnLabelStmt | Label
 static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
     if (!is_func_body) enter_scope();
     Node *node = new_node(ND_COMP_STMT, tok);
