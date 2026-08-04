@@ -550,12 +550,16 @@ extract_end:
     }
 
     t->fval = int_part + frac_part;
-    if (!pos_exp) return;
 
-    while (pos < ci) exp = exp * 10 + clean[pos++] - '0';
+    if (pos_exp) {
+        while (pos < ci) exp = exp * 10 + clean[pos++] - '0';
 
-    exp *= sign;
-    t->fval = base == 16 ? fast_ldexp(t->fval, exp) : t->fval * fast_pow10(exp);
+        exp *= sign;
+        t->fval = base == 16 ? fast_ldexp(t->fval, exp) : t->fval * fast_pow10(exp);
+    }
+
+    // Demote literal value from double to float
+    if (t->ty->kind == TY_FLOAT) t->fval = (float)t->fval;
 
     return;
 error:

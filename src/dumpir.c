@@ -52,10 +52,13 @@ static void print_type(Type *ty) {
 
 static void printcon(Con *c, Type *ty) {
     if (c->type == CBits) {
-        if (is_flonum(ty))
-            fprintf(out_file, "%f", c->bits.d);
-        else
+        if (ty->kind == TY_FLOAT) {
+            fprintf(out_file, "0x%016" PRIx64, c->bits.i);
+        } else if (ty->kind == TY_DOUBLE) {
+            fprintf(out_file, "0x%016" PRIx64, c->bits.i);
+        } else {
             fprintf(out_file, "%" PRIi64, c->bits.i);
+        }
     } else if (c->type == CAddr) {
         if (c->bits.i)
             fprintf(out_file, "getelementptr (i8, ptr @%s, i64 %" PRIi64 ")", str(c->sym), c->bits.i);

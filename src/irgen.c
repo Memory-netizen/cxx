@@ -180,13 +180,13 @@ static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
 }
 
 static Ref convert(Node *lhs, Type *target_ty) {
+    Ref lr = gen_expr(lhs);
     if (lhs->ty->kind == TY_ARRAY && is_pointer(target_ty)) {
-        Ref addr = gen_expr(lhs);
         Ref dst = TMP(tmp_id++, target_ty);
-        new_ins(IR_GEP, dst, (Ref[]){addr, LONG(0)}, 2);
+        new_ins(IR_GEP, dst, (Ref[]){lr, LONG(0)}, 2);
         return dst;
     }
-    return cast(gen_expr(lhs), lhs->ty, target_ty);
+    return cast(lr, lhs->ty, target_ty);
 }
 
 static Ref gen_expr(Node *node) {
