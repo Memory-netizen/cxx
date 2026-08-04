@@ -459,7 +459,7 @@ static Type *get_common_type(Type *ty1, Type *ty2) {
     return ty1;
 }
 
-static void integer_promotion(Node **expr) {
+void integer_promotion(Node **expr) {
     Type *ty = get_common_type((*expr)->ty, ty_int);
     new_imcast(expr, ty);
 }

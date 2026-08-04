@@ -866,6 +866,11 @@ static Node *fncall(Token **rest, Token *tok) {
             new_imcast(&arg, param_ty);
             param_ty = param_ty->next;
         } else if (ty->is_variadic) {
+            // If parameter type is omitted (e.g. in "..."),
+            // "char", "unsinged char" and "signed char" are promoted to "int" or "unsigned int"
+            // float arguments are promoted to double.
+            if (is_integer(arg->ty)) integer_promotion(&arg);
+            if (arg->ty->kind == TY_FLOAT) new_imcast(&arg, ty_double);
             lvalue_convert(&arg);
         } else {
             error(tok, "too many arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc,
