@@ -338,6 +338,10 @@ static Ref gen_expr(Node *node) {
     switch (node->kind) {
         case ND_NEG:
             dst = TMP(tmp_id++, node->ty);
+            if (is_flonum(node->ty)) {
+                new_ins(IR_NEG, dst, (Ref[]){lr}, 1);
+                return dst;
+            }
             Ref zr = node->ty->size == 8 ? LONG(0) : INT(0);
             new_ins(IR_SUB, dst, (Ref[]){zr, lr}, 2);
             return dst;

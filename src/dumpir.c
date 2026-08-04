@@ -2,27 +2,28 @@
 
 static FILE *out_file;
 static Module *curm;
+
 static const char *op_str[][3] = {
     [IR_ADD] = {"add", "add", "fadd"},
     [IR_SUB] = {"sub", "sub", "fsub"},
     [IR_MUL] = {"mul", "mul", "fmul"},
     [IR_DIV] = {"sdiv", "udiv", "fdiv"},
-    [IR_REM] = {"srem", "urem", "frem"},
-    [IR_AND] = {"and", "and", "and"},
-    [IR_OR] = {"or", "or", "or"},
-    [IR_XOR] = {"xor", "xor", "xor"},
-    [IR_SHL] = {"shl", "shl", "shl"},
-    [IR_SHR] = {"ashr", "lshr", "ashr"},
+    [IR_REM] = {"srem", "urem", NULL},
+    [IR_AND] = {"and", "and", NULL},
+    [IR_OR] = {"or", "or", NULL},
+    [IR_XOR] = {"xor", "xor", NULL},
+    [IR_SHL] = {"shl", "shl", NULL},
+    [IR_SHR] = {"ashr", "lshr", NULL},
     [IR_CMP_EQ] = {"icmp eq", "icmp eq", "fcmp oeq"},
-    [IR_CMP_NE] = {"icmp ne", "icmp ne", "fcmp one"},
+    [IR_CMP_NE] = {"icmp ne", "icmp ne", "fcmp une"},
     [IR_CMP_LE] = {"icmp sle", "icmp ule", "fcmp ole"},
     [IR_CMP_LT] = {"icmp slt", "icmp ult", "fcmp olt"},
     [IR_EXT] = {"sext", "zext", "fpext"},
     [IR_TRUNC] = {"trunc", "trunc", "fptrunc"},
-    [IR_FPTOINT] = {"fptosi", "fptoui"},
-    [IR_INTTOFP] = {"sitofp", "uitofp"},
-    [IR_PTRTOINT] = {"ptrtoint", "ptrtoint", "ptrtoint"},
-    [IR_INTTOPTR] = {"inttoptr", "inttoptr", "inttoptr"},
+    [IR_FPTOINT] = {"fptosi", "fptoui", NULL},
+    [IR_INTTOFP] = {"sitofp", "uitofp", NULL},
+    [IR_PTRTOINT] = {"ptrtoint", "ptrtoint", NULL},
+    [IR_INTTOPTR] = {"inttoptr", "inttoptr", NULL},
 };
 
 static const char *ty_str[] = {
@@ -52,13 +53,10 @@ static void print_type(Type *ty) {
 
 static void printcon(Con *c, Type *ty) {
     if (c->type == CBits) {
-        if (ty->kind == TY_FLOAT) {
+        if (is_flonum(ty))
             fprintf(out_file, "0x%016" PRIx64, c->bits.i);
-        } else if (ty->kind == TY_DOUBLE) {
-            fprintf(out_file, "0x%016" PRIx64, c->bits.i);
-        } else {
+        else
             fprintf(out_file, "%" PRIi64, c->bits.i);
-        }
     } else if (c->type == CAddr) {
         if (c->bits.i)
             fprintf(out_file, "getelementptr (i8, ptr @%s, i64 %" PRIi64 ")", str(c->sym), c->bits.i);
@@ -211,6 +209,14 @@ void dump_blk(Blk *b) {
                 fprintf(out_file, "\n");
                 break;
             }
+            // fneg
+            case IR_NEG:
+                fprintf(out_file, "fneg ");
+                print_type(ir->args[0].ty);
+                fprintf(out_file, " ");
+                print_operand(ir->args[0]);
+                fprintf(out_file, "\n");
+                break;
             // arithmetic
             case IR_ADD:
             case IR_SUB:
