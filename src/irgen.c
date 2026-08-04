@@ -257,8 +257,11 @@ static Ref gen_expr(Node *node) {
             if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
             Ref lr = load(addr, node->ty, align);
             int addend = (node->kind == ND_PREINC || node->kind == ND_POSTINC) ? 1 : -1;
-            Ref rr = INT(addend);
-            rr.ty = is_pointer(node->ty) ? ty_long : node->ty;
+            union {
+                double f64;
+                uint64_t bits;
+            } u = {addend};
+            Ref rr = is_flonum(node->ty) ? DOUBLE(u.bits) : INT(addend);
             dst = TMP(tmp_id++, node->ty);
             new_ins(ir_op, dst, (Ref[]){lr, rr}, 2);
             new_ins(IR_STR, R, (Ref[]){dst, addr, INT(align)}, 3);
