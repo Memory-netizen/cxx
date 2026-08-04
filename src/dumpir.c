@@ -94,9 +94,9 @@ static void print_operand(Ref r) {
 }
 
 void dump_blk(Blk *b) {
-    fprintf(out_file, "%d:", b->blk_id);
+    int indent = fprintf(out_file, "%d:", b->blk_id);
     if (b->num_pred) {
-        fprintf(out_file, "\t\t\t\t\t\t\t; preds = ");
+        fprintf(out_file, "%*.s; preds = ", 48 - indent, "");
         for (uint32_t i = 0; i < b->num_pred; i++) {
             fprintf(out_file, "%%%d", b->pred[i]->blk_id);
             if (i < b->num_pred - 1) fprintf(out_file, ", ");
@@ -107,11 +107,11 @@ void dump_blk(Blk *b) {
     while (p) {
         fprintf(out_file, "  %%%d = phi ", p->result.val);
         print_type(p->result.ty);
-        for (int i = 0; i < p->num_arg; i++) {
+        for (int i = p->num_arg - 1; i >= 0; i--) {
             fprintf(out_file, " [ ");
             print_operand(p->arg[i]);
             fprintf(out_file, ", %%%d ]", p->blk[i]->blk_id);
-            if (i < p->num_arg - 1) fprintf(out_file, ", ");
+            if (i) fprintf(out_file, ", ");
         }
         fprintf(out_file, "\n");
         p = p->next;
