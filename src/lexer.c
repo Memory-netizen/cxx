@@ -1,4 +1,5 @@
 #include "cxx.h"
+#include "pow_table.h"
 
 SrcFile *cur_file = NULL;
 
@@ -267,6 +268,18 @@ static Token *read_char_literal(char *start) {
     return tok;
 }
 
+static double fast_pow10(int exp) {
+    if (exp < -323) return 0.0;
+    if (exp > 308) return HUGE_VAL;
+    return pow10_table[exp + 323];
+}
+
+static double fast_ldexp(double x, int exp) {
+    if (exp < -1074) return 0.0;
+    if (exp > 1023) return HUGE_VAL * x;
+    return x * pow2_table[exp + 1074];
+}
+
 static int is_valid_digit(int c, int base) {
     if (base == 2)
         return c == '0' || c == '1';
@@ -527,7 +540,9 @@ extract_end:
         return;
     }
 
-    // t->ty = ty_float;
+    t->ty = flags == SUF_LDOUBLE ? ty_ldouble : ty_double;
+    t->ty = flags == SUF_FLOAT ? ty_float : ty_double;
+
     limit = pos_exp ? pos_exp : ci;
 
     double divisor = base;
@@ -536,18 +551,13 @@ extract_end:
         divisor *= base;
     }
 
-    frac_part += int_part;
-    if (!pos_exp) {
-        t->val = frac_part;
-        t->ty = infer_type(t->val, flags, base);
-        return;
-    }
+    t->fval = int_part + frac_part;
+    if (!pos_exp) return;
 
     while (pos < ci) exp = exp * 10 + clean[pos++] - '0';
 
     exp *= sign;
-    // t->val.f =
-    //     base == 16 ? fast_ldexp(frac_part, exp) : frac_part * fast_pow10(exp);
+    t->fval = base == 16 ? fast_ldexp(t->fval, exp) : t->fval * fast_pow10(exp);
 
     return;
 error:
@@ -648,7 +658,7 @@ static Token *tokenize(char *filename, char *p) {
         Token *tok;
 
         // Numeric literal
-        if (isdigit(*p)) {
+        if (isdigit(*p) || (*p == '.' && isdigit(p[1]))) {
             tok = read_int_literal(p);
             fill_tok(tok, filename, line, col, is_sol, is_leadingws);
             cur = cur->next = tok;

@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -59,6 +60,9 @@ extern Type *ty_long;
 extern Type *ty_ulong;
 extern Type *ty_llong;
 extern Type *ty_ullong;
+extern Type *ty_float;
+extern Type *ty_double;
+extern Type *ty_ldouble;
 extern Type *ty_i1;
 extern Type *ty_i32;
 extern Type *ty_i64;
@@ -221,6 +225,7 @@ struct Token {
     union {
         uint32_t id;   // Uesd if kind == TK_IDENT;
         uint64_t val;  // Uesd if kind == TK_NUM;
+        double fval;   // Uesd if kind == TK_NUM;
     };
     Type *ty;  // Used if TK_NUM or TK_STR
 };
@@ -414,6 +419,7 @@ struct Node {
             Node *var_init;
         };
         int64_t val;  // Used if kind == ND_NUM
+        double fval;  // Used if kind == ND_NUM
     };
     Node *label_ring;
     Node *label_body;
