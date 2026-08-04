@@ -32,6 +32,7 @@ static int64_t const_expr(Token **rest, Token *tok);
 static int64_t eval(Node *node);
 static int64_t eval2(Node *node, uint32_t *sym);
 static int64_t eval_rval(Node *node, uint32_t *sym);
+static double eval_double(Node *node);
 
 static Node *new_node(NodeKind kind, Token *tok) {
     Node *node = emalloc(sizeof(Node));
@@ -806,8 +807,18 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
 
     if (init->expr) {
         uint32_t sym = 0;
-        int64_t val = eval2(init->expr, &sym);
-        Con *con = &(Con){sym ? CAddr : CBits, sym, {val}};
+        union {
+            int64_t val;
+            double fval;
+        } u;
+
+        if (is_flonum(ty))
+            u.fval = eval_double(init->expr);
+        else
+            u.val = eval2(init->expr, &sym);
+
+        Con *con = &(Con){sym ? CAddr : CBits, sym, {u.val}};
+
         Ref r = newcon(con, curm, ty);
         init->val = &curm->con[r.val];
         init->is_inited = true;
@@ -1227,6 +1238,40 @@ static Node *conditional(Token **rest, Token *tok) {
 // is a pointer to a global variable and n is a postiive/negative
 // number. The latter form is accepted only as an initialization
 // expression for a global variable.
+static double eval_double(Node *node) {
+    add_type(node);
+    if (is_integer(node->ty)) {
+        if (node->ty->is_unsigned) return (unsigned long)eval(node);
+        return eval(node);
+    }
+    switch (node->kind) {
+        case ND_ADD:
+            return eval_double(node->lhs) + eval_double(node->rhs);
+        case ND_SUB:
+            return eval_double(node->lhs) - eval_double(node->rhs);
+        case ND_MUL:
+            return eval_double(node->lhs) * eval_double(node->rhs);
+        case ND_DIV:
+            return eval_double(node->lhs) / eval_double(node->rhs);
+        case ND_NEG:
+            return -eval_double(node->lhs);
+        case ND_COND:
+            return eval_double(node->cond) ? eval_double(node->then) : eval_double(node->els);
+        case ND_COMMA:
+            return eval_double(node->rhs);
+        case ND_IMCAST:
+        case ND_EXCAST:
+            if (is_flonum(node->lhs->ty)) return eval_double(node->lhs);
+            return eval(node->lhs);
+        case ND_NUM:
+            return node->fval;
+        default:
+            break;
+    }
+    error(node->tok, "not a compile-time constant");
+    return 0;
+}
+
 static int64_t eval_ty(int64_t val, Type *ty) {
     if (is_integer(ty)) {
         switch (ty->size) {
@@ -1245,6 +1290,7 @@ static int64_t eval(Node *node) { return eval2(node, NULL); }
 
 static int64_t eval2(Node *node, uint32_t *sym) {
     add_type(node);
+    if (is_flonum(node->ty)) return eval_double(node);
 
     switch (node->kind) {
         case ND_NUM:
