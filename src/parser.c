@@ -424,7 +424,11 @@ static bool consume_end(Token **rest, Token *tok) {
 
 static Token *skip_excess_element(Token *tok) {
     if (tok->kind == TK_LBRACE) {
-        tok = skip_excess_element(tok->next);
+        tok = tok->next;
+        while (tok->kind != TK_RBRACE) {
+            tok = skip_excess_element(tok);
+            match(&tok, tok, TK_COMMA);
+        }
         return skip(tok, TK_RBRACE);
     }
 
@@ -630,8 +634,15 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
     }
 
     if (tok->kind == TK_LBRACE) {
-        init->expr = assign(&tok, tok->next);
-        *rest = skip(tok, TK_RBRACE);
+        tok = tok->next;
+        for (int i = 0; !consume_end(rest, tok); i++) {
+            if (i > 0) {
+                tok = skip(tok, TK_COMMA);
+                tok = skip_excess_element(tok);
+            } else {
+                init->expr = assign(&tok, tok);
+            }
+        }
         return;
     }
     init->expr = assign(rest, tok);
@@ -733,11 +744,40 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
     return node;
 }
 
+static bool is_fully_initialized(Initializer *init, Type *ty) {
+    switch (ty->kind) {
+        case TY_ARRAY:
+            if (init->is_flexible && !init->child) return false;
+            for (int i = 0; i < ty->len; i++) {
+                if (!is_fully_initialized(init->child[i], ty->base)) return false;
+            }
+            return true;
+        case TY_STRUCT:
+            for (Member *mem = ty->members; mem; mem = mem->next) {
+                if (!is_fully_initialized(init->child[mem->idx], mem->ty)) return false;
+            }
+            return true;
+        case TY_UNION: {
+            if (!is_fully_initialized(init->child[0], ty->members->ty)) return false;
+            return ty->members->ty->size == ty->size;
+        }
+        default:
+            return init->expr != NULL;
+    }
+}
+
 static Node *lvar_initializer(Token **rest, Token *tok, Sym *var) {
     Initializer *init = initializer(rest, tok, var->ty, &var->ty);
     InitDesg desg = {NULL, 0, NULL, var};
+    // When a variable is not a scalar
+    // and the initializer does not explicitly cover all fields
     // zero-initialize the entire memory region of a variable
-    Node *lhs = new_unary(ND_MEMZERO, new_var_node(var, tok), tok);
+    Node *lhs;
+    if (is_scalar(var->ty) || is_fully_initialized(init, var->ty))
+        lhs = new_node(ND_NOP, tok);
+    else
+        lhs = new_unary(ND_MEMZERO, new_var_node(var, tok), tok);
+
     Node *rhs = create_lvar_init(init, var->ty, &desg, tok);
     return new_binary(ND_COMMA, lhs, rhs, tok);
 }

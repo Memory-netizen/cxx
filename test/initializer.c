@@ -482,6 +482,33 @@ int main() {
     ASSERT(0, strcmp(g65.b, "oo"));
     ASSERT(0, strcmp(g66.b, "oobar"));
 
+    ASSERT(1, ({
+               int a = {1, 2, 3};
+               a;
+           }));
+    ASSERT(1, ({
+               int a = {
+                   1,
+                   2,
+                   3,
+               };
+               a;
+           }));
+    ASSERT(1, ({
+               int a = {
+                   1,
+                   {2, 3},
+               };
+               a;
+           }));
+    ASSERT(1, ({
+               int a = {
+                   1,
+                   {{2}, 3},
+               };
+               a;
+           }));
+
     printf("OK\n");
     return 0;
 }
