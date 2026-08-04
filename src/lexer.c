@@ -292,14 +292,12 @@ static int is_valid_digit(int c, int base) {
 }
 
 enum {
-    SUF_INT = 0x001,
-    SUF_UNSIGNED = 0x002,
-    SUF_LONG = 0x004,
-    SUF_LLONG = 0x008,
-    SUF_FLOAT = 0x010,
-    SUF_DOUBLE = 0x020,
-    SUF_LDOUBLE = 0x040,
-    SUF_BITINT = 0x080,
+    SUF_UNSIGNED = 0x001,
+    SUF_LONG = 0x002,
+    SUF_LLONG = 0x004,
+    SUF_FLOAT = 0x08,
+    SUF_LDOUBLE = 0x010,
+    SUF_BITINT = 0x020,
 };
 
 static Type *infer_type(uint64_t val, int flags, int base) {

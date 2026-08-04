@@ -96,6 +96,9 @@ int main() {
     ASSERT(1, sizeof(false));
     ASSERT(8, sizeof(nullptr));
 
+    ASSERT(4, sizeof(float));
+    ASSERT(8, sizeof(double));
+
     printf("OK\n");
     return 0;
 }

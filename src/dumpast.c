@@ -204,7 +204,10 @@ static void dump_node(Node *node) {
 
     switch (node->kind) {
         case ND_NUM:
-            fprintf(stdout, "  val=%ld\n", node->val);
+            if (is_flonum(node->ty))
+                fprintf(stdout, "  val=%f\n", node->fval);
+            else
+                fprintf(stdout, "  val=%ld\n", node->val);
             break;
 
         case ND_NULLPTR:

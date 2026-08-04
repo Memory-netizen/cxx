@@ -5,7 +5,7 @@
 
 Type *ty_void = TYPE(TY_VOID, 1, 1, false);
 Type *ty_nullptr = TYPE(TY_NULLPTR, 8, 8, true);
-Type *ty_bool = TYPE(TY_BOOL, 1, 1, false);
+Type *ty_bool = TYPE(TY_BOOL, 1, 1, true);
 Type *ty_char = TYPE(TY_CHAR, 1, 1, CHAR_MIN == 0);
 Type *ty_schar = TYPE(TY_SCHAR, 1, 1, false);
 Type *ty_uchar = TYPE(TY_UCHAR, 1, 1, true);
@@ -20,7 +20,7 @@ Type *ty_ullong = TYPE(TY_LLONG, 8, 8, true);
 Type *ty_float = TYPE(TY_FLOAT, 4, 4, false);
 Type *ty_double = TYPE(TY_DOUBLE, 8, 8, false);
 Type *ty_ldouble = TYPE(TY_LDOUBLE, 8, 8, false);
-Type *ty_i1 = TYPE(TY_I1, 1, 1, false);
+Type *ty_i1 = TYPE(TY_I1, 1, 1, true);
 Type *ty_i32 = TYPE(TY_I32, 4, 4, false);
 Type *ty_i64 = TYPE(TY_I64, 8, 8, false);
 

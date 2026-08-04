@@ -136,10 +136,12 @@ static Ref load(Ref addr, Type *ty, int align) {
 static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
     if (target_ty->kind == TY_BOOL) {
         Ref tmp = TMP(tmp_id++, ty_i1);
-        new_ins(IR_CMP_NE, tmp, (Ref[]){val, INT(0)}, 2);
+        Ref zr = INT(0);
+        zr.ty = src_ty;
+        new_ins(IR_CMP_NE, tmp, (Ref[]){val, zr}, 2);
 
         Ref dst = TMP(tmp_id++, target_ty);
-        new_ins(IR_ZEXT, dst, (Ref[]){tmp}, 1);
+        new_ins(IR_EXT, dst, (Ref[]){tmp}, 1);
         return dst;
     }
     if (is_pointer(src_ty) && is_integer(target_ty)) {
@@ -152,20 +154,28 @@ static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
         new_ins(IR_INTTOPTR, dst, (Ref[]){val}, 1);
         return dst;
     }
+    if (is_flonum(src_ty) && is_integer(target_ty)) {
+        Ref dst = TMP(tmp_id++, target_ty);
+        new_ins(IR_FPTOINT, dst, (Ref[]){val}, 1);
+        return dst;
+    }
+    if (is_integer(src_ty) && is_flonum(target_ty)) {
+        Ref dst = TMP(tmp_id++, target_ty);
+        new_ins(IR_INTTOFP, dst, (Ref[]){val}, 1);
+        return dst;
+    }
+
     if (target_ty->kind == TY_VOID) return val;
     if (target_ty->size == src_ty->size) {
         val.ty = target_ty;
         return val;
     }
     Ref dst = TMP(tmp_id++, target_ty);
-    if (target_ty->size > src_ty->size) {
-        if (src_ty->is_unsigned)
-            new_ins(IR_ZEXT, dst, (Ref[]){val}, 1);
-        else
-            new_ins(IR_SEXT, dst, (Ref[]){val}, 1);
-    } else {
+    if (target_ty->size > src_ty->size)
+        new_ins(IR_EXT, dst, (Ref[]){val}, 1);
+    else
         new_ins(IR_TRUNC, dst, (Ref[]){val}, 1);
-    }
+
     return dst;
 }
 
@@ -188,6 +198,8 @@ static Ref gen_expr(Node *node) {
         case ND_NULLPTR:
             return NULLPTR;
         case ND_NUM:
+            if (node->ty->kind == TY_FLOAT) return FLOAT(node->val);
+            if (node->ty->kind == TY_DOUBLE) return DOUBLE(node->val);
             if (node->ty->size == 1)
                 dst = BOOL(node->val);
             else if (node->ty->size == 4)
@@ -335,10 +347,12 @@ static Ref gen_expr(Node *node) {
             return dst;
         case ND_NOT: {
             Ref tmp = TMP(tmp_id++, ty_i1);
-            new_ins(IR_CMP_EQ, tmp, (Ref[]){lr, INT(0)}, 2);
+            Ref zr = INT(0);
+            zr.ty = node->lhs->ty;
+            new_ins(IR_CMP_EQ, tmp, (Ref[]){lr, zr}, 2);
 
             dst = TMP(tmp_id++, node->ty);
-            new_ins(IR_ZEXT, dst, (Ref[]){tmp}, 1);
+            new_ins(IR_EXT, dst, (Ref[]){tmp}, 1);
             return dst;
         }
         default:
@@ -387,7 +401,7 @@ static Ref gen_expr(Node *node) {
             new_ins(cmp_op[node->kind], tmp, (Ref[]){lr, rr}, 2);
 
             dst = TMP(tmp_id++, node->ty);
-            new_ins(IR_ZEXT, dst, (Ref[]){tmp}, 1);
+            new_ins(IR_EXT, dst, (Ref[]){tmp}, 1);
             return dst;
         }
         default:
@@ -404,7 +418,9 @@ static Ref gen_cond(Node *node) {
     // cond
     Ref tmp = gen_expr(node->cond);
     Ref cond = TMP(tmp_id++, ty_i1);
-    new_ins(IR_CMP_NE, cond, (Ref[]){tmp, INT(0)}, 2);
+    Ref zr = INT(0);
+    zr.ty = tmp.ty;
+    new_ins(IR_CMP_NE, cond, (Ref[]){tmp, zr}, 2);
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;
     curb->succ1 = t_blk;
@@ -449,7 +465,9 @@ static Ref gen_logor(Node *node) {
     // lhs
     Ref lr = gen_expr(node->lhs);
     Ref cond = TMP(tmp_id++, ty_i1);
-    new_ins(IR_CMP_NE, cond, (Ref[]){lr, INT(0)}, 2);
+    Ref zr = INT(0);
+    zr.ty = lr.ty;
+    new_ins(IR_CMP_NE, cond, (Ref[]){lr, zr}, 2);
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;
     curb->succ1 = m_blk;
@@ -463,9 +481,10 @@ static Ref gen_logor(Node *node) {
     insert_blk(curb);
     Ref rr = gen_expr(node->rhs);
     Ref res_r = TMP(tmp_id++, ty_i1);
-    new_ins(IR_CMP_NE, res_r, (Ref[]){rr, INT(0)}, 2);
+    zr.ty = rr.ty;
+    new_ins(IR_CMP_NE, res_r, (Ref[]){rr, zr}, 2);
     Ref r_ext = TMP(tmp_id++, ty_int);
-    new_ins(IR_ZEXT, r_ext, (Ref[]){res_r}, 1);
+    new_ins(IR_EXT, r_ext, (Ref[]){res_r}, 1);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
     add_pred(curb, curb->succ1);
@@ -487,7 +506,9 @@ static Ref gen_logand(Node *node) {
     // lhs
     Ref lr = gen_expr(node->lhs);
     Ref cond = TMP(tmp_id++, ty_i1);
-    new_ins(IR_CMP_NE, cond, (Ref[]){lr, INT(0)}, 2);
+    Ref zr = INT(0);
+    zr.ty = lr.ty;
+    new_ins(IR_CMP_NE, cond, (Ref[]){lr, zr}, 2);
 
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;
@@ -502,9 +523,10 @@ static Ref gen_logand(Node *node) {
     insert_blk(curb);
     Ref rr = gen_expr(node->rhs);
     Ref res_r = TMP(tmp_id++, ty_i1);
-    new_ins(IR_CMP_NE, res_r, (Ref[]){rr, INT(0)}, 2);
+    zr.ty = rr.ty;
+    new_ins(IR_CMP_NE, res_r, (Ref[]){rr, zr}, 2);
     Ref r_ext = TMP(tmp_id++, ty_int);
-    new_ins(IR_ZEXT, r_ext, (Ref[]){res_r}, 1);
+    new_ins(IR_EXT, r_ext, (Ref[]){res_r}, 1);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
     add_pred(curb, curb->succ1);
@@ -527,7 +549,9 @@ static void gen_if(Node *node) {
     // cond
     Ref tmp = gen_stmt(node->cond);
     Ref cond = TMP(tmp_id++, ty_i1);
-    new_ins(IR_CMP_NE, cond, (Ref[]){tmp, INT(0)}, 2);
+    Ref zr = INT(0);
+    zr.ty = tmp.ty;
+    new_ins(IR_CMP_NE, cond, (Ref[]){tmp, zr}, 2);
 
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;
@@ -581,7 +605,9 @@ static void gen_for(Node *node) {
     if (node->cond) {
         Ref tmp = gen_expr(node->cond);
         Ref cond = TMP(tmp_id++, ty_i1);
-        new_ins(IR_CMP_NE, cond, (Ref[]){tmp, INT(0)}, 2);
+        Ref zr = INT(0);
+        zr.ty = tmp.ty;
+        new_ins(IR_CMP_NE, cond, (Ref[]){tmp, zr}, 2);
 
         curb->jmp.type = IR_JNZ;
         curb->jmp.arg = cond;
@@ -637,7 +663,9 @@ static void gen_while(Node *node) {
     insert_blk(curb);
     Ref tmp = gen_expr(node->cond);
     Ref cond = TMP(tmp_id++, ty_i1);
-    new_ins(IR_CMP_NE, cond, (Ref[]){tmp, INT(0)}, 2);
+    Ref zr = INT(0);
+    zr.ty = tmp.ty;
+    new_ins(IR_CMP_NE, cond, (Ref[]){tmp, zr}, 2);
 
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;
@@ -684,11 +712,13 @@ static void gen_do(Node *node) {
     add_pred(curb, curb->succ1);
 
     // cond
+    Ref zr = INT(0);
     curb = cond_blk;
     insert_blk(curb);
     Ref tmp = gen_expr(node->cond);
     Ref cond = TMP(tmp_id++, ty_i1);
-    new_ins(IR_CMP_NE, cond, (Ref[]){tmp, INT(0)}, 2);
+    zr.ty = tmp.ty;
+    new_ins(IR_CMP_NE, cond, (Ref[]){tmp, zr}, 2);
 
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;

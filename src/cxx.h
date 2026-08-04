@@ -604,9 +604,10 @@ typedef enum {
     IR_MEMSET,
 
     // Conversion
-    IR_ZEXT,
-    IR_SEXT,
+    IR_EXT,
     IR_TRUNC,
+    IR_INTTOFP,
+    IR_FPTOINT,
     IR_PTRTOINT,
     IR_INTTOPTR,
 
@@ -630,6 +631,7 @@ struct Con {
     uint32_t sym;
     union {
         int64_t i;
+        double d;
     } bits;
 };
 
@@ -654,6 +656,8 @@ enum {
 #define BOOL(x) getcon(x, curm, ty_bool)
 #define INT(x) getcon(x, curm, ty_i32)
 #define LONG(x) getcon(x, curm, ty_i64)
+#define FLOAT(x) getcon(x, curm, ty_float)
+#define DOUBLE(x) getcon(x, curm, ty_double)
 #define NULLPTR newcon(&(Con){CAddr, 0, {0}}, curm, ty_nullptr)
 
 struct Ref {

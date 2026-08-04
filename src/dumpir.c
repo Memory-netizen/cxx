@@ -2,55 +2,34 @@
 
 static FILE *out_file;
 static Module *curm;
-static const char *op_str[][IR_CNT] = {
-    {
-        [IR_ADD] = "add",
-        [IR_SUB] = "sub",
-        [IR_MUL] = "mul",
-        [IR_DIV] = "sdiv",
-        [IR_REM] = "srem",
-        [IR_AND] = "and",
-        [IR_OR] = "or",
-        [IR_XOR] = "xor",
-        [IR_SHL] = "shl",
-        [IR_SHR] = "ashr",
-        [IR_CMP_EQ] = "icmp eq",
-        [IR_CMP_NE] = "icmp ne",
-        [IR_CMP_LE] = "icmp sle",
-        [IR_CMP_LT] = "icmp slt",
-        [IR_SEXT] = "sext",
-        [IR_ZEXT] = "zext",
-        [IR_TRUNC] = "trunc",
-        [IR_PTRTOINT] = "ptrtoint",
-        [IR_INTTOPTR] = "inttoptr",
-    },
-    {
-        [IR_ADD] = "add",
-        [IR_SUB] = "sub",
-        [IR_MUL] = "mul",
-        [IR_DIV] = "udiv",
-        [IR_REM] = "urem",
-        [IR_AND] = "and",
-        [IR_OR] = "or",
-        [IR_XOR] = "xor",
-        [IR_SHL] = "shl",
-        [IR_SHR] = "lshr",
-        [IR_CMP_EQ] = "icmp eq",
-        [IR_CMP_NE] = "icmp ne",
-        [IR_CMP_LE] = "icmp ule",
-        [IR_CMP_LT] = "icmp ult",
-        [IR_SEXT] = "sext",
-        [IR_ZEXT] = "zext",
-        [IR_TRUNC] = "trunc",
-        [IR_PTRTOINT] = "ptrtoint",
-        [IR_INTTOPTR] = "inttoptr",
-    },
+static const char *op_str[][3] = {
+    [IR_ADD] = {"add", "add", "fadd"},
+    [IR_SUB] = {"sub", "sub", "fsub"},
+    [IR_MUL] = {"mul", "mul", "fmul"},
+    [IR_DIV] = {"sdiv", "udiv", "fdiv"},
+    [IR_REM] = {"srem", "urem", "frem"},
+    [IR_AND] = {"and", "and", "and"},
+    [IR_OR] = {"or", "or", "or"},
+    [IR_XOR] = {"xor", "xor", "xor"},
+    [IR_SHL] = {"shl", "shl", "shl"},
+    [IR_SHR] = {"ashr", "lshr", "ashr"},
+    [IR_CMP_EQ] = {"icmp eq", "icmp eq", "fcmp oeq"},
+    [IR_CMP_NE] = {"icmp ne", "icmp ne", "fcmp one"},
+    [IR_CMP_LE] = {"icmp sle", "icmp ule", "fcmp ole"},
+    [IR_CMP_LT] = {"icmp slt", "icmp ult", "fcmp olt"},
+    [IR_EXT] = {"sext", "zext", "fpext"},
+    [IR_TRUNC] = {"trunc", "trunc", "fptrunc"},
+    [IR_FPTOINT] = {"fptosi", "fptoui"},
+    [IR_INTTOFP] = {"sitofp", "uitofp"},
+    [IR_PTRTOINT] = {"ptrtoint", "ptrtoint", "ptrtoint"},
+    [IR_INTTOPTR] = {"inttoptr", "inttoptr", "inttoptr"},
 };
 
 static const char *ty_str[] = {
-    [TY_VOID] = "void", [TY_I1] = "i1",    [TY_I32] = "i32",   [TY_I64] = "i64",   [TY_BOOL] = "i8",
-    [TY_CHAR] = "i8",   [TY_SCHAR] = "i8", [TY_UCHAR] = "i8",  [TY_SHORT] = "i16", [TY_INT] = "i32",
-    [TY_ENUM] = "i32",  [TY_LONG] = "i64", [TY_LLONG] = "i64", [TY_PTR] = "ptr",   [TY_NULLPTR] = "ptr",
+    [TY_VOID] = "void", [TY_I1] = "i1",       [TY_I32] = "i32",   [TY_I64] = "i64",     [TY_BOOL] = "i8",
+    [TY_CHAR] = "i8",   [TY_SCHAR] = "i8",    [TY_UCHAR] = "i8",  [TY_SHORT] = "i16",   [TY_INT] = "i32",
+    [TY_ENUM] = "i32",  [TY_LONG] = "i64",    [TY_LLONG] = "i64", [TY_FLOAT] = "float", [TY_DOUBLE] = "double",
+    [TY_PTR] = "ptr",   [TY_NULLPTR] = "ptr",
 };
 
 static void print_type(Type *ty) {
@@ -71,10 +50,13 @@ static void print_type(Type *ty) {
     fprintf(out_file, "%s", ty_str[ty->kind]);
 }
 
-static void printcon(Con *c) {
-    if (c->type == CBits)
-        fprintf(out_file, "%" PRIi64, c->bits.i);
-    else if (c->type == CAddr) {
+static void printcon(Con *c, Type *ty) {
+    if (c->type == CBits) {
+        if (is_flonum(ty))
+            fprintf(out_file, "%f", c->bits.d);
+        else
+            fprintf(out_file, "%" PRIi64, c->bits.i);
+    } else if (c->type == CAddr) {
         if (c->bits.i)
             fprintf(out_file, "getelementptr (i8, ptr @%s, i64 %" PRIi64 ")", str(c->sym), c->bits.i);
         else if (c->sym)
@@ -86,7 +68,7 @@ static void printcon(Con *c) {
 
 static void print_operand(Ref r) {
     if (r.type == RCon)
-        printcon(&curm->con[r.val]);
+        printcon(&curm->con[r.val], r.ty);
     else if (r.type == RGlb)
         fprintf(out_file, "@%s", str(r.val));
     else
@@ -203,12 +185,21 @@ void dump_blk(Blk *b) {
                 fprintf(out_file, ")\n");
                 break;
             // conversion
-            case IR_SEXT:
-            case IR_ZEXT:
+            case IR_EXT:
             case IR_TRUNC:
+            case IR_FPTOINT:
+            case IR_INTTOFP:
             case IR_PTRTOINT:
-            case IR_INTTOPTR:
-                fprintf(out_file, "%s ", op_str[0][ir->op]);
+            case IR_INTTOPTR: {
+                Type *ty = ir->args[0].ty;
+                int idx = ty->is_unsigned;
+                if (is_flonum(ty)) {
+                    if (!is_flonum(ir->dst.ty))
+                        idx = ir->dst.ty->is_unsigned;
+                    else
+                        idx = 2;
+                }
+                fprintf(out_file, "%s ", op_str[ir->op][idx]);
                 print_type(ir->args[0].ty);
                 fprintf(out_file, " ");
                 print_operand(ir->args[0]);
@@ -216,6 +207,7 @@ void dump_blk(Blk *b) {
                 print_type(ir->dst.ty);
                 fprintf(out_file, "\n");
                 break;
+            }
             // arithmetic
             case IR_ADD:
             case IR_SUB:
@@ -230,8 +222,10 @@ void dump_blk(Blk *b) {
             case IR_CMP_EQ:
             case IR_CMP_NE:
             case IR_CMP_LE:
-            case IR_CMP_LT:
-                fprintf(out_file, "%s ", op_str[ir->args[0].ty->is_unsigned][ir->op]);
+            case IR_CMP_LT: {
+                int idx = ir->args[0].ty->is_unsigned;
+                if (is_flonum(ir->args[0].ty)) idx = 2;
+                fprintf(out_file, "%s ", op_str[ir->op][idx]);
                 print_type(ir->args[0].ty);
                 fprintf(out_file, " ");
                 print_operand(ir->args[0]);
@@ -239,6 +233,7 @@ void dump_blk(Blk *b) {
                 print_operand(ir->args[1]);
                 fprintf(out_file, "\n");
                 break;
+            }
             default:
                 fatal("unknown ir op kind %d", ir->op);
         }
@@ -381,17 +376,17 @@ static void dump_init(Initializer *init, Type *ty) {
     }
     if (init->ty->kind == TY_PTR && init->val->type == CBits) {
         fprintf(out_file, "inttoptr (i64 ");
-        printcon(init->val);
+        printcon(init->val, init->ty);
         fprintf(out_file, " to ptr)");
         return;
     }
     if (init->ty->kind != TY_PTR && init->val->type == CAddr) {
         fprintf(out_file, "ptrtoint (ptr ");
-        printcon(init->val);
+        printcon(init->val, init->ty);
         fprintf(out_file, " to i64)");
         return;
     }
-    printcon(init->val);
+    printcon(init->val, init->ty);
 }
 
 static const char *sclass_name[] = {

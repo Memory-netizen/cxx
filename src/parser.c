@@ -2217,9 +2217,11 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
         SHORT = 1 << 6,
         INT = 1 << 8,
         LONG = 1 << 10,
-        OTHER = 1 << 12,
-        SIGNED = 1 << 13,
-        UNSIGNED = 1 << 14,
+        FLOAT = 1 << 12,
+        DOUBLE = 1 << 14,
+        OTHER = 1 << 16,
+        SIGNED = 1 << 17,
+        UNSIGNED = 1 << 18,
     };
 
     while (is_typename(tok, true)) {
@@ -2308,6 +2310,12 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
             case TK_LONG:
                 typespec_cnt += LONG;
                 break;
+            case TK_FLOAT:
+                typespec_cnt += FLOAT;
+                break;
+            case TK_DOUBLE:
+                typespec_cnt += DOUBLE;
+                break;
             case TK_SIGNED:
                 typespec_cnt |= SIGNED;
                 break;
@@ -2373,6 +2381,15 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
             case UNSIGNED + LONG + LONG:
             case UNSIGNED + LONG + LONG + INT:
                 ty = ty_ullong;
+                break;
+            case FLOAT:
+                ty = ty_float;
+                break;
+            case DOUBLE:
+                ty = ty_double;
+                break;
+            case LONG + DOUBLE:
+                ty = ty_double;  // now "long double" as an alias for "double"
                 break;
             case NONE:
             case OTHER:
