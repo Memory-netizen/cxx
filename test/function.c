@@ -71,6 +71,8 @@ double add_double3(double x, double y, double z) { return x + y + z; }
 
 int (*fnptr(int (*fn)(int n, ...)))(int, ...) { return fn; }
 
+int param_decay3(int x()) { return x(); }
+
 int main() {
     ASSERT(3, ret3());
     ASSERT(8, add2(3, 5));
@@ -164,6 +166,8 @@ int main() {
                fn(2, 5);
            }));
     ASSERT(6, fnptr(add_all)(3, 1, 2, 3));
+
+    ASSERT(3, param_decay3(ret3));
 
     printf("OK\n");
     return 0;

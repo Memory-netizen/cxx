@@ -369,12 +369,12 @@ void check_condop(Node *node) {
 
     if (is_nullptr(lhs) && is_nullptr(rhs)) return;
 
-    if (is_pointer(lhs) && (is_null_constant(node->rhs) || is_nullptr(rhs))) return;
-    if (is_pointer(rhs) && (is_null_constant(node->lhs) || is_nullptr(lhs))) return;
+    if (is_pointer(lhs) && (is_null_constant(node->els) || is_nullptr(rhs))) return;
+    if (is_pointer(rhs) && (is_null_constant(node->then) || is_nullptr(lhs))) return;
 
     // ------
-    if (is_nullptr(lhs) && is_null_constant(node->rhs)) return;
-    if (is_nullptr(rhs) && is_null_constant(node->lhs)) return;
+    if (is_nullptr(lhs) && is_null_constant(node->els)) return;
+    if (is_nullptr(rhs) && is_null_constant(node->then)) return;
 
     if (is_pointer(lhs) && is_pointer(rhs)) return;
     if (is_integer(lhs) && is_pointer(rhs)) return;
