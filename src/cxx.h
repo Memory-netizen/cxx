@@ -233,6 +233,13 @@ struct Token {
 bool match(Token **rest, Token *tok, TokenKind kind);
 Token *skip(Token *tok, TokenKind kind);
 Token *tokenize_file(char *filename);
+void convert_pptoken(Token *tok);
+
+//
+// preprocess.c
+//
+
+Token *preprocess(Token *tok);
 
 //
 // Parser

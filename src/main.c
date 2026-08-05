@@ -57,6 +57,8 @@ int main(int argc, char **argv) {
     // Tokenize and parse.
     Token *tok = tokenize_file(input_path);
 
+    convert_pptoken(tok);
+
     if (opt_dump_tokens) {
         dump_tokens(tok);
         freeall();
