@@ -36,7 +36,6 @@ static double eval_double(Node *node);
 
 static Node *new_node(NodeKind kind, Token *tok) {
     Node *node = emalloc(sizeof(Node));
-    memset(node, 0, sizeof(*node));
     node->kind = kind;
     node->tok = tok;
     return node;
@@ -214,7 +213,6 @@ static void push_tag_namespace(uint32_t id, Type *ty, Token *loc) {
 
 static Sym *new_var(uint32_t id, Type *ty) {
     Sym *var = emalloc(sizeof(Sym));
-    memset(var, 0, sizeof(Sym));
     var->id = id;
     var->ty = ty;
     var->align = ty->align;
@@ -445,7 +443,6 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
 
 static Initializer *new_initializer(Type *ty, bool is_flexible) {
     Initializer *init = emalloc(sizeof(Initializer));
-    memset(init, 0, sizeof(Initializer));
     init->ty = ty;
 
     if (ty->kind == TY_ARRAY) {
@@ -1777,7 +1774,7 @@ static void check_case(int64_t val, Token *tok) {
 //     | "default" ":"
 // ConstRangeExp ::= ConstExp "..." ConstExp
 static Node *label(Token **rest, Token *tok) {
-    Node head = {}, *cur = &head;
+    Node dummy = {}, *cur = &dummy;
     while (1) {
         if (tok->kind == TK_IDENT && tok->next->kind == TK_COLON) {
             Node *node = new_node(ND_LABEL, tok);
@@ -1838,8 +1835,8 @@ static Node *label(Token **rest, Token *tok) {
         break;
     }
     *rest = tok;
-    cur->label_ring = head.label_ring;
-    return head.label_ring;
+    cur->label_ring = dummy.label_ring;
+    return dummy.label_ring;
 }
 
 static uint32_t push_named_loop(Node *lb, Token *tok) {
@@ -2043,8 +2040,8 @@ static Type *enum_decl(Token **rest, Token *tok) {
     }
 
     // Read an enum-list.
-    EnumVal head = {};
-    EnumVal *cur = &head;
+    EnumVal dummy = {};
+    EnumVal *cur = &dummy;
     int i = 0;
     int64_t val = 0;
     while (!consume_end(rest, tok)) {
@@ -2052,11 +2049,11 @@ static Type *enum_decl(Token **rest, Token *tok) {
 
         Token *enm_name = tok;
         uint32_t name = get_ident(enm_name);
-        EnumVal *tmp = head.next;
+        EnumVal *tmp = dummy.next;
         while (tmp) {
-            if (tmp->name == name) {
+            if (tmp->name->id == name) {
                 diag(enm_name, "error", "redeclaration of enumerator ‘%.*s’", enm_name->len, enm_name->loc);
-                diag_exit(tmp->loc, "note", "previous definition is here");
+                diag_exit(tmp->name, "note", "previous definition is here");
                 exit(1);
             }
             tmp = tmp->next;
@@ -2074,14 +2071,13 @@ static Type *enum_decl(Token **rest, Token *tok) {
 
         push_namespace(name, SYM_ENUM, ty, enm_name)->enum_val = val;
         EnumVal *enm = emalloc(sizeof(EnumVal));
-        enm->name = name;
+        enm->name = enm_name;
         enm->val = val++;
-        enm->loc = enm_name;
         cur = cur->next = enm;
     }
 
-    if (!head.next) error(tok, "empty enum is invalid");
-    ty->enumvals = head.next;
+    if (!dummy.next) error(tok, "empty enum is invalid");
+    ty->enumvals = dummy.next;
     if (redefine) {
         if (!is_compatible(ty, exist_ty)) {
             diag(tag, "error", "conflicting redefinition of enum ‘enum %.*s’", tag->len, tag->loc);
@@ -2099,8 +2095,8 @@ note:
 // MemDecl  ::= TypeSpec+ (MemDeclr ("," MemDeclr)*)? ";"
 // MemDeclr ::= Declr
 static void struct_members(Token **rest, Token *tok, Type *ty) {
-    Member head = {};
-    Member *cur = &head;
+    Member dummy = {};
+    Member *cur = &dummy;
 
     while (tok->kind != TK_RBRACE) {
         int align = 0;
@@ -2119,7 +2115,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             if (mem->ty->size < 0 && tok->next->kind != TK_RBRACE)
                 error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
             mem->name = mem->ty->name;
-            Member *tmp = head.next;
+            Member *tmp = dummy.next;
             while (tmp) {
                 if (tmp->name->id == mem->name->id) {
                     diag(mem->name, "error", "duplicate member ‘%.*s’", mem->name->len, mem->name->loc);
@@ -2131,13 +2127,13 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
         }
     }
 
-    if (cur != &head && cur->ty->kind == TY_ARRAY && cur->ty->len < 0) {
+    if (cur != &dummy && cur->ty->kind == TY_ARRAY && cur->ty->len < 0) {
         cur->ty = array_of(cur->ty->base, 0);
         ty->is_flexible = true;
     }
 
     *rest = tok->next;
-    ty->members = head.next;
+    ty->members = dummy.next;
 }
 
 // RecordSpec ::= Record Ident ("{" MemDecl+ "}")? | Record "{" MemDecl+ "}"
@@ -2470,7 +2466,7 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
 
     uint32_t nparam = 0;
     bool is_variadic = false;
-    Type dummy, *cur = &dummy;
+    Type dummy = {}, *cur = &dummy;
 
     while (tok->kind != TK_RPAREN) {
         if (cur != &dummy) tok = skip(tok, TK_COMMA);
@@ -2486,6 +2482,7 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
         if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type", start->len, start->loc);
         // "array of T" is converted to "pointer to T" in the parameter
         // context. For example, *argv[] is converted to **argv by this.
+
         if (paramty->kind == TY_ARRAY) {
             Type *arr = paramty;
             paramty = pointer_to(paramty->base, paramty->qual);
@@ -2515,7 +2512,6 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
         push_namespace(id, SYM_VAR, ty, cur->name)->var = new_lvar(id, cur);
     }
 
-    cur->next = NULL;
     *rest = skip(tok, TK_RPAREN);
 
     ty = func_type(ty);
@@ -2782,7 +2778,6 @@ static Token *external_declaration(Token *tok) {
 // TransUnit ::= ExDecl+
 Module *parse(Token *tok) {
     Module *md = emalloc(sizeof(Module));
-    memset(md, 0, sizeof(Module));
     md->con = vnew(2, sizeof md->con[0]);
     curm = md;
 

@@ -5,8 +5,8 @@ static bool is_hash(Token *tok) { return tok->is_sol && tok->kind == TK_HASH; }
 // Visit all tokens in `tok` while evaluating preprocessing
 // macros and directives.
 static Token *preprocess2(Token *tok) {
-    Token head = {};
-    Token *cur = &head;
+    Token dummy = {};
+    Token *cur = &dummy;
 
     while (tok->kind != TK_EOF) {
         // Pass through if it is not a "#".
@@ -25,7 +25,7 @@ static Token *preprocess2(Token *tok) {
     }
 
     cur->next = tok;
-    return head.next;
+    return dummy.next;
 }
 
 // Entry point function of the preprocessor.

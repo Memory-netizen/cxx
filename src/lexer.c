@@ -599,7 +599,7 @@ void convert_pptoken(Token *tok) {
 static Token *tokenize(char *filename, char *p) {
     int line = 1;
     int col = 1;
-    Token dummy, *cur = &dummy;
+    Token dummy = {}, *cur = &dummy;
 
     while (*p) {
         bool is_leadingws = false;
@@ -721,7 +721,6 @@ static Token *tokenize(char *filename, char *p) {
 
     Token *eof = new_token(TK_EOF, p, p);
     fill_tok(eof, filename, line, col, false, false);
-    eof->next = NULL;
     cur->next = eof;
     convert_pptoken(dummy.next);
     return dummy.next;

@@ -542,9 +542,8 @@ struct Member {
 
 struct EnumVal {
     EnumVal *next;
-    uint32_t name;
+    Token *name;
     int64_t val;
-    Token *loc;
 };
 
 enum {

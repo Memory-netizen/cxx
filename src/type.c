@@ -75,14 +75,14 @@ bool is_scalar(Type *ty) { return is_arith(ty) || is_pointer(ty) || is_nullptr(t
 bool is_record(Type *ty) { return ty->kind == TY_STRUCT || ty->kind == TY_UNION; }
 
 static void copy_struct_type(Type *dst, Type *src) {
-    Member head = {};
-    Member *cur = &head;
+    Member dummy = {};
+    Member *cur = &dummy;
     for (Member *mem = src->members; mem; mem = mem->next) {
         Member *new = emalloc(sizeof(Member));
         *new = *mem;
         cur = cur->next = new;
     }
-    dst->members = head.next;
+    dst->members = dummy.next;
 }
 
 Type *copy_type(Type *ty) {
@@ -99,15 +99,12 @@ Type *pointer_to(Type *base, uint32_t qual) {
     ty->size = 8;
     ty->align = 8;
     ty->is_unsigned = true;
-    ty->name = NULL;
-    ty->next = NULL;
     ty->base = base;
     return ty;
 }
 
 Type *func_type(Type *return_ty) {
     Type *ty = emalloc(sizeof(Type));
-    memset(ty, 0, sizeof(Type));
     ty->kind = TY_FUNC;
     ty->ret = return_ty;
     return ty;
@@ -118,8 +115,6 @@ Type *array_of(Type *base, int len) {
     ty->kind = TY_ARRAY;
     ty->size = base->size * len;
     ty->align = base->align;
-    ty->name = NULL;
-    ty->next = NULL;
     ty->base = base;
     ty->len = len;
     return ty;
@@ -127,7 +122,6 @@ Type *array_of(Type *base, int len) {
 
 Type *struct_type(bool is_union) {
     Type *ty = emalloc(sizeof(Type));
-    memset(ty, 0, sizeof(Type));
     ty->kind = is_union ? TY_UNION : TY_STRUCT;
     ty->align = 1;
     return ty;
@@ -135,7 +129,6 @@ Type *struct_type(bool is_union) {
 
 Type *enum_type(void) {
     Type *ty = emalloc(sizeof(Type));
-    memset(ty, 0, sizeof(Type));
     ty->kind = TY_ENUM;
     ty->size = 4;
     ty->align = 4;
@@ -236,7 +229,7 @@ bool is_compatible(Type *t1, Type *t2) {
             EnumVal *enm1 = t1->enumvals;
             EnumVal *enm2 = t2->enumvals;
             for (; enm1 && enm2; enm1 = enm1->next, enm2 = enm2->next) {
-                if (enm1->name != enm2->name) return false;
+                if (enm1->name->id != enm2->name->id) return false;
                 if (enm1->val != enm2->val) return false;
             }
             return enm1 == NULL && enm2 == NULL;

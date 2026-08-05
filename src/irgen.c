@@ -40,7 +40,6 @@ static Ir *new_ins(IrKind op, Ref dst, Ref *args, uint32_t narg) {
 
 static Blk *new_blk(void) {
     Blk *b = emalloc(sizeof(Blk));
-    memset(b, 0, sizeof(Blk));
     b->pred = vnew(2, sizeof(Blk *));
     return b;
 }
@@ -904,6 +903,7 @@ Module *irgen(Module *md) {
     curm = md;
     for (Sym *fn = md->fns; fn; fn = fn->next) {
         if (!fn->is_defined) continue;
+
         curf = fn;
         uint32_t nparam = tmp_id = fn->ty->nparam;
         tail = &dummy;
