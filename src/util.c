@@ -19,7 +19,7 @@ void fatal(char *fmt, ...) {
 static void emit_diag(char *loc, const char *level, const char *msg, va_list ap) {
     // Find a line containing `loc`.
     char *line = loc;
-    char *p = cur_file->content;
+    char *p = cur_file->contents;
     while (p < line && line[-1] != '\n') line--;
 
     int line_no = 1;
@@ -29,7 +29,7 @@ static void emit_diag(char *loc, const char *level, const char *msg, va_list ap)
     char *end = loc;
     while (*end != '\n') end++;
 
-    fprintf(stderr, "%s:%d:%ld: %s: ", cur_file->filename, line_no, loc - line + 1, level);
+    fprintf(stderr, "%s:%d:%ld: %s: ", cur_file->name, line_no, loc - line + 1, level);
     vfprintf(stderr, msg, ap);
     fputc('\n', stderr);
 

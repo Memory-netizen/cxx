@@ -1,7 +1,10 @@
 #include "cxx.h"
 #include "pow_table.h"
 
+// Input file
 SrcFile *cur_file = NULL;
+// A list of all input files.
+static SrcFile **input_files;
 
 // Attempt to match the given token type
 // If matched, consume the token and return true;
@@ -74,6 +77,7 @@ static int read_punct(char *p, TokenKind *type) {
 static Token *new_token(TokenKind kind, char *start, char *end) {
     Token *tok = emalloc(sizeof(Token));
     tok->kind = kind;
+    tok->file = cur_file;
     tok->loc = start;
     tok->len = end - start;
     return tok;
@@ -596,7 +600,11 @@ void convert_pptoken(Token *tok) {
 }
 
 // Tokenize a given string and returns new tokens.
-static Token *tokenize(char *filename, char *p) {
+static Token *tokenize(SrcFile *file) {
+    cur_file = file;
+    char *filename = file->name;
+    char *p = file->contents;
+
     int line = 1;
     int col = 1;
     Token dummy = {}, *cur = &dummy;
@@ -735,7 +743,7 @@ static char *read_file(char *path) {
         fp = stdin;
     } else {
         fp = fopen(path, "r");
-        if (!fp) fatal("%s: %s", path, strerror(errno));
+        if (!fp) return NULL;
     }
 
     char *buf;
@@ -758,11 +766,32 @@ static char *read_file(char *path) {
     fputc('\0', out);
     fclose(out);
 
-    cur_file = emalloc(sizeof(SrcFile));
-    cur_file->filename = path;
-    cur_file->content = buf;
-
     return buf;
 }
 
-Token *tokenize_file(char *path) { return tokenize(path, read_file(path)); }
+SrcFile **get_input_files(void) { return input_files; }
+
+static SrcFile *new_file(char *name, int file_no, char *contents) {
+    SrcFile *file = emalloc(sizeof(SrcFile));
+    file->name = name;
+    file->file_no = file_no;
+    file->contents = contents;
+    return file;
+}
+
+Token *tokenize_file(char *path) {
+    char *p = read_file(path);
+    if (!p) return NULL;
+
+    static int file_no = 0;
+    SrcFile *file = new_file(path, file_no + 1, p);
+
+    if (!input_files)
+        input_files = vnew(2, sizeof(SrcFile *));
+    else
+        input_files = vgrow(input_files, file_no + 1);
+
+    input_files[file_no++] = file;
+
+    return tokenize(file);
+}

@@ -10,7 +10,7 @@ static bool opt_dump_raw_tokens;
 
 static char *opt_o;
 
-static char *base_file;
+char *base_file;
 static char *output_file;
 
 static char **input_paths;
@@ -185,6 +185,7 @@ static void run_cc1(int argc, char **argv, char *input, char *output) {
 // Stage 1: .c → .ll  (cc1: tokenize + preprocess + parse + irgen)
 static void cc1(void) {
     Token *tok = tokenize_file(base_file);
+    if (!tok) fatal("%s: %s", base_file, strerror(errno));
 
     if (opt_dump_raw_tokens) dump_tokens(tok);
 

@@ -470,6 +470,8 @@ void dump_fn(Sym *fn) {
 void dump_module(Module *md, FILE *out) {
     out_file = out;
     curm = md;
+    SrcFile **files = get_input_files();
+    fprintf(out_file, "; ModuleID = '%s'\nsource_filename = \"%s\"\n\n", files[0]->name, files[0]->name);
     fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
     fprintf(out_file, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n\n");
 

@@ -73,9 +73,16 @@ extern Type *ty_i32;
 extern Type *ty_i64;
 
 struct SrcFile {
-    char *filename;
-    char *content;
+    char *name;
+    int file_no;
+    char *contents;
 };
+
+//
+// main.c
+//
+
+extern char *base_file;
 
 //
 // Lexer
@@ -214,7 +221,6 @@ typedef enum {
     TK_STATIC_ASSERT,
     TK_SWITCH,
     TK_WHILE,
-
 } TokenKind;
 
 struct Token {
@@ -223,10 +229,11 @@ struct Token {
     char *loc;
     size_t len;
     char *filename;
-    int line;
-    int col;
-    bool is_sol;
-    bool is_leadingws;
+    SrcFile *file;      // Source location
+    int line;           // Line number
+    int col;            // colume number
+    bool is_sol;        // true if is starting of line
+    bool is_leadingws;  // true if is leading space
     union {
         uint32_t id;   // Uesd if kind == TK_IDENT;
         uint64_t val;  // Uesd if kind == TK_NUM;
@@ -239,6 +246,7 @@ bool match(Token **rest, Token *tok, TokenKind kind);
 Token *skip(Token *tok, TokenKind kind);
 Token *tokenize_file(char *filename);
 void convert_pptoken(Token *tok);
+SrcFile **get_input_files(void);
 
 //
 // preprocess.c

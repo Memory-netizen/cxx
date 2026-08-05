@@ -50,6 +50,10 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c ; $(c_recipe)
 
 .PHONY: test clean linecnt fmt
 
+test/macro.out: cxx test/macro.c
+	./cxx -c -o test/macro.o test/macro.c
+	$(CC) -o $@ test/macro.o -xc test/common
+
 $(TEST_DIR)/%.out: $(TARGET) $(TEST_DIR)/%.c
 	$(CC) -o- -E -P -C $(TEST_DIR)/$*.c | ./$(TARGET) -c -o test/$*.o -
 	$(CC) -o $@ $(TEST_DIR)/$*.o -xc test/common
