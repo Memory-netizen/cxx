@@ -840,63 +840,6 @@ static uint32_t get_ident(Token *tok) {
     return tok->id;
 }
 
-static Node *fncall(Token **rest, Token *tok, Node *fn) {
-    if (fn->ty->kind != TY_FUNC && !is_funcptr(fn->ty))
-        error(tok, "called object ‘%.*s’ is not a function or function pointer", fn->tok->len, fn->tok->loc);
-
-    Node *node = new_node(ND_FUNCALL, tok);
-    node->func = fn;
-
-    Type *ty = (fn->ty->kind == TY_FUNC) ? fn->ty : fn->ty->base;
-    Type *param_ty = ty->params;
-    node->func_ty = ty;
-    node->ty = ty->ret;
-
-    tok = tok->next;
-
-    if (tok->kind == TK_RPAREN) {
-        if (param_ty)
-            error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ty->nparam);
-        *rest = tok->next;
-        return node;
-    }
-
-    Node dummy, *cur = &dummy;
-    uint32_t i = 0;
-
-    do {
-        Node *arg = assign(&tok, tok);
-        if (param_ty) {
-            if (param_ty->kind == TY_STRUCT || param_ty->kind == TY_UNION)
-                error(arg->tok, "passing struct or union is not supported yet");
-            check_asop(param_ty, arg, CTX_CALL);
-            lvalue_convert(&arg);
-            new_imcast(&arg, param_ty);
-            param_ty = param_ty->next;
-        } else if (ty->is_variadic) {
-            // If parameter type is omitted (e.g. in "..."),
-            // "char", "unsinged char" and "signed char" are promoted to "int" or "unsigned int"
-            // float arguments are promoted to double.
-            if (is_integer(arg->ty)) integer_promotion(&arg);
-            if (arg->ty->kind == TY_FLOAT) new_imcast(&arg, ty_double);
-            lvalue_convert(&arg);
-        } else {
-            error(tok, "too many arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ty->nparam);
-        }
-        ++i;
-        cur = cur->next = arg;
-    } while (match(&tok, tok, TK_COMMA));
-
-    if (param_ty)
-        error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ty->nparam);
-
-    *rest = skip(tok, TK_RPAREN);
-
-    node->args = dummy.next;
-    node->narg = i;
-    return node;
-}
-
 // PrimExp ::= "true" | "false" | "nullptr" | Num | Str | Ident | "(" Exp ")" | "(" CompStmt ")"
 static Node *primary(Token **rest, Token *tok) {
     Node *node;
@@ -961,6 +904,63 @@ static Node *primary(Token **rest, Token *tok) {
     }
     error(tok, "expected expression before ‘%.*s’", tok->len, tok->loc);
     return NULL;
+}
+
+static Node *fncall(Token **rest, Token *tok, Node *fn) {
+    if (fn->ty->kind != TY_FUNC && !is_funcptr(fn->ty))
+        error(tok, "called object ‘%.*s’ is not a function or function pointer", fn->tok->len, fn->tok->loc);
+
+    Node *node = new_node(ND_FUNCALL, tok);
+    node->func = fn;
+
+    Type *ty = (fn->ty->kind == TY_FUNC) ? fn->ty : fn->ty->base;
+    Type *param_ty = ty->params;
+    node->func_ty = ty;
+    node->ty = ty->ret;
+
+    tok = tok->next;
+
+    if (tok->kind == TK_RPAREN) {
+        if (param_ty)
+            error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ty->nparam);
+        *rest = tok->next;
+        return node;
+    }
+
+    Node dummy, *cur = &dummy;
+    uint32_t i = 0;
+
+    do {
+        Node *arg = assign(&tok, tok);
+        if (param_ty) {
+            if (param_ty->kind == TY_STRUCT || param_ty->kind == TY_UNION)
+                error(arg->tok, "passing struct or union is not supported yet");
+            check_asop(param_ty, arg, CTX_CALL);
+            lvalue_convert(&arg);
+            new_imcast(&arg, param_ty);
+            param_ty = param_ty->next;
+        } else if (ty->is_variadic) {
+            // If parameter type is omitted (e.g. in "..."),
+            // "char", "unsinged char" and "signed char" are promoted to "int" or "unsigned int"
+            // float arguments are promoted to double.
+            if (is_integer(arg->ty)) integer_promotion(&arg);
+            if (arg->ty->kind == TY_FLOAT) new_imcast(&arg, ty_double);
+            lvalue_convert(&arg);
+        } else {
+            error(tok, "too many arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ty->nparam);
+        }
+        ++i;
+        cur = cur->next = arg;
+    } while (match(&tok, tok, TK_COMMA));
+
+    if (param_ty)
+        error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ty->nparam);
+
+    *rest = skip(tok, TK_RPAREN);
+
+    node->args = dummy.next;
+    node->narg = i;
+    return node;
 }
 
 static Member *get_struct_member(Type *ty, Token *tok) {

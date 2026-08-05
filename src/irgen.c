@@ -840,7 +840,8 @@ static void gen_continue(Node *n) {
 static void gen_ret(Node *n) {
     Ref result = gen_expr(n->lhs);
     if (!refeq(result, R)) {
-        Ref ops[] = {result, SLOT(curf->ty->nparam + 1, pointer_to(curf->ty->ret, 0)), INT(curf->ty->ret->align)};
+        Type *ty = curf->ty;
+        Ref ops[] = {result, SLOT(ty->nparam + 1, pointer_to(ty->ret, 0)), INT(ty->ret->align)};
         new_ins(IR_STR, R, ops, 3);
     }
 
@@ -904,7 +905,7 @@ Module *irgen(Module *md) {
     for (Sym *fn = md->fns; fn; fn = fn->next) {
         if (!fn->is_defined) continue;
         curf = fn;
-        tmp_id = fn->ty->nparam;
+        uint32_t nparam = tmp_id = fn->ty->nparam;
         tail = &dummy;
         fn->start = new_blk();
         fn->end = new_blk();
@@ -930,7 +931,7 @@ Module *irgen(Module *md) {
             new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty, 0)), (Ref[]){INT(var->align)}, 1);
 
         Sym *var = fn->locals;
-        for (uint32_t i = 0; i < fn->ty->nparam; ++i, var = var->next)
+        for (uint32_t i = 0; i < nparam; ++i, var = var->next)
             new_ins(IR_STR, R, (Ref[]){TMP(i, var->ty), TMP(var->vreg, pointer_to(var->ty, 0)), INT(var->align)}, 3);
 
         // Body
@@ -942,10 +943,9 @@ Module *irgen(Module *md) {
         insert_blk(curb);
 
         if (is_valid)
-            new_ins(IR_LORD, TMP(tmp_id, ty), (Ref[]){SLOT(curf->ty->nparam + 1, pointer_to(ty, 0)), INT(ty->align)},
-                    2);
+            new_ins(IR_LORD, TMP(tmp_id, ty), (Ref[]){SLOT(nparam + 1, pointer_to(ty, 0)), INT(ty->align)}, 2);
         curb->jmp.type = IR_RET;
-        curb->jmp.arg = is_valid ? TMP(tmp_id, fn->ty->ret) : R;
+        curb->jmp.arg = is_valid ? TMP(tmp_id, ty) : R;
     }
     return md;
 }
