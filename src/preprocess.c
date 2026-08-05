@@ -2,6 +2,15 @@
 
 static bool is_hash(Token *tok) { return tok->is_sol && tok->kind == TK_HASH; }
 
+// Some preprocessor directives such as #include allow extraneous
+// tokens before newline. This function skips such tokens.
+static Token *skip_line(Token *tok) {
+    if (tok->is_sol) return tok;
+    diag("warning", tok, "extra token");
+    while (tok->is_sol) tok = tok->next;
+    return tok;
+}
+
 static Token *copy_token(Token *tok) {
     Token *t = emalloc(sizeof(Token));
     *t = *tok;
@@ -45,7 +54,8 @@ static Token *preprocess2(Token *tok) {
             char *path = format("%s/%s", dirname(strdup(tok->file->name)), str(tok->id));
             Token *tok2 = tokenize_file(path);
             if (!tok2) error(tok, "%s", strerror(errno));
-            tok = append(tok2, tok->next);
+            tok = skip_line(tok->next);
+            tok = append(tok2, tok);
             continue;
         }
 
