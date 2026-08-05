@@ -131,8 +131,6 @@ struct Scope {
 
 // Represents currently scope.
 static Scope *scope = &(Scope){0};
-// Represents function prototype scope
-static Scope *proto_scope;
 
 static void enter_scope(void) {
     Scope *sc = emalloc(sizeof(Scope));
@@ -143,9 +141,6 @@ static void enter_scope(void) {
 }
 
 static void leave_scope(void) { scope = scope->next; }
-
-static void push_proto_scope(void) { proto_scope = scope; }
-static void pop_proto_scope(void) { scope = proto_scope; }
 
 // All local variable instances created during parsing are
 // accumulated to this list.
@@ -911,6 +906,7 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
         error(tok, "called object ‘%.*s’ is not a function or function pointer", fn->tok->len, fn->tok->loc);
 
     Node *node = new_node(ND_FUNCALL, tok);
+    lvalue_convert(&fn);
     node->func = fn;
 
     Type *ty = (fn->ty->kind == TY_FUNC) ? fn->ty : fn->ty->base;
@@ -1079,12 +1075,14 @@ static Node *unary(Token **rest, Token *tok) {
             Node *node = cast(rest, tok->next);
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_FUNC) node = node->lhs;
             return new_unary(ND_ADDR, node, tok);
         }
         case TK_STAR: {
             Node *node = new_unary(ND_DEREF, cast(rest, tok->next), tok);
             add_type(node);
             if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base, 0));
+            if (node->ty->kind == TY_FUNC) new_imcast(&node, pointer_to(node->ty, 0));
             return node;
         }
         case TK_INC:
@@ -2469,8 +2467,6 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
     }
 
     enter_scope();
-    push_proto_scope();
-    locals = NULL;
 
     uint32_t nparam = 0;
     bool is_variadic = false;
@@ -2497,11 +2493,16 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
             paramty->is_star = arr->is_star;
             paramty->is_static = arr->is_static;
         }
+        if (paramty->kind == TY_FUNC) {
+            Type *fn = paramty;
+            paramty = pointer_to(paramty, 0);
+            paramty->name = fn->name;
+        }
 
         if (paramty->size < 0)
             error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len, paramty->name->loc);
         cur = cur->next = copy_type(paramty);
-
+        nparam++;
         uint32_t id = intern("", 0);
         if (cur->name) {
             id = get_ident(cur->name);
@@ -2511,7 +2512,6 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
                 diag_exit(ns->loc, "note", "previous definition is here");
             }
         }
-        nparam++;
         push_namespace(id, SYM_VAR, ty, cur->name)->var = new_lvar(id, cur);
     }
 
@@ -2689,12 +2689,16 @@ static Token *external_declaration(Token *tok) {
             var->is_defined = true;
             var->funcspec |= funcspec;
             cur_fn = var;
-            pop_proto_scope();
+            locals = NULL;
+            enter_scope();
 
             Type *param = ty->params;
             while (param) {
                 if (is_pointer(param) && param->is_star)
-                    error(param->name, "‘[*]’ not allowed in other than function prototype scope");
+                    error(ty->name, "‘[*]’ not allowed in other than function prototype scope");
+                uint32_t id = intern("", 0);
+                if (param->name) id = get_ident(param->name);
+                push_namespace(id, SYM_VAR, ty, param->name)->var = new_lvar(id, param);
                 param = param->next;
             }
 
