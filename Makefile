@@ -1,6 +1,7 @@
 # Settings
 TARGET := cxx
 CFLAGS := -Wall -Wextra -Werror -std=c23 -fno-common
+CFLAGS += -D_GNU_SOURCE
 LDFLAGS :=
 
 # Debug flags
@@ -50,15 +51,15 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c ; $(c_recipe)
 .PHONY: test clean linecnt fmt
 
 $(TEST_DIR)/%.out: $(TARGET) $(TEST_DIR)/%.c
-	$(CC) -o- -E -P -C $(TEST_DIR)/$*.c | ./$(TARGET) -o $(TEST_DIR)/$*.ll -
-	$(CC) -o $@ $(TEST_DIR)/$*.ll -xc $(TEST_DIR)/common -Wno-override-module
+	$(CC) -o- -E -P -C $(TEST_DIR)/$*.c | ./$(TARGET) -c -o test/$*.o -
+	$(CC) -o $@ $(TEST_DIR)/$*.o -xc test/common
 
 test: $(TARGET) $(TESTS)
 	@for i in $(TESTS); do echo "Running $$i"; $$i || exit 1; echo; done
-	@bash $(TEST_DIR)/driver.sh
+	@bash $(TEST_DIR)/driver.sh ./cxx
 
 clean:
-	-rm -rf $(TARGET) $(BUILD_DIR) $(TEST_DIR)/*.out $(TEST_DIR)/*.ll
+	-rm -rf $(TARGET) $(BUILD_DIR) $(TEST_DIR)/*.out $(TEST_DIR)/*.ll $(TEST_DIR)/*.o
 
 linecnt:
 	@echo "Total lines of code (excluding blank lines and // comments):"

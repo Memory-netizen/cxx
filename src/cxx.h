@@ -1,7 +1,6 @@
 #ifndef CXX_H_
 #define CXX_H_
 
-#define _POSIX_C_SOURCE 200809L
 #define ALIGN_UP(value, align) (((value) + (align) - 1) & ~((align) - 1))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -17,7 +16,9 @@
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
+#include <glob.h>
 #include <inttypes.h>
+#include <libgen.h>
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
@@ -28,6 +29,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 typedef struct SrcFile SrcFile;
 typedef struct Token Token;
