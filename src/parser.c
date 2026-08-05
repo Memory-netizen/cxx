@@ -811,7 +811,8 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
 
         Con *con = &(Con){sym ? CAddr : CBits, sym, {u.val}};
 
-        Ref r = newcon(con, curm, ty);
+        Ref r = newcon(con, curm);
+        r.ty = ty;
         init->val = &curm->con[r.val];
         init->is_inited = true;
     }

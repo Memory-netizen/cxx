@@ -643,6 +643,7 @@ struct Con {
 };
 
 enum {
+    RUndef,
     RTmp,
     RCon,
     RSlot,
@@ -650,7 +651,7 @@ enum {
 };
 
 #define R \
-    (Ref) { RTmp, 0, NULL }
+    (Ref) { RUndef, 0, NULL }
 #define TMP(x, ty) \
     (Ref) { RTmp, x, ty }
 #define SLOT(x, ty) \
@@ -660,12 +661,42 @@ enum {
 #define CON(x, ty) \
     (Ref) { RCon, x, ty }
 
-#define BOOL(x) getcon(x, curm, ty_bool)
-#define INT(x) getcon(x, curm, ty_i32)
-#define LONG(x) getcon(x, curm, ty_i64)
-#define FLOAT(x) getcon(x, curm, ty_float)
-#define DOUBLE(x) getcon(x, curm, ty_double)
-#define NULLPTR newcon(&(Con){CAddr, 0, {0}}, curm, ty_nullptr)
+#define BOOL(x)                    \
+    ({                             \
+        Ref tmp = getcon(x, curm); \
+        tmp.ty = ty_bool;          \
+        tmp;                       \
+    })
+#define INT(x)                     \
+    ({                             \
+        Ref tmp = getcon(x, curm); \
+        tmp.ty = ty_int;           \
+        tmp;                       \
+    })
+#define LONG(x)                    \
+    ({                             \
+        Ref tmp = getcon(x, curm); \
+        tmp.ty = ty_long;          \
+        tmp;                       \
+    })
+#define FLOAT(x)                   \
+    ({                             \
+        Ref tmp = getcon(x, curm); \
+        tmp.ty = ty_float;         \
+        tmp;                       \
+    })
+#define DOUBLE(x)                  \
+    ({                             \
+        Ref tmp = getcon(x, curm); \
+        tmp.ty = ty_double;        \
+        tmp;                       \
+    })
+#define NULLPTR                                        \
+    ({                                                 \
+        Ref tmp = newcon(&(Con){CAddr, 0, {0}}, curm); \
+        tmp.ty = nullptr;                              \
+        tmp;                                           \
+    })
 
 struct Ref {
     uint32_t type;
@@ -751,7 +782,7 @@ char *str(uint32_t id);
 uint32_t str_len(uint32_t id);
 char *escape_char_to_string(char c);
 
-Ref newcon(Con *c0, Module *md, Type *ty);
-Ref getcon(int64_t val, Module *md, Type *ty);
+Ref newcon(Con *c0, Module *md);
+Ref getcon(int64_t val, Module *md);
 
 #endif  // CXX_H_
