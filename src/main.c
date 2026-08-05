@@ -3,6 +3,7 @@
 static char *opt_o;
 static bool opt_ast_dump;
 static bool opt_dump_tokens;
+static bool opt_dump_raw_tokens;
 
 static char *input_path;
 
@@ -28,6 +29,11 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-dump-tokens")) {
             opt_dump_tokens = true;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-dump-raw-tokens")) {
+            opt_dump_raw_tokens = true;
             continue;
         }
 
@@ -57,7 +63,13 @@ int main(int argc, char **argv) {
     // Tokenize and parse.
     Token *tok = tokenize_file(input_path);
 
-    convert_pptoken(tok);
+    if (opt_dump_raw_tokens) {
+        dump_tokens(tok);
+        freeall();
+        return 0;
+    }
+
+    preprocess(tok);
 
     if (opt_dump_tokens) {
         dump_tokens(tok);
