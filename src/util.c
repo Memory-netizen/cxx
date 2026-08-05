@@ -16,15 +16,11 @@ void fatal(char *fmt, ...) {
     exit(1);
 }
 
-static void emit_diag(char *loc, const char *level, const char *msg, va_list ap) {
+static void emit_diag(char *level, int line_no, char *loc, const char *msg, va_list ap) {
     // Find a line containing `loc`.
     char *line = loc;
     char *p = cur_file->contents;
     while (p < line && line[-1] != '\n') line--;
-
-    int line_no = 1;
-    while (p < line)
-        if (*p++ == '\n') line_no++;
 
     char *end = loc;
     while (*end != '\n') end++;
@@ -50,65 +46,38 @@ static void emit_diag(char *loc, const char *level, const char *msg, va_list ap)
 void error(Token *tok, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    emit_diag(tok->loc, "error", msg, ap);
+    emit_diag("error", tok->line, tok->loc, msg, ap);
     va_end(ap);
     exit(1);
 }
 
-void error_at(char *loc, const char *msg, ...) {
+void error_at(int line_no, char *loc, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    emit_diag(loc, "error", msg, ap);
+
+    emit_diag("error", line_no, loc, msg, ap);
     va_end(ap);
     exit(1);
 }
 
-void warning_at(char *loc, const char *msg, ...) {
+void diag_at(char *level, int line_no, char *loc, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    emit_diag(loc, "warning", msg, ap);
+    emit_diag(level, line_no, loc, msg, ap);
     va_end(ap);
 }
 
-void warning(Token *tok, const char *msg, ...) {
+void diag(char *level, Token *tok, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    emit_diag(tok->loc, "warning", msg, ap);
+    emit_diag(level, tok->line, tok->loc, msg, ap);
     va_end(ap);
 }
 
-void note_at(char *loc, const char *msg, ...) {
+void diag_exit(char *level, Token *tok, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    emit_diag(loc, "note", msg, ap);
-    va_end(ap);
-}
-
-void note(Token *tok, const char *msg, ...) {
-    va_list ap;
-    va_start(ap, msg);
-    emit_diag(tok->loc, "note", msg, ap);
-    va_end(ap);
-}
-
-void diag_at(char *loc, char *level, const char *msg, ...) {
-    va_list ap;
-    va_start(ap, msg);
-    emit_diag(loc, level, msg, ap);
-    va_end(ap);
-}
-
-void diag(Token *tok, char *level, const char *msg, ...) {
-    va_list ap;
-    va_start(ap, msg);
-    emit_diag(tok->loc, level, msg, ap);
-    va_end(ap);
-}
-
-void diag_exit(Token *tok, char *level, const char *msg, ...) {
-    va_list ap;
-    va_start(ap, msg);
-    emit_diag(tok->loc, level, msg, ap);
+    emit_diag(level, tok->line, tok->loc, msg, ap);
     va_end(ap);
     exit(1);
 }

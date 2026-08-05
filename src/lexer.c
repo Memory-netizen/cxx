@@ -6,6 +6,9 @@ SrcFile *cur_file = NULL;
 // A list of all input files.
 static SrcFile **input_files;
 
+static int line;
+static int col;
+
 // Attempt to match the given token type
 // If matched, consume the token and return true;
 // otherwise, leave the token unconsumed and return false.
@@ -113,7 +116,7 @@ static int read_escaped_char(char **new_pos, char *p) {
     if (*p == 'x') {
         // Read a hexadecimal number.
         p++;
-        if (!isxdigit(*p)) error_at(p, "invalid hex escape sequence");
+        if (!isxdigit(*p)) error_at(line, p, "invalid hex escape sequence");
 
         int c = 0;
         for (; isxdigit(*p); p++) c = (c << 4) + from_hex(*p);
@@ -149,7 +152,7 @@ static int read_escaped_char(char **new_pos, char *p) {
 // Find a closing double-quote.
 static char *string_literal_end(char *p) {
     for (char *start = p++; *p != '"'; p++) {
-        if (*p == '\n' || *p == '\0') error_at(start, "missing terminating \" character");
+        if (*p == '\n' || *p == '\0') error_at(line, start, "missing terminating \" character");
         if (*p == '\\') p++;
     }
     return p;
@@ -175,7 +178,7 @@ static Token *read_string_literal(char *start) {
 
 static Token *read_char_literal(char *start) {
     char *p = start + 1;
-    if (*p == '\0') error_at(start, "unclosed char literal");
+    if (*p == '\0') error_at(line, start, "unclosed char literal");
     int c;
     if (*p == '\\')
         c = read_escaped_char(&p, p + 1);
@@ -183,7 +186,7 @@ static Token *read_char_literal(char *start) {
         c = (unsigned char)*p++;
 
     char *end = strchr(p, '\'');
-    if (!end) error_at(p, "unclosed char literal");
+    if (!end) error_at(line, p, "unclosed char literal");
 
     Token *tok = new_token(TK_NUM, start, end + 1);
     tok->val = c;
@@ -327,7 +330,7 @@ void convert_pp_number(Token *t) {
             }
             text += 2;
             if (!is_valid_digit(*text, base))
-                error_at(text, "invalid suffix ‘%.*s’ on integer constant", end - text, text);
+                error_at(line, text, "invalid suffix ‘%.*s’ on integer constant", end - text, text);
         }
     } else if (first_ch == '.') {
         clean[ci++] = '0';  // canonicalize
@@ -509,7 +512,7 @@ extract_end:
     return;
 error:
     text--;
-    error_at(text, "invalid suffix ‘%.*s’ on constant", end - text, text);
+    error_at(line, text, "invalid suffix ‘%.*s’ on constant", end - text, text);
 }
 
 // Advance col, tracking newlines.
@@ -605,8 +608,9 @@ static Token *tokenize(SrcFile *file) {
     char *filename = file->name;
     char *p = file->contents;
 
-    int line = 1;
-    int col = 1;
+    line = 1;
+    col = 1;
+
     Token dummy = {}, *cur = &dummy;
 
     while (*p) {
@@ -630,7 +634,7 @@ static Token *tokenize(SrcFile *file) {
             if (start_with(p, "/*")) {
                 is_leadingws = true;
                 char *q = strstr(p + 2, "*/");
-                if (!q) error_at(p, "unterminated /* comment");
+                if (!q) error_at(line, p, "unterminated /* comment");
                 for (char *r = p; r < q + 2; r++) {
                     if (*r == '\n') {
                         line++;
@@ -711,7 +715,7 @@ static Token *tokenize(SrcFile *file) {
         }
 
         // other char
-        if (*p == '`' || *p == '@' || *p == '$') error_at(p, "stray ‘%s’ in program", *p);
+        if (*p == '`' || *p == '@' || *p == '$') error_at(line, p, "stray ‘%s’ in program", *p);
 
         // Punctuator
         if (ispunct(*p)) {
@@ -724,7 +728,7 @@ static Token *tokenize(SrcFile *file) {
             continue;
         }
 
-        error_at(p, "invalid token");
+        error_at(line, p, "invalid token");
     }
 
     Token *eof = new_token(TK_EOF, p, p);

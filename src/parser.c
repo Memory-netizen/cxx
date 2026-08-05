@@ -166,9 +166,9 @@ static NameSpace *find_ident(Token *tok, bool search_par, bool is_extern) {
                 if (!is_extern) return ns;
                 if (ns->lnk == LK_EXTERN || ns->lnk == LK_INTERN) return ns;
                 if (sc == scope) {
-                    diag(tok, "error", "extern declaration of ‘%.*s’ follows declaration with no linkage", tok->len,
+                    diag("error", tok, "extern declaration of ‘%.*s’ follows declaration with no linkage", tok->len,
                          tok->loc);
-                    diag_exit(ns->loc, "note", "previous definition is here");
+                    diag_exit("note", ns->loc, "previous definition is here");
                 }
                 break;
             }
@@ -270,16 +270,16 @@ static Type *find_typedef(Token *tok, bool search_par) {
 
 static void check_decl_compatile(NameSpace *sym, SymKind kind, Type *ty) {
     if (sym->kind != kind) {
-        diag(ty->name, "error", "‘%.*s’ redeclared as different kind of symbol", ty->name->len, ty->name->loc);
+        diag("error", ty->name, "‘%.*s’ redeclared as different kind of symbol", ty->name->len, ty->name->loc);
         goto note;
     }
     if (!is_compatible(sym->ty, ty)) {
-        diag(ty->name, "error", "‘%.*s’ redeclared as conflicting type", ty->name->len, ty->name->loc);
+        diag("error", ty->name, "‘%.*s’ redeclared as conflicting type", ty->name->len, ty->name->loc);
         goto note;
     }
     return;
 note:
-    diag_exit(sym->loc, "note", "previous definition is here");
+    diag_exit("note", sym->loc, "previous definition is here");
 }
 
 static void swap(Node **lhs, Node **rhs) {
@@ -1452,8 +1452,8 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         uint32_t id = get_ident(ty->name);
         if (ns) {
             if (!is_extern) {
-                diag(ty->name, "error", "redefinition of ‘%.*s’", ty->name->len, ty->name->loc);
-                diag_exit(ns->loc, "note", "previous definition is here");
+                diag("error", ty->name, "redefinition of ‘%.*s’", ty->name->len, ty->name->loc);
+                diag_exit("note", ns->loc, "previous definition is here");
             }
             check_decl_compatile(ns, symkind, ty);
             var = new_lvar(id, ty);
@@ -1751,8 +1751,8 @@ static void check_label(uint32_t label, Token *tok) {
     Node *cur = labels;
     while (cur) {
         if (cur->label == label) {
-            diag(tok, "error", "redefinition of label ‘%.*s’", tok->len, tok->loc);
-            diag_exit(cur->tok, "note", "previous definition is here");
+            diag("error", tok, "redefinition of label ‘%.*s’", tok->len, tok->loc);
+            diag_exit("note", cur->tok, "previous definition is here");
         }
         cur = cur->goto_next;
     }
@@ -1762,8 +1762,8 @@ static void check_case(int64_t val, Token *tok) {
     Node *cur = cur_sw->case_next;
     while (cur) {
         if (cur->val == val) {
-            diag(tok, "error", "duplicate case value ‘%ld’", val);
-            diag_exit(cur->tok, "note", "previous case defined here");
+            diag("error", tok, "duplicate case value ‘%ld’", val);
+            diag_exit("note", cur->tok, "previous case defined here");
         }
         cur = cur->case_next;
     }
@@ -1791,8 +1791,8 @@ static Node *label(Token **rest, Token *tok) {
         if (tok->kind == TK_DEFAULT) {
             if (!cur_sw) error(tok, "‘default’ label not within a switch statement");
             if (cur_sw->default_case) {
-                diag(tok, "error", "multiple default labels in one switch");
-                diag_exit(cur_sw->default_case->tok, "note", "this is the first default label");
+                diag("error", tok, "multiple default labels in one switch");
+                diag_exit("note", cur_sw->default_case->tok, "this is the first default label");
             }
             Node *node = new_node(ND_CASE, tok);
             tok = skip(tok->next, TK_COLON);
@@ -1997,7 +1997,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
         if (ns) {
             ty = ns->ty;
             if (ty->kind != TY_ENUM) {
-                diag(tag, "error", "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
+                diag("error", tag, "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
                      tag->loc);
                 goto note;
             }
@@ -2019,7 +2019,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
         if (ns) {
             exist_ty = ns->ty;
             if (exist_ty->kind != TY_ENUM) {
-                diag(tag, "error", "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
+                diag("error", tag, "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
                      tag->loc);
                 goto note;
             }
@@ -2053,8 +2053,8 @@ static Type *enum_decl(Token **rest, Token *tok) {
         EnumVal *tmp = dummy.next;
         while (tmp) {
             if (tmp->name->id == name) {
-                diag(enm_name, "error", "redeclaration of enumerator ‘%.*s’", enm_name->len, enm_name->loc);
-                diag_exit(tmp->name, "note", "previous definition is here");
+                diag("error", enm_name, "redeclaration of enumerator ‘%.*s’", enm_name->len, enm_name->loc);
+                diag_exit("note", tmp->name, "previous definition is here");
                 exit(1);
             }
             tmp = tmp->next;
@@ -2062,8 +2062,8 @@ static Type *enum_decl(Token **rest, Token *tok) {
         if (!redefine) {
             NameSpace *ns2 = find_ident(enm_name, false, false);
             if (ns2) {
-                diag(enm_name, "error", "redeclaration of ‘%.*s’", enm_name->len, enm_name->loc);
-                diag_exit(ns2->loc, "note", "previous definition is here");
+                diag("error", enm_name, "redeclaration of ‘%.*s’", enm_name->len, enm_name->loc);
+                diag_exit("note", ns2->loc, "previous definition is here");
             }
         }
         tok = tok->next;
@@ -2081,7 +2081,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
     ty->enumvals = dummy.next;
     if (redefine) {
         if (!is_compatible(ty, exist_ty)) {
-            diag(tag, "error", "conflicting redefinition of enum ‘enum %.*s’", tag->len, tag->loc);
+            diag("error", tag, "conflicting redefinition of enum ‘enum %.*s’", tag->len, tag->loc);
             goto note;
         }
         return exist_ty;
@@ -2089,7 +2089,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
     return ty;
 
 note:
-    diag_exit(ns->loc, "note", "previous definition is here");
+    diag_exit("note", ns->loc, "previous definition is here");
     return NULL;
 }
 
@@ -2119,8 +2119,8 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             Member *tmp = dummy.next;
             while (tmp) {
                 if (tmp->name->id == mem->name->id) {
-                    diag(mem->name, "error", "duplicate member ‘%.*s’", mem->name->len, mem->name->loc);
-                    diag_exit(tmp->name, "note", "previous declaration is here");
+                    diag("error", mem->name, "duplicate member ‘%.*s’", mem->name->len, mem->name->loc);
+                    diag_exit("note", tmp->name, "previous declaration is here");
                 }
                 tmp = tmp->next;
             }
@@ -2162,7 +2162,7 @@ static Type *record_decl(Token **rest, Token *tok) {
             else if (ty->kind == TY_STRUCT && !is_union)
                 match = true;
             if (!match) {
-                diag(tag, "error", "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
+                diag("error", tag, "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
                      tag->loc);
                 goto note;
             }
@@ -2190,7 +2190,7 @@ static Type *record_decl(Token **rest, Token *tok) {
             else if (exist_ty->kind == TY_STRUCT && !is_union)
                 match = true;
             if (!match) {
-                diag(tag, "error", "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
+                diag("error", tag, "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
                      tag->loc);
                 goto note;
             }
@@ -2231,7 +2231,7 @@ static Type *record_decl(Token **rest, Token *tok) {
 
     if (redefine) {
         if (!is_compatible(ty, exist_ty)) {
-            diag(tag, "error", "redefinition of struct or union ‘%s %.*s’", ty_kind, tag->len, tag->loc);
+            diag("error", tag, "redefinition of struct or union ‘%s %.*s’", ty_kind, tag->len, tag->loc);
             goto note;
         }
         return exist_ty;
@@ -2239,7 +2239,7 @@ static Type *record_decl(Token **rest, Token *tok) {
     insert_ty(ty, ty_kind);
     return ty;
 note:
-    diag_exit(ns->loc, "note", "previous definition is here");
+    diag_exit("note", ns->loc, "previous definition is here");
     return NULL;
 }
 
@@ -2506,8 +2506,8 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
             id = get_ident(cur->name);
             NameSpace *ns = find_ident(cur->name, false, false);
             if (ns) {
-                diag(cur->name, "error", "redefinition of parameter ‘%s’", str(id));
-                diag_exit(ns->loc, "note", "previous definition is here");
+                diag("error", cur->name, "redefinition of parameter ‘%s’", str(id));
+                diag_exit("note", ns->loc, "previous definition is here");
             }
         }
         push_namespace(id, SYM_VAR, ty, cur->name)->var = new_lvar(id, cur);
@@ -2666,11 +2666,11 @@ static Token *external_declaration(Token *tok) {
                 check_decl_compatile(ns, SYM_FUNC, ty);
                 var = ns->var;
                 if (var->is_defined) {
-                    diag(ty->name, "error", "redefinition of ‘%.*s’", ty->name->len, ty->name->loc);
+                    diag("error", ty->name, "redefinition of ‘%.*s’", ty->name->len, ty->name->loc);
                     goto note;
                 }
                 if (sclass == SC_STATIC && var->sclass != SC_STATIC) {
-                    diag(ty->name, "error", "static declaration of ‘%.*s’ follows non-static declaration",
+                    diag("error", ty->name, "static declaration of ‘%.*s’ follows non-static declaration",
                          ty->name->len, ty->name->loc);
                     goto note;
                 }
@@ -2729,19 +2729,19 @@ static Token *external_declaration(Token *tok) {
                 check_decl_compatile(ns, symkind, ty);
                 var = ns->var;
                 if (var->is_defined && tok->kind == TK_AS) {
-                    diag(ty->name, "error", "redefinition of ‘%.*s’", ty->name->len, ty->name->loc);
+                    diag("error", ty->name, "redefinition of ‘%.*s’", ty->name->len, ty->name->loc);
                     goto note;
                 }
                 if (var->sclass & SC_STATIC) {
                     if (!is_func && !(sclass & SC_STATIC)) {
-                        diag(ty->name, "error", "non-static declaration of ‘%.*s’ follows static declaration",
+                        diag("error", ty->name, "non-static declaration of ‘%.*s’ follows static declaration",
                              ty->name->len, ty->name->loc);
                         goto note;
                     }
                 }
                 if (sclass & SC_STATIC) {
                     if (!(var->sclass & SC_STATIC)) {
-                        diag(ty->name, "error", "static declaration of ‘%.*s’ follows non-static declaration",
+                        diag("error", ty->name, "static declaration of ‘%.*s’ follows non-static declaration",
                              ty->name->len, ty->name->loc);
                         goto note;
                     }
@@ -2772,7 +2772,7 @@ static Token *external_declaration(Token *tok) {
         else
             error(tok, "expected ‘;’ after top level declarator");
     note:
-        diag_exit(ns->loc, "note", "previous definition is here");
+        diag_exit("note", ns->loc, "previous definition is here");
     }
 }
 
