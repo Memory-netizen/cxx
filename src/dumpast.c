@@ -228,8 +228,9 @@ static void dump_node(Node *node) {
             break;
 
         case ND_FUNCALL:
-            fprintf(stdout, "  func=‘%s’  narg=%u\n", str(node->func), node->narg);
+            fprintf(stdout, "  narg=%u\n", node->narg);
             depth++;
+            dump_node(node->func);
             dump_node_list(node->args);
             depth--;
             break;
@@ -482,9 +483,9 @@ void dump_ast(Module *prog) {
         fprintf(stdout, "\n");
 
         Sym *p = fn->locals;
-        if (fn->nparam) {
+        if (fn->ty->nparam) {
             fprintf(stdout, "  params:\n");
-            for (uint32_t i = 0; i < fn->nparam; p = p->next, i++) {
+            for (uint32_t i = 0; i < fn->ty->nparam; p = p->next, i++) {
                 fprintf(stdout, "    %s: ", str(p->id));
                 print_type(p->ty);
                 fprintf(stdout, "\n");

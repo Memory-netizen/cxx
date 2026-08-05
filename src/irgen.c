@@ -181,6 +181,7 @@ static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
 
 static Ref convert(Node *lhs, Type *target_ty) {
     Ref lr = gen_expr(lhs);
+    if (lhs->ty->kind == TY_FUNC && lhs->kind == ND_VAR) return lr;
     if (lhs->ty->kind == TY_ARRAY && is_pointer(target_ty)) {
         Ref dst = TMP(tmp_id++, target_ty);
         new_ins(IR_GEP, dst, (Ref[]){lr, LONG(0)}, 2);
@@ -318,7 +319,7 @@ static Ref gen_expr(Node *node) {
         case ND_FUNCALL: {
             int nargs = node->narg;
             Ref call_ops[nargs + 1];
-            call_ops[0] = GLB(node->func, NULL);
+            call_ops[0] = gen_expr(node->func);
 
             int idx = 1;
             for (Node *arg = node->args; arg; arg = arg->next) call_ops[idx++] = gen_expr(arg);
@@ -839,7 +840,7 @@ static void gen_continue(Node *n) {
 static void gen_ret(Node *n) {
     Ref result = gen_expr(n->lhs);
     if (!refeq(result, R)) {
-        Ref ops[] = {result, SLOT(curf->nparam + 1, pointer_to(curf->ty->ret, 0)), INT(curf->ty->ret->align)};
+        Ref ops[] = {result, SLOT(curf->ty->nparam + 1, pointer_to(curf->ty->ret, 0)), INT(curf->ty->ret->align)};
         new_ins(IR_STR, R, ops, 3);
     }
 
@@ -901,8 +902,9 @@ static Ref gen_stmt(Node *node) {
 Module *irgen(Module *md) {
     curm = md;
     for (Sym *fn = md->fns; fn; fn = fn->next) {
+        if (!fn->is_defined) continue;
         curf = fn;
-        tmp_id = fn->nparam;
+        tmp_id = fn->ty->nparam;
         tail = &dummy;
         fn->start = new_blk();
         fn->end = new_blk();
@@ -928,7 +930,7 @@ Module *irgen(Module *md) {
             new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty, 0)), (Ref[]){INT(var->align)}, 1);
 
         Sym *var = fn->locals;
-        for (uint32_t i = 0; i < fn->nparam; ++i, var = var->next)
+        for (uint32_t i = 0; i < fn->ty->nparam; ++i, var = var->next)
             new_ins(IR_STR, R, (Ref[]){TMP(i, var->ty), TMP(var->vreg, pointer_to(var->ty, 0)), INT(var->align)}, 3);
 
         // Body
@@ -940,7 +942,8 @@ Module *irgen(Module *md) {
         insert_blk(curb);
 
         if (is_valid)
-            new_ins(IR_LORD, TMP(tmp_id, ty), (Ref[]){SLOT(curf->nparam + 1, pointer_to(ty, 0)), INT(ty->align)}, 2);
+            new_ins(IR_LORD, TMP(tmp_id, ty), (Ref[]){SLOT(curf->ty->nparam + 1, pointer_to(ty, 0)), INT(ty->align)},
+                    2);
         curb->jmp.type = IR_RET;
         curb->jmp.arg = is_valid ? TMP(tmp_id, fn->ty->ret) : R;
     }

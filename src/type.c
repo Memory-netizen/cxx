@@ -698,13 +698,16 @@ void add_type(Node *node) {
             node->ty = ty;
             break;
         }
+        case ND_FUNCALL:
+            add_type(node->func);
+            node->ty = node->func->func_ty->ret;
+            break;
         // other
         case ND_NOP:
         case ND_GOTO:
         case ND_BREAK:
         case ND_CONTINUE:
         case ND_PTRAS:
-        case ND_FUNCALL:
             // Nothing to do
             break;
     }

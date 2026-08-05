@@ -276,7 +276,6 @@ struct Sym {
 
     // Function
     uint32_t funcspec;
-    uint32_t nparam;
     Node *body;
     Node *labels;
     Sym *locals;
@@ -398,7 +397,7 @@ struct Node {
         };
         struct {
             // Function call
-            uint32_t func;
+            Node *func;
             Type *func_ty;
             Node *args;
             uint32_t narg;
@@ -508,6 +507,7 @@ struct Type {
             // Function
             Type *ret;
             Type *params;
+            uint32_t nparam;
             bool is_variadic;
         };
         struct {

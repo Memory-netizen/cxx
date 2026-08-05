@@ -840,26 +840,23 @@ static uint32_t get_ident(Token *tok) {
     return tok->id;
 }
 
-static Node *fncall(Token **rest, Token *tok) {
-    NameSpace *ns = find_ident(tok, true, false);
-    if (!ns) error(tok, "implicit declaration of function ‘%.*s’", tok->len, tok->loc);
-    if (ns->kind != SYM_FUNC)
-        error(tok, "called object ‘%.*s’ is not a function or function pointer", tok->len, tok->loc);
+static Node *fncall(Token **rest, Token *tok, Node *fn) {
+    if (fn->ty->kind != TY_FUNC && !is_funcptr(fn->ty))
+        error(tok, "called object ‘%.*s’ is not a function or function pointer", fn->tok->len, fn->tok->loc);
 
     Node *node = new_node(ND_FUNCALL, tok);
-    node->func = tok->id;
+    node->func = fn;
 
-    Type *ty = ns->ty;
+    Type *ty = (fn->ty->kind == TY_FUNC) ? fn->ty : fn->ty->base;
     Type *param_ty = ty->params;
     node->func_ty = ty;
     node->ty = ty->ret;
 
-    tok = tok->next->next;
+    tok = tok->next;
 
     if (tok->kind == TK_RPAREN) {
         if (param_ty)
-            error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc,
-                  ns->var->nparam);
+            error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ty->nparam);
         *rest = tok->next;
         return node;
     }
@@ -884,15 +881,14 @@ static Node *fncall(Token **rest, Token *tok) {
             if (arg->ty->kind == TY_FLOAT) new_imcast(&arg, ty_double);
             lvalue_convert(&arg);
         } else {
-            error(tok, "too many arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc,
-                  ns->var->nparam);
+            error(tok, "too many arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ty->nparam);
         }
         ++i;
         cur = cur->next = arg;
     } while (match(&tok, tok, TK_COMMA));
 
     if (param_ty)
-        error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ns->var->nparam);
+        error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ty->nparam);
 
     *rest = skip(tok, TK_RPAREN);
 
@@ -946,17 +942,20 @@ static Node *primary(Token **rest, Token *tok) {
         return new_var_node(var, tok);
     }
     if (tok->kind == TK_IDENT) {
-        // Function call
-        if (tok->next->kind == TK_LPAREN) return fncall(rest, tok);
-        // Variable or enum constant
+        // Variable, function or enum constant
         NameSpace *sc = find_ident(tok, true, false);
-        if (!sc) error(tok, "use of undeclared identifier ‘%.*s’", tok->len, tok->loc);
+        if (!sc) {
+            if (tok->next->kind == TK_LPAREN)
+                error(tok, "implicit declaration of function ‘%.*s’", tok->len, tok->loc);
+            else
+                error(tok, "use of undeclared identifier ‘%.*s’", tok->len, tok->loc);
+        }
         while (sc->prev) sc = sc->prev;
         if (sc->kind == SYM_TYNAME) error(tok, "unexpected type name ‘%.*s’: expected expression", tok->len, tok->loc);
-        if (sc->kind == SYM_VAR)
-            node = new_var_node(sc->var, tok);
-        else
+        if (sc->kind == SYM_ENUM)
             node = new_num(sc->enum_val, tok);
+        else
+            node = new_var_node(sc->var, tok);
         *rest = tok->next;
         return node;
     }
@@ -1006,7 +1005,12 @@ static Node *postfix(Token **rest, Token *tok) {
     while (1) {
         add_type(node);
         if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base, 0));
+        if (node->ty->kind == TY_FUNC && node->kind == ND_VAR) new_imcast(&node, pointer_to(node->ty, 0));
         switch (tok->kind) {
+            case TK_LPAREN:
+                // foo()
+                node = fncall(&tok, tok, node);
+                continue;
                 // x[y] is short for *(x+y)
             case TK_LBRACKET: {
                 Token *start = tok;
@@ -2468,6 +2472,7 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
     push_proto_scope();
     locals = NULL;
 
+    uint32_t nparam = 0;
     bool is_variadic = false;
     Type dummy, *cur = &dummy;
 
@@ -2506,6 +2511,7 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
                 diag_exit(ns->loc, "note", "previous definition is here");
             }
         }
+        nparam++;
         push_namespace(id, SYM_VAR, ty, cur->name)->var = new_lvar(id, cur);
     }
 
@@ -2515,6 +2521,7 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
     ty = func_type(ty);
     ty->is_variadic = is_variadic;
     ty->params = dummy.next;
+    ty->nparam = nparam;
 
     leave_scope();
     return ty;
@@ -2688,7 +2695,6 @@ static Token *external_declaration(Token *tok) {
             while (param) {
                 if (is_pointer(param) && param->is_star)
                     error(param->name, "‘[*]’ not allowed in other than function prototype scope");
-                var->nparam++;
                 param = param->next;
             }
 
