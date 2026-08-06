@@ -227,6 +227,8 @@ typedef enum {
     P_IFDEF,
     P_IFNDEF,
     P_ELIF,
+    P_ELIFDEF,
+    P_ELIFNDEF,
     P_ELSE,
     P_ENDIF,
     P_DEFINE,
@@ -238,9 +240,10 @@ static struct {
     char *directive;
     uint32_t id;
 } dt[] = {
-    [P_INCLUDE] = {"include", 0}, [P_IF] = {"if", 0},         [P_IFDEF] = {"ifdef", 0},
-    [P_IFNDEF] = {"ifndef", 0},   [P_ELIF] = {"elif", 0},     [P_ELSE] = {"else", 0},
-    [P_ENDIF] = {"endif", 0},     [P_DEFINE] = {"define", 0}, [P_UNDEF] = {"undef", 0},
+    [P_INCLUDE] = {"include", 0},   [P_IF] = {"if", 0},       [P_IFDEF] = {"ifdef", 0},
+    [P_IFNDEF] = {"ifndef", 0},     [P_ELIF] = {"elif", 0},   [P_ELIFDEF] = {"elifdef", 0},
+    [P_ELIFNDEF] = {"elifndef", 0}, [P_ELSE] = {"else", 0},   [P_ENDIF] = {"endif", 0},
+    [P_DEFINE] = {"define", 0},     [P_UNDEF] = {"undef", 0},
 };
 
 // Visit all tokens in `tok` while evaluating preprocessing
@@ -326,6 +329,30 @@ static Token *preprocess2(Token *tok) {
                 int64_t val = eval_const_expr(&tok, tok);
                 cond_incl->state = val ? BLOCK_ACTIVE : BLOCK_PENDING;
             }
+            continue;
+        }
+
+        if (tok->id == dt[P_ELIFDEF].id) {
+            check_elif_else_valid(tok);
+            if (cur_state != BLOCK_PENDING) {
+                cond_incl->state = BLOCK_DEAD;
+            } else {
+                bool defined = find_macro(tok->next);
+                cond_incl->state = defined ? BLOCK_ACTIVE : BLOCK_PENDING;
+            }
+            tok = skip_line(tok->next->next);
+            continue;
+        }
+
+        if (tok->id == dt[P_ELIFNDEF].id) {
+            check_elif_else_valid(tok);
+            if (cur_state != BLOCK_PENDING) {
+                cond_incl->state = BLOCK_DEAD;
+            } else {
+                bool defined = find_macro(tok->next);
+                cond_incl->state = defined ? BLOCK_PENDING : BLOCK_ACTIVE;
+            }
+            tok = skip_line(tok->next->next);
             continue;
         }
 

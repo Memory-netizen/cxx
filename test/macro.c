@@ -195,6 +195,22 @@ int main() {
 #else
 #endif
 
+#define M8
+#ifndef M8
+    m = 3;
+#elifdef M7
+    m = 7;
+#endif
+    assert(7, m, "m");
+
+#define M8
+#ifndef M8
+    m = 3;
+#elifndef NO_SUCH_MACRO
+    m = 6;
+#endif
+    assert(6, m, "m");
+
     printf("OK\n");
     return 0;
 }
