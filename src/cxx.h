@@ -5,7 +5,7 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-#define BIT_HAS(bits, n) ((bits) & (n) != 0)
+#define BIT_HAS(bits, n) (((bits) & (n)) != 0)
 #define BIT_SET(bits, n) ((bits) |= (n))
 #define BIT_INTER(a, b) ((a) & (b))
 #define BIT_UNION(a, b) ((a) | (b))

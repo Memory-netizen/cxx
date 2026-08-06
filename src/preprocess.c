@@ -1,15 +1,6 @@
 #include "cxx.h"
 
-static bool expand_macro(Token **rest, Token *tok);
-
-typedef struct Macro Macro;
-struct Macro {
-    Macro *next;
-    uint32_t id;
-    Token *body;
-    bool deleted;
-};
-static Macro *macros;
+static Token *expand_macro(Token *dst, Token *list);
 
 // `#if` can be nested, so we use a stack to manage nested `#if`s.
 typedef enum {
@@ -87,9 +78,10 @@ static Token *copy_token(Token *tok) {
     return t;
 }
 
-static Token *new_eof(void) {
-    Token *t = emalloc(sizeof(Token));
+static Token *new_eof(Token *tok) {
+    Token *t = copy_token(tok);
     t->kind = TK_EOF;
+    t->len = 0;
     return t;
 }
 
@@ -114,7 +106,7 @@ static Token *copy_line(Token **rest, Token *tok) {
 
     for (; tok && !tok->is_sol; tok = tok->next) cur = cur->next = copy_token(tok);
 
-    cur->next = new_eof();
+    cur->next = new_eof(tok);
     *rest = tok;
     return dummy.next;
 }
@@ -127,11 +119,8 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
     if (expr->kind == TK_EOF) error(start, "no expression");
 
     Token dummy = {}, *cur = &dummy;
-    while (expr->kind != TK_EOF) {
-        if (expand_macro(&expr, expr)) continue;
-        cur = cur->next = expr;
-        expr = expr->next;
-    }
+    cur = expand_macro(cur, expr);
+    cur->next = new_eof(cur);
     expr = dummy.next;
 
     convert_pptoken(expr);
@@ -149,6 +138,39 @@ static void check_elif_else_valid(Token *dt) {
         error(cond_incl->if_tok, "the conditional began here");
     }
 }
+
+typedef struct Macro Macro;
+struct Macro {
+    Macro *next;
+    uint32_t id;
+    Token *body;
+    bool deleted;
+};
+
+static Macro *macros;
+
+typedef struct Hideset Hideset;
+struct Hideset {
+    Hideset *next;
+    uint32_t id;
+};
+
+static Hideset *hideset;
+
+static bool is_disabled(uint32_t id) {
+    for (Hideset *hs = hideset; hs; hs = hs->next)
+        if (hs->id == id) return true;
+    return false;
+}
+
+static void push_disabled(uint32_t id) {
+    Hideset *hs = emalloc(sizeof(Hideset));
+    hs->id = id;
+    hs->next = hideset;
+    hideset = hs;
+}
+
+static void pop_disabled() { hideset = hideset->next; }
 
 static Macro *find_macro(Token *tok) {
     if (tok->kind != TK_IDENT) return NULL;
@@ -170,11 +192,33 @@ static Macro *add_macro(uint32_t id, Token *body) {
 
 // If tok is a macro, expand it and return true.
 // Otherwise, do nothing and return false.
-static bool expand_macro(Token **rest, Token *tok) {
-    Macro *m = find_macro(tok);
-    if (!m) return false;
-    *rest = append(m->body, tok->next);
-    return true;
+static Token *expand_macro(Token *dst, Token *list) {
+    Token *cur = list;
+    while (cur && cur->kind != TK_EOF) {
+        if (cur->kind != TK_IDENT) {
+            dst = dst->next = copy_token(cur);
+            cur = cur->next;
+            continue;
+        }
+        if (is_disabled(cur->id)) {
+            dst = dst->next = copy_token(cur);
+            cur = cur->next;
+            continue;
+        }
+        Macro *m = find_macro(cur);
+        if (!m) {
+            dst = dst->next = copy_token(cur);
+            cur = cur->next;
+            continue;
+        }
+
+        push_disabled(cur->id);
+        dst = expand_macro(dst, m->body);
+        pop_disabled();
+        cur = cur->next;
+        continue;
+    }
+    return dst;
 }
 
 typedef enum {
@@ -200,8 +244,7 @@ static struct {
 // macros and directives.
 static Token *preprocess2(Token *tok) {
     if (!dt[0].id) {
-        for (size_t i = 0; i < sizeof(dt) / sizeof(dt[0]); ++i)
-            dt[i].id = intern(dt[i].directive, strlen(dt[i].directive));
+        for (size_t i = 0; i < P_CNT; ++i) dt[i].id = intern(dt[i].directive, strlen(dt[i].directive));
     }
     Token dummy = {};
     Token *cur = &dummy;
@@ -224,17 +267,17 @@ static Token *preprocess2(Token *tok) {
 
         BlockState cur_state = cond_incl->state;
 
-        // Pass through if it is not a "#".
+        // Concat token to buff until meet "#".
         if (!is_hash(tok)) {
             bool concat = (cur_state == BLOCK_ACTIVE);
-            while (!is_hash(tok)) {
-                if (concat) {
-                    if (expand_macro(&tok, tok)) continue;
-                    cur = cur->next = tok;
-                }
+            Token dummy = {}, *buf = &dummy;
+            while (!is_hash(tok) && tok->kind != TK_EOF) {
+                if (concat) buf = buf->next = tok;
                 tok = tok->next;
-                if (tok->kind == TK_EOF) goto loop_start;
             }
+            buf->next = new_eof(tok);
+            cur = expand_macro(cur, dummy.next);
+            if (tok->kind == TK_EOF) goto loop_start;
         }
 
         Token *tk_hash = tok;
@@ -318,6 +361,7 @@ static Token *preprocess2(Token *tok) {
         error(tok, "invalid preprocessor directive");
     }
 
+    cur->next = tok;
     return dummy.next;
 }
 

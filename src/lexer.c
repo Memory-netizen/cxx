@@ -307,7 +307,7 @@ void convert_pp_number(Token *t) {
     char first_ch = *text;
 
     int base = 10;
-    char clean[t->len + 1];
+    char *clean = vnew(t->len + 1, sizeof(char));
     uint32_t ci = 0;
 
     // Stage 1: Process literal prefixes

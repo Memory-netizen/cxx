@@ -201,7 +201,8 @@ static void print_tokens(Token *tok) {
     int line = 1;
     for (; tok->kind != TK_EOF; tok = tok->next) {
         if (line > 1 && tok->is_sol) fprintf(out, "\n");
-        fprintf(out, " %.*s", (int)tok->len, tok->loc);
+        if (tok->is_leadingws) fprintf(out, " ");
+        fprintf(out, "%.*s", (int)tok->len, tok->loc);
         line++;
     }
     fprintf(out, "\n");
