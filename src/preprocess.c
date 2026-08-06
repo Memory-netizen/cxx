@@ -5,7 +5,7 @@ static bool is_hash(Token *tok) { return tok->is_sol && tok->kind == TK_HASH; }
 // Some preprocessor directives such as #include allow extraneous
 // tokens before newline. This function skips such tokens.
 static Token *skip_line(Token *tok) {
-    if (tok->is_sol) return tok;
+    if (tok->is_sol || tok->kind == TK_EOF) return tok;
     diag("warning", tok, "extra token");
     while (tok->is_sol) tok = tok->next;
     return tok;
@@ -51,7 +51,9 @@ static Token *preprocess2(Token *tok) {
 
             if (tok->kind != TK_STRLIT) error(tok, "expected a filename");
 
-            char *path = format("%s/%s", dirname(strdup(tok->file->name)), str(tok->id));
+            char *path = str(tok->id);
+            if (path[0] != '/') path = format("%s/%s", dirname(strdup(tok->file->name)), path);
+
             Token *tok2 = tokenize_file(path);
             if (!tok2) error(tok, "%s", strerror(errno));
             tok = skip_line(tok->next);

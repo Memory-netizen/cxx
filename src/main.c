@@ -1,6 +1,8 @@
 #include "cxx.h"
 
+static bool opt_E;
 static bool opt_S;
+static bool opt_ll;
 static bool opt_c;
 static bool opt_cc1;
 static bool opt_hash_hash_hash;
@@ -21,7 +23,7 @@ static int num_tmpfiles;
 
 static void usage(int status) {
     fprintf(stderr,
-            "cxx [ -o <path> ] [ -S | -c ] [ -ast-dump ] [ -dump-tokens ]"
+            "cxx [ -o <path> ] [ -S | -c | -E ] [ -ast-dump ] [ -dump-tokens ]"
             " [ -raw-dump-tokens ] <file>\n");
     exit(status);
 }
@@ -53,8 +55,18 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
+        if (!strcmp(argv[i], "-E")) {
+            opt_E = true;
+            continue;
+        }
+
         if (!strcmp(argv[i], "-S")) {
             opt_S = true;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-emit-llvm")) {
+            opt_ll = true;
             continue;
         }
 
@@ -96,7 +108,7 @@ static void parse_args(int argc, char **argv) {
 
         input_paths[num_input++] = argv[i];
     }
-    if (!num_input) fatal("no input files");
+    if (!num_input && !base_file) fatal("no input files");
 }
 
 static FILE *open_outfile(char *path) {
@@ -182,6 +194,19 @@ static void run_cc1(int argc, char **argv, char *input, char *output) {
 
 // --- Compilation stages ---
 
+// Print tokens to stdout. Used for -E.
+static void print_tokens(Token *tok) {
+    FILE *out = open_outfile(opt_o ? opt_o : "-");
+
+    int line = 1;
+    for (; tok->kind != TK_EOF; tok = tok->next) {
+        if (line > 1 && tok->is_sol) fprintf(out, "\n");
+        fprintf(out, " %.*s", (int)tok->len, tok->loc);
+        line++;
+    }
+    fprintf(out, "\n");
+}
+
 // Stage 1: .c → .ll  (cc1: tokenize + preprocess + parse + irgen)
 static void cc1(void) {
     Token *tok = tokenize_file(base_file);
@@ -189,17 +214,25 @@ static void cc1(void) {
 
     if (opt_dump_raw_tokens) dump_tokens(tok);
 
-    preprocess(tok);
+    tok = preprocess(tok);
 
     if (opt_dump_tokens) dump_tokens(tok);
+
+    // If -E is given, print out preprocessed C code as a result.
+    if (opt_E) {
+        print_tokens(tok);
+        return;
+    }
 
     Module *prog = parse(tok);
 
     if (opt_ast_dump) dump_ast(prog);
 
     Module *module = irgen(prog);
+
     FILE *out = open_outfile(output_file);
     dump_module(module, out);
+
     fclose(out);
 }
 
@@ -237,7 +270,8 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    if (num_input > 1 && opt_o && (opt_c || opt_S)) fatal("cannot specify '-o' with '-c' or '-S' with multiple files");
+    if (num_input > 1 && opt_o && (opt_c || opt_S || opt_E))
+        fatal("cannot specify '-o' with '-c' ,'-S' or '-E' with multiple files");
 
     char **ld_args = vnew(argc, sizeof(char *));
     int num_ldarg = 0;
@@ -248,6 +282,8 @@ int main(int argc, char **argv) {
         char *output;
         if (opt_o)
             output = opt_o;
+        else if (opt_S && opt_ll)
+            output = replace_extn(input, ".ll");
         else if (opt_S)
             output = replace_extn(input, ".s");
         else
@@ -270,11 +306,17 @@ int main(int argc, char **argv) {
         // Handle .c (or stdin "-").
         if (!endswith(input, ".c") && strcmp(input, "-")) fatal("unknown file extension: %s", input);
 
+        // -E: .c → stdout
+        if (opt_E) {
+            run_cc1(argc, argv, input, NULL);
+            continue;
+        }
+
         // -S: .c → .ll → .s
         if (opt_S) {
-            char *tmp_ll = create_tmpfile();
+            char *tmp_ll = opt_ll ? output : create_tmpfile();
             run_cc1(argc, argv, input, tmp_ll);
-            compile(tmp_ll, output);
+            if (!opt_ll) compile(tmp_ll, output);
             continue;
         }
 
