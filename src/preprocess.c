@@ -242,9 +242,14 @@ static void read_macro_definition(Token **rest, Token *tok) {
 static MacroArg *read_macro_arg_one(Token **rest, Token *tok) {
     Token dummy = {};
     Token *cur = &dummy;
+    int level = 0;
 
-    while (tok->kind != TK_COMMA && tok->kind != TK_RPAREN) {
+    while ((level > 0) || (tok->kind != TK_COMMA && tok->kind != TK_RPAREN)) {
         if (tok->kind == TK_EOF) error(tok, "premature end of input");
+        if (tok->kind == TK_LPAREN)
+            level++;
+        else if (tok->kind == TK_RPAREN)
+            level--;
         cur = cur->next = copy_token(tok);
         tok = tok->next;
     }
