@@ -16,16 +16,16 @@ void fatal(char *fmt, ...) {
     exit(1);
 }
 
-static void emit_diag(char *level, int line_no, char *loc, const char *msg, va_list ap) {
+static void emit_diag(char *level, SrcFile *diagfile, int line_no, char *loc, const char *msg, va_list ap) {
     // Find a line containing `loc`.
     char *line = loc;
-    char *p = cur_file->contents;
+    char *p = diagfile->contents;
     while (p < line && line[-1] != '\n') line--;
 
     char *end = loc;
     while (*end && *end != '\n') end++;
 
-    fprintf(stderr, "%s:%d:%ld: %s: ", cur_file->name, line_no, loc - line + 1, level);
+    fprintf(stderr, "%s:%d:%ld: %s: ", diagfile->name, line_no, loc - line + 1, level);
     vfprintf(stderr, msg, ap);
     fputc('\n', stderr);
 
@@ -46,7 +46,7 @@ static void emit_diag(char *level, int line_no, char *loc, const char *msg, va_l
 void error(Token *tok, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    emit_diag("error", tok->line, tok->loc, msg, ap);
+    emit_diag("error", tok->file, tok->line, tok->loc, msg, ap);
     va_end(ap);
     exit(1);
 }
@@ -55,7 +55,7 @@ void error_at(int line_no, char *loc, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
 
-    emit_diag("error", line_no, loc, msg, ap);
+    emit_diag("error", cur_file, line_no, loc, msg, ap);
     va_end(ap);
     exit(1);
 }
@@ -63,21 +63,21 @@ void error_at(int line_no, char *loc, const char *msg, ...) {
 void diag_at(char *level, int line_no, char *loc, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    emit_diag(level, line_no, loc, msg, ap);
+    emit_diag(level, cur_file, line_no, loc, msg, ap);
     va_end(ap);
 }
 
 void diag(char *level, Token *tok, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    emit_diag(level, tok->line, tok->loc, msg, ap);
+    emit_diag(level, tok->file, tok->line, tok->loc, msg, ap);
     va_end(ap);
 }
 
 void diag_exit(char *level, Token *tok, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    emit_diag(level, tok->line, tok->loc, msg, ap);
+    emit_diag(level, tok->file, tok->line, tok->loc, msg, ap);
     va_end(ap);
     exit(1);
 }

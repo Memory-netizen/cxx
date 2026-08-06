@@ -1,5 +1,13 @@
 #include "cxx.h"
 
+typedef struct Macro Macro;
+struct Macro {
+    Macro *next;
+    uint32_t id;
+    Token *body;
+};
+static Macro *macros;
+
 // `#if` can be nested, so we use a stack to manage nested `#if`s.
 typedef enum {
     BLOCK_DEAD,     // this block is dead
@@ -30,6 +38,7 @@ static CondIncl *push_cond_incl(Token *tok, BlockState state) {
 typedef struct FileStack FileStack;
 struct FileStack {
     FileStack *next;
+    SrcFile *srcfile;
     CondIncl *condframe;
     Token *rest;
 };
@@ -37,6 +46,7 @@ struct FileStack {
 static FileStack *file_stack;
 static FileStack *push_file(Token *rest) {
     FileStack *file = emalloc(sizeof(FileStack));
+    file->srcfile = cur_file;
     file->condframe = cond_incl;
     file->rest = rest;
 
@@ -49,6 +59,7 @@ static FileStack *push_file(Token *rest) {
 }
 
 static Token *pop_file(void) {
+    cur_file = file_stack->srcfile;
     cond_incl = file_stack->condframe;
     Token *rest = file_stack->rest;
     file_stack = file_stack->next;
@@ -98,7 +109,7 @@ static Token *copy_line(Token **rest, Token *tok) {
     Token dummy = {};
     Token *cur = &dummy;
 
-    for (; !tok->is_sol; tok = tok->next) cur = cur->next = copy_token(tok);
+    for (; tok && !tok->is_sol; tok = tok->next) cur = cur->next = copy_token(tok);
 
     cur->next = new_eof();
     *rest = tok;
@@ -113,6 +124,7 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
     if (expr->kind == TK_EOF) error(start, "no expression");
 
     Token *rest2;
+    convert_pptoken(expr);
     int64_t val = const_expr(&rest2, expr);
     if (rest2->kind != TK_EOF) error(rest2, "extra token");
     return val;
@@ -127,12 +139,40 @@ static void check_elif_else_valid(Token *dt) {
     }
 }
 
+static Macro *find_macro(Token *tok) {
+    if (tok->kind != TK_IDENT) return NULL;
+
+    for (Macro *m = macros; m; m = m->next)
+        if (m->id == tok->id) return m;
+    return NULL;
+}
+
+static Macro *add_macro(uint32_t id, Token *body) {
+    Macro *m = emalloc(sizeof(Macro));
+    m->id = id;
+    m->body = body;
+
+    m->next = macros;
+    macros = m;
+    return m;
+}
+
+// If tok is a macro, expand it and return true.
+// Otherwise, do nothing and return false.
+static bool expand_macro(Token **rest, Token *tok) {
+    Macro *m = find_macro(tok);
+    if (!m) return false;
+    *rest = append(m->body, tok->next);
+    return true;
+}
+
 typedef enum {
     P_INCLUDE,
     P_IF,
     P_ELIF,
     P_ELSE,
     P_ENDIF,
+    P_DEFINE,
     P_CNT,
 } P_DIRECT;
 
@@ -141,7 +181,7 @@ static struct {
     uint32_t id;
 } dt[] = {
     [P_INCLUDE] = {"include", 0}, [P_IF] = {"if", 0},       [P_ELIF] = {"elif", 0},
-    [P_ELSE] = {"else", 0},       [P_ENDIF] = {"endif", 0},
+    [P_ELSE] = {"else", 0},       [P_ENDIF] = {"endif", 0}, [P_DEFINE] = {"define", 0},
 };
 
 // Visit all tokens in `tok` while evaluating preprocessing
@@ -176,7 +216,10 @@ static Token *preprocess2(Token *tok) {
         if (!is_hash(tok)) {
             bool concat = (cur_state == BLOCK_ACTIVE);
             while (!is_hash(tok)) {
-                if (concat) cur = cur->next = tok;
+                if (concat) {
+                    expand_macro(&tok, tok);
+                    cur = cur->next = tok;
+                }
                 tok = tok->next;
                 if (tok->kind == TK_EOF) goto loop_start;
             }
@@ -238,6 +281,13 @@ static Token *preprocess2(Token *tok) {
             tok = skip_line(tok->next);
             push_file(tok);
             tok = tok2;
+            continue;
+        }
+
+        if (tok->id == dt[P_DEFINE].id) {
+            tok = tok->next;
+            if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
+            add_macro(tok->id, copy_line(&tok, tok->next));
             continue;
         }
 

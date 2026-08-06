@@ -734,7 +734,6 @@ static Token *tokenize(SrcFile *file) {
     Token *eof = new_token(TK_EOF, p, p);
     fill_tok(eof, filename, line, col, false, false);
     cur->next = eof;
-    convert_pptoken(dummy.next);
     return dummy.next;
 }
 
