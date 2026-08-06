@@ -139,11 +139,25 @@ static void check_elif_else_valid(Token *dt) {
     }
 }
 
+typedef struct MacroParam MacroParam;
+struct MacroParam {
+    MacroParam *next;
+    uint32_t id;
+};
+
+typedef struct MacroArg MacroArg;
+struct MacroArg {
+    MacroArg *next;
+    uint32_t id;
+    Token *tok;
+};
+
 typedef struct Macro Macro;
 struct Macro {
     Macro *next;
     uint32_t id;
     bool is_objlike;  // Object-like or function-like
+    MacroParam *params;
     Token *body;
     bool deleted;
 };
@@ -192,6 +206,23 @@ static Macro *add_macro(uint32_t id, bool is_objlike, Token *body) {
     return m;
 }
 
+static MacroParam *read_macro_params(Token **rest, Token *tok) {
+    MacroParam dummy = {};
+    MacroParam *cur = &dummy;
+
+    while (tok->kind != TK_RPAREN) {
+        if (cur != &dummy) tok = skip(tok, TK_COMMA);
+
+        if (tok->kind != TK_IDENT) error(tok, "expected an identifier");
+        MacroParam *m = emalloc(sizeof(MacroParam));
+        m->id = tok->id;
+        cur = cur->next = m;
+        tok = tok->next;
+    }
+    *rest = tok->next;
+    return dummy.next;
+}
+
 static void read_macro_definition(Token **rest, Token *tok) {
     if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
     Token *name = tok;
@@ -199,12 +230,84 @@ static void read_macro_definition(Token **rest, Token *tok) {
 
     if (tok->kind == TK_LPAREN && !tok->is_leadingws) {
         // Function-like macro
-        tok = skip(tok->next, TK_RPAREN);
-        add_macro(name->id, false, copy_line(rest, tok));
+        MacroParam *params = read_macro_params(&tok, tok->next);
+        Macro *m = add_macro(name->id, false, copy_line(rest, tok));
+        m->params = params;
     } else {
         // Object-like macro
         add_macro(name->id, true, copy_line(rest, tok));
     }
+}
+
+static MacroArg *read_macro_arg_one(Token **rest, Token *tok) {
+    Token dummy = {};
+    Token *cur = &dummy;
+
+    while (tok->kind != TK_COMMA && tok->kind != TK_RPAREN) {
+        if (tok->kind == TK_EOF) error(tok, "premature end of input");
+        cur = cur->next = copy_token(tok);
+        tok = tok->next;
+    }
+
+    cur->next = new_eof(tok);
+
+    MacroArg *arg = emalloc(sizeof(MacroArg));
+    arg->tok = dummy.next;
+    *rest = tok;
+    return arg;
+}
+
+static MacroArg *read_macro_args(Token **rest, Token *tok, MacroParam *params) {
+    Token *start = tok;
+    tok = tok->next->next;
+
+    MacroArg dummy = {};
+    MacroArg *cur = &dummy;
+
+    MacroParam *pp = params;
+    for (; pp; pp = pp->next) {
+        if (cur != &dummy) tok = skip(tok, TK_COMMA);
+        cur = cur->next = read_macro_arg_one(&tok, tok);
+        cur->id = pp->id;
+    }
+
+    if (pp) error(start, "too many arguments");
+    *rest = skip(tok, TK_RPAREN);
+    return dummy.next;
+}
+
+static MacroArg *find_arg(MacroArg *args, Token *tok) {
+    for (MacroArg *ap = args; ap; ap = ap->next)
+        if (ap->id == tok->id) return ap;
+    return NULL;
+}
+
+// Replace func-like macro parameters with given arguments.
+static Token *subst(Token *tok, MacroArg *args) {
+    Token dummy = {};
+    Token *cur = &dummy;
+
+    while (tok->kind != TK_EOF) {
+        MacroArg *arg = find_arg(args, tok);
+
+        // Handle a macro token. Macro arguments are completely macro-expanded
+        // before they are substituted into a macro body.
+        if (arg) {
+            Token dummy2 = {};
+            expand_macro(&dummy2, arg->tok);
+            for (Token *t = dummy2.next; t; t = t->next) cur = cur->next = copy_token(t);
+            tok = tok->next;
+            continue;
+        }
+
+        // Handle a non-macro token.
+        cur = cur->next = copy_token(tok);
+        tok = tok->next;
+        continue;
+    }
+
+    cur->next = tok;
+    return dummy.next;
 }
 
 // Recursively expand the input linked‑list macro,
@@ -249,10 +352,11 @@ static Token *expand_macro(Token *dst, Token *list) {
         }
 
         // Function-like macro application
+        MacroArg *args = read_macro_args(&cur, cur, m->params);
+        Token *sub = subst(m->body, args);
         push_disabled(cur->id);
-        dst = expand_macro(dst, m->body);
+        dst = expand_macro(dst, sub);
         pop_disabled();
-        cur = cur->next->next->next;
         continue;
     }
     return dst;
@@ -313,13 +417,13 @@ static Token *preprocess2(Token *tok) {
         // Concat token to buff until meet "#".
         if (!is_hash(tok)) {
             bool concat = (cur_state == BLOCK_ACTIVE);
-            Token dummy = {}, *buf = &dummy;
+            Token dummy2 = {}, *buf = &dummy2;
             while (!is_hash(tok) && tok->kind != TK_EOF) {
                 if (concat) buf = buf->next = tok;
                 tok = tok->next;
             }
             buf->next = new_eof(tok);
-            cur = expand_macro(cur, dummy.next);
+            cur = expand_macro(cur, dummy2.next);
             if (tok->kind == TK_EOF) goto loop_start;
         }
 
