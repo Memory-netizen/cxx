@@ -224,6 +224,8 @@ static Token *expand_macro(Token *dst, Token *list) {
 typedef enum {
     P_INCLUDE,
     P_IF,
+    P_IFDEF,
+    P_IFNDEF,
     P_ELIF,
     P_ELSE,
     P_ENDIF,
@@ -236,7 +238,8 @@ static struct {
     char *directive;
     uint32_t id;
 } dt[] = {
-    [P_INCLUDE] = {"include", 0}, [P_IF] = {"if", 0},         [P_ELIF] = {"elif", 0},   [P_ELSE] = {"else", 0},
+    [P_INCLUDE] = {"include", 0}, [P_IF] = {"if", 0},         [P_IFDEF] = {"ifdef", 0},
+    [P_IFNDEF] = {"ifndef", 0},   [P_ELIF] = {"elif", 0},     [P_ELSE] = {"else", 0},
     [P_ENDIF] = {"endif", 0},     [P_DEFINE] = {"define", 0}, [P_UNDEF] = {"undef", 0},
 };
 
@@ -291,6 +294,27 @@ static Token *preprocess2(Token *tok) {
                 state = val ? BLOCK_ACTIVE : BLOCK_PENDING;
             }
             push_cond_incl(tk_hash, state);
+            continue;
+        }
+        if (tok->id == dt[P_IFDEF].id) {
+            BlockState state = BLOCK_DEAD;
+            if (cur_state == BLOCK_ACTIVE) {
+                bool defined = find_macro(tok->next);
+                state = defined ? BLOCK_ACTIVE : BLOCK_PENDING;
+            }
+            push_cond_incl(tk_hash, state);
+            tok = skip_line(tok->next->next);
+            continue;
+        }
+
+        if (tok->id == dt[P_IFNDEF].id) {
+            BlockState state = BLOCK_DEAD;
+            if (cur_state == BLOCK_ACTIVE) {
+                bool defined = find_macro(tok->next);
+                state = defined ? BLOCK_PENDING : BLOCK_ACTIVE;
+            }
+            push_cond_incl(tk_hash, state);
+            tok = skip_line(tok->next->next);
             continue;
         }
 
