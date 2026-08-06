@@ -9,14 +9,13 @@ typedef enum {
 
 typedef struct CondIncl CondIncl;
 struct CondIncl {
-    struct CondIncl *next;
+    CondIncl *next;
     Token *if_tok;
     BlockState state;
     int else_seen;
 };
 
 static CondIncl *cond_incl;
-
 static CondIncl *push_cond_incl(Token *tok, BlockState state) {
     CondIncl *ci = emalloc(sizeof(CondIncl));
     ci->state = state;
@@ -25,6 +24,35 @@ static CondIncl *push_cond_incl(Token *tok, BlockState state) {
     ci->next = cond_incl;
     cond_incl = ci;
     return ci;
+}
+
+// `#include` can be nested, so we use a stack to manage nested `#include`s.
+typedef struct FileStack FileStack;
+struct FileStack {
+    FileStack *next;
+    CondIncl *condframe;
+    Token *rest;
+};
+
+static FileStack *file_stack;
+static FileStack *push_file(Token *rest) {
+    FileStack *file = emalloc(sizeof(FileStack));
+    file->condframe = cond_incl;
+    file->rest = rest;
+
+    cond_incl = NULL;
+    push_cond_incl(NULL, BLOCK_ACTIVE);
+
+    file->next = file_stack;
+    file_stack = file;
+    return file;
+}
+
+static Token *pop_file(void) {
+    cond_incl = file_stack->condframe;
+    Token *rest = file_stack->rest;
+    file_stack = file_stack->next;
+    return rest;
 }
 
 static bool is_hash(Token *tok) { return tok && tok->is_sol && tok->kind == TK_HASH; }
@@ -52,7 +80,7 @@ static Token *new_eof(void) {
 }
 
 // Append tok2 to the end of tok1.
-static Token *append(Token *tok1, Token *tok2) {
+Token *append(Token *tok1, Token *tok2) {
     if (!tok1 || tok1->kind == TK_EOF) return tok2;
 
     Token dummy = {};
@@ -92,9 +120,9 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
 
 // check #elif / #else valid
 static void check_elif_else_valid(Token *dt) {
-    if (!cond_incl->next) error(dt, "%s without #if", str(dt->next->id));
+    if (!cond_incl->next) error(dt, "%s without #if", str(dt->id));
     if (cond_incl->else_seen) {
-        diag("error", dt, "%s after #else", str(dt->next->id));
+        diag("error", dt, "%s after #else", str(dt->id));
         error(cond_incl->if_tok, "the conditional began here");
     }
 }
@@ -127,7 +155,21 @@ static Token *preprocess2(Token *tok) {
     Token *cur = &dummy;
     push_cond_incl(tok, BLOCK_ACTIVE);
 
-    while (tok->kind != TK_EOF) {
+    while (1) {
+    loop_start:
+        if (tok->kind == TK_EOF) {
+            while (cond_incl->next) {
+                error(cond_incl->if_tok, "unterminated conditional directive");
+                cond_incl = cond_incl->next;
+            }
+            if (file_stack) {
+                tok = pop_file();
+                continue;
+            } else {
+                break;
+            }
+        }
+
         BlockState cur_state = cond_incl->state;
 
         // Pass through if it is not a "#".
@@ -136,29 +178,14 @@ static Token *preprocess2(Token *tok) {
             while (!is_hash(tok)) {
                 if (concat) cur = cur->next = tok;
                 tok = tok->next;
-                if (tok->kind == TK_EOF) goto end;
+                if (tok->kind == TK_EOF) goto loop_start;
             }
         }
 
         Token *tk_hash = tok;
         tok = tok->next;
 
-        if (tok->id == dt[P_INCLUDE].id) {
-            if (cur_state != BLOCK_ACTIVE) continue;
-            tok = tok->next;
-
-            if (tok->kind != TK_STRLIT) error(tok, "expected a filename");
-
-            char *path = str(tok->id);
-            if (path[0] != '/') path = format("%s/%s", dirname(strdup(tok->file->name)), path);
-
-            Token *tok2 = tokenize_file(path);
-            if (!tok2) error(tok, "%s", strerror(errno));
-            tok = skip_line(tok->next);
-            tok = append(tok2, tok);
-            continue;
-        }
-
+        // Preprocessing directives that may alter conditional‑frame state
         if (tok->id == dt[P_IF].id) {
             BlockState state = BLOCK_DEAD;
             if (cur_state == BLOCK_ACTIVE) {
@@ -170,7 +197,7 @@ static Token *preprocess2(Token *tok) {
         }
 
         if (tok->id == dt[P_ELIF].id) {
-            check_elif_else_valid(tk_hash);
+            check_elif_else_valid(tok);
             if (cur_state != BLOCK_PENDING) {
                 cond_incl->state = BLOCK_DEAD;
             } else {
@@ -181,7 +208,7 @@ static Token *preprocess2(Token *tok) {
         }
 
         if (tok->id == dt[P_ELSE].id) {
-            check_elif_else_valid(tk_hash);
+            check_elif_else_valid(tok);
             cond_incl->else_seen = 1;
             cond_incl->state = (cur_state == BLOCK_PENDING) ? BLOCK_ACTIVE : BLOCK_DEAD;
             if (cond_incl->next->state == BLOCK_ACTIVE) tok = skip_line(tok->next);
@@ -195,13 +222,29 @@ static Token *preprocess2(Token *tok) {
             continue;
         }
 
+        // these directives are only meaningful when the block is active
+        if (cur_state != BLOCK_ACTIVE) continue;
+
+        if (tok->id == dt[P_INCLUDE].id) {
+            tok = tok->next;
+
+            if (tok->kind != TK_STRLIT) error(tok, "expected a filename");
+
+            char *path = str(tok->id);
+            if (path[0] != '/') path = format("%s/%s", dirname(strdup(tok->file->name)), path);
+
+            Token *tok2 = tokenize_file(path);
+            if (!tok2) error(tok, "%s", strerror(errno));
+            tok = skip_line(tok->next);
+            push_file(tok);
+            tok = tok2;
+            continue;
+        }
+
         // `#`-only line is legal. It's called a null directive.
         if (tok->is_sol) continue;
-
         error(tok, "invalid preprocessor directive");
     }
-
-end:
 
     cur->next = tok;
     return dummy.next;
