@@ -143,6 +143,7 @@ typedef struct Macro Macro;
 struct Macro {
     Macro *next;
     uint32_t id;
+    bool is_objlike;  // Object-like or function-like
     Token *body;
     bool deleted;
 };
@@ -180,9 +181,10 @@ static Macro *find_macro(Token *tok) {
     return NULL;
 }
 
-static Macro *add_macro(uint32_t id, Token *body) {
+static Macro *add_macro(uint32_t id, bool is_objlike, Token *body) {
     Macro *m = emalloc(sizeof(Macro));
     m->id = id;
+    m->is_objlike = is_objlike;
     m->body = body;
 
     m->next = macros;
@@ -190,8 +192,24 @@ static Macro *add_macro(uint32_t id, Token *body) {
     return m;
 }
 
-// If tok is a macro, expand it and return true.
-// Otherwise, do nothing and return false.
+static void read_macro_definition(Token **rest, Token *tok) {
+    if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
+    Token *name = tok;
+    tok = tok->next;
+
+    if (tok->kind == TK_LPAREN && !tok->is_leadingws) {
+        // Function-like macro
+        tok = skip(tok->next, TK_RPAREN);
+        add_macro(name->id, false, copy_line(rest, tok));
+    } else {
+        // Object-like macro
+        add_macro(name->id, true, copy_line(rest, tok));
+    }
+}
+
+// Recursively expand the input linked‑list macro,
+// link it to the pointer specified by the argument,
+// and terminate the returned linked list with a NULL tail.
 static Token *expand_macro(Token *dst, Token *list) {
     Token *cur = list;
     while (cur && cur->kind != TK_EOF) {
@@ -205,6 +223,7 @@ static Token *expand_macro(Token *dst, Token *list) {
             cur = cur->next;
             continue;
         }
+
         Macro *m = find_macro(cur);
         if (!m) {
             dst = dst->next = copy_token(cur);
@@ -212,10 +231,28 @@ static Token *expand_macro(Token *dst, Token *list) {
             continue;
         }
 
+        // Object-like macro application
+        if (m->is_objlike) {
+            push_disabled(cur->id);
+            dst = expand_macro(dst, m->body);
+            pop_disabled();
+            cur = cur->next;
+            continue;
+        }
+
+        // If a funclike macro token is not followed by an argument list,
+        // treat it as a normal identifier.
+        if (cur->next->kind != TK_LPAREN) {
+            dst = dst->next = copy_token(cur);
+            cur = cur->next;
+            continue;
+        }
+
+        // Function-like macro application
         push_disabled(cur->id);
         dst = expand_macro(dst, m->body);
         pop_disabled();
-        cur = cur->next;
+        cur = cur->next->next->next;
         continue;
     }
     return dst;
@@ -391,9 +428,7 @@ static Token *preprocess2(Token *tok) {
         }
 
         if (tok->id == dt[P_DEFINE].id) {
-            tok = tok->next;
-            if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
-            add_macro(tok->id, copy_line(&tok, tok->next));
+            read_macro_definition(&tok, tok->next);
             continue;
         }
 
@@ -401,7 +436,7 @@ static Token *preprocess2(Token *tok) {
             tok = tok->next;
             if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
 
-            Macro *m = add_macro(tok->id, NULL);
+            Macro *m = add_macro(tok->id, true, NULL);
             m->deleted = true;
             tok = skip_line(tok->next);
             continue;
