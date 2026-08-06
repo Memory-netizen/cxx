@@ -5,6 +5,7 @@ struct Macro {
     Macro *next;
     uint32_t id;
     Token *body;
+    bool deleted;
 };
 static Macro *macros;
 
@@ -143,7 +144,7 @@ static Macro *find_macro(Token *tok) {
     if (tok->kind != TK_IDENT) return NULL;
 
     for (Macro *m = macros; m; m = m->next)
-        if (m->id == tok->id) return m;
+        if (m->id == tok->id) return m->deleted ? NULL : m;
     return NULL;
 }
 
@@ -173,6 +174,7 @@ typedef enum {
     P_ELSE,
     P_ENDIF,
     P_DEFINE,
+    P_UNDEF,
     P_CNT,
 } P_DIRECT;
 
@@ -180,8 +182,8 @@ static struct {
     char *directive;
     uint32_t id;
 } dt[] = {
-    [P_INCLUDE] = {"include", 0}, [P_IF] = {"if", 0},       [P_ELIF] = {"elif", 0},
-    [P_ELSE] = {"else", 0},       [P_ENDIF] = {"endif", 0}, [P_DEFINE] = {"define", 0},
+    [P_INCLUDE] = {"include", 0}, [P_IF] = {"if", 0},         [P_ELIF] = {"elif", 0},   [P_ELSE] = {"else", 0},
+    [P_ENDIF] = {"endif", 0},     [P_DEFINE] = {"define", 0}, [P_UNDEF] = {"undef", 0},
 };
 
 // Visit all tokens in `tok` while evaluating preprocessing
@@ -288,6 +290,16 @@ static Token *preprocess2(Token *tok) {
             tok = tok->next;
             if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
             add_macro(tok->id, copy_line(&tok, tok->next));
+            continue;
+        }
+
+        if (tok->id == dt[P_UNDEF].id) {
+            tok = tok->next;
+            if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
+
+            Macro *m = add_macro(tok->id, NULL);
+            m->deleted = true;
+            tok = skip_line(tok->next);
             continue;
         }
 
