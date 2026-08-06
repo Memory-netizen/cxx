@@ -1,5 +1,7 @@
 #include "cxx.h"
 
+static bool expand_macro(Token **rest, Token *tok);
+
 typedef struct Macro Macro;
 struct Macro {
     Macro *next;
@@ -124,8 +126,16 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
 
     if (expr->kind == TK_EOF) error(start, "no expression");
 
-    Token *rest2;
+    Token dummy = {}, *cur = &dummy;
+    while (expr->kind != TK_EOF) {
+        if (expand_macro(&expr, expr)) continue;
+        cur = cur->next = expr;
+        expr = expr->next;
+    }
+    expr = dummy.next;
+
     convert_pptoken(expr);
+    Token *rest2;
     int64_t val = const_expr(&rest2, expr);
     if (rest2->kind != TK_EOF) error(rest2, "extra token");
     return val;
@@ -219,7 +229,7 @@ static Token *preprocess2(Token *tok) {
             bool concat = (cur_state == BLOCK_ACTIVE);
             while (!is_hash(tok)) {
                 if (concat) {
-                    expand_macro(&tok, tok);
+                    if (expand_macro(&tok, tok)) continue;
                     cur = cur->next = tok;
                 }
                 tok = tok->next;
@@ -308,7 +318,6 @@ static Token *preprocess2(Token *tok) {
         error(tok, "invalid preprocessor directive");
     }
 
-    cur->next = tok;
     return dummy.next;
 }
 
