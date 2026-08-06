@@ -23,7 +23,7 @@ static void emit_diag(char *level, int line_no, char *loc, const char *msg, va_l
     while (p < line && line[-1] != '\n') line--;
 
     char *end = loc;
-    while (*end != '\n') end++;
+    while (*end && *end != '\n') end++;
 
     fprintf(stderr, "%s:%d:%ld: %s: ", cur_file->name, line_no, loc - line + 1, level);
     vfprintf(stderr, msg, ap);

@@ -28,7 +28,6 @@ static Node *compound_stmt(Token **rest, Token *tok);
 static Node *expr(Token **rest, Token *tok);
 static Node *assign(Token **rest, Token *tok);
 static Node *cast(Token **rest, Token *tok);
-static int64_t const_expr(Token **rest, Token *tok);
 static int64_t eval(Node *node);
 static int64_t eval2(Node *node, uint32_t *sym);
 static int64_t eval_rval(Node *node, uint32_t *sym);
@@ -1386,7 +1385,7 @@ static int64_t eval_rval(Node *node, uint32_t *sym) {
 }
 
 // ConstExp ::= CondExp
-static int64_t const_expr(Token **rest, Token *tok) {
+int64_t const_expr(Token **rest, Token *tok) {
     Node *node = conditional(rest, tok);
     return eval(node);
 }

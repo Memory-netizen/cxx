@@ -460,6 +460,7 @@ struct Initializer {
     Initializer **child;
 };
 
+int64_t const_expr(Token **rest, Token *tok);
 Node *new_unary(NodeKind kind, Node *expr, Token *tok);
 void new_imcast(Node **expr, Type *ty);
 void lvalue_convert(Node **expr);
