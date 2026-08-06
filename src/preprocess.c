@@ -263,7 +263,6 @@ static MacroArg *read_macro_arg_one(Token **rest, Token *tok) {
 }
 
 static MacroArg *read_macro_args(Token **rest, Token *tok, MacroParam *params) {
-    Token *start = tok;
     tok = tok->next->next;
 
     MacroArg dummy = {};
@@ -276,7 +275,7 @@ static MacroArg *read_macro_args(Token **rest, Token *tok, MacroParam *params) {
         cur->id = pp->id;
     }
 
-    if (pp) error(start, "too many arguments");
+    if (tok->kind != TK_RPAREN) error(tok, "too many arguments");
     *rest = skip(tok, TK_RPAREN);
     return dummy.next;
 }
@@ -350,16 +349,17 @@ static Token *expand_macro(Token *dst, Token *list) {
 
         // If a funclike macro token is not followed by an argument list,
         // treat it as a normal identifier.
-        if (cur->next->kind != TK_LPAREN) {
+        if (!cur->next || cur->next->kind != TK_LPAREN || cur->next->is_leadingws) {
             dst = dst->next = copy_token(cur);
             cur = cur->next;
             continue;
         }
 
         // Function-like macro application
+        uint32_t macro_id = cur->id;
         MacroArg *args = read_macro_args(&cur, cur, m->params);
         Token *sub = subst(m->body, args);
-        push_disabled(cur->id);
+        push_disabled(macro_id);
         dst = expand_macro(dst, sub);
         pop_disabled();
         continue;
