@@ -932,6 +932,37 @@ static void init_macros(void) {
     add_builtin("__LINE__", line_macro);
 }
 
+// Concatenate adjacent string literals into a single string literal
+// as per the C spec.
+void join_adjacent_string_literals(Token *tok1) {
+    while (tok1->kind != TK_EOF) {
+        if (tok1->kind != TK_STRLIT || tok1->next->kind != TK_STRLIT) {
+            tok1 = tok1->next;
+            continue;
+        }
+
+        Token *tok2 = tok1->next;
+        while (tok2->kind == TK_STRLIT) tok2 = tok2->next;
+
+        int len = tok1->ty->len;
+        for (Token *t = tok1->next; t != tok2; t = t->next) len = len + t->ty->len - 1;
+
+        char *buf = emalloc(tok1->ty->base->size * len);
+
+        int i = 0;
+        for (Token *t = tok1; t != tok2; t = t->next) {
+            memcpy(buf + i, str(t->id), t->ty->size);
+            i = i + t->ty->size - t->ty->base->size;
+        }
+
+        *tok1 = *copy_token(tok1);
+        tok1->ty = array_of(tok1->ty->base, len);
+        tok1->id = intern(buf, len);
+        tok1->next = tok2;
+        tok1 = tok2;
+    }
+}
+
 // Entry point function of the preprocessor.
 Token *preprocess(Token *tok) {
     init_macros();

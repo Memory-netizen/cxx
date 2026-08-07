@@ -252,6 +252,7 @@ static void cc1(void) {
         print_tokens(tok);
         return;
     }
+    join_adjacent_string_literals(tok);
 
     Module *prog = parse(tok);
 
