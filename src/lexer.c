@@ -607,7 +607,7 @@ void convert_pptoken(Token *tok) {
 }
 
 // Tokenize a given string and returns new tokens.
-static Token *tokenize(SrcFile *file) {
+Token *tokenize(SrcFile *file) {
     cur_file = file;
     char *filename = file->name;
     char *p = file->contents;
@@ -718,11 +718,8 @@ static Token *tokenize(SrcFile *file) {
             continue;
         }
 
-        // other char
-        if (*p == '`' || *p == '@' || *p == '$') error_at(line, p, "stray ‘%s’ in program", *p);
-
         // Punctuator
-        if (ispunct(*p)) {
+        if (ispunct(*p) && ((*p != '`' && *p != '@' && *p != '$'))) {
             tok = new_token(TK_PUNCT, p, p);
             tok->len = read_punct(p, &tok->kind);
             fill_tok(tok, filename, line, col, is_sol, is_leadingws);
@@ -732,7 +729,13 @@ static Token *tokenize(SrcFile *file) {
             continue;
         }
 
-        error_at(line, p, "invalid token");
+        // Other char
+        tok = new_token(TK_OTHER, p, p + 1);
+        fill_tok(tok, filename, line, col, is_sol, is_leadingws);
+        cur = cur->next = tok;
+        p += tok->len;
+        advance_col(&line, &col, tok->len);
+        continue;
     }
 
     Token *eof = new_token(TK_EOF, p, p);
@@ -778,7 +781,7 @@ static char *read_file(char *path) {
 
 SrcFile **get_input_files(void) { return input_files; }
 
-static SrcFile *new_file(char *name, int file_no, char *contents) {
+SrcFile *new_file(char *name, int file_no, char *contents) {
     SrcFile *file = emalloc(sizeof(SrcFile));
     file->name = name;
     file->file_no = file_no;

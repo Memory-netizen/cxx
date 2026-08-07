@@ -221,6 +221,7 @@ typedef enum {
     TK_STATIC_ASSERT,
     TK_SWITCH,
     TK_WHILE,
+    TK_OTHER,
 } TokenKind;
 
 struct Token {
@@ -245,6 +246,8 @@ struct Token {
 bool match(Token **rest, Token *tok, TokenKind kind);
 Token *skip(Token *tok, TokenKind kind);
 Token *tokenize_file(char *filename);
+SrcFile *new_file(char *name, int file_no, char *contents);
+Token *tokenize(SrcFile *file);
 void convert_pptoken(Token *tok);
 SrcFile **get_input_files(void);
 
