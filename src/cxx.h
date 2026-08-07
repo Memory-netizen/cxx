@@ -241,6 +241,7 @@ struct Token {
     Type *ty;  // Used if TK_NUM or TK_STR
     char *filename;
     SrcFile *file;      // Source location
+    Token *origin;      // If this is expanded from a macro, the original token
     int line;           // Line number
     int col;            // colume number
     bool is_sol;        // true if is starting of line
@@ -716,7 +717,7 @@ enum {
 #define NULLPTR                                        \
     ({                                                 \
         Ref tmp = newcon(&(Con){CAddr, 0, {0}}, curm); \
-        tmp.ty = nullptr;                              \
+        tmp.ty = ty_nullptr;                           \
         tmp;                                           \
     })
 

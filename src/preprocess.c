@@ -230,12 +230,14 @@ struct MacroArg {
     Token *tok;
 };
 
+typedef Token *macro_handler_fn(Token *);
 struct Macro {
     Macro *next;
     uint32_t id;
     bool is_objlike;  // Object-like or function-like
     MacroParam *params;
     Token *body;
+    macro_handler_fn *handler;
     bool deleted;
 };
 
@@ -521,6 +523,14 @@ static Token *expand_macro(Token *dst, Token *list) {
             continue;
         }
 
+        Token *macro_name = cur;
+        // Built-in dynamic macro application such as __LINE__
+        if (m->handler) {
+            dst = dst->next = m->handler(macro_name);
+            cur = cur->next;
+            continue;
+        }
+
         // Object-like macro application
         if (m->is_objlike) {
             Token *prev = dst;
@@ -531,6 +541,7 @@ static Token *expand_macro(Token *dst, Token *list) {
                 prev->next->is_leadingws = cur->is_leadingws;
                 prev->next->is_sol = cur->is_sol;
             }
+            for (Token *t = prev; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
             cur = cur->next;
             continue;
         }
@@ -544,18 +555,19 @@ static Token *expand_macro(Token *dst, Token *list) {
         }
 
         // Function-like macro application
-        bool body_leadingws = cur->is_leadingws;
-        bool body_sol = cur->is_sol;
         MacroArg *args = read_macro_args(&cur, cur, m->params);
         Token *sub = subst(m->body, args);
+        for (Token *t = sub; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
+
         Token *prev = dst;
         push_disabled(m->id);
         dst = expand_macro(dst, sub);
         pop_disabled();
         if (prev->next) {
-            prev->next->is_leadingws = body_leadingws;
-            prev->next->is_sol = body_sol;
+            prev->next->is_leadingws = macro_name->is_leadingws;
+            prev->next->is_sol = macro_name->is_sol;
         }
+
         continue;
     }
     return dst;
@@ -832,6 +844,22 @@ static void define_macro(char *name, char *buf) {
     add_macro(intern(name, strlen(name)), true, tok);
 }
 
+static Macro *add_builtin(char *name, macro_handler_fn *fn) {
+    Macro *m = add_macro(intern(name, strlen(name)), true, NULL);
+    m->handler = fn;
+    return m;
+}
+
+static Token *file_macro(Token *tmpl) {
+    while (tmpl->origin) tmpl = tmpl->origin;
+    return new_str_token(tmpl->file->name, tmpl);
+}
+
+static Token *line_macro(Token *tmpl) {
+    while (tmpl->origin) tmpl = tmpl->origin;
+    return new_num_token(tmpl->line, tmpl);
+}
+
 static void init_macros(void) {
     // Define predefined macros
     define_macro("_LP64", "1");
@@ -875,6 +903,9 @@ static void init_macros(void) {
     // define_macro("__x86_64__", "1");
     define_macro("linux", "1");
     define_macro("unix", "1");
+
+    add_builtin("__FILE__", file_macro);
+    add_builtin("__LINE__", line_macro);
 }
 
 // Entry point function of the preprocessor.
