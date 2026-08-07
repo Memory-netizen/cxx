@@ -192,6 +192,12 @@ static void run_cc1(int argc, char **argv, char *input, char *output) {
     run_subprocess(args);
 }
 
+// Returns true if a given file exists.
+bool file_exists(char *path) {
+    struct stat st;
+    return !stat(path, &st);
+}
+
 // --- Compilation stages ---
 
 // Print tokens to stdout. Used for -E.

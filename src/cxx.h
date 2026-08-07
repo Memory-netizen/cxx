@@ -83,6 +83,7 @@ struct SrcFile {
 //
 
 extern char *base_file;
+bool file_exists(char *path);
 
 //
 // Lexer

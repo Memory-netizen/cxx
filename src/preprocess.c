@@ -135,7 +135,7 @@ static Token *copy_line(Token **rest, Token *tok) {
     Token dummy = {};
     Token *cur = &dummy;
 
-    for (; tok && !tok->is_sol; tok = tok->next) cur = cur->next = copy_token(tok);
+    for (; tok && !tok->is_sol && tok->kind != TK_EOF; tok = tok->next) cur = cur->next = copy_token(tok);
 
     cur->next = new_eof(tok);
     *rest = tok;
@@ -561,6 +561,52 @@ static Token *expand_macro(Token *dst, Token *list) {
     return dst;
 }
 
+// Read an #include argument.
+static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
+    // Pattern 1: #include "foo.h"
+    if (tok->kind == TK_STRLIT) {
+        *is_dquote = true;
+        *rest = skip_line(tok->next);
+        return strndup(tok->loc + 1, tok->len - 2);
+    }
+
+    // Pattern 2: #include <foo.h>
+    if (tok->kind == TK_LT) {
+        // Reconstruct a filename from a sequence of tokens between
+        // "<" and ">".
+        Token *start = tok;
+
+        // Find closing ">".
+        for (; tok->kind != TK_GT; tok = tok->next)
+            if (tok->is_sol || tok->kind == TK_EOF) error(tok, "expected '>'");
+
+        *is_dquote = false;
+        *rest = skip_line(tok->next);
+        *tok = *new_eof(tok);
+        return join_tokens(start->next);
+    }
+
+    // Pattern 3: #include FOO
+    // In this case FOO must be macro-expanded to either
+    // a single string token or a sequence of "<" ... ">".
+    if (tok->kind == TK_IDENT) {
+        Token dummy = {}, *cur = &dummy;
+        cur = expand_macro(cur, copy_line(rest, tok));
+        cur->next = new_eof(cur);
+        return read_include_filename(&cur, dummy.next, is_dquote);
+    }
+
+    error(tok, "expected a filename");
+    return NULL;
+}
+
+static Token *include_file(Token *tok, char *path, Token *filename_tok) {
+    Token *tok2 = tokenize_file(path);
+    if (!tok2) error(filename_tok, "%s: cannot open file: %s", path, strerror(errno));
+    push_file(tok);
+    return tok2;
+}
+
 typedef enum {
     P_INCLUDE,
     P_IF,
@@ -715,18 +761,17 @@ static Token *preprocess2(Token *tok) {
         if (cur_state != BLOCK_ACTIVE) continue;
 
         if (tok->id == dt[P_INCLUDE].id) {
-            tok = tok->next;
+            bool is_dquote;
+            char *filename = read_include_filename(&tok, tok->next, &is_dquote);
 
-            if (tok->kind != TK_STRLIT) error(tok, "expected a filename");
-
-            char *path = str(tok->id);
-            if (path[0] != '/') path = format("%s/%s", dirname(strdup(tok->file->name)), path);
-
-            Token *tok2 = tokenize_file(path);
-            if (!tok2) error(tok, "%s", strerror(errno));
-            tok = skip_line(tok->next);
-            push_file(tok);
-            tok = tok2;
+            if (filename[0] != '/') {
+                char *path = format("%s/%s", dirname(strdup(tk_hash->file->name)), filename);
+                if (file_exists(path)) {
+                    tok = include_file(tok, path, tk_hash->next->next);
+                }
+            } else {
+                tok = include_file(tok, filename, tk_hash->next->next);
+            }
             continue;
         }
 
