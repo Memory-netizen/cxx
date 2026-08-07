@@ -73,6 +73,8 @@ int (*fnptr(int (*fn)(int n, ...)))(int, ...) { return fn; }
 
 int param_decay3(int x()) { return x(); }
 
+char *func_fn(void) { return __func__; }
+
 int main() {
     ASSERT(3, ret3());
     ASSERT(8, add2(3, 5));
@@ -168,6 +170,10 @@ int main() {
     ASSERT(6, fnptr(add_all)(3, 1, 2, 3));
 
     ASSERT(3, param_decay3(ret3));
+
+    ASSERT(5, sizeof(__func__));
+    ASSERT(0, strcmp("main", __func__));
+    ASSERT(0, strcmp("func_fn", func_fn()));
 
     printf("OK\n");
     return 0;

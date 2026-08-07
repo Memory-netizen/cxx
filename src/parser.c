@@ -251,11 +251,11 @@ static uint32_t new_unique_varname(uint32_t id) {
     return id;
 }
 
-static Sym *new_string_literal(Token *tok) {
+static Sym *new_string_literal(uint32_t id, Type *ty) {
     uint32_t uid = new_unique_varname(intern(".str", 4));
-    Sym *var = new_gvar(uid, tok->ty);
+    Sym *var = new_gvar(uid, ty);
     var->is_str = true;
-    var->init_data = tok->id;
+    var->init_data = id;
     return var;
 }
 
@@ -872,7 +872,7 @@ static Node *primary(Token **rest, Token *tok) {
         return node;
     }
     if (tok->kind == TK_STRLIT) {
-        Sym *var = new_string_literal(tok);
+        Sym *var = new_string_literal(tok->id, tok->ty);
         *rest = tok->next;
         return new_var_node(var, tok);
     }
@@ -2697,6 +2697,12 @@ static Token *external_declaration(Token *tok) {
                 push_namespace(id, SYM_VAR, ty, param->name)->var = new_lvar(id, param);
                 param = param->next;
             }
+            static uint32_t fn_id = 0;
+            if (!fn_id) fn_id = intern("__func__", 8);
+            Type *fn_name = array_of(ty_char, str_len(var->id) + 1);
+            NameSpace *tmp = push_namespace(fn_id, SYM_VAR, fn_name, ty->name);
+
+            tmp->var = new_string_literal(var->id, fn_name);
 
             var->body = compound_stmt2(&tok, tok, true);
 
