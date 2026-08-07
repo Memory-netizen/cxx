@@ -810,10 +810,30 @@ static void remove_backslash_newline(char *p) {
     p[j] = '\0';
 }
 
+// Replaces \r or \r\n with \n.
+static void canonicalize_newline(char *p) {
+    int i = 0, j = 0;
+
+    while (p[i]) {
+        if (p[i] == '\r' && p[i + 1] == '\n') {
+            i += 2;
+            p[j++] = '\n';
+        } else if (p[i] == '\r') {
+            i++;
+            p[j++] = '\n';
+        } else {
+            p[j++] = p[i++];
+        }
+    }
+
+    p[j] = '\0';
+}
+
 Token *tokenize_file(char *path) {
     char *p = read_file(path);
     if (!p) return NULL;
 
+    canonicalize_newline(p);
     remove_backslash_newline(p);
 
     static int file_no = 0;

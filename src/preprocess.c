@@ -837,7 +837,7 @@ static Token *preprocess2(Token *tok) {
 
             Macro *m = add_macro(tok->id, true, NULL);
             m->deleted = true;
-            
+
             tok = skip_line(tok->next);
             continue;
         }
