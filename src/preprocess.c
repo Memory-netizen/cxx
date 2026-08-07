@@ -630,6 +630,8 @@ typedef enum {
     P_ENDIF,
     P_DEFINE,
     P_UNDEF,
+    P_ERROR,
+    P_WARNING,
     P_CNT,
 } P_DIRECT;
 
@@ -640,7 +642,8 @@ static struct {
     [P_INCLUDE] = {"include", 0},   [P_IF] = {"if", 0},       [P_IFDEF] = {"ifdef", 0},
     [P_IFNDEF] = {"ifndef", 0},     [P_ELIF] = {"elif", 0},   [P_ELIFDEF] = {"elifdef", 0},
     [P_ELIFNDEF] = {"elifndef", 0}, [P_ELSE] = {"else", 0},   [P_ENDIF] = {"endif", 0},
-    [P_DEFINE] = {"define", 0},     [P_UNDEF] = {"undef", 0},
+    [P_DEFINE] = {"define", 0},     [P_UNDEF] = {"undef", 0}, [P_ERROR] = {"error", 0},
+    [P_WARNING] = {"warning", 0},
 };
 
 // Visit all tokens in `tok` while evaluating preprocessing
@@ -802,6 +805,19 @@ static Token *preprocess2(Token *tok) {
             continue;
         }
 
+        if (tok->id == dt[P_ERROR].id) {
+            Token *err = tok;
+            Token *msg = copy_line(&tok, tok);
+            error(err, "#%s", join_tokens(msg));
+        }
+
+        if (tok->id == dt[P_WARNING].id) {
+            Token *warn = tok;
+            Token *msg = copy_line(&tok, tok);
+            diag("warning", warn, "#%s", join_tokens(msg));
+            continue;
+        }
+
         // `#`-only line is legal. It's called a null directive.
         if (tok->is_sol) continue;
         error(tok, "invalid preprocessor directive");
@@ -811,8 +827,59 @@ static Token *preprocess2(Token *tok) {
     return dummy.next;
 }
 
+static void define_macro(char *name, char *buf) {
+    Token *tok = tokenize(new_file("<built-in>", 1, buf), 1, 1);
+    add_macro(intern(name, strlen(name)), true, tok);
+}
+
+static void init_macros(void) {
+    // Define predefined macros
+    define_macro("_LP64", "1");
+    define_macro("__C99_MACRO_WITH_VA_ARGS", "1");
+    define_macro("__ELF__", "1");
+    define_macro("__LP64__", "1");
+    define_macro("__SIZEOF_DOUBLE__", "8");
+    define_macro("__SIZEOF_FLOAT__", "4");
+    define_macro("__SIZEOF_INT__", "4");
+    define_macro("__SIZEOF_LONG_DOUBLE__", "8");
+    define_macro("__SIZEOF_LONG_LONG__", "8");
+    define_macro("__SIZEOF_LONG__", "8");
+    define_macro("__SIZEOF_POINTER__", "8");
+    define_macro("__SIZEOF_PTRDIFF_T__", "8");
+    define_macro("__SIZEOF_SHORT__", "2");
+    define_macro("__SIZEOF_SIZE_T__", "8");
+    define_macro("__SIZE_TYPE__", "unsigned long");
+    define_macro("__STDC_HOSTED__", "1");
+    define_macro("__STDC_NO_ATOMICS__", "1");
+    define_macro("__STDC_NO_COMPLEX__", "1");
+    define_macro("__STDC_NO_THREADS__", "1");
+    define_macro("__STDC_NO_VLA__", "1");
+    define_macro("__STDC_VERSION__", "201112L");
+    define_macro("__STDC__", "1");
+    define_macro("__USER_LABEL_PREFIX__", "");
+    define_macro("__alignof__", "_Alignof");
+    // define_macro("__amd64", "1");
+    // define_macro("__amd64__", "1");
+    define_macro("__cxx__", "1");
+    define_macro("__const__", "const");
+    define_macro("__gnu_linux__", "1");
+    define_macro("__inline__", "inline");
+    define_macro("__linux", "1");
+    define_macro("__linux__", "1");
+    define_macro("__signed__", "signed");
+    define_macro("__typeof__", "typeof");
+    define_macro("__unix", "1");
+    define_macro("__unix__", "1");
+    define_macro("__volatile__", "volatile");
+    // define_macro("__x86_64", "1");
+    // define_macro("__x86_64__", "1");
+    define_macro("linux", "1");
+    define_macro("unix", "1");
+}
+
 // Entry point function of the preprocessor.
 Token *preprocess(Token *tok) {
+    init_macros();
     tok = preprocess2(tok);
     convert_pptoken(tok);
     return tok;
