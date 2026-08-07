@@ -83,6 +83,9 @@ struct SrcFile {
 //
 
 extern char *base_file;
+extern char **include_paths;
+extern int num_include_paths;
+
 bool file_exists(char *path);
 
 //

@@ -51,7 +51,7 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c ; $(c_recipe)
 .PHONY: test clean linecnt fmt
 
 $(TEST_DIR)/%.out: $(TARGET) $(TEST_DIR)/%.c
-	./$(TARGET) -c -o test/$*.o $(TEST_DIR)/$*.c
+	./$(TARGET) -I$(TEST_DIR) -c -o $(TEST_DIR)/$*.o $(TEST_DIR)/$*.c
 	$(CC) -o $@ $(TEST_DIR)/$*.o -xc test/common
 
 test: $(TARGET) $(TESTS)

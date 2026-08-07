@@ -21,6 +21,9 @@ static int num_input;
 static char **tmpfiles;
 static int num_tmpfiles;
 
+char **include_paths;
+int num_include_paths;
+
 static void usage(int status) {
     fprintf(stderr,
             "cxx [ -o <path> ] [ -S | -c | -E ] [ -ast-dump ] [ -dump-tokens ]"
@@ -28,7 +31,12 @@ static void usage(int status) {
     exit(status);
 }
 
-static bool take_arg(char *arg) { return !strcmp(arg, "-o"); }
+static bool take_arg(char *arg) {
+    char *x[] = {"-o", "-I"};
+    for (size_t i = 0; i < sizeof(x) / sizeof(*x); i++)
+        if (!strcmp(arg, x[i])) return true;
+    return false;
+}
 
 static void parse_args(int argc, char **argv) {
     // Make sure that all command line options that take an argument
@@ -72,6 +80,11 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-c") || !strcmp(argv[i], "--c")) {
             opt_c = true;
+            continue;
+        }
+
+        if (!strncmp(argv[i], "-I", 2)) {
+            include_paths[num_include_paths++] = argv[i] + 2;
             continue;
         }
 
@@ -269,6 +282,7 @@ int main(int argc, char **argv) {
     atexit(cleanup);
     input_paths = vnew(argc, sizeof(char *));
     tmpfiles = vnew(argc * 4, sizeof(char *));
+    include_paths = vnew(argc, sizeof(char *));
 
     parse_args(argc, argv);
 
