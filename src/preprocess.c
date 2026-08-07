@@ -1,6 +1,8 @@
 #include "cxx.h"
 
 static Token *expand_macro(Token *dst, Token *list);
+typedef struct Macro Macro;
+static Macro *find_macro(Token *tok);
 
 // `#if` can be nested, so we use a stack to manage nested `#if`s.
 typedef enum {
@@ -140,10 +142,48 @@ static Token *copy_line(Token **rest, Token *tok) {
     return dummy.next;
 }
 
+static Token *new_num_token(int val, Token *tmpl) {
+    char *buf = format("%d\n", val);
+    SrcFile *file = new_file(tmpl->file->name, tmpl->file->file_no, buf);
+    return tokenize(file, tmpl->line, tmpl->col);
+}
+
+static Token *read_const_expr(Token **rest, Token *tok) {
+    tok = copy_line(rest, tok);
+
+    Token dummy = {};
+    Token *cur = &dummy;
+    uint32_t defined_id = intern("defined", 7);
+
+    while (tok->kind != TK_EOF) {
+        // "defined(foo)" or "defined foo" becomes "1" if macro "foo"
+        // is defined. Otherwise "0".
+        if (tok->kind == TK_IDENT && tok->id == defined_id) {
+            Token *start = tok;
+            bool has_paren = match(&tok, tok->next, TK_LPAREN);
+
+            if (tok->kind != TK_IDENT) error(start, "macro name must be an identifier");
+            Macro *m = find_macro(tok);
+            tok = tok->next;
+
+            if (has_paren) tok = skip(tok, TK_RPAREN);
+
+            cur = cur->next = new_num_token(m ? 1 : 0, start);
+            continue;
+        }
+
+        cur = cur->next = tok;
+        tok = tok->next;
+    }
+
+    cur->next = tok;
+    return dummy.next;
+}
+
 // Read and evaluate a constant expression.
 static int64_t eval_const_expr(Token **rest, Token *tok) {
     Token *start = tok;
-    Token *expr = copy_line(rest, tok->next);
+    Token *expr = read_const_expr(rest, tok->next);
 
     if (expr->kind == TK_EOF) error(start, "no expression");
 
@@ -151,6 +191,15 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
     cur = expand_macro(cur, expr);
     cur->next = new_eof(cur);
     expr = dummy.next;
+
+    // we replace remaining non-macro identifiers with "0"
+    for (Token *t = expr; t->kind != TK_EOF; t = t->next) {
+        if (t->kind == TK_IDENT) {
+            Token *next = t->next;
+            *t = *new_num_token(0, t);
+            t->next = next;
+        }
+    }
 
     convert_pptoken(expr);
     Token *rest2;
@@ -181,7 +230,6 @@ struct MacroArg {
     Token *tok;
 };
 
-typedef struct Macro Macro;
 struct Macro {
     Macro *next;
     uint32_t id;

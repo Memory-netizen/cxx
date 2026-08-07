@@ -281,6 +281,43 @@ int main() {
 #define paste4(x, y, z) x##y##z
     ASSERT(123, paste4(1, 2, 3));
 
+#define M12
+#if defined(M12)
+    m = 3;
+#else
+    m = 4;
+#endif
+    ASSERT(3, m);
+
+#define M12
+#if defined M12
+    m = 3;
+#else
+    m = 4;
+#endif
+    ASSERT(3, m);
+
+#if defined(M12) - 1
+    m = 3;
+#else
+    m = 4;
+#endif
+    ASSERT(4, m);
+
+#if defined(NO_SUCH_MACRO)
+    m = 3;
+#else
+    m = 4;
+#endif
+    ASSERT(4, m);
+
+#if no_such_symbol == 0
+    m = 5;
+#else
+    m = 6;
+#endif
+    ASSERT(5, m);
+
     printf("OK\n");
     return 0;
 }

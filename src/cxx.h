@@ -229,6 +229,12 @@ struct Token {
     Token *next;
     char *loc;
     size_t len;
+    union {
+        uint32_t id;   // Uesd if kind == TK_IDENT;
+        uint64_t val;  // Uesd if kind == TK_NUM;
+        double fval;   // Uesd if kind == TK_NUM;
+    };
+    Type *ty;  // Used if TK_NUM or TK_STR
     char *filename;
     SrcFile *file;      // Source location
     int line;           // Line number
@@ -236,12 +242,6 @@ struct Token {
     bool is_sol;        // true if is starting of line
     bool is_leadingws;  // true if is leading space
     bool noexpand;      // true if this token shall not be macro-expanded
-    union {
-        uint32_t id;   // Uesd if kind == TK_IDENT;
-        uint64_t val;  // Uesd if kind == TK_NUM;
-        double fval;   // Uesd if kind == TK_NUM;
-    };
-    Type *ty;  // Used if TK_NUM or TK_STR
 };
 
 bool match(Token **rest, Token *tok, TokenKind kind);
