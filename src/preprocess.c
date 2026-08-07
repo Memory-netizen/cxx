@@ -837,6 +837,7 @@ static Token *preprocess2(Token *tok) {
 
             Macro *m = add_macro(tok->id, true, NULL);
             m->deleted = true;
+            
             tok = skip_line(tok->next);
             continue;
         }
@@ -866,6 +867,11 @@ static Token *preprocess2(Token *tok) {
 void define_macro(char *name, char *buf) {
     Token *tok = tokenize(new_file("<built-in>", 1, buf), 1, 1);
     add_macro(intern(name, strlen(name)), true, tok);
+}
+
+void undef_macro(char *name) {
+    Macro *m = add_macro(intern(name, strlen(name)), true, NULL);
+    m->deleted = true;
 }
 
 static Macro *add_builtin(char *name, macro_handler_fn *fn) {
