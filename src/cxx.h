@@ -261,6 +261,8 @@ SrcFile **get_input_files(void);
 // preprocess.c
 //
 
+void init_macros(void);
+void define_macro(char *name, char *buf);
 Token *preprocess(Token *tok);
 void join_adjacent_string_literals(Token *tok1);
 

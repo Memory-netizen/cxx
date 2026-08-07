@@ -47,6 +47,14 @@ static void add_default_include_paths(char *argv0) {
     include_paths[num_include_paths++] = "/usr/include";
 }
 
+static void define(char *str) {
+    char *eq = strchr(str, '=');
+    if (eq)
+        define_macro(strndup(str, eq - str), eq + 1);
+    else
+        define_macro(str, "1");
+}
+
 static void parse_args(int argc, char **argv) {
     // Make sure that all command line options that take an argument
     // have an argument.
@@ -94,6 +102,16 @@ static void parse_args(int argc, char **argv) {
 
         if (!strncmp(argv[i], "-I", 2)) {
             include_paths[num_include_paths++] = argv[i] + 2;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-D")) {
+            define(argv[++i]);
+            continue;
+        }
+
+        if (!strncmp(argv[i], "-D", 2)) {
+            define(argv[i] + 2);
             continue;
         }
 
@@ -294,6 +312,7 @@ int main(int argc, char **argv) {
     tmpfiles = vnew(argc * 4, sizeof(char *));
     include_paths = vnew(argc + 4, sizeof(char *));
 
+    init_macros();
     parse_args(argc, argv);
 
     if (opt_cc1) {
