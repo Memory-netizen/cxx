@@ -119,7 +119,11 @@ static char *quote_string(char *str) {
 
 static Token *new_str_token(char *str, Token *tmpl) {
     char *buf = quote_string(str);
-    return tokenize(new_file(tmpl->file->name, tmpl->file->file_no, buf));
+    SrcFile *file = new_file(tmpl->file->name, tmpl->file->file_no, buf);
+    Token *tok = tokenize(file, tmpl->line, tmpl->col);
+    tok->is_sol = false;
+    tok->is_leadingws = false;
+    return tok;
 }
 
 // Copy all tokens until the next newline, terminate them with
@@ -349,8 +353,13 @@ static Token *paste(Token *lhs, Token *rhs) {
     char *buf = format("%.*s%.*s", lhs->len, lhs->loc, rhs->len, rhs->loc);
 
     // Tokenize the resulting string.
-    Token *tok = tokenize(new_file(lhs->file->name, lhs->file->file_no, buf));
+    SrcFile *file = new_file(lhs->file->name, lhs->file->file_no, buf);
+    Token *tok = tokenize(file, lhs->line, lhs->col);
     if (tok->next->kind != TK_EOF) error(lhs, "pasting forms '%s', an invalid token", buf);
+
+    // Inherit source location and whitespace flag from lhs.
+    tok->is_sol = false;
+    tok->is_leadingws = lhs->is_leadingws;
     return tok;
 }
 
@@ -410,12 +419,22 @@ static Token *subst(Token *tok, MacroArg *args) {
             continue;
         }
 
-        // Handle a macro token. Macro arguments are completely macro-expanded
-        // before they are substituted into a macro body.
+        // Expand the argument and mark the resulting tokens so they
+        // are not expanded again during the body re-scan.
+        // The first token inherits is_leadingws from the parameter token
+        // in the macro body (since it conceptually "replaces" it there).
         if (arg) {
             Token dummy2 = {};
             expand_macro(&dummy2, arg->tok);
-            for (Token *t = dummy2.next; t; t = t->next) cur = cur->next = copy_token(t);
+            bool first = true;
+            for (Token *t = dummy2.next; t; t = t->next) {
+                cur = cur->next = copy_token(t);
+                cur->noexpand = true;
+                if (first) {
+                    cur->is_leadingws = tok->is_leadingws;
+                    first = false;
+                }
+            }
             tok = tok->next;
             continue;
         }
@@ -436,7 +455,7 @@ static Token *subst(Token *tok, MacroArg *args) {
 static Token *expand_macro(Token *dst, Token *list) {
     Token *cur = list;
     while (cur && cur->kind != TK_EOF) {
-        if (cur->kind != TK_IDENT) {
+        if (cur->noexpand || cur->kind != TK_IDENT) {
             dst = dst->next = copy_token(cur);
             cur = cur->next;
             continue;
@@ -456,9 +475,14 @@ static Token *expand_macro(Token *dst, Token *list) {
 
         // Object-like macro application
         if (m->is_objlike) {
+            Token *prev = dst;
             push_disabled(cur->id);
             dst = expand_macro(dst, m->body);
             pop_disabled();
+            if (prev->next) {
+                prev->next->is_leadingws = cur->is_leadingws;
+                prev->next->is_sol = cur->is_sol;
+            }
             cur = cur->next;
             continue;
         }
@@ -472,12 +496,18 @@ static Token *expand_macro(Token *dst, Token *list) {
         }
 
         // Function-like macro application
-        uint32_t macro_id = cur->id;
+        bool body_leadingws = cur->is_leadingws;
+        bool body_sol = cur->is_sol;
         MacroArg *args = read_macro_args(&cur, cur, m->params);
         Token *sub = subst(m->body, args);
-        push_disabled(macro_id);
+        Token *prev = dst;
+        push_disabled(m->id);
         dst = expand_macro(dst, sub);
         pop_disabled();
+        if (prev->next) {
+            prev->next->is_leadingws = body_leadingws;
+            prev->next->is_sol = body_sol;
+        }
         continue;
     }
     return dst;

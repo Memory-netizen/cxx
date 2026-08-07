@@ -512,7 +512,7 @@ extract_end:
     return;
 error:
     text--;
-    error_at(line, text, "invalid suffix ‘%.*s’ on constant", end - text, text);
+    error(t, "invalid suffix ‘%.*s’ on constant", end - text, text);
 }
 
 // Advance col, tracking newlines.
@@ -607,13 +607,13 @@ void convert_pptoken(Token *tok) {
 }
 
 // Tokenize a given string and returns new tokens.
-Token *tokenize(SrcFile *file) {
+Token *tokenize(SrcFile *file, int line_no, int col_no) {
     cur_file = file;
     char *filename = file->name;
     char *p = file->contents;
 
-    line = 1;
-    col = 1;
+    line = line_no;
+    col = col_no;
 
     Token dummy = {}, *cur = &dummy;
 
@@ -803,5 +803,5 @@ Token *tokenize_file(char *path) {
 
     input_files[file_no++] = file;
 
-    return tokenize(file);
+    return tokenize(file, 1, 1);
 }

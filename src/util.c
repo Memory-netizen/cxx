@@ -184,7 +184,7 @@ static uint32_t fnv_hash_32(const unsigned char *s, int len) {
     return hash;
 }
 
-uint32_t intern(char *s, int len) {
+uint32_t intern(char *s, uint32_t len) {
     Bucket *b;
     uint32_t h;
     uint32_t i, n;
@@ -194,7 +194,7 @@ uint32_t intern(char *s, int len) {
     n = b->nstr;
 
     for (i = 0; i < n; i++)
-        if (memcmp(s, b->str[i], len) == 0) return h | (i << IBits);
+        if (b->len[i] == len && memcmp(s, b->str[i], len) == 0) return h | (i << IBits);
 
     if (n == 1 << (32 - IBits)) fatal("interning table overflow");
     if (n == 0) {

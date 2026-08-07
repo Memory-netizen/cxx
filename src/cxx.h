@@ -235,6 +235,7 @@ struct Token {
     int col;            // colume number
     bool is_sol;        // true if is starting of line
     bool is_leadingws;  // true if is leading space
+    bool noexpand;      // true if this token shall not be macro-expanded
     union {
         uint32_t id;   // Uesd if kind == TK_IDENT;
         uint64_t val;  // Uesd if kind == TK_NUM;
@@ -247,7 +248,7 @@ bool match(Token **rest, Token *tok, TokenKind kind);
 Token *skip(Token *tok, TokenKind kind);
 Token *tokenize_file(char *filename);
 SrcFile *new_file(char *name, int file_no, char *contents);
-Token *tokenize(SrcFile *file);
+Token *tokenize(SrcFile *file, int line_no, int col_no);
 void convert_pptoken(Token *tok);
 SrcFile **get_input_files(void);
 
@@ -790,7 +791,7 @@ void *vnew(size_t len, size_t esz);
 void *vgrow(void *data, size_t len);
 
 char *format(char *s, ...);
-uint32_t intern(char *s, int len);
+uint32_t intern(char *s, uint32_t len);
 char *str(uint32_t id);
 uint32_t str_len(uint32_t id);
 char *escape_char_to_string(char c);
