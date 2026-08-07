@@ -2697,12 +2697,21 @@ static Token *external_declaration(Token *tok) {
                 push_namespace(id, SYM_VAR, ty, param->name)->var = new_lvar(id, param);
                 param = param->next;
             }
-            static uint32_t fn_id = 0;
-            if (!fn_id) fn_id = intern("__func__", 8);
-            Type *fn_name = array_of(ty_char, str_len(var->id) + 1);
-            NameSpace *tmp = push_namespace(fn_id, SYM_VAR, fn_name, ty->name);
 
-            tmp->var = new_string_literal(var->id, fn_name);
+            //  "__func__" is automatically defined as if
+            // static const char __func__[] = "function-name";
+            // [GNU] "__FUNCTION__" is yet another name of "__func__".
+            static uint32_t fn_id = 0;
+            static uint32_t fn_id2 = 0;
+            if (!fn_id) fn_id = intern("__func__", 8);
+            if (!fn_id2) fn_id2 = intern("__FUNCTION__", 12);
+
+            Type *fn_name = array_of(ty_char, str_len(var->id) + 1);
+
+            NameSpace *tmp = push_namespace(fn_id, SYM_VAR, fn_name, ty->name);
+            NameSpace *tmp2 = push_namespace(fn_id2, SYM_VAR, fn_name, ty->name);
+
+            tmp2->var = tmp->var = new_string_literal(var->id, fn_name);
 
             var->body = compound_stmt2(&tok, tok, true);
 
