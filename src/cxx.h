@@ -92,8 +92,8 @@ bool file_exists(char *path);
 // Lexer
 //
 
-typedef enum {
-    TK_EOF = -1,
+enum {
+    TK_EOF,
     TK_PUNCT,
     TK_COMMA,  // ,
     TK_AS,     // =
@@ -226,31 +226,30 @@ typedef enum {
     TK_SWITCH,
     TK_WHILE,
     TK_OTHER,
-} TokenKind;
+};
 
 struct Token {
-    TokenKind kind;
     Token *next;
-    char *loc;
-    size_t len;
+    Token *origin;  // If this is expanded from a macro, the original token
     union {
         uint32_t id;   // Uesd if kind == TK_IDENT;
         uint64_t val;  // Uesd if kind == TK_NUM;
         double fval;   // Uesd if kind == TK_NUM;
     };
-    Type *ty;  // Used if TK_NUM or TK_STR
-    char *filename;
-    SrcFile *file;      // Source location
-    Token *origin;      // If this is expanded from a macro, the original token
-    int line;           // Line number
-    int col;            // colume number
+    Type *ty;       // Used if TK_NUM or TK_STR
+    SrcFile *file;  // Source location
+    char *loc;
+    uint32_t len;
+    uint32_t line;  // Line number
+    uint32_t col;   // colume number
+    uint8_t kind;
     bool is_sol;        // true if is starting of line
     bool is_leadingws;  // true if is leading space
     bool noexpand;      // true if this token shall not be macro-expanded
 };
 
-bool match(Token **rest, Token *tok, TokenKind kind);
-Token *skip(Token *tok, TokenKind kind);
+bool match(Token **rest, Token *tok, uint32_t kind);
+Token *skip(Token *tok, uint32_t kind);
 Token *tokenize_file(char *filename);
 SrcFile *new_file(char *name, int file_no, char *contents);
 Token *tokenize(SrcFile *file, int line_no, int col_no);

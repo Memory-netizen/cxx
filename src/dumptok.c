@@ -1,6 +1,6 @@
 #include "cxx.h"
 
-static const char *token_kind_name(TokenKind kind) {
+static const char *token_kind_name(uint32_t kind) {
     if (kind == TK_EOF) return "eof";
     if (kind >= TK_KEYWORD) return "keyword";
 
@@ -73,7 +73,7 @@ void dump_tokens(Token *tok) {
         if (tok->is_sol) fprintf(stdout, " [StartOfLine]");
         if (tok->is_leadingws) fprintf(stdout, " [LeadingSpace]");
 
-        fprintf(stdout, "   Loc=<%s:%d:%d>\n", tok->filename, tok->line, tok->col);
+        fprintf(stdout, "   Loc=<%s:%d:%d>\n", tok->file->name, tok->line, tok->col);
 
         tok = tok->next;
     }
