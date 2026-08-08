@@ -1310,12 +1310,18 @@ static int64_t eval2(Node *node, uint32_t *sym) {
             return eval(node->lhs) - eval(node->rhs);
         case ND_MUL:
             return eval(node->lhs) * eval(node->rhs);
-        case ND_DIV:
-            if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) / (uint64_t)eval(node->rhs);
-            return eval(node->lhs) / eval(node->rhs);
-        case ND_MOD:
-            if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) % (uint64_t)eval(node->rhs);
-            return eval(node->lhs) % eval(node->rhs);
+        case ND_DIV: {
+            int64_t right = eval(node->rhs);
+            if (right == 0) error(node->tok, "division by zero");
+            if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) / (uint64_t)right;
+            return eval(node->lhs) / right;
+        }
+        case ND_MOD: {
+            int64_t right = eval(node->rhs);
+            if (right == 0) error(node->tok, "division by zero");
+            if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) % (uint64_t)right;
+            return eval(node->lhs) % right;
+        }
         case ND_BAND:
             return eval(node->lhs) & eval(node->rhs);
         case ND_BOR:

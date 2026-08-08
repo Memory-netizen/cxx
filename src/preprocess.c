@@ -148,12 +148,14 @@ static Token *new_num_token(int val, Token *tmpl) {
     return tokenize(file, tmpl->line, tmpl->col);
 }
 
+static uint32_t defined_id;
 static Token *read_const_expr(Token **rest, Token *tok) {
     tok = copy_line(rest, tok);
 
     Token dummy = {};
     Token *cur = &dummy;
-    uint32_t defined_id = intern("defined", 7);
+
+    if (!defined_id) defined_id = intern("defined", 7);
 
     while (tok->kind != TK_EOF) {
         // "defined(foo)" or "defined foo" becomes "1" if macro "foo"
@@ -162,7 +164,7 @@ static Token *read_const_expr(Token **rest, Token *tok) {
             Token *start = tok;
             bool has_paren = match(&tok, tok->next, TK_LPAREN);
 
-            if (tok->kind != TK_IDENT) error(start, "macro name must be an identifier");
+            if (tok->kind != TK_IDENT) error(start, "operator \"defined\" requires an identifier");
             Macro *m = find_macro(tok);
             tok = tok->next;
 
@@ -185,7 +187,7 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
     Token *start = tok;
     Token *expr = read_const_expr(rest, tok->next);
 
-    if (expr->kind == TK_EOF) error(start, "no expression");
+    if (expr->kind == TK_EOF) error(start, "no expression in #%s", str(start->id));
 
     Token dummy = {}, *cur = &dummy;
     cur = expand_macro(cur, expr);
@@ -202,9 +204,12 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
     }
 
     convert_pptoken(expr);
+    for (Token *t = expr; t->kind != TK_EOF; t = t->next)
+        if (t->kind == TK_NUM && is_flonum(t->ty)) error(t, "floating point literal in preprocessor expression");
+
     Token *rest2;
     int64_t val = const_expr(&rest2, expr);
-    if (rest2->kind != TK_EOF) error(rest2, "extra token");
+    if (rest2->kind != TK_EOF) error(rest2, "missing binary operator before token \"%.*s\"", rest2->len, rest2->loc);
     return val;
 }
 
@@ -269,7 +274,7 @@ static void push_disabled(uint32_t id) {
 static void pop_disabled() { hideset = hideset->next; }
 
 static Macro *find_macro(Token *tok) {
-    if (tok->kind != TK_IDENT) return NULL;
+    if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
 
     for (Macro *m = macros; m; m = m->next)
         if (m->id == tok->id) return m->deleted ? NULL : m;
@@ -298,7 +303,10 @@ static MacroParam *read_macro_params(Token **rest, Token *tok, bool *is_variadic
             *rest = skip(tok->next, TK_RPAREN);
             return dummy.next;
         }
-        if (tok->kind != TK_IDENT) error(tok, "expected an identifier");
+        if (tok->kind != TK_IDENT) error(tok, " expected parameter name");
+        for (MacroParam *p = dummy.next; p; p = p->next)
+            if (p->id == tok->id) error(tok, "duplicate macro parameter \"%s\"", str(tok->id));
+
         MacroParam *m = emalloc(sizeof(MacroParam));
         m->id = tok->id;
         cur = cur->next = m;
@@ -310,6 +318,11 @@ static MacroParam *read_macro_params(Token **rest, Token *tok, bool *is_variadic
 
 static void read_macro_definition(Token **rest, Token *tok) {
     if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
+    if (!defined_id) defined_id = intern("defined", 7);
+    if (tok->id == defined_id) error(tok, "'defined' cannot be used as a macro name");
+    Macro *exist = find_macro(tok);
+    if (exist && exist->is_builtin) diag("warning", tok, "redefining builtin macro");
+
     Token *name = tok;
     tok = tok->next;
 
@@ -317,11 +330,13 @@ static void read_macro_definition(Token **rest, Token *tok) {
         // Function-like macro
         bool is_variadic = false;
         MacroParam *params = read_macro_params(&tok, tok->next, &is_variadic);
+        if (!tok->is_leadingws) diag("warning", tok, "ISO C99 requires whitespace after the macro name");
         Macro *m = add_macro(name->id, false, copy_line(rest, tok));
         m->params = params;
         m->is_variadic = is_variadic;
     } else {
         // Object-like macro
+        if (!tok->is_leadingws) diag("warning", tok, "ISO C99 requires whitespace after the macro name");
         add_macro(name->id, true, copy_line(rest, tok));
     }
 }
@@ -626,7 +641,7 @@ static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
 
         // Find closing ">".
         for (; tok->kind != TK_GT; tok = tok->next)
-            if (tok->is_sol || tok->kind == TK_EOF) error(tok, "expected '>'");
+            if (tok->is_sol || tok->kind == TK_EOF) error(start, "expected '>' to match this '<'");
 
         *is_dquote = false;
         *rest = skip_line(tok->next);
@@ -644,7 +659,7 @@ static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
         return read_include_filename(&cur, dummy.next, is_dquote);
     }
 
-    error(tok, "expected a filename");
+    error(tok, "expected \"FILENAME\" or <FILENAME>");
     return NULL;
 }
 
@@ -696,10 +711,7 @@ static Token *preprocess2(Token *tok) {
     while (1) {
     loop_start:
         if (tok->kind == TK_EOF) {
-            while (cond_incl->next) {
-                error(cond_incl->if_tok, "unterminated conditional directive");
-                cond_incl = cond_incl->next;
-            }
+            if (cond_incl->next) error(cond_incl->if_tok, "unterminated conditional directive");
             if (file_stack) {
                 tok = pop_file();
                 continue;
@@ -802,7 +814,7 @@ static Token *preprocess2(Token *tok) {
         }
 
         if (tok->id == dt[P_ENDIF].id) {
-            if (!cond_incl->next) error(tk_hash, "stray #endif");
+            if (!cond_incl->next) error(tk_hash, "#endif without #if");
             cond_incl = cond_incl->next;
             if (cond_incl->state == BLOCK_ACTIVE) tok = skip_line(tok->next);
             continue;
@@ -834,9 +846,10 @@ static Token *preprocess2(Token *tok) {
 
         if (tok->id == dt[P_UNDEF].id) {
             tok = tok->next;
-            if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
+            Macro *m = find_macro(tok);
+            if (m && m->is_builtin) diag("warning", tok, "undefining builtin macro");
 
-            Macro *m = add_macro(tok->id, true, NULL);
+            m = add_macro(tok->id, true, NULL);
             m->deleted = true;
 
             tok = skip_line(tok->next);
