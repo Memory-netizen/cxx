@@ -33,14 +33,23 @@ static CondIncl *push_cond_incl(Token *tok, BlockState state) {
 // `#include` can be nested, so we use a stack to manage nested `#include`s.
 typedef struct FileStack FileStack;
 struct FileStack {
-    FileStack *next;
     SrcFile *srcfile;
     CondIncl *condframe;
     Token *rest;
 };
 
-static FileStack *file_stack;
+static FileStack *file_stack[256];
+static int include_depth;
+#define MAX_INCL_DEPTH 200
+
+#define STR1(x) #x
+#define STR(x) STR1(x)
+
 static FileStack *push_file(Token *rest) {
+    if (include_depth >= MAX_INCL_DEPTH) error(rest, "include nesting too deep, MAX_DEPTH = " STR(MAX_INCL_DEPTH));
+#undef STR
+#undef STR1
+
     FileStack *file = emalloc(sizeof(FileStack));
     file->srcfile = cur_file;
     file->condframe = cond_incl;
@@ -49,17 +58,18 @@ static FileStack *push_file(Token *rest) {
     cond_incl = NULL;
     push_cond_incl(NULL, BLOCK_ACTIVE);
 
-    file->next = file_stack;
-    file_stack = file;
+    file_stack[include_depth++] = file;
+
     return file;
 }
 
 static Token *pop_file(void) {
-    cur_file = file_stack->srcfile;
-    cond_incl = file_stack->condframe;
-    Token *rest = file_stack->rest;
-    file_stack = file_stack->next;
-    return rest;
+    include_depth--;
+    FileStack *file = file_stack[include_depth];
+
+    cur_file = file->srcfile;
+    cond_incl = file->condframe;
+    return file->rest;
 }
 
 static bool is_hash(Token *tok) { return tok && tok->is_sol && tok->kind == TK_HASH; }
@@ -712,7 +722,7 @@ static Token *preprocess2(Token *tok) {
     loop_start:
         if (tok->kind == TK_EOF) {
             if (cond_incl->next) error(cond_incl->if_tok, "unterminated conditional directive");
-            if (file_stack) {
+            if (include_depth > 0) {
                 tok = pop_file();
                 continue;
             } else {
