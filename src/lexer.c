@@ -789,6 +789,7 @@ SrcFile *new_file(char *name, int file_no, char *contents) {
     return file;
 }
 
+// Translation phases 2.
 // Removes backslashes followed by a newline.
 static void remove_backslash_newline(char *p) {
     int i = 0, j = 0;

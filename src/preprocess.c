@@ -234,12 +234,13 @@ typedef Token *macro_handler_fn(Token *);
 struct Macro {
     Macro *next;
     uint32_t id;
+    bool deleted;
+    bool is_builtin;
     bool is_objlike;  // Object-like or function-like
     bool is_variadic;
     MacroParam *params;
     Token *body;
     macro_handler_fn *handler;
-    bool deleted;
 };
 
 static Macro *macros;
@@ -861,22 +862,75 @@ static Token *preprocess2(Token *tok) {
     }
 
     cur->next = tok;
+    cond_incl = NULL;
     return dummy.next;
 }
 
-void define_macro(char *name, char *buf) {
-    Token *tok = tokenize(new_file("<built-in>", 1, buf), 1, 1);
-    add_macro(intern(name, strlen(name)), true, tok);
+static char *cmd_buf;
+static int cmd_len;
+
+static void remove_quote(char *buf, const char *str) {
+    while (isspace((unsigned char)*str)) str++;
+
+    size_t len = strlen(str);
+    while (len > 0 && isspace((unsigned char)str[len - 1])) len--;
+
+    if (len >= 2 && (str[0] == '\'' || str[0] == '\"') && str[0] == str[len - 1]) {
+        str++;
+        len -= 2;
+    }
+
+    memcpy(buf, str, len);
+    buf[len] = '\0';
+}
+
+void define_macro(char *str) {
+    static char buf[4096];
+    remove_quote(buf, str);
+
+    size_t len = strlen(buf);
+    char *eq = strchr(buf, '=');
+    if (eq) {
+        *eq = ' ';
+    } else {
+        buf[len++] = ' ';
+        buf[len++] = '1';
+        buf[len++] = '\0';
+    }
+
+    if (!cmd_buf)
+        cmd_buf = vnew(4096, sizeof(char));
+    else
+        cmd_buf = vgrow(cmd_buf, cmd_len + len + 12);
+
+    sprintf(cmd_buf + cmd_len, "#define %s\n", buf);
+    cmd_len += len + 9;
 }
 
 void undef_macro(char *name) {
-    Macro *m = add_macro(intern(name, strlen(name)), true, NULL);
-    m->deleted = true;
+    size_t len = strlen(name);
+    if (!cmd_buf)
+        cmd_buf = vnew(4096, sizeof(char));
+    else
+        cmd_buf = vgrow(cmd_buf, cmd_len + len + 12);
+
+    sprintf(cmd_buf + cmd_len, "#undef %s\n", name);
+    cmd_len += len + 8;
 }
 
-static Macro *add_builtin(char *name, macro_handler_fn *fn) {
-    Macro *m = add_macro(intern(name, strlen(name)), true, NULL);
+static void prep_cmdline(void) {
+    if (!cmd_buf) return;
+    SrcFile *cmd_line = new_file("<command line>", 1, cmd_buf);
+    Token *tok = tokenize(cmd_line, 1, 1);
+    preprocess2(tok);
+}
+
+static Macro *add_builtin(char *name, char *buf, macro_handler_fn *fn) {
+    Token *tok = NULL;
+    if (buf) tok = tokenize(new_file("<built-in>", 1, buf), 1, 1);
+    Macro *m = add_macro(intern(name, strlen(name)), true, tok);
     m->handler = fn;
+    m->is_builtin = true;
     return m;
 }
 
@@ -892,52 +946,53 @@ static Token *line_macro(Token *tmpl) {
 
 void init_macros(void) {
     // Define predefined macros
-    define_macro("_LP64", "1");
-    define_macro("__C99_MACRO_WITH_VA_ARGS", "1");
-    define_macro("__ELF__", "1");
-    define_macro("__LP64__", "1");
-    define_macro("__SIZEOF_DOUBLE__", "8");
-    define_macro("__SIZEOF_FLOAT__", "4");
-    define_macro("__SIZEOF_INT__", "4");
-    define_macro("__SIZEOF_LONG_DOUBLE__", "8");
-    define_macro("__SIZEOF_LONG_LONG__", "8");
-    define_macro("__SIZEOF_LONG__", "8");
-    define_macro("__SIZEOF_POINTER__", "8");
-    define_macro("__SIZEOF_PTRDIFF_T__", "8");
-    define_macro("__SIZEOF_SHORT__", "2");
-    define_macro("__SIZEOF_SIZE_T__", "8");
-    define_macro("__SIZE_TYPE__", "unsigned long");
-    define_macro("__STDC_HOSTED__", "1");
-    define_macro("__STDC_NO_ATOMICS__", "1");
-    define_macro("__STDC_NO_COMPLEX__", "1");
-    define_macro("__STDC_NO_THREADS__", "1");
-    define_macro("__STDC_NO_VLA__", "1");
-    define_macro("__STDC_VERSION__", "201112L");
-    define_macro("__STDC__", "1");
-    define_macro("__USER_LABEL_PREFIX__", "");
-    define_macro("__alignof__", "_Alignof");
-    // define_macro("__amd64", "1");
-    // define_macro("__amd64__", "1");
-    define_macro("__cxx__", "1");
-    define_macro("__const__", "const");
-    define_macro("__gnu_linux__", "1");
-    define_macro("__inline__", "inline");
-    define_macro("__linux", "1");
-    define_macro("__linux__", "1");
-    define_macro("__signed__", "signed");
-    define_macro("__typeof__", "typeof");
-    define_macro("__unix", "1");
-    define_macro("__unix__", "1");
-    define_macro("__volatile__", "volatile");
-    // define_macro("__x86_64", "1");
-    // define_macro("__x86_64__", "1");
-    define_macro("linux", "1");
-    define_macro("unix", "1");
+    add_builtin("_LP64", "1", NULL);
+    add_builtin("__C99_MACRO_WITH_VA_ARGS", "1", NULL);
+    add_builtin("__ELF__", "1", NULL);
+    add_builtin("__LP64__", "1", NULL);
+    add_builtin("__SIZEOF_DOUBLE__", "8", NULL);
+    add_builtin("__SIZEOF_FLOAT__", "4", NULL);
+    add_builtin("__SIZEOF_INT__", "4", NULL);
+    add_builtin("__SIZEOF_LONG_DOUBLE__", "8", NULL);
+    add_builtin("__SIZEOF_LONG_LONG__", "8", NULL);
+    add_builtin("__SIZEOF_LONG__", "8", NULL);
+    add_builtin("__SIZEOF_POINTER__", "8", NULL);
+    add_builtin("__SIZEOF_PTRDIFF_T__", "8", NULL);
+    add_builtin("__SIZEOF_SHORT__", "2", NULL);
+    add_builtin("__SIZEOF_SIZE_T__", "8", NULL);
+    add_builtin("__SIZE_TYPE__", "unsigned long", NULL);
+    add_builtin("__STDC_HOSTED__", "1", NULL);
+    add_builtin("__STDC_NO_ATOMICS__", "1", NULL);
+    add_builtin("__STDC_NO_COMPLEX__", "1", NULL);
+    add_builtin("__STDC_NO_THREADS__", "1", NULL);
+    add_builtin("__STDC_NO_VLA__", "1", NULL);
+    add_builtin("__STDC_VERSION__", "201112L", NULL);
+    add_builtin("__STDC__", "1", NULL);
+    add_builtin("__USER_LABEL_PREFIX__", "", NULL);
+    add_builtin("__alignof__", "_Alignof", NULL);
+    // add_builtin("__amd64", "1",NULL);
+    // add_builtin("__amd64__", "1",NULL);
+    add_builtin("__cxx__", "1", NULL);
+    add_builtin("__const__", "const", NULL);
+    add_builtin("__gnu_linux__", "1", NULL);
+    add_builtin("__inline__", "inline", NULL);
+    add_builtin("__linux", "1", NULL);
+    add_builtin("__linux__", "1", NULL);
+    add_builtin("__signed__", "signed", NULL);
+    add_builtin("__typeof__", "typeof", NULL);
+    add_builtin("__unix", "1", NULL);
+    add_builtin("__unix__", "1", NULL);
+    add_builtin("__volatile__", "volatile", NULL);
+    // add_builtin("__x86_64", "1",NULL);
+    // add_builtin("__x86_64__", "1",NULL);
+    add_builtin("linux", "1", NULL);
+    add_builtin("unix", "1", NULL);
 
-    add_builtin("__FILE__", file_macro);
-    add_builtin("__LINE__", line_macro);
+    add_builtin("__FILE__", NULL, file_macro);
+    add_builtin("__LINE__", NULL, line_macro);
 }
 
+// Translation phases 6.
 // Concatenate adjacent string literals into a single string literal
 // as per the C spec.
 void join_adjacent_string_literals(Token *tok1) {
@@ -972,6 +1027,7 @@ void join_adjacent_string_literals(Token *tok1) {
 // Entry point function of the preprocessor.
 Token *preprocess(Token *tok) {
     init_macros();
+    prep_cmdline();
     tok = preprocess2(tok);
     convert_pptoken(tok);
     return tok;
