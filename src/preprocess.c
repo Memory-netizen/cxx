@@ -152,10 +152,10 @@ static Token *copy_line(Token **rest, Token *tok) {
     return dummy.next;
 }
 
-static Token *new_num_token(int val, Token *tmpl) {
-    char *buf = format("%d\n", val);
-    SrcFile *file = new_file(tmpl->file->name, tmpl->file->file_no, buf);
-    return tokenize(file, tmpl->line, tmpl->col);
+static void ident_to_num(Token *tok, int64_t val) {
+    tok->kind = TK_NUM;
+    tok->val = val;
+    tok->ty = ty_long;
 }
 
 static uint32_t defined_id;
@@ -180,7 +180,8 @@ static Token *read_const_expr(Token **rest, Token *tok) {
 
             if (has_paren) tok = skip(tok, TK_RPAREN);
 
-            cur = cur->next = new_num_token(m ? 1 : 0, start);
+            ident_to_num(start, m ? 1 : 0);
+            cur = cur->next = start;
             continue;
         }
 
@@ -205,13 +206,8 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
     expr = dummy.next;
 
     // we replace remaining non-macro identifiers with "0"
-    for (Token *t = expr; t->kind != TK_EOF; t = t->next) {
-        if (t->kind == TK_IDENT) {
-            Token *next = t->next;
-            *t = *new_num_token(0, t);
-            t->next = next;
-        }
-    }
+    for (Token *t = expr; t->kind != TK_EOF; t = t->next)
+        if (t->kind == TK_IDENT) ident_to_num(t, 0);
 
     convert_pptoken(expr);
     for (Token *t = expr; t->kind != TK_EOF; t = t->next)
@@ -340,13 +336,15 @@ static void read_macro_definition(Token **rest, Token *tok) {
         // Function-like macro
         bool is_variadic = false;
         MacroParam *params = read_macro_params(&tok, tok->next, &is_variadic);
-        if (!tok->is_leadingws) diag("warning", tok, "ISO C99 requires whitespace after the macro name");
+        if (!tok->is_sol && !tok->is_leadingws)
+            diag("warning", tok, "ISO C99 requires whitespace after the macro name");
         Macro *m = add_macro(name->id, false, copy_line(rest, tok));
         m->params = params;
         m->is_variadic = is_variadic;
     } else {
         // Object-like macro
-        if (!tok->is_leadingws) diag("warning", tok, "ISO C99 requires whitespace after the macro name");
+        if (!tok->is_sol && !tok->is_leadingws)
+            diag("warning", tok, "ISO C99 requires whitespace after the macro name");
         add_macro(name->id, true, copy_line(rest, tok));
     }
 }
@@ -963,8 +961,10 @@ static Token *file_macro(Token *tmpl) {
 }
 
 static Token *line_macro(Token *tmpl) {
-    while (tmpl->origin) tmpl = tmpl->origin;
-    return new_num_token(tmpl->line, tmpl);
+    Token *orig = tmpl;
+    while (orig->origin) orig = orig->origin;
+    ident_to_num(tmpl, orig->line);
+    return tmpl;
 }
 
 void init_macros(void) {

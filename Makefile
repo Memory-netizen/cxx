@@ -17,7 +17,6 @@ CC := clang
 
 # Directories
 SRC_DIR := ./src
-INC_DIR := ./include
 TEST_DIR := ./test
 BUILD_DIR := ./build
 
@@ -27,14 +26,10 @@ OBJS := $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(SRCS))
 TEST_SRCS := $(wildcard $(TEST_DIR)/*.c)
 TESTS := $(TEST_SRCS:.c=.out)
 
-# Header directories:
-INC_DIRS := $(INC_DIR) $(SRC_DIR)
-INC_FLAGS := $(addprefix -I, $(INC_DIRS))
-
-HDRS := $(foreach d,$(INC_DIRS),$(wildcard $(d)/*.h))
+HDRS := $(wildcard $(SRC_DIR)/*.h)
 ALL_SRCS := $(SRCS) $(HDRS)
 DEPS := $(OBJS:.o=.d)
-CPPFLAGS := $(INC_FLAGS) -MMD -MP
+CPPFLAGS := -MMD -MP
 
 # Main target
 $(TARGET): $(OBJS)
