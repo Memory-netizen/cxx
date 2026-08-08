@@ -176,8 +176,8 @@ static Token *read_string_literal(char *start) {
     return tok;
 }
 
-static Token *read_char_literal(char *start) {
-    char *p = start + 1;
+static Token *read_char_literal(char *start, char *quote) {
+    char *p = quote + 1;
     if (*p == '\0') error_at(line, start, "unclosed char literal");
     int c;
     if (*p == '\\')
@@ -696,7 +696,17 @@ Token *tokenize(SrcFile *file, int line_no, int col_no) {
 
         // Character literal
         if (*p == '\'') {
-            tok = read_char_literal(p);
+            tok = read_char_literal(p, p);
+            fill_tok(tok, filename, line, col, is_sol, is_leadingws);
+            cur = cur->next = tok;
+            p += tok->len;
+            advance_col(&line, &col, tok->len);
+            continue;
+        }
+
+        // Wide character literal
+        if (start_with(p, "L'")) {
+            tok = read_char_literal(p, p + 1);
             fill_tok(tok, filename, line, col, is_sol, is_leadingws);
             cur = cur->next = tok;
             p += tok->len;

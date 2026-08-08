@@ -82,15 +82,15 @@ void diag_exit(char *level, Token *tok, const char *msg, ...) {
     exit(1);
 }
 
-static void **pool = NULL;
-static size_t free_len = 0;
+static void **pool;
+static size_t free_len;
 
 typedef struct Block_Mem {
     void *ptr;
     struct Block_Mem *next;
 } Block_Mem;
 
-static Block_Mem *mem_blocks = {0};
+static Block_Mem *mem_blocks;
 
 void *emalloc(size_t n) {
     if (n == 0) return NULL;
