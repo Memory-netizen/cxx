@@ -1,9 +1,8 @@
 #include "cxx.h"
 
-#define POOL_SIZE (32 * 1024 * 1024)  // 32MB
-#define BIG_THRESHOLD (128 * 1024)    // 128KB
+#define POOL_SIZE (128 * 1024 * 1024)  // 128MB
+#define BIG_THRESHOLD (128 * 1024)     // 128KB
 #define ALIGNMENT _Alignof(max_align_t)
-#define HEAD_SIZE ALIGN_UP(sizeof(void *), ALIGNMENT)
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
 // Reports an error and exit.
@@ -82,15 +81,8 @@ void diag_exit(char *level, Token *tok, const char *msg, ...) {
     exit(1);
 }
 
-static void **pool;
+static char *pool;
 static size_t free_len;
-
-typedef struct Block_Mem {
-    void *ptr;
-    struct Block_Mem *next;
-} Block_Mem;
-
-static Block_Mem *mem_blocks;
 
 void *emalloc(size_t n) {
     if (n == 0) return NULL;
@@ -98,22 +90,18 @@ void *emalloc(size_t n) {
     if (n >= BIG_THRESHOLD) {
         void *p = calloc(1, n);
         if (!p) fatal("emalloc, out of memory");
-        Block_Mem *b = emalloc(sizeof(Block_Mem));
-        b->ptr = p;
-        b->next = mem_blocks;
-        mem_blocks = b;
         return p;
     }
 
     if (free_len < n) {
-        void **new_pool = calloc(1, POOL_SIZE);
+        void *new_pool = calloc(1, POOL_SIZE);
         if (!new_pool) fatal("emalloc, out of memory");
-        new_pool[0] = pool;
         pool = new_pool;
-        free_len = POOL_SIZE - HEAD_SIZE;
+        free_len = POOL_SIZE;
     }
 
-    void *p = (char *)pool + HEAD_SIZE + (free_len - n);
+    void *p = pool;
+    pool += n;
     free_len -= n;
     return p;
 }
@@ -220,21 +208,6 @@ char *str(uint32_t id) {
 uint32_t str_len(uint32_t id) {
     assert(id >> IBits < itbl[id & IMask].nstr);
     return itbl[id & IMask].len[id >> IBits];
-}
-
-void freeall(void) {
-    while (mem_blocks) {
-        Block_Mem *b = mem_blocks;
-        mem_blocks = b->next;
-        free(b->ptr);
-    }
-    while (pool) {
-        void **pp = pool[0];
-        free(pool);
-        pool = pp;
-    }
-    free_len = 0;
-    memset(itbl, 0, sizeof(itbl));
 }
 
 char *escape_char_to_string(char c) {

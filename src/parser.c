@@ -2709,8 +2709,8 @@ static Token *external_declaration(Token *tok) {
             // [GNU] "__FUNCTION__" is yet another name of "__func__".
             static uint32_t fn_id = 0;
             static uint32_t fn_id2 = 0;
-            if (!fn_id) fn_id = intern("__func__", 8);
-            if (!fn_id2) fn_id2 = intern("__FUNCTION__", 12);
+            if (fn_id == 0) fn_id = intern("__func__", 8);
+            if (fn_id2 == 0) fn_id2 = intern("__FUNCTION__", 12);
 
             Type *fn_name = array_of(ty_char, str_len(var->id) + 1);
 

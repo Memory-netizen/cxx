@@ -925,6 +925,14 @@ Module *irgen(Module *md) {
         for (Sym *var = fn->locals; var; var = var->next)
             new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty, 0)), (Ref[]){INT(var->align)}, 1);
 
+        // The C spec defines a special rule for the main function.
+        //  Reaching the end of the main function is equivalent to returning 0,
+        //  even though the behavior is undefined for the other functions.
+        uint32_t main_id = 0;
+        if (main_id == 0) main_id = intern("main", 4);
+        if (curf->id == main_id)
+            new_ins(IR_STR, R, (Ref[]){INT(0), TMP(nparam + 1, pointer_to(ty, 0)), INT(ty->align)}, 3);
+
         Sym *var = fn->locals;
         for (uint32_t i = 0; i < nparam; ++i, var = var->next)
             new_ins(IR_STR, R, (Ref[]){TMP(i, var->ty), TMP(var->vreg, pointer_to(var->ty, 0)), INT(var->align)}, 3);
