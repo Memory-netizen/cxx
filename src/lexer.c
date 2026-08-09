@@ -795,6 +795,7 @@ SrcFile *new_file(char *name, int file_no, char *contents) {
     file->name = name;
     file->file_no = file_no;
     file->contents = contents;
+    file->size = strlen(contents);
     return file;
 }
 
@@ -804,6 +805,9 @@ static void remove_backslash_newline(char *p) {
     int i = 0, j = 0;
     int n = 0;
 
+    // We want to keep the number of newline characters so that
+    // the logical line number matches the physical one.
+    // This counter maintain the number of newlines we have removed.
     while (p[i]) {
         if (p[i] == '\\' && p[i + 1] == '\n') {
             i += 2;
@@ -839,6 +843,58 @@ static void canonicalize_newline(char *p) {
     p[j] = '\0';
 }
 
+void build_line_offsets(SrcFile *f) {
+    if (!f || f->num_lines > 0) return;
+
+    int count = 1;
+    char *p = f->contents;
+    while (*p)
+        if (*p++ == '\n') count++;
+
+    f->num_lines = count;
+
+    f->line_offsets = emalloc(sizeof(uint32_t) * count);
+
+    int idx = 1;
+    f->line_offsets[0] = 0;
+    p = f->contents;
+    while (*p)
+        if (*p++ == '\n') f->line_offsets[idx++] = p - f->contents;
+}
+
+void get_location(SrcFile *f, char *loc, int *out_line, int *out_col) {
+    if (!f || !loc) {
+        *out_line = 1;
+        *out_col = 1;
+        return;
+    }
+
+    uint32_t offset = (uint32_t)(loc - f->contents);
+
+    if (offset > f->size) {
+        offset = f->size;
+        loc = f->contents + f->size;
+    }
+
+    int lo = 0, hi = f->num_lines - 1;
+    int idx = 0;
+
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (f->line_offsets[mid] <= offset) {
+            idx = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    *out_line = idx + 1;
+
+    char *line_start = f->contents + f->line_offsets[idx];
+    *out_col = (int)(loc - line_start) + 1;
+}
+
 Token *tokenize_file(char *path) {
     char *p = read_file(path);
     if (!p) return NULL;
@@ -848,6 +904,7 @@ Token *tokenize_file(char *path) {
 
     static int file_no = 0;
     SrcFile *file = new_file(path, file_no + 1, p);
+    build_line_offsets(file);
 
     if (!input_files)
         input_files = vnew(2, sizeof(SrcFile *));

@@ -77,6 +77,9 @@ struct SrcFile {
     char *name;
     int file_no;
     char *contents;
+    size_t size;
+    uint32_t *line_offsets;
+    int num_lines;
 };
 
 //
@@ -240,9 +243,9 @@ struct Token {
     Type *ty;       // Used if TK_NUM or TK_STR
     SrcFile *file;  // Source location
     char *loc;
-    uint32_t len;
     uint32_t line;  // Line number
-    uint32_t col;   // colume number
+    uint16_t col;   // colume number
+    uint16_t len;
     uint8_t kind;
     bool is_sol;        // true if is starting of line
     bool is_leadingws;  // true if is leading space
