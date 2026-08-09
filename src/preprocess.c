@@ -456,7 +456,7 @@ static Token *paste(Token *lhs, Token *rhs) {
 
     // Tokenize the resulting string.
     SrcFile *file = new_file(lhs->file->name, lhs->file->file_no, buf);
-    Token *tok = tokenize(file, lhs->line, lhs->col);
+    Token *tok = tokenize(file);
     if (tok->next->kind != TK_EOF) error(lhs, "pasting forms '%s', an invalid token", buf);
 
     // Inherit source location and whitespace flag from lhs.
@@ -593,7 +593,7 @@ static Token *expand_macro(Token *dst, Token *list) {
                 prev->next->is_leadingws = cur->is_leadingws;
                 prev->next->is_sol = cur->is_sol;
             }
-            for (Token *t = prev; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
+            for (Token *t = prev->next; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
             cur = cur->next;
             continue;
         }
@@ -955,13 +955,13 @@ void undef_macro(char *name) {
 static void prep_cmdline(void) {
     if (!cmd_buf) return;
     SrcFile *cmd_line = new_file("<command line>", 1, cmd_buf);
-    Token *tok = tokenize(cmd_line, 1, 1);
+    Token *tok = tokenize(cmd_line);
     preprocess2(tok);
 }
 
 static Macro *add_builtin(char *name, char *buf, macro_handler_fn *fn) {
     Token *tok = NULL;
-    if (buf) tok = tokenize(new_file("<built-in>", 1, buf), 1, 1);
+    if (buf) tok = tokenize(new_file("<built-in>", 1, buf));
     Macro *m = add_macro(intern(name, strlen(name)), true, tok);
     m->handler = fn;
     m->is_builtin = true;
@@ -977,7 +977,9 @@ static Token *file_macro(Token *tmpl) {
 static Token *line_macro(Token *tmpl) {
     Token *orig = tmpl;
     while (orig->origin) orig = orig->origin;
-    return ident_to_num(tmpl, orig->line);
+    int line, col;
+    get_location(orig->file, orig->loc, &line, &col);
+    return ident_to_num(tmpl, line);
 }
 
 // __COUNTER__ is expanded to serial values starting from 0.
@@ -1013,49 +1015,54 @@ static char *format_date(struct tm *tm) {
 // __TIME__ is expanded to the current time, e.g. "13:34:03".
 static char *format_time(struct tm *tm) { return format("\"%02d:%02d:%02d\"", tm->tm_hour, tm->tm_min, tm->tm_sec); }
 
+static char built_in[] = {
+    "#define _LP64 1\n"
+    "#define __C99_MACRO_WITH_VA_ARGS 1\n"
+    "#define __ELF__ 1\n"
+    "#define __LP64__ 1\n"
+    "#define __SIZEOF_DOUBLE__ 8\n"
+    "#define __SIZEOF_FLOAT__ 4\n"
+    "#define __SIZEOF_INT__ 4\n"
+    "#define __SIZEOF_LONG_DOUBLE__ 8\n"
+    "#define __SIZEOF_LONG_LONG__ 8\n"
+    "#define __SIZEOF_POINTER__ 8\n"
+    "#define __SIZEOF_PTRDIFF_T__ 8\n"
+    "#define __SIZEOF_SHORT__ 2\n"
+    "#define __SIZEOF_SIZE_T__ 8\n"
+    "#define __SIZE_TYPE__ unsigned long\n"
+    "#define __STDC_HOSTED__ 1\n"
+    "#define __STDC_NO_ATOMICS__ 1\n"
+    "#define __STDC_NO_COMPLEX__ 1\n"
+    "#define __STDC_NO_THREADS__ 1\n"
+    "#define __STDC_NO_VLA__ 1\n"
+    "#define __STDC_VERSION__ 201112L\n"
+    "#define __STDC__ 1\n"
+    "#define __USER_LABEL_PREFIX__\n"
+    "#define __alignof__ _Alignof\n"
+    "#define __cxx__ 1\n"
+    "#define __const__ const\n"
+    "#define __gnu_linux__ 1\n"
+    "#define __inline__ inline\n"
+    "#define __linux 1\n"
+    "#define __linux__ 1\n"
+    "#define __signed__ signed\n"
+    "#define __typeof__ typeof\n"
+    "#define __unix 1\n"
+    "#define __unix__ 1\n"
+    "#define __volatile__ volatile\n"
+    "#define linux 1\n"
+    "#define unix 1\n",
+};
+
+static void prep_builtin(void) {
+    SrcFile *pred_marcos = new_file("<bulit-in>", 1, built_in);
+    Token *tok = tokenize(pred_marcos);
+    preprocess2(tok);
+}
+
 void init_macros(void) {
     // Define predefined macros
-    add_builtin("_LP64", "1", NULL);
-    add_builtin("__C99_MACRO_WITH_VA_ARGS", "1", NULL);
-    add_builtin("__ELF__", "1", NULL);
-    add_builtin("__LP64__", "1", NULL);
-    add_builtin("__SIZEOF_DOUBLE__", "8", NULL);
-    add_builtin("__SIZEOF_FLOAT__", "4", NULL);
-    add_builtin("__SIZEOF_INT__", "4", NULL);
-    add_builtin("__SIZEOF_LONG_DOUBLE__", "8", NULL);
-    add_builtin("__SIZEOF_LONG_LONG__", "8", NULL);
-    add_builtin("__SIZEOF_LONG__", "8", NULL);
-    add_builtin("__SIZEOF_POINTER__", "8", NULL);
-    add_builtin("__SIZEOF_PTRDIFF_T__", "8", NULL);
-    add_builtin("__SIZEOF_SHORT__", "2", NULL);
-    add_builtin("__SIZEOF_SIZE_T__", "8", NULL);
-    add_builtin("__SIZE_TYPE__", "unsigned long", NULL);
-    add_builtin("__STDC_HOSTED__", "1", NULL);
-    add_builtin("__STDC_NO_ATOMICS__", "1", NULL);
-    add_builtin("__STDC_NO_COMPLEX__", "1", NULL);
-    add_builtin("__STDC_NO_THREADS__", "1", NULL);
-    add_builtin("__STDC_NO_VLA__", "1", NULL);
-    add_builtin("__STDC_VERSION__", "201112L", NULL);
-    add_builtin("__STDC__", "1", NULL);
-    add_builtin("__USER_LABEL_PREFIX__", "", NULL);
-    add_builtin("__alignof__", "_Alignof", NULL);
-    // add_builtin("__amd64", "1",NULL);
-    // add_builtin("__amd64__", "1",NULL);
-    add_builtin("__cxx__", "1", NULL);
-    add_builtin("__const__", "const", NULL);
-    add_builtin("__gnu_linux__", "1", NULL);
-    add_builtin("__inline__", "inline", NULL);
-    add_builtin("__linux", "1", NULL);
-    add_builtin("__linux__", "1", NULL);
-    add_builtin("__signed__", "signed", NULL);
-    add_builtin("__typeof__", "typeof", NULL);
-    add_builtin("__unix", "1", NULL);
-    add_builtin("__unix__", "1", NULL);
-    add_builtin("__volatile__", "volatile", NULL);
-    // add_builtin("__x86_64", "1",NULL);
-    // add_builtin("__x86_64__", "1",NULL);
-    add_builtin("linux", "1", NULL);
-    add_builtin("unix", "1", NULL);
+    prep_builtin();
 
     add_builtin("__FILE__", NULL, file_macro);
     add_builtin("__LINE__", NULL, line_macro);
@@ -1067,6 +1074,8 @@ void init_macros(void) {
     struct tm *tm = localtime(&now);
     add_builtin("__DATE__", format_date(tm), NULL);
     add_builtin("__TIME__", format_time(tm), NULL);
+
+    for (Macro *m = macros; m; m = m->next) m->is_builtin = true;
 }
 
 // Translation phases 6.

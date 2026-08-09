@@ -68,14 +68,19 @@ static const char *token_kind_name(uint32_t kind) {
 
 void dump_tokens(Token *tok) {
     while (tok && tok->kind != TK_EOF) {
-        fprintf(stdout, "%-20s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok->loc);
+        int line, col;
+        Token *orig = tok;
+        while (orig->origin) orig = orig->origin;
+        get_location(orig->file, orig->loc, &line, &col);
 
+        fprintf(stdout, "%-20s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok->loc);
         if (tok->is_sol) fprintf(stdout, " [StartOfLine]");
         if (tok->is_leadingws) fprintf(stdout, " [LeadingSpace]");
-
-        fprintf(stdout, "   Loc=<%s:%d:%d>\n", tok->file->name, tok->line, tok->col);
+        fprintf(stdout, "   Loc=<%s:%d:%d>\n", orig->file->name, line, col);
 
         tok = tok->next;
     }
-    fprintf(stdout, "%-20s ‘’   Loc=<%s:%d:%d>\n", "eof", tok->file->name, tok->line, tok->col);
+    int line, col;
+    get_location(tok->file, tok->loc, &line, &col);
+    fprintf(stdout, "%-20s ‘’   Loc=<%s:%d:%d>\n", "eof", tok->file->name, line, col);
 }

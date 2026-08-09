@@ -8,6 +8,8 @@ static SrcFile **input_files;
 
 static int line;
 static int col;
+static bool is_leadingws = false;
+static bool is_sol = false;
 
 // Attempt to match the given token type
 // If matched, consume the token and return true;
@@ -83,16 +85,11 @@ static Token *new_token(uint32_t kind, char *start, char *end) {
     tok->file = cur_file;
     tok->loc = start;
     tok->len = end - start;
-    return tok;
-}
-
-// Fill position metadata into a token.
-static void fill_tok(Token *tok, int line, int col, bool is_sol, bool is_leadingws) {
     tok->file = cur_file;
-    tok->line = line;
-    tok->col = col;
     tok->is_sol = is_sol;
     tok->is_leadingws = is_leadingws;
+    is_sol = is_leadingws = false;
+    return tok;
 }
 
 static int from_hex(char c) {
@@ -607,18 +604,18 @@ void convert_pptoken(Token *tok) {
 }
 
 // Tokenize a given string and returns new tokens.
-Token *tokenize(SrcFile *file, int line_no, int col_no) {
+Token *tokenize(SrcFile *file) {
     cur_file = file;
     char *p = file->contents;
 
-    line = line_no;
-    col = col_no;
+    line = 1;
+    col = 1;
+    is_sol = true;
+    is_leadingws = false;
 
     Token dummy = {}, *cur = &dummy;
 
     while (*p) {
-        bool is_leadingws = false;
-        bool is_sol = cur == &dummy;
         // Skip whitespace and comments.
         for (;;) {
             // Skip line comments.
@@ -676,7 +673,6 @@ Token *tokenize(SrcFile *file, int line_no, int col_no) {
         // Numeric literal
         if (isdigit(*p) || (*p == '.' && isdigit(p[1]))) {
             tok = read_int_literal(p);
-            fill_tok(tok, line, col, is_sol, is_leadingws);
             cur = cur->next = tok;
             p += tok->len;
             advance_col(&line, &col, tok->len);
@@ -686,7 +682,6 @@ Token *tokenize(SrcFile *file, int line_no, int col_no) {
         // String literal
         if (*p == '"') {
             tok = read_string_literal(p);
-            fill_tok(tok, line, col, is_sol, is_leadingws);
             cur = cur->next = tok;
             p += tok->len;
             advance_col(&line, &col, tok->len);
@@ -696,7 +691,6 @@ Token *tokenize(SrcFile *file, int line_no, int col_no) {
         // Character literal
         if (*p == '\'') {
             tok = read_char_literal(p, p);
-            fill_tok(tok, line, col, is_sol, is_leadingws);
             cur = cur->next = tok;
             p += tok->len;
             advance_col(&line, &col, tok->len);
@@ -706,7 +700,6 @@ Token *tokenize(SrcFile *file, int line_no, int col_no) {
         // Wide character literal
         if (start_with(p, "L'")) {
             tok = read_char_literal(p, p + 1);
-            fill_tok(tok, line, col, is_sol, is_leadingws);
             cur = cur->next = tok;
             p += tok->len;
             advance_col(&line, &col, tok->len);
@@ -721,7 +714,6 @@ Token *tokenize(SrcFile *file, int line_no, int col_no) {
             } while (is_ident1(*p));
             tok = new_token(TK_IDENT, start, p);
             tok->id = intern(tok->loc, tok->len);
-            fill_tok(tok, line, col, is_sol, is_leadingws);
             cur = cur->next = tok;
             advance_col(&line, &col, tok->len);
             continue;
@@ -731,7 +723,6 @@ Token *tokenize(SrcFile *file, int line_no, int col_no) {
         if (ispunct(*p) && ((*p != '`' && *p != '@' && *p != '$'))) {
             tok = new_token(TK_PUNCT, p, p);
             tok->len = read_punct(p, tok);
-            fill_tok(tok, line, col, is_sol, is_leadingws);
             cur = cur->next = tok;
             p += tok->len;
             advance_col(&line, &col, tok->len);
@@ -740,7 +731,6 @@ Token *tokenize(SrcFile *file, int line_no, int col_no) {
 
         // Other char
         tok = new_token(TK_OTHER, p, p + 1);
-        fill_tok(tok, line, col, is_sol, is_leadingws);
         cur = cur->next = tok;
         p += tok->len;
         advance_col(&line, &col, tok->len);
@@ -748,7 +738,6 @@ Token *tokenize(SrcFile *file, int line_no, int col_no) {
     }
 
     Token *eof = new_token(TK_EOF, p, p);
-    fill_tok(eof, line, col, true, false);
     cur->next = eof;
     return dummy.next;
 }
@@ -913,5 +902,5 @@ Token *tokenize_file(char *path) {
 
     input_files[file_no++] = file;
 
-    return tokenize(file, 1, 1);
+    return tokenize(file);
 }

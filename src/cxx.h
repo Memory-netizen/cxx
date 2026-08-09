@@ -239,14 +239,14 @@ struct Token {
         uint32_t id;   // Uesd if kind == TK_IDENT;
         uint64_t val;  // Uesd if kind == TK_NUM;
         double fval;   // Uesd if kind == TK_NUM;
+        char *msg;     // Used if token is broken;
     };
     Type *ty;       // Used if TK_NUM or TK_STR
     SrcFile *file;  // Source location
     char *loc;
-    uint32_t line;  // Line number
-    uint16_t col;   // colume number
     uint16_t len;
     uint8_t kind;
+    bool is_broken;
     bool is_sol;        // true if is starting of line
     bool is_leadingws;  // true if is leading space
     bool noexpand;      // true if this token shall not be macro-expanded
@@ -256,9 +256,10 @@ bool match(Token **rest, Token *tok, uint32_t kind);
 Token *skip(Token *tok, uint32_t kind);
 Token *tokenize_file(char *filename);
 SrcFile *new_file(char *name, int file_no, char *contents);
-Token *tokenize(SrcFile *file, int line_no, int col_no);
+Token *tokenize(SrcFile *file);
 void convert_pptoken(Token *tok);
 SrcFile **get_input_files(void);
+void get_location(SrcFile *f, char *loc, int *out_line, int *out_col);
 
 //
 // preprocess.c

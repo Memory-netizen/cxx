@@ -325,7 +325,6 @@ int main(int argc, char **argv) {
     tmpfiles = vnew(argc * 4, sizeof(char *));
     include_paths = vnew(argc + 4, sizeof(char *));
 
-    init_macros();
     parse_args(argc, argv);
 
     if (opt_cc1) {

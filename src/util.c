@@ -45,7 +45,11 @@ static void emit_diag(char *level, SrcFile *diagfile, int line_no, char *loc, co
 void error(Token *tok, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    emit_diag("error", tok->file, tok->line, tok->loc, msg, ap);
+    int line, col;
+    Token *orig = tok;
+    while (orig->origin) orig = orig->origin;
+    get_location(orig->file, orig->loc, &line, &col);
+    emit_diag("error", tok->file, line, tok->loc, msg, ap);
     va_end(ap);
     exit(1);
 }
@@ -69,14 +73,22 @@ void diag_at(char *level, int line_no, char *loc, const char *msg, ...) {
 void diag(char *level, Token *tok, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    emit_diag(level, tok->file, tok->line, tok->loc, msg, ap);
+    int line, col;
+    Token *orig = tok;
+    while (orig->origin) orig = orig->origin;
+    get_location(orig->file, orig->loc, &line, &col);
+    emit_diag(level, orig->file, line, tok->loc, msg, ap);
     va_end(ap);
 }
 
 void diag_exit(char *level, Token *tok, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    emit_diag(level, tok->file, tok->line, tok->loc, msg, ap);
+    int line, col;
+    Token *orig = tok;
+    while (orig->origin) orig = orig->origin;
+    get_location(orig->file, orig->loc, &line, &col);
+    emit_diag(level, orig->file, line, tok->loc, msg, ap);
     va_end(ap);
     exit(1);
 }
