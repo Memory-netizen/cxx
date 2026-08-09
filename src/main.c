@@ -287,6 +287,8 @@ static void cc1(void) {
 
     if (opt_ast_dump) dump_ast(prog);
 
+    fold_ast(prog);
+
     Module *module = irgen(prog);
 
     FILE *out = open_outfile(output_file);

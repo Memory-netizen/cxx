@@ -17,16 +17,11 @@ static Ref gen_logand(Node *node);
 static Ref gen_logor(Node *node);
 
 static Ir *new_ins(IrKind op, Ref dst, Ref *args, uint32_t narg) {
-    Ir *new = emalloc(sizeof(Ir));
+    Ir *new = emalloc(sizeof(Ir) + narg * sizeof(Ref));
     new->op = op;
     new->dst = dst;
     new->narg = narg;
-    if (narg > 0 && args) {
-        new->args = emalloc(narg * sizeof(Ref));
-        memcpy(new->args, args, narg * sizeof(Ref));
-    } else {
-        new->args = NULL;
-    }
+    if (narg > 0 && args) memcpy(new->args, args, narg * sizeof(Ref));
 
     new->prev = curb->tail;
     new->next = NULL;

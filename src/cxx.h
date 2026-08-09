@@ -733,11 +733,11 @@ struct Ref {
 static inline int refeq(Ref a, Ref b) { return a.type == b.type && a.val == b.val && a.ty == b.ty; }
 
 struct Ir {
-    IrKind op;
     Ref dst;
-    Ref *args;
-    uint32_t narg;
     Ir *prev, *next;
+    uint16_t op;
+    uint16_t narg;
+    Ref args[];
 };
 
 struct Phi {
@@ -781,6 +781,7 @@ Module *irgen(Module *node);
 void dump_module(Module *module, FILE *out);
 void dump_ast(Module *prog);
 void dump_tokens(Token *tok);
+void fold_ast(Module *prog);
 
 //
 // util.c
