@@ -697,6 +697,7 @@ typedef enum {
     P_UNDEF,
     P_ERROR,
     P_WARNING,
+    P_PRAGMA,
     P_CNT,
 } P_DIRECT;
 
@@ -704,11 +705,11 @@ static struct {
     char *directive;
     uint32_t id;
 } dt[] = {
-    [P_INCLUDE] = {"include", 0},   [P_IF] = {"if", 0},       [P_IFDEF] = {"ifdef", 0},
-    [P_IFNDEF] = {"ifndef", 0},     [P_ELIF] = {"elif", 0},   [P_ELIFDEF] = {"elifdef", 0},
-    [P_ELIFNDEF] = {"elifndef", 0}, [P_ELSE] = {"else", 0},   [P_ENDIF] = {"endif", 0},
-    [P_DEFINE] = {"define", 0},     [P_UNDEF] = {"undef", 0}, [P_ERROR] = {"error", 0},
-    [P_WARNING] = {"warning", 0},
+    [P_INCLUDE] = {"include", 0},   [P_IF] = {"if", 0},         [P_IFDEF] = {"ifdef", 0},
+    [P_IFNDEF] = {"ifndef", 0},     [P_ELIF] = {"elif", 0},     [P_ELIFDEF] = {"elifdef", 0},
+    [P_ELIFNDEF] = {"elifndef", 0}, [P_ELSE] = {"else", 0},     [P_ENDIF] = {"endif", 0},
+    [P_DEFINE] = {"define", 0},     [P_UNDEF] = {"undef", 0},   [P_ERROR] = {"error", 0},
+    [P_WARNING] = {"warning", 0},   [P_PRAGMA] = {"pragma", 0},
 };
 
 // Visit all tokens in `tok` while evaluating preprocessing
@@ -879,6 +880,13 @@ static Token *preprocess2(Token *tok) {
             Token *warn = tok;
             Token *msg = read_line(&tok, tok);
             diag("warning", warn, "#%s", join_tokens(msg));
+            continue;
+        }
+
+        if (tok->id == dt[P_PRAGMA].id) {
+            do {
+                tok = tok->next;
+            } while (!tok->is_sol);
             continue;
         }
 
