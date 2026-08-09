@@ -972,6 +972,18 @@ static Token *line_macro(Token *tmpl) {
     return ident_to_num(tmpl, orig->line);
 }
 
+// __DATE__ is expanded to the current date, e.g. "May 17 2020".
+static char *format_date(struct tm *tm) {
+    static char mon[][4] = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    };
+
+    return format("\"%s %2d %d\"", mon[tm->tm_mon], tm->tm_mday, tm->tm_year + 1900);
+}
+
+// __TIME__ is expanded to the current time, e.g. "13:34:03".
+static char *format_time(struct tm *tm) { return format("\"%02d:%02d:%02d\"", tm->tm_hour, tm->tm_min, tm->tm_sec); }
+
 void init_macros(void) {
     // Define predefined macros
     add_builtin("_LP64", "1", NULL);
@@ -1018,6 +1030,11 @@ void init_macros(void) {
 
     add_builtin("__FILE__", NULL, file_macro);
     add_builtin("__LINE__", NULL, line_macro);
+
+    time_t now = time(NULL);
+    struct tm *tm = localtime(&now);
+    add_builtin("__DATE__", format_date(tm), NULL);
+    add_builtin("__TIME__", format_time(tm), NULL);
 }
 
 // Translation phases 6.

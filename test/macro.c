@@ -386,6 +386,9 @@ int main() {
 #define M14(x, ...) x
     ASSERT(5, M14(5));
 
+    ASSERT(11, strlen(__DATE__));
+    ASSERT(8, strlen(__TIME__));
+
     printf("OK\n");
     return 0;
 }
