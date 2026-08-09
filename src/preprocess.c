@@ -991,6 +991,8 @@ static Token *timestamp_macro(Token *tmpl) {
     return new_str_token(buf, tmpl);
 }
 
+static Token *base_file_macro(Token *tmpl) { return new_str_token(base_file, tmpl); }
+
 // __DATE__ is expanded to the current date, e.g. "May 17 2020".
 static char *format_date(struct tm *tm) {
     static char mon[][4] = {
@@ -1051,6 +1053,7 @@ void init_macros(void) {
     add_builtin("__LINE__", NULL, line_macro);
     add_builtin("__COUNTER__", NULL, counter_macro);
     add_builtin("__TIMESTAMP__", NULL, timestamp_macro);
+    add_builtin("__BASE_FILE__", NULL, base_file_macro);
 
     time_t now = time(NULL);
     struct tm *tm = localtime(&now);
