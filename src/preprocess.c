@@ -72,14 +72,14 @@ static Token *pop_file(void) {
     return file->rest;
 }
 
-static bool is_hash(Token *tok) { return tok && tok->is_sol && tok->kind == TK_HASH; }
+static bool is_hash(Token *tok) { return tok->is_sol && tok->kind == TK_HASH; }
 
 // Some preprocessor directives such as #include allow extraneous
 // tokens before newline. This function skips such tokens.
 static Token *skip_line(Token *tok) {
-    if (tok->is_sol || tok->kind == TK_EOF) return tok;
+    if (tok->is_sol) return tok;
     diag("warning", tok, "extra token");
-    while (!tok->is_sol && tok->kind != TK_EOF) tok = tok->next;
+    while (!tok->is_sol) tok = tok->next;
     return tok;
 }
 
@@ -94,19 +94,8 @@ static Token *new_eof(Token *tok) {
     Token *t = copy_token(tok);
     t->kind = TK_EOF;
     t->len = 0;
+    t->is_sol = true;
     return t;
-}
-
-// Append tok2 to the end of tok1.
-Token *append(Token *tok1, Token *tok2) {
-    if (!tok1 || tok1->kind == TK_EOF) return tok2;
-
-    Token dummy = {};
-    Token *cur = &dummy;
-
-    for (; tok1 && tok1->kind != TK_EOF; tok1 = tok1->next) cur = cur->next = copy_token(tok1);
-    cur->next = tok2;
-    return dummy.next;
 }
 
 // Double-quote a given string and returns it.
@@ -130,44 +119,54 @@ static char *quote_string(char *str) {
 }
 
 static Token *new_str_token(char *str, Token *tmpl) {
-    char *buf = quote_string(str);
-    SrcFile *file = new_file(tmpl->file->name, tmpl->file->file_no, buf);
-    Token *tok = tokenize(file, tmpl->line, tmpl->col);
-    tok->is_sol = false;
-    tok->is_leadingws = false;
-    return tok;
+    Token *new = copy_token(tmpl);
+    int len = strlen(str);
+    new->kind = TK_STRLIT;
+    new->id = intern(str, len);
+    new->ty = array_of(ty_char, len + 1);
+    char *q_str = quote_string(str);
+    new->loc = q_str;
+    new->len = strlen(q_str);
+    new->origin = tmpl;
+    return new;
 }
 
-// Copy all tokens until the next newline, terminate them with
-// an EOF token and then returns them. This function is used to
-// create a new list of tokens for `#if` arguments.
-static Token *copy_line(Token **rest, Token *tok) {
+// Consume all tokens until a newline or EOF taking ownership of them.
+// Terminate them with an EOF token and then returns them.
+// Used for constructing macro bodies and #if, #error, and #warning directives.
+static Token *read_line(Token **rest, Token *tok) {
     Token dummy = {};
     Token *cur = &dummy;
 
-    for (; tok && !tok->is_sol && tok->kind != TK_EOF; tok = tok->next) cur = cur->next = copy_token(tok);
+    for (; !tok->is_sol; tok = tok->next) cur = cur->next = tok;
 
     cur->next = new_eof(tok);
     *rest = tok;
     return dummy.next;
 }
 
-static void ident_to_num(Token *tok, int64_t val) {
-    tok->kind = TK_NUM;
-    tok->val = val;
-    tok->ty = ty_long;
+static Token *ident_to_num(Token *tok, int64_t val) {
+    Token *new = copy_token(tok);
+    new->kind = TK_NUM;
+    new->val = val;
+    new->ty = ty_long;
+    char *fmt = format("%ld", val);
+    new->loc = fmt;
+    new->len = strlen(fmt);
+    new->origin = tok;
+    return new;
 }
 
 static uint32_t defined_id;
 static Token *read_const_expr(Token **rest, Token *tok) {
-    tok = copy_line(rest, tok);
+    tok = read_line(rest, tok);
 
     Token dummy = {};
     Token *cur = &dummy;
 
     if (!defined_id) defined_id = intern("defined", 7);
 
-    while (tok->kind != TK_EOF) {
+    while (tok) {
         // "defined(foo)" or "defined foo" becomes "1" if macro "foo"
         // is defined. Otherwise "0".
         if (tok->kind == TK_IDENT && tok->id == defined_id) {
@@ -180,8 +179,7 @@ static Token *read_const_expr(Token **rest, Token *tok) {
 
             if (has_paren) tok = skip(tok, TK_RPAREN);
 
-            ident_to_num(start, m ? 1 : 0);
-            cur = cur->next = start;
+            cur = cur->next = ident_to_num(start, m ? 1 : 0);
             continue;
         }
 
@@ -189,7 +187,6 @@ static Token *read_const_expr(Token **rest, Token *tok) {
         tok = tok->next;
     }
 
-    cur->next = tok;
     return dummy.next;
 }
 
@@ -206,8 +203,15 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
     expr = dummy.next;
 
     // we replace remaining non-macro identifiers with "0"
-    for (Token *t = expr; t->kind != TK_EOF; t = t->next)
-        if (t->kind == TK_IDENT) ident_to_num(t, 0);
+    Token dummy2 = {};
+    cur = &dummy2;
+    for (Token *t = expr; t; t = t->next) {
+        if (t->kind == TK_IDENT)
+            cur = cur->next = ident_to_num(t, 0);
+        else
+            cur = cur->next = t;
+    }
+    expr = dummy2.next;
 
     convert_pptoken(expr);
     for (Token *t = expr; t->kind != TK_EOF; t = t->next)
@@ -338,14 +342,14 @@ static void read_macro_definition(Token **rest, Token *tok) {
         MacroParam *params = read_macro_params(&tok, tok->next, &is_variadic);
         if (!tok->is_sol && !tok->is_leadingws)
             diag("warning", tok, "ISO C99 requires whitespace after the macro name");
-        Macro *m = add_macro(name->id, false, copy_line(rest, tok));
+        Macro *m = add_macro(name->id, false, read_line(rest, tok));
         m->params = params;
         m->is_variadic = is_variadic;
     } else {
         // Object-like macro
         if (!tok->is_sol && !tok->is_leadingws)
             diag("warning", tok, "ISO C99 requires whitespace after the macro name");
-        add_macro(name->id, true, copy_line(rest, tok));
+        add_macro(name->id, true, read_line(rest, tok));
     }
 }
 
@@ -364,7 +368,7 @@ static MacroArg *read_macro_arg_one(Token **rest, Token *tok, bool read_rest) {
             level++;
         else if (tok->kind == TK_RPAREN)
             level--;
-        cur = cur->next = copy_token(tok);
+        cur = cur->next = tok;
         tok = tok->next;
     }
 
@@ -437,12 +441,12 @@ static char *join_tokens(Token *tok) {
 
 // Concatenates all tokens in `arg` and returns a new string token.
 // This function is used for the stringizing operator (#).
-static Token *stringize(Token *hash, Token *arg) {
+static Token *stringize(Token *arg) {
     // Create a new string token. We need to set some value to its
     // source location for error reporting function, so we use a macro
     // name token as a template.
     char *s = join_tokens(arg);
-    return new_str_token(s, hash);
+    return new_str_token(s, arg);
 }
 
 // Concatenate two tokens to create a new token.
@@ -471,7 +475,7 @@ static Token *subst(Token *tok, MacroArg *args) {
         if (tok->kind == TK_HASH) {
             MacroArg *arg = find_arg(args, tok->next);
             if (!arg) error(tok->next, "'#' is not followed by a macro parameter");
-            cur = cur->next = stringize(tok, arg->tok);
+            cur = cur->next = stringize(arg->tok);
             tok = tok->next->next;
             continue;
         }
@@ -554,19 +558,19 @@ static Token *expand_macro(Token *dst, Token *list) {
     Token *cur = list;
     while (cur && cur->kind != TK_EOF) {
         if (cur->noexpand || cur->kind != TK_IDENT) {
-            dst = dst->next = copy_token(cur);
+            dst = dst->next = cur;
             cur = cur->next;
             continue;
         }
         if (is_disabled(cur->id)) {
-            dst = dst->next = copy_token(cur);
+            dst = dst->next = cur;
             cur = cur->next;
             continue;
         }
 
         Macro *m = find_macro(cur);
         if (!m) {
-            dst = dst->next = copy_token(cur);
+            dst = dst->next = cur;
             cur = cur->next;
             continue;
         }
@@ -597,7 +601,7 @@ static Token *expand_macro(Token *dst, Token *list) {
         // If a funclike macro token is not followed by an argument list,
         // treat it as a normal identifier.
         if (!cur->next || cur->next->kind != TK_LPAREN || cur->next->is_leadingws) {
-            dst = dst->next = copy_token(cur);
+            dst = dst->next = cur;
             cur = cur->next;
             continue;
         }
@@ -618,6 +622,7 @@ static Token *expand_macro(Token *dst, Token *list) {
 
         continue;
     }
+    dst->next = NULL;
     return dst;
 }
 
@@ -662,7 +667,7 @@ static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
     // a single string token or a sequence of "<" ... ">".
     if (tok->kind == TK_IDENT) {
         Token dummy = {}, *cur = &dummy;
-        cur = expand_macro(cur, copy_line(rest, tok));
+        cur = expand_macro(cur, read_line(rest, tok));
         cur->next = new_eof(cur);
         return read_include_filename(&cur, dummy.next, is_dquote);
     }
@@ -866,13 +871,13 @@ static Token *preprocess2(Token *tok) {
 
         if (tok->id == dt[P_ERROR].id) {
             Token *err = tok;
-            Token *msg = copy_line(&tok, tok);
+            Token *msg = read_line(&tok, tok);
             error(err, "#%s", join_tokens(msg));
         }
 
         if (tok->id == dt[P_WARNING].id) {
             Token *warn = tok;
-            Token *msg = copy_line(&tok, tok);
+            Token *msg = read_line(&tok, tok);
             diag("warning", warn, "#%s", join_tokens(msg));
             continue;
         }
@@ -956,15 +961,15 @@ static Macro *add_builtin(char *name, char *buf, macro_handler_fn *fn) {
 }
 
 static Token *file_macro(Token *tmpl) {
-    while (tmpl->origin) tmpl = tmpl->origin;
-    return new_str_token(tmpl->file->name, tmpl);
+    Token *orig = tmpl;
+    while (orig->origin) orig = orig->origin;
+    return new_str_token(orig->file->name, tmpl);
 }
 
 static Token *line_macro(Token *tmpl) {
     Token *orig = tmpl;
     while (orig->origin) orig = orig->origin;
-    ident_to_num(tmpl, orig->line);
-    return tmpl;
+    return ident_to_num(tmpl, orig->line);
 }
 
 void init_macros(void) {
@@ -1039,7 +1044,6 @@ void join_adjacent_string_literals(Token *tok1) {
             i = i + t->ty->size - t->ty->base->size;
         }
 
-        *tok1 = *copy_token(tok1);
         tok1->ty = array_of(tok1->ty->base, len);
         tok1->id = intern(buf, len);
         tok1->next = tok2;

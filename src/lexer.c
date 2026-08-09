@@ -748,7 +748,7 @@ Token *tokenize(SrcFile *file, int line_no, int col_no) {
     }
 
     Token *eof = new_token(TK_EOF, p, p);
-    fill_tok(eof, line, col, false, false);
+    fill_tok(eof, line, col, true, false);
     cur->next = eof;
     return dummy.next;
 }

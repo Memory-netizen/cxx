@@ -361,8 +361,6 @@ int main() {
 
     ASSERT(1, __STDC__);
 
-    ASSERT(1, __STDC__);
-
     // ASSERT(0, strcmp(main_filename1, "test/macro.c"));
     ASSERT(5, main_line1);
     ASSERT(7, main_line2);

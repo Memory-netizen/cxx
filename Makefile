@@ -17,13 +17,12 @@ CC := clang
 
 # Directories
 SRC_DIR := ./src
-TEST_DIR := ./test
 BUILD_DIR := ./build
 
 # Source files
 SRCS := $(wildcard $(SRC_DIR)/*.c)
 OBJS := $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(SRCS))
-TEST_SRCS := $(wildcard $(TEST_DIR)/*.c)
+TEST_SRCS := $(wildcard test/*.c)
 TESTS := $(TEST_SRCS:.c=.out)
 
 HDRS := $(wildcard $(SRC_DIR)/*.h)
@@ -45,16 +44,16 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c ; $(c_recipe)
 
 .PHONY: test clean linecnt fmt
 
-$(TEST_DIR)/%.out: $(TARGET) $(TEST_DIR)/%.c
-	./$(TARGET) -I$(TEST_DIR) -c -o $(TEST_DIR)/$*.o $(TEST_DIR)/$*.c
-	$(CC) -o $@ $(TEST_DIR)/$*.o -xc test/common
+test/%.out: $(TARGET) test/%.c
+	./$(TARGET) -Itest -c -o test/$*.o test/$*.c
+	$(CC) -o $@ test/$*.o -xc test/common
 
 test: $(TARGET) $(TESTS)
 	@for i in $(TESTS); do echo "Running $$i"; $$i || exit 1; echo; done
-	@bash $(TEST_DIR)/driver.sh ./cxx
+	@bash test/driver.sh ./cxx
 
 clean:
-	-rm -rf $(TARGET) $(BUILD_DIR) $(TEST_DIR)/*.out $(TEST_DIR)/*.ll $(TEST_DIR)/*.o
+	-rm -rf $(TARGET) $(BUILD_DIR) test/*.out test/*.ll test/*.o
 
 linecnt:
 	@echo "Total lines of code (excluding blank lines and // comments):"
