@@ -76,8 +76,14 @@ void dump_tokens(Token *tok) {
         fprintf(stdout, "%-20s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok->loc);
         if (tok->is_sol) fprintf(stdout, " [StartOfLine]");
         if (tok->is_leadingws) fprintf(stdout, " [LeadingSpace]");
-        fprintf(stdout, "   Loc=<%s:%d:%d>\n", orig->file->name, line, col);
+        fprintf(stdout, "   Loc=<%s:%d:%d", orig->file->name, line, col);
 
+        if (tok->origin) {
+            get_location(tok->file, tok->loc, &line, &col);
+            fprintf(stdout, " <Spelling=%s:%d:%d>>\n", tok->file->name, line, col);
+        } else {
+            fprintf(stdout, ">\n");
+        }
         tok = tok->next;
     }
     int line, col;

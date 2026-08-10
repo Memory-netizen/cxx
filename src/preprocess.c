@@ -1,5 +1,6 @@
 #include "cxx.h"
 
+struct tm *tm;
 static Token *expand_macro(Token *dst, Token *list);
 typedef struct Macro Macro;
 static Macro *find_macro(Token *tok);
@@ -118,6 +119,7 @@ static char *quote_string(char *str) {
     return buf;
 }
 
+static void write_scratch_space(Token *tok, char *str);
 static Token *new_str_token(char *str, Token *tmpl) {
     Token *new = copy_token(tmpl);
     int len = strlen(str);
@@ -125,9 +127,19 @@ static Token *new_str_token(char *str, Token *tmpl) {
     new->id = intern(str, len);
     new->ty = array_of(ty_char, len + 1);
     char *q_str = quote_string(str);
-    new->loc = q_str;
-    new->len = strlen(q_str);
+    write_scratch_space(new, q_str);
     new->origin = tmpl;
+    return new;
+}
+
+static Token *ident_to_num(Token *tok, int64_t val) {
+    Token *new = copy_token(tok);
+    new->kind = TK_NUM;
+    new->val = val;
+    new->ty = ty_long;
+    char *fmt = format("%ld", val);
+    write_scratch_space(new, fmt);
+    new->origin = tok;
     return new;
 }
 
@@ -143,18 +155,6 @@ static Token *read_line(Token **rest, Token *tok) {
     cur->next = new_eof(tok);
     *rest = tok;
     return dummy.next;
-}
-
-static Token *ident_to_num(Token *tok, int64_t val) {
-    Token *new = copy_token(tok);
-    new->kind = TK_NUM;
-    new->val = val;
-    new->ty = ty_long;
-    char *fmt = format("%ld", val);
-    new->loc = fmt;
-    new->len = strlen(fmt);
-    new->origin = tok;
-    return new;
 }
 
 static uint32_t defined_id;
@@ -959,12 +959,9 @@ static void prep_cmdline(void) {
     preprocess2(tok);
 }
 
-static Macro *add_builtin(char *name, char *buf, macro_handler_fn *fn) {
-    Token *tok = NULL;
-    if (buf) tok = tokenize(new_file("<built-in>", 1, buf));
-    Macro *m = add_macro(intern(name, strlen(name)), true, tok);
+static Macro *add_builtin(char *name, macro_handler_fn *fn) {
+    Macro *m = add_macro(intern(name, strlen(name)), true, NULL);
     m->handler = fn;
-    m->is_builtin = true;
     return m;
 }
 
@@ -1001,19 +998,65 @@ static Token *timestamp_macro(Token *tmpl) {
     return new_str_token(buf, tmpl);
 }
 
-static Token *base_file_macro(Token *tmpl) { return new_str_token(base_file, tmpl); }
+static Token *base_file_macro(Token *tmpl) {
+    static Token *exist;
+    if (exist) {
+        Token *new = copy_token(exist);
+        new->origin = tmpl;
+        return new;
+    }
+    exist = new_str_token(base_file, tmpl);
+    return exist;
+}
 
 // __DATE__ is expanded to the current date, e.g. "May 17 2020".
-static char *format_date(struct tm *tm) {
+static Token *date_macro(Token *tmpl) {
     static char mon[][4] = {
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     };
-
-    return format("\"%s %2d %d\"", mon[tm->tm_mon], tm->tm_mday, tm->tm_year + 1900);
+    static Token *exist;
+    if (exist) {
+        Token *new = copy_token(exist);
+        new->origin = tmpl;
+        return new;
+    }
+    char buf[32];
+    sprintf(buf, "%s %2d %d", mon[tm->tm_mon], tm->tm_mday, tm->tm_year + 1900);
+    exist = new_str_token(buf, tmpl);
+    return exist;
 }
 
 // __TIME__ is expanded to the current time, e.g. "13:34:03".
-static char *format_time(struct tm *tm) { return format("\"%02d:%02d:%02d\"", tm->tm_hour, tm->tm_min, tm->tm_sec); }
+static Token *time_macro(Token *tmpl) {
+    static Token *exist;
+    if (exist) {
+        Token *new = copy_token(exist);
+        new->origin = tmpl;
+        return new;
+    }
+    char buf[32];
+    sprintf(buf, "%02d:%02d:%02d", tm->tm_hour, tm->tm_min, tm->tm_sec);
+    exist = new_str_token(buf, tmpl);
+    return exist;
+}
+
+SrcFile *scratch;
+static void init_scratch_space(void) {
+    char *scratch_space = vnew(4096, sizeof(char));
+    scratch_space[0] = '\n';
+    scratch = new_file("<scratch space>", 1, scratch_space);
+}
+
+static void write_scratch_space(Token *tok, char *str) {
+    static int space_pos = 1;
+    int len = strlen(str);
+    scratch->contents = vgrow(scratch->contents, space_pos + len + 1);
+    sprintf(scratch->contents + space_pos, "%s\n", str);
+    tok->file = scratch;
+    tok->loc = scratch->contents + space_pos;
+    tok->len = len;
+    space_pos += len + 1;
+}
 
 static char built_in[] = {
     "#define _LP64 1\n"
@@ -1062,20 +1105,23 @@ static void prep_builtin(void) {
 
 void init_macros(void) {
     // Define predefined macros
+    time_t now = time(NULL);
+    tm = localtime(&now);
+
     prep_builtin();
 
-    add_builtin("__FILE__", NULL, file_macro);
-    add_builtin("__LINE__", NULL, line_macro);
-    add_builtin("__COUNTER__", NULL, counter_macro);
-    add_builtin("__TIMESTAMP__", NULL, timestamp_macro);
-    add_builtin("__BASE_FILE__", NULL, base_file_macro);
+    add_builtin("__FILE__", file_macro);
+    add_builtin("__LINE__", line_macro);
+    add_builtin("__COUNTER__", counter_macro);
+    add_builtin("__TIMESTAMP__", timestamp_macro);
+    add_builtin("__BASE_FILE__", base_file_macro);
 
-    time_t now = time(NULL);
-    struct tm *tm = localtime(&now);
-    add_builtin("__DATE__", format_date(tm), NULL);
-    add_builtin("__TIME__", format_time(tm), NULL);
+    add_builtin("__DATE__", date_macro);
+    add_builtin("__TIME__", time_macro);
 
     for (Macro *m = macros; m; m = m->next) m->is_builtin = true;
+
+    init_scratch_space();
 }
 
 // Translation phases 6.

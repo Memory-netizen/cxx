@@ -784,7 +784,6 @@ SrcFile *new_file(char *name, int file_no, char *contents) {
     file->name = name;
     file->file_no = file_no;
     file->contents = contents;
-    file->size = strlen(contents);
     return file;
 }
 
@@ -840,6 +839,7 @@ void build_line_offsets(SrcFile *f) {
     while (*p)
         if (*p++ == '\n') count++;
 
+    f->size = p - f->contents;
     f->num_lines = count;
 
     f->line_offsets = emalloc(sizeof(uint32_t) * count);
@@ -857,6 +857,8 @@ void get_location(SrcFile *f, char *loc, int *out_line, int *out_col) {
         *out_col = 1;
         return;
     }
+
+    build_line_offsets(f);
 
     uint32_t offset = (uint32_t)(loc - f->contents);
 
@@ -893,7 +895,6 @@ Token *tokenize_file(char *path) {
 
     static int file_no = 0;
     SrcFile *file = new_file(path, file_no + 1, p);
-    build_line_offsets(file);
 
     if (!input_files)
         input_files = vnew(2, sizeof(SrcFile *));
