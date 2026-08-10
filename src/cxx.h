@@ -99,6 +99,10 @@ bool file_exists(char *path);
 
 enum {
     TK_EOF,
+    TK_NL,
+    TK_WS,
+    TK_COMMENT,
+    TK_LINE,
     TK_PUNCT,
     TK_COMMA,  // ,
     TK_AS,     // =

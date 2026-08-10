@@ -9,7 +9,7 @@ static SrcFile **input_files;
 static int line;
 static int col;
 static bool is_leadingws = false;
-static bool is_sol = false;
+static bool is_sol = true;
 
 // Attempt to match the given token type
 // If matched, consume the token and return true;

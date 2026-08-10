@@ -695,8 +695,17 @@ static Token *include_file(Token *tok, char *path, Token *filename_tok) {
     return tok2;
 }
 
+static Token *new_linemarker(Token *tmpl, int line, uint32_t filename) {
+    Token *linemarker = copy_token(tmpl);
+    linemarker->kind = TK_LINE;
+    linemarker->val = line;
+    linemarker->filename = filename;
+    linemarker->is_sol = true;
+    return linemarker;
+}
+
 // Read #line arguments
-static void read_line_marker(Token **rest, Token *tok) {
+static Token *read_line_marker(Token **rest, Token *tok) {
     Token *start = tok;
     tok = read_line(rest, tok->next);
     if (tok->kind != TK_PPNUM) error(start, "#line directive requires a positive integer argument");
@@ -717,10 +726,11 @@ static void read_line_marker(Token **rest, Token *tok) {
     line_delta = line_no - line - 1;
 
     tok = tok->next;
-    if (tok->kind == TK_EOF) return;
 
-    if (tok->kind != TK_STRLIT) error(tok, "filename expected");
-    display_name = tok->id;
+    if (tok->kind != TK_EOF && tok->kind != TK_STRLIT) error(tok, "filename expected");
+    if (tok->kind == TK_STRLIT) display_name = tok->id;
+
+    return new_linemarker(start, line_no, display_name);
 }
 
 typedef enum {
@@ -759,6 +769,7 @@ static Token *preprocess2(Token *tok) {
     if (!dt[0].id) {
         for (size_t i = 0; i < P_CNT; ++i) dt[i].id = intern(dt[i].directive, strlen(dt[i].directive));
     }
+    int line, col;
     Token dummy = {};
     Token *cur = &dummy;
     push_cond_incl(tok, BLOCK_ACTIVE);
@@ -766,11 +777,15 @@ static Token *preprocess2(Token *tok) {
     line_delta = 0;
     display_name = cur_file->id;
 
+    cur = cur->next = new_linemarker(tok, 1, display_name);
+
     while (1) {
         if (tok->kind == TK_EOF) {
             if (cond_incl->next) error(cond_incl->if_tok, "unterminated conditional directive");
             if (include_depth > 0) {
                 tok = pop_file();
+                get_location(tok->file, tok->loc, &line, &col);
+                cur = cur->next = new_linemarker(tok, line + line_delta, display_name);
                 continue;
             } else {
                 break;
@@ -892,11 +907,18 @@ static Token *preprocess2(Token *tok) {
                 char *path = format("%s/%s", dirname(strdup(tk_hash->file->name)), filename);
                 if (file_exists(path)) {
                     tok = include_file(tok, path, tk_hash->next->next);
+
+                    get_location(tok->file, tok->loc, &line, &col);
+                    cur = cur->next = new_linemarker(tok, line + line_delta, display_name);
                     continue;
                 }
             }
+
             char *path = search_include_paths(filename);
             tok = include_file(tok, path ? path : filename, tk_hash->next->next);
+
+            get_location(tok->file, tok->loc, &line, &col);
+            cur = cur->next = new_linemarker(tok, line + line_delta, display_name);
             continue;
         }
 
@@ -931,7 +953,12 @@ static Token *preprocess2(Token *tok) {
         }
 
         if (tok->id == dt[P_LINE].id) {
-            read_line_marker(&tok, tok);
+            cur = cur->next = read_line_marker(&tok, tok);
+            continue;
+        }
+
+        if (tok->kind == TK_PPNUM) {
+            cur = cur->next = read_line_marker(&tok, tk_hash);
             continue;
         }
 

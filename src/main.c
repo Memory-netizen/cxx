@@ -258,11 +258,28 @@ static void print_tokens(Token *tok) {
     int line = 1;
     for (; tok->kind != TK_EOF; tok = tok->next) {
         if (line > 1 && tok->is_sol) fprintf(out, "\n");
+        if (tok->kind == TK_LINE) {
+            fprintf(out, "# %lu \"%s\"", tok->val, str(tok->filename));
+            line++;
+            continue;
+        }
         if (tok->is_leadingws) fprintf(out, " ");
         fprintf(out, "%.*s", (int)tok->len, tok->loc);
         line++;
     }
     fprintf(out, "\n");
+}
+
+static Token *filter_tokens(Token *tok) {
+    Token dummy = {}, *cur = &dummy;
+    for (; tok; tok = tok->next) {
+        if (tok->kind == TK_LINE) continue;
+        if (tok->kind == TK_WS) continue;
+        if (tok->kind == TK_NL) continue;
+        if (tok->kind == TK_COMMENT) continue;
+        cur = cur->next = tok;
+    }
+    return dummy.next;
 }
 
 // Stage 1: .c → .ll  (cc1: tokenize + preprocess + parse + irgen)
@@ -281,6 +298,9 @@ static void cc1(void) {
         print_tokens(tok);
         return;
     }
+
+    tok = filter_tokens(tok);
+
     join_adjacent_string_literals(tok);
 
     Module *prog = parse(tok);

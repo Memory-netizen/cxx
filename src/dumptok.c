@@ -5,6 +5,10 @@ static const char *token_kind_name(uint32_t kind) {
     if (kind >= TK_KEYWORD) return "keyword";
 
     static const char *table[] = {
+        [TK_NL] = "new line",
+        [TK_WS] = "white space",
+        [TK_COMMENT] = "comment",
+        [TK_LINE] = "linemaker",
         [TK_PUNCT] = "punctuator",
         [TK_COMMA] = "comma",
         [TK_AS] = "equal",
@@ -68,6 +72,10 @@ static const char *token_kind_name(uint32_t kind) {
 
 void dump_tokens(Token *tok) {
     while (tok && tok->kind != TK_EOF) {
+        if (tok->kind == TK_LINE) {
+            tok = tok->next;
+            continue;
+        }
         int line, col;
         Token *orig = tok;
         while (orig->origin) orig = orig->origin;
