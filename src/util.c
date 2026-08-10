@@ -17,6 +17,9 @@ void fatal(char *fmt, ...) {
 
 static void emit_diag(char *level, SrcFile *diagfile, int line_no, char *loc, const char *msg, va_list ap) {
     // Find a line containing `loc`.
+    int line1, col1;
+    get_location(diagfile, loc, &line1, &col1);
+
     char *line = loc;
     char *p = diagfile->contents;
     while (p < line && line[-1] != '\n') line--;
@@ -49,24 +52,27 @@ void error(Token *tok, const char *msg, ...) {
     Token *orig = tok;
     while (orig->origin) orig = orig->origin;
     get_location(orig->file, orig->loc, &line, &col);
-    emit_diag("error", tok->file, line, tok->loc, msg, ap);
+    emit_diag("error", orig->file, line, orig->loc, msg, ap);
     va_end(ap);
     exit(1);
 }
 
-void error_at(int line_no, char *loc, const char *msg, ...) {
+void error_at(SrcFile *file, char *loc, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-
-    emit_diag("error", cur_file, line_no, loc, msg, ap);
+    int line, col;
+    get_location(file, loc, &line, &col);
+    emit_diag("error", file, line, loc, msg, ap);
     va_end(ap);
     exit(1);
 }
 
-void diag_at(char *level, int line_no, char *loc, const char *msg, ...) {
+void diag_at(char *level, SrcFile *file, char *loc, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    emit_diag(level, cur_file, line_no, loc, msg, ap);
+    int line, col;
+    get_location(file, loc, &line, &col);
+    emit_diag(level, file, line, loc, msg, ap);
     va_end(ap);
 }
 

@@ -41,6 +41,7 @@ struct FileStack {
     Token *rest;
 };
 
+static SrcFile *cur_file;
 static int line_delta;
 static uint32_t display_name;
 static FileStack *file_stack[256];
@@ -802,6 +803,7 @@ static Token *preprocess2(Token *tok) {
                 if (concat) {
                     tok->line_delta = line_delta;
                     tok->filename = display_name;
+                    if (tok->is_broken) error(tok, tok->msg);
                     buf = buf->next = tok;
                 }
                 tok = tok->next;

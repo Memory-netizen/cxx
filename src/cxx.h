@@ -51,7 +51,6 @@ typedef struct Member Member;
 typedef struct EnumVal EnumVal;
 typedef struct Initializer Initializer;
 
-extern SrcFile *cur_file;
 extern Type *ty_void;
 extern Type *ty_nullptr;
 extern Type *ty_bool;
@@ -800,9 +799,9 @@ void fold_ast(Module *prog);
 //
 
 void fatal(char *fmt, ...);
-void error_at(int line_no, char *loc, const char *msg, ...);
+void error_at(SrcFile *file, char *loc, const char *msg, ...);
 void error(Token *tok, const char *msg, ...);
-void diag_at(char *level, int line_no, char *loc, const char *msg, ...);
+void diag_at(char *level, SrcFile *file, char *loc, const char *msg, ...);
 void diag(char *level, Token *tok, const char *msg, ...);
 void diag_exit(char *level, Token *tok, const char *msg, ...);
 

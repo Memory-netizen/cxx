@@ -2,12 +2,10 @@
 #include "pow_table.h"
 
 // Input file
-SrcFile *cur_file = NULL;
+static SrcFile *cur_file;
 // A list of all input files.
 static SrcFile **input_files;
 
-static int line;
-static int col;
 static bool is_leadingws = false;
 static bool is_sol = true;
 
@@ -82,7 +80,6 @@ static int read_punct(char *p, Token *tok) {
 static Token *new_token(uint32_t kind, char *start, char *end) {
     Token *tok = emalloc(sizeof(Token));
     tok->kind = kind;
-    tok->file = cur_file;
     tok->loc = start;
     tok->len = end - start;
     tok->file = cur_file;
@@ -113,7 +110,7 @@ static int read_escaped_char(char **new_pos, char *p) {
     if (*p == 'x') {
         // Read a hexadecimal number.
         p++;
-        if (!isxdigit(*p)) error_at(line, p, "invalid hex escape sequence");
+        if (!isxdigit(*p)) error_at(cur_file, p, "invalid hex escape sequence");
 
         int c = 0;
         for (; isxdigit(*p); p++) c = (c << 4) + from_hex(*p);
@@ -148,8 +145,9 @@ static int read_escaped_char(char **new_pos, char *p) {
 
 // Find a closing double-quote.
 static char *string_literal_end(char *p) {
-    for (char *start = p++; *p != '"'; p++) {
-        if (*p == '\n' || *p == '\0') error_at(line, start, "missing terminating \" character");
+    p++;
+    for (; *p != '"'; p++) {
+        if (*p == '\n' || *p == '\0') return NULL;
         if (*p == '\\') p++;
     }
     return p;
@@ -157,7 +155,8 @@ static char *string_literal_end(char *p) {
 
 static Token *read_string_literal(char *start) {
     char *end = string_literal_end(start);
-    char buf[end - start];
+    if (!end) goto error;
+    char *buf = emalloc(end - start);
     int len = 0;
 
     for (char *p = start + 1; p < end;) {
@@ -171,11 +170,18 @@ static Token *read_string_literal(char *start) {
     tok->ty = array_of(ty_char, len + 1);
     tok->id = intern(buf, len);
     return tok;
+error:
+    end = start;
+    while (*end != '\n') end++;
+    tok = new_token(TK_STRLIT, start, end + 1);
+    tok->is_broken = true;
+    tok->msg = "missing terminating \" character";
+    return tok;
 }
 
 static Token *read_char_literal(char *start, char *quote) {
     char *p = quote + 1;
-    if (*p == '\0') error_at(line, start, "unclosed char literal");
+    if (*p == '\0') goto error;
     int c;
     if (*p == '\\')
         c = read_escaped_char(&p, p + 1);
@@ -183,10 +189,15 @@ static Token *read_char_literal(char *start, char *quote) {
         c = (unsigned char)*p++;
 
     char *end = strchr(p, '\'');
-    if (!end) error_at(line, p, "unclosed char literal");
+    if (!end) goto error;
 
     Token *tok = new_token(TK_NUM, start, end + 1);
     tok->val = c;
+    return tok;
+error:
+    tok = new_token(TK_NUM, start, start + 1);
+    tok->is_broken = true;
+    tok->msg = "unclosed char literal";
     return tok;
 }
 
@@ -326,8 +337,7 @@ void convert_pp_number(Token *t) {
                     break;
             }
             text += 2;
-            if (!is_valid_digit(*text, base))
-                error_at(line, text, "invalid suffix ‘%.*s’ on integer constant", end - text, text);
+            if (!is_valid_digit(*text, base)) error(t, "invalid suffix ‘%.*s’ on integer constant", end - text, text);
         }
     } else if (first_ch == '.') {
         clean[ci++] = '0';  // canonicalize
@@ -512,12 +522,6 @@ error:
     error(t, "invalid suffix ‘%.*s’ on constant", end - text, text);
 }
 
-// Advance col, tracking newlines.
-static inline void advance_col(int *line, int *col, int n) {
-    *col += n;
-    (void)line;
-}
-
 void convert_pptoken(Token *tok) {
     static struct {
         char *keyword;
@@ -608,12 +612,11 @@ Token *tokenize(SrcFile *file) {
     cur_file = file;
     char *p = file->contents;
 
-    line = 1;
-    col = 1;
     is_sol = true;
     is_leadingws = false;
 
     Token dummy = {}, *cur = &dummy;
+    Token *tok;
 
     while (*p) {
         // Skip whitespace and comments.
@@ -622,11 +625,7 @@ Token *tokenize(SrcFile *file) {
             if (start_with(p, "//")) {
                 is_leadingws = true;
                 p += 2;
-                col += 2;
-                while (*p != '\n' && *p != '\0') {
-                    p++;
-                    col++;
-                }
+                while (*p != '\n') p++;
                 continue;
             }
 
@@ -634,14 +633,12 @@ Token *tokenize(SrcFile *file) {
             if (start_with(p, "/*")) {
                 is_leadingws = true;
                 char *q = strstr(p + 2, "*/");
-                if (!q) error_at(line, p, "unterminated /* comment");
-                for (char *r = p; r < q + 2; r++) {
-                    if (*r == '\n') {
-                        line++;
-                        col = 1;
-                    } else {
-                        col++;
-                    }
+                if (!q) {
+                    tok = new_token(TK_COMMENT, p, p);
+                    tok->is_broken = true;
+                    tok->msg = "unterminated /* comment";
+                    cur = cur->next = tok;
+                    goto end;
                 }
                 p = q + 2;
                 continue;
@@ -650,15 +647,12 @@ Token *tokenize(SrcFile *file) {
             if (*p == '\n') {
                 is_leadingws = false;
                 is_sol = true;
-                line++;
-                col = 1;
                 p++;
                 continue;
             }
 
             if (isspace(*p)) {
                 is_leadingws = true;
-                col++;
                 p++;
                 continue;
             }
@@ -668,14 +662,11 @@ Token *tokenize(SrcFile *file) {
 
         if (*p == '\0') break;
 
-        Token *tok;
-
         // Numeric literal
         if (isdigit(*p) || (*p == '.' && isdigit(p[1]))) {
             tok = read_int_literal(p);
             cur = cur->next = tok;
             p += tok->len;
-            advance_col(&line, &col, tok->len);
             continue;
         }
 
@@ -684,7 +675,6 @@ Token *tokenize(SrcFile *file) {
             tok = read_string_literal(p);
             cur = cur->next = tok;
             p += tok->len;
-            advance_col(&line, &col, tok->len);
             continue;
         }
 
@@ -693,7 +683,6 @@ Token *tokenize(SrcFile *file) {
             tok = read_char_literal(p, p);
             cur = cur->next = tok;
             p += tok->len;
-            advance_col(&line, &col, tok->len);
             continue;
         }
 
@@ -702,7 +691,6 @@ Token *tokenize(SrcFile *file) {
             tok = read_char_literal(p, p + 1);
             cur = cur->next = tok;
             p += tok->len;
-            advance_col(&line, &col, tok->len);
             continue;
         }
 
@@ -715,7 +703,6 @@ Token *tokenize(SrcFile *file) {
             tok = new_token(TK_IDENT, start, p);
             tok->id = intern(tok->loc, tok->len);
             cur = cur->next = tok;
-            advance_col(&line, &col, tok->len);
             continue;
         }
 
@@ -725,7 +712,6 @@ Token *tokenize(SrcFile *file) {
             tok->len = read_punct(p, tok);
             cur = cur->next = tok;
             p += tok->len;
-            advance_col(&line, &col, tok->len);
             continue;
         }
 
@@ -733,9 +719,9 @@ Token *tokenize(SrcFile *file) {
         tok = new_token(TK_OTHER, p, p + 1);
         cur = cur->next = tok;
         p += tok->len;
-        advance_col(&line, &col, tok->len);
         continue;
     }
+end:
 
     Token *eof = new_token(TK_EOF, p, p);
     cur->next = eof;
@@ -767,9 +753,10 @@ static char *read_file(char *path) {
     }
 
     if (fp != stdin) fclose(fp);
+    fflush(out);
 
     // Make sure that the last line is properly terminated with '\n'.
-    fflush(out);
+    if (buflen > 0 && buf[buflen - 1] == '\\') fatal("stray ‘\\’ at end of file");
     if (buflen == 0 || buf[buflen - 1] != '\n') fputc('\n', out);
     fputc('\0', out);
     fclose(out);
