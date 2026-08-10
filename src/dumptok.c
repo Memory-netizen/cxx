@@ -5,8 +5,8 @@ static const char *token_kind_name(uint32_t kind) {
     if (kind >= TK_KEYWORD) return "keyword";
 
     static const char *table[] = {
-        [TK_NL] = "new line",
-        [TK_WS] = "white space",
+        [TK_NL] = "new_line",
+        [TK_WS] = "white_space",
         [TK_COMMENT] = "comment",
         [TK_LINE] = "linemaker",
         [TK_PUNCT] = "punctuator",
@@ -70,21 +70,44 @@ static const char *token_kind_name(uint32_t kind) {
     return name ? name : "unknown";
 }
 
-void dump_tokens(Token *tok) {
+void dump_raw_tokens(Token *tok) {
     while (tok && tok->kind != TK_EOF) {
-        if (tok->kind == TK_LINE) {
-            tok = tok->next;
+        int line, col;
+        get_location(tok->file, tok->loc, &line, &col);
+
+        fprintf(stdout, "%-16s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok->loc);
+        if (tok->is_sol) fprintf(stdout, " [StartOfLine]");
+        fprintf(stdout, "  Loc=<%s:%d:%d>\n", str(tok->filename), line, col);
+
+        tok = tok->next;
+    }
+    int line, col;
+    get_location(tok->file, tok->loc, &line, &col);
+    fprintf(stdout, "%-16s ‘’   Loc=<%s:%d:%d>\n", "eof", str(tok->filename), line, col);
+}
+
+void dump_tokens(Token *tok) {
+    int line, col;
+    bool is_leadingws = false;
+    for (; tok && tok->kind != TK_EOF; tok = tok->next) {
+        if (tok->kind == TK_LINE || tok->kind == TK_NL) continue;
+
+        if (tok->kind == TK_WS || tok->kind == TK_COMMENT) {
+            is_leadingws = true;
             continue;
         }
-        int line, col;
+
         Token *orig = tok;
         while (orig->origin) orig = orig->origin;
         get_location(orig->file, orig->loc, &line, &col);
 
-        fprintf(stdout, "%-20s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok->loc);
+        fprintf(stdout, "%-16s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok->loc);
         if (tok->is_sol) fprintf(stdout, " [StartOfLine]");
-        if (tok->is_leadingws) fprintf(stdout, " [LeadingSpace]");
-        fprintf(stdout, "   Loc=<%s:%d:%d", str(orig->filename), line + orig->line_delta, col);
+        if (is_leadingws) {
+            fprintf(stdout, " [LeadingSpace]");
+            is_leadingws = false;
+        }
+        fprintf(stdout, "  Loc=<%s:%d:%d", str(orig->filename), line + orig->line_delta, col);
 
         if (tok->origin) {
             get_location(tok->file, tok->loc, &line, &col);
@@ -92,9 +115,8 @@ void dump_tokens(Token *tok) {
         } else {
             fprintf(stdout, ">\n");
         }
-        tok = tok->next;
     }
-    int line, col;
+
     get_location(tok->file, tok->loc, &line, &col);
-    fprintf(stdout, "%-20s ‘’   Loc=<%s:%d:%d>\n", "eof", str(tok->filename), line + tok->line_delta, col);
+    fprintf(stdout, "%-16s ‘’   Loc=<%s:%d:%d>\n", "eof", str(tok->filename), line + tok->line_delta, col);
 }

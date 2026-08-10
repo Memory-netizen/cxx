@@ -234,6 +234,8 @@ enum {
     TK_SWITCH,
     TK_WHILE,
     TK_OTHER,
+    TK_ERR,
+    TK_WARN,
 };
 
 struct Token {
@@ -263,7 +265,8 @@ Token *skip(Token *tok, uint32_t kind);
 Token *tokenize_file(char *filename);
 SrcFile *new_file(char *name, int file_no, char *contents);
 Token *tokenize(SrcFile *file);
-void convert_pptoken(Token *tok);
+void convert_ppnumber(Token *tok);
+void convert_keywords(Token *tok);
 SrcFile **get_input_files(void);
 void get_location(SrcFile *f, char *loc, int *out_line, int *out_col);
 
@@ -791,6 +794,7 @@ struct Module {
 Module *irgen(Module *node);
 void dump_module(Module *module, FILE *out);
 void dump_ast(Module *prog);
+void dump_raw_tokens(Token *tok);
 void dump_tokens(Token *tok);
 void fold_ast(Module *prog);
 

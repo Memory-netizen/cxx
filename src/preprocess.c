@@ -97,6 +97,11 @@ static Token *skip_line(Token *tok) {
     return tok;
 }
 
+static Token *skip_ws(Token *tok) {
+    while (tok->kind == TK_WS || tok->kind == TK_COMMENT) tok = tok->next;
+    return tok;
+}
+
 static Token *copy_token(Token *tok) {
     Token *t = emalloc(sizeof(Token));
     *t = *tok;
@@ -226,7 +231,7 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
     }
     expr = dummy2.next;
 
-    convert_pptoken(expr);
+    convert_ppnumber(expr);
     for (Token *t = expr; t->kind != TK_EOF; t = t->next)
         if (t->kind == TK_NUM && is_flonum(t->ty)) error(t, "floating point literal in preprocessor expression");
 
@@ -801,7 +806,8 @@ static Token *preprocess2(Token *tok) {
                 if (concat) {
                     tok->line_delta = line_delta;
                     tok->filename = display_name;
-                    if (tok->is_broken) error(tok, tok->msg);
+                    if (tok->kind == TK_ERR) error(tok, tok->msg);
+                    if (tok->kind == TK_WARN) warning(tok, tok->msg);
                     buf = buf->next = tok;
                 }
                 tok = tok->next;
@@ -812,7 +818,7 @@ static Token *preprocess2(Token *tok) {
         }
 
         Token *tk_hash = tok;
-        tok = tok->next;
+        tok = skip_ws(tok->next);
 
         // Preprocessing directives that may alter conditional‑frame state
         if (tok->id == dt[P_IF].id) {
@@ -1244,6 +1250,7 @@ Token *preprocess(Token *tok) {
     init_macros();
     prep_cmdline();
     tok = preprocess2(tok);
-    convert_pptoken(tok);
+    convert_keywords(tok);
+    convert_ppnumber(tok);
     return tok;
 }

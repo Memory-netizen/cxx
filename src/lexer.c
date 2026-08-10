@@ -6,7 +6,6 @@ static SrcFile *cur_file;
 // A list of all input files.
 static SrcFile **input_files;
 
-static bool is_leadingws = false;
 static bool is_sol = true;
 
 // Attempt to match the given token type
@@ -83,9 +82,9 @@ static Token *new_token(uint32_t kind, char *start, char *end) {
     tok->loc = start;
     tok->len = end - start;
     tok->file = cur_file;
+    tok->filename = cur_file->id;
     tok->is_sol = is_sol;
-    tok->is_leadingws = is_leadingws;
-    is_sol = is_leadingws = false;
+    is_sol = false;
     return tok;
 }
 
@@ -173,7 +172,7 @@ static Token *read_string_literal(char *start) {
 error:
     end = start;
     while (*end != '\n') end++;
-    tok = new_token(TK_STRLIT, start, end + 1);
+    tok = new_token(TK_ERR, start, end + 1);
     tok->is_broken = true;
     tok->msg = "missing terminating \" character";
     return tok;
@@ -195,7 +194,7 @@ static Token *read_char_literal(char *start, char *quote) {
     tok->val = c;
     return tok;
 error:
-    tok = new_token(TK_NUM, start, start + 1);
+    tok = new_token(TK_ERR, start, start + 1);
     tok->is_broken = true;
     tok->msg = "unclosed char literal";
     return tok;
@@ -308,7 +307,7 @@ static Type *infer_type(uint64_t val, int flags, int base) {
     return ty;
 }
 
-void convert_pp_number(Token *t) {
+static void convert_pp_num(Token *t) {
     t->kind = TK_NUM;
     char *text = t->loc;
     char *end = t->loc + t->len;
@@ -522,7 +521,14 @@ error:
     error(t, "invalid suffix ‘%.*s’ on constant", end - text, text);
 }
 
-void convert_pptoken(Token *tok) {
+void convert_ppnumber(Token *tok) {
+    while (tok->kind != TK_EOF) {
+        if (tok->kind == TK_PPNUM) convert_pp_num(tok);
+        tok = tok->next;
+    }
+}
+
+void convert_keywords(Token *tok) {
     static struct {
         char *keyword;
         uint32_t id;
@@ -602,7 +608,6 @@ void convert_pptoken(Token *tok) {
                     break;
                 }
         }
-        if (tok->kind == TK_PPNUM) convert_pp_number(tok);
         tok = tok->next;
     }
 }
@@ -613,54 +618,62 @@ Token *tokenize(SrcFile *file) {
     char *p = file->contents;
 
     is_sol = true;
-    is_leadingws = false;
 
     Token dummy = {}, *cur = &dummy;
     Token *tok;
+    int inner_nl = 0;
 
     while (*p) {
-        // Skip whitespace and comments.
-        for (;;) {
-            // Skip line comments.
-            if (start_with(p, "//")) {
-                is_leadingws = true;
-                p += 2;
-                while (*p != '\n') p++;
-                continue;
-            }
-
-            // Skip block comments.
-            if (start_with(p, "/*")) {
-                is_leadingws = true;
-                char *q = strstr(p + 2, "*/");
-                if (!q) {
-                    tok = new_token(TK_COMMENT, p, p);
-                    tok->is_broken = true;
-                    tok->msg = "unterminated /* comment";
-                    cur = cur->next = tok;
-                    goto end;
-                }
-                p = q + 2;
-                continue;
-            }
-
-            if (*p == '\n') {
-                is_leadingws = false;
-                is_sol = true;
-                p++;
-                continue;
-            }
-
-            if (isspace(*p)) {
-                is_leadingws = true;
-                p++;
-                continue;
-            }
-
-            break;
+        // Read line comments.
+        if (start_with(p, "//")) {
+            char *q = p + 2;
+            while (*q != '\n') q++;
+            tok = new_token(TK_COMMENT, p, q);
+            cur = cur->next = tok;
+            p = q;
+            continue;
         }
 
-        if (*p == '\0') break;
+        // Read block comments.
+        if (start_with(p, "/*")) {
+            char *q = strstr(p + 2, "*/");
+            if (!q) {
+                tok = new_token(TK_ERR, p, p + 1);
+                tok->is_broken = true;
+                tok->msg = "unterminated /* comment";
+                cur = cur->next = tok;
+                goto end;
+            }
+            char *r = p;
+            while (r < q)
+                if (*r++ == '\n') inner_nl++;
+            tok = new_token(TK_COMMENT, p, q + 2);
+            cur = cur->next = tok;
+            p = q + 2;
+            continue;
+        }
+
+        // Read white space
+        if (isspace(*p)) {
+            char *q = p;
+            int nl = 0;
+            while (isspace(*q)) {
+                if (*q++ == '\n') {
+                    nl++;
+                    continue;
+                }
+            }
+            tok = new_token(TK_WS, p, q);
+            if (nl) {
+                tok->kind = TK_NL;
+                tok->val = nl + inner_nl;
+                inner_nl = 0;
+                is_sol = true;
+            }
+            cur = cur->next = tok;
+            p = q;
+            continue;
+        }
 
         // Numeric literal
         if (isdigit(*p) || (*p == '.' && isdigit(p[1]))) {
@@ -819,7 +832,7 @@ static void canonicalize_newline(char *p) {
     p[j] = '\0';
 }
 
-void build_line_offsets(SrcFile *f) {
+static void build_line_offsets(SrcFile *f) {
     if (!f || f->num_lines > 0) return;
 
     int count = 1;

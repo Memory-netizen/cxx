@@ -287,7 +287,7 @@ static void cc1(void) {
     Token *tok = tokenize_file(base_file);
     if (!tok) fatal("%s: %s", base_file, strerror(errno));
 
-    if (opt_dump_raw_tokens) dump_tokens(tok);
+    if (opt_dump_raw_tokens) dump_raw_tokens(tok);
 
     tok = preprocess(tok);
 
