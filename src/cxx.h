@@ -801,7 +801,7 @@ void fold_ast(Module *prog);
 void fatal(char *fmt, ...);
 void error_at(SrcFile *file, char *loc, const char *msg, ...);
 void error(Token *tok, const char *msg, ...);
-void diag_at(char *level, SrcFile *file, char *loc, const char *msg, ...);
+void warning(Token *tok, const char *msg, ...);
 void diag(char *level, Token *tok, const char *msg, ...);
 void diag_exit(char *level, Token *tok, const char *msg, ...);
 

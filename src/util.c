@@ -15,29 +15,27 @@ void fatal(char *fmt, ...) {
     exit(1);
 }
 
-static void emit_diag(char *level, SrcFile *diagfile, int line_no, char *loc, const char *msg, va_list ap) {
-    // Find a line containing `loc`.
-    int line1, col1;
-    get_location(diagfile, loc, &line1, &col1);
+static void emit_diag(char *level, uint32_t filename, int line_delta, SrcFile *diagfile, char *loc, const char *msg,
+                      va_list ap) {
+    // Find a start containing `loc`.
+    int line, col;
+    get_location(diagfile, loc, &line, &col);
 
-    char *line = loc;
     char *p = diagfile->contents;
-    while (p < line && line[-1] != '\n') line--;
+    char *start = p + diagfile->line_offsets[line - 1];
+    char *end = p + diagfile->line_offsets[line] - 1;
 
-    char *end = loc;
-    while (*end && *end != '\n') end++;
-
-    fprintf(stderr, "%s:%d:%ld: %s: ", diagfile->name, line_no, loc - line + 1, level);
+    fprintf(stderr, "%s:%d:%d: %s: ", str(filename), line + line_delta, col, level);
     vfprintf(stderr, msg, ap);
     fputc('\n', stderr);
 
-    int indent = fprintf(stderr, " %4d | ", line_no);
-    fprintf(stderr, "%.*s\n", (int)(end - line), line);
+    int indent = fprintf(stderr, " %4d | ", line);
+    fprintf(stderr, "%.*s\n", (int)(end - start), start);
 
     fprintf(stderr, "%*s", indent, "| ");  // print pos spaces.
 
-    while (line < loc) {
-        if (*line++ == '\t')
+    while (start < loc) {
+        if (*start++ == '\t')
             fprintf(stderr, "\t");
         else
             fprintf(stderr, " ");
@@ -45,56 +43,48 @@ static void emit_diag(char *level, SrcFile *diagfile, int line_no, char *loc, co
     fprintf(stderr, "^\n");
 }
 
-void error(Token *tok, const char *msg, ...) {
-    va_list ap;
-    va_start(ap, msg);
-    int line, col;
-    Token *orig = tok;
-    while (orig->origin) orig = orig->origin;
-    get_location(orig->file, orig->loc, &line, &col);
-    emit_diag("error", orig->file, line, orig->loc, msg, ap);
-    va_end(ap);
-    exit(1);
-}
-
-void error_at(SrcFile *file, char *loc, const char *msg, ...) {
-    va_list ap;
-    va_start(ap, msg);
-    int line, col;
-    get_location(file, loc, &line, &col);
-    emit_diag("error", file, line, loc, msg, ap);
-    va_end(ap);
-    exit(1);
-}
-
-void diag_at(char *level, SrcFile *file, char *loc, const char *msg, ...) {
-    va_list ap;
-    va_start(ap, msg);
-    int line, col;
-    get_location(file, loc, &line, &col);
-    emit_diag(level, file, line, loc, msg, ap);
-    va_end(ap);
-}
-
 void diag(char *level, Token *tok, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    int line, col;
     Token *orig = tok;
     while (orig->origin) orig = orig->origin;
-    get_location(orig->file, orig->loc, &line, &col);
-    emit_diag(level, orig->file, line, tok->loc, msg, ap);
+    emit_diag(level, orig->filename, orig->line_delta, orig->file, orig->loc, msg, ap);
     va_end(ap);
 }
 
 void diag_exit(char *level, Token *tok, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    int line, col;
     Token *orig = tok;
     while (orig->origin) orig = orig->origin;
-    get_location(orig->file, orig->loc, &line, &col);
-    emit_diag(level, orig->file, line, tok->loc, msg, ap);
+    emit_diag(level, orig->filename, orig->line_delta, orig->file, orig->loc, msg, ap);
+    va_end(ap);
+    exit(1);
+}
+
+void error(Token *tok, const char *msg, ...) {
+    va_list ap;
+    va_start(ap, msg);
+    Token *orig = tok;
+    while (orig->origin) orig = orig->origin;
+    emit_diag("error", orig->filename, orig->line_delta, orig->file, orig->loc, msg, ap);
+    va_end(ap);
+    exit(1);
+}
+
+void warning(Token *tok, const char *msg, ...) {
+    va_list ap;
+    va_start(ap, msg);
+    Token *orig = tok;
+    while (orig->origin) orig = orig->origin;
+    emit_diag("warning", orig->filename, orig->line_delta, orig->file, orig->loc, msg, ap);
+    va_end(ap);
+}
+
+void error_at(SrcFile *file, char *loc, const char *msg, ...) {
+    va_list ap;
+    va_start(ap, msg);
+    emit_diag("error", file->id, 0, file, loc, msg, ap);
     va_end(ap);
     exit(1);
 }

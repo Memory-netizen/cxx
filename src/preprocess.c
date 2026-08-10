@@ -92,7 +92,7 @@ static bool is_hash(Token *tok) { return tok->is_sol && tok->kind == TK_HASH; }
 // tokens before newline. This function skips such tokens.
 static Token *skip_line(Token *tok) {
     if (tok->is_sol) return tok;
-    diag("warning", tok, "extra token");
+    warning(tok, "extra token");
     while (!tok->is_sol) tok = tok->next;
     return tok;
 }
@@ -344,7 +344,7 @@ static void read_macro_definition(Token **rest, Token *tok) {
     if (!defined_id) defined_id = intern("defined", 7);
     if (tok->id == defined_id) error(tok, "'defined' cannot be used as a macro name");
     Macro *exist = find_macro(tok);
-    if (exist && exist->is_builtin) diag("warning", tok, "redefining builtin macro");
+    if (exist && exist->is_builtin) warning(tok, "redefining builtin macro");
 
     Token *name = tok;
     tok = tok->next;
@@ -353,15 +353,13 @@ static void read_macro_definition(Token **rest, Token *tok) {
         // Function-like macro
         bool is_variadic = false;
         MacroParam *params = read_macro_params(&tok, tok->next, &is_variadic);
-        if (!tok->is_sol && !tok->is_leadingws)
-            diag("warning", tok, "ISO C99 requires whitespace after the macro name");
+        if (!tok->is_sol && !tok->is_leadingws) warning(tok, "ISO C99 requires whitespace after the macro name");
         Macro *m = add_macro(name->id, false, read_line(rest, tok));
         m->params = params;
         m->is_variadic = is_variadic;
     } else {
         // Object-like macro
-        if (!tok->is_sol && !tok->is_leadingws)
-            diag("warning", tok, "ISO C99 requires whitespace after the macro name");
+        if (!tok->is_sol && !tok->is_leadingws) warning(tok, "ISO C99 requires whitespace after the macro name");
         add_macro(name->id, true, read_line(rest, tok));
     }
 }
@@ -932,7 +930,7 @@ static Token *preprocess2(Token *tok) {
         if (tok->id == dt[P_UNDEF].id) {
             tok = tok->next;
             Macro *m = find_macro(tok);
-            if (m && m->is_builtin) diag("warning", tok, "undefining builtin macro");
+            if (m && m->is_builtin) warning(tok, "undefining builtin macro");
 
             m = add_macro(tok->id, true, NULL);
             m->deleted = true;
@@ -950,7 +948,7 @@ static Token *preprocess2(Token *tok) {
         if (tok->id == dt[P_WARNING].id) {
             Token *warn = tok;
             Token *msg = read_line(&tok, tok);
-            diag("warning", warn, "#%s", join_tokens(msg));
+            warning(warn, "#%s", join_tokens(msg));
             continue;
         }
 
