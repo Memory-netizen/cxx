@@ -75,6 +75,7 @@ extern Type *ty_i64;
 
 struct SrcFile {
     char *name;
+    uint32_t id;
     int file_no;
     char *contents;
     size_t size;
@@ -244,6 +245,8 @@ struct Token {
     Type *ty;       // Used if TK_NUM or TK_STR
     SrcFile *file;  // Source location
     char *loc;
+    uint32_t filename;  // Diagnostic filename
+    int32_t line_delta;
     uint16_t len;
     uint8_t kind;
     bool is_broken;

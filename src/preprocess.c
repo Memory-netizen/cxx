@@ -35,10 +35,14 @@ static CondIncl *push_cond_incl(Token *tok, BlockState state) {
 typedef struct FileStack FileStack;
 struct FileStack {
     SrcFile *srcfile;
+    int line_delta;
+    uint32_t display_name;
     CondIncl *condframe;
     Token *rest;
 };
 
+static int line_delta;
+static uint32_t display_name;
 static FileStack *file_stack[256];
 static int include_depth;
 #define MAX_INCL_DEPTH 200
@@ -46,22 +50,27 @@ static int include_depth;
 #define STR1(x) #x
 #define STR(x) STR1(x)
 
-static FileStack *push_file(Token *rest) {
+static FileStack *push_file(Token *rest, SrcFile *file) {
     if (include_depth >= MAX_INCL_DEPTH) error(rest, "include nesting too deep, MAX_DEPTH = " STR(MAX_INCL_DEPTH));
 #undef STR
 #undef STR1
 
-    FileStack *file = emalloc(sizeof(FileStack));
-    file->srcfile = cur_file;
-    file->condframe = cond_incl;
-    file->rest = rest;
+    FileStack *fs = emalloc(sizeof(FileStack));
+    fs->srcfile = cur_file;
+    fs->line_delta = line_delta;
+    fs->display_name = display_name;
+    fs->condframe = cond_incl;
+    fs->rest = rest;
 
+    cur_file = file;
+    line_delta = 0;
+    display_name = file->id;
     cond_incl = NULL;
     push_cond_incl(NULL, BLOCK_ACTIVE);
 
-    file_stack[include_depth++] = file;
+    file_stack[include_depth++] = fs;
 
-    return file;
+    return fs;
 }
 
 static Token *pop_file(void) {
@@ -70,6 +79,9 @@ static Token *pop_file(void) {
 
     cur_file = file->srcfile;
     cond_incl = file->condframe;
+    line_delta = file->line_delta;
+    display_name = file->display_name;
+
     return file->rest;
 }
 
@@ -679,8 +691,36 @@ static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
 static Token *include_file(Token *tok, char *path, Token *filename_tok) {
     Token *tok2 = tokenize_file(path);
     if (!tok2) error(filename_tok, "%s: cannot open file: %s", path, strerror(errno));
-    push_file(tok);
+    push_file(tok, tok2->file);
     return tok2;
+}
+
+// Read #line arguments
+static void read_line_marker(Token **rest, Token *tok) {
+    Token *start = tok;
+    tok = read_line(rest, tok->next);
+    if (tok->kind != TK_PPNUM) error(start, "#line directive requires a positive integer argument");
+
+    int line_no = 0;
+    for (uint32_t i = 0; i < tok->len; i++) {
+        char c = tok->loc[i];
+        if (isdigit(c))
+            line_no = line_no * 10 + c - '0';
+        else
+            error(start, "line marker directive requires a simple digit sequence");
+    }
+    if (line_no == 0) error(start, "#line directive requires a positive integer argument");
+    if (*tok->loc == '0') error(start, "line marker directive interprets number as decimal, not octal");
+
+    int line, col;
+    get_location(start->file, start->loc, &line, &col);
+    line_delta = line_no - line - 1;
+
+    tok = tok->next;
+    if (tok->kind == TK_EOF) return;
+
+    if (tok->kind != TK_STRLIT) error(tok, "filename expected");
+    display_name = tok->id;
 }
 
 typedef enum {
@@ -697,6 +737,7 @@ typedef enum {
     P_UNDEF,
     P_ERROR,
     P_WARNING,
+    P_LINE,
     P_PRAGMA,
     P_CNT,
 } P_DIRECT;
@@ -705,11 +746,11 @@ static struct {
     char *directive;
     uint32_t id;
 } dt[] = {
-    [P_INCLUDE] = {"include", 0},   [P_IF] = {"if", 0},         [P_IFDEF] = {"ifdef", 0},
-    [P_IFNDEF] = {"ifndef", 0},     [P_ELIF] = {"elif", 0},     [P_ELIFDEF] = {"elifdef", 0},
-    [P_ELIFNDEF] = {"elifndef", 0}, [P_ELSE] = {"else", 0},     [P_ENDIF] = {"endif", 0},
-    [P_DEFINE] = {"define", 0},     [P_UNDEF] = {"undef", 0},   [P_ERROR] = {"error", 0},
-    [P_WARNING] = {"warning", 0},   [P_PRAGMA] = {"pragma", 0},
+    [P_INCLUDE] = {"include", 0},   [P_IF] = {"if", 0},       [P_IFDEF] = {"ifdef", 0},
+    [P_IFNDEF] = {"ifndef", 0},     [P_ELIF] = {"elif", 0},   [P_ELIFDEF] = {"elifdef", 0},
+    [P_ELIFNDEF] = {"elifndef", 0}, [P_ELSE] = {"else", 0},   [P_ENDIF] = {"endif", 0},
+    [P_DEFINE] = {"define", 0},     [P_UNDEF] = {"undef", 0}, [P_ERROR] = {"error", 0},
+    [P_WARNING] = {"warning", 0},   [P_LINE] = {"line", 0},   [P_PRAGMA] = {"pragma", 0},
 };
 
 // Visit all tokens in `tok` while evaluating preprocessing
@@ -721,9 +762,11 @@ static Token *preprocess2(Token *tok) {
     Token dummy = {};
     Token *cur = &dummy;
     push_cond_incl(tok, BLOCK_ACTIVE);
+    cur_file = tok->file;
+    line_delta = 0;
+    display_name = cur_file->id;
 
     while (1) {
-    loop_start:
         if (tok->kind == TK_EOF) {
             if (cond_incl->next) error(cond_incl->if_tok, "unterminated conditional directive");
             if (include_depth > 0) {
@@ -741,12 +784,16 @@ static Token *preprocess2(Token *tok) {
             bool concat = (cur_state == BLOCK_ACTIVE);
             Token dummy2 = {}, *buf = &dummy2;
             while (!is_hash(tok) && tok->kind != TK_EOF) {
-                if (concat) buf = buf->next = tok;
+                if (concat) {
+                    tok->line_delta = line_delta;
+                    tok->filename = display_name;
+                    buf = buf->next = tok;
+                }
                 tok = tok->next;
             }
             buf->next = new_eof(tok);
             cur = expand_macro(cur, dummy2.next);
-            if (tok->kind == TK_EOF) goto loop_start;
+            if (tok->kind == TK_EOF) continue;
         }
 
         Token *tk_hash = tok;
@@ -883,6 +930,11 @@ static Token *preprocess2(Token *tok) {
             continue;
         }
 
+        if (tok->id == dt[P_LINE].id) {
+            read_line_marker(&tok, tok);
+            continue;
+        }
+
         if (tok->id == dt[P_PRAGMA].id) {
             do {
                 tok = tok->next;
@@ -894,6 +946,9 @@ static Token *preprocess2(Token *tok) {
         if (tok->is_sol) continue;
         error(tok, "invalid preprocessor directive");
     }
+
+    tok->line_delta = line_delta;
+    tok->filename = display_name;
 
     cur->next = tok;
     cond_incl = NULL;
@@ -968,7 +1023,7 @@ static Macro *add_builtin(char *name, macro_handler_fn *fn) {
 static Token *file_macro(Token *tmpl) {
     Token *orig = tmpl;
     while (orig->origin) orig = orig->origin;
-    return new_str_token(orig->file->name, tmpl);
+    return new_str_token(str(orig->filename), tmpl);
 }
 
 static Token *line_macro(Token *tmpl) {
@@ -976,7 +1031,7 @@ static Token *line_macro(Token *tmpl) {
     while (orig->origin) orig = orig->origin;
     int line, col;
     get_location(orig->file, orig->loc, &line, &col);
-    return ident_to_num(tmpl, line);
+    return ident_to_num(tmpl, line + orig->line_delta);
 }
 
 // __COUNTER__ is expanded to serial values starting from 0.
@@ -1051,8 +1106,10 @@ static void write_scratch_space(Token *tok, char *str) {
     static int space_pos = 1;
     int len = strlen(str);
     scratch->contents = vgrow(scratch->contents, space_pos + len + 1);
+    scratch->num_lines = 0;  // Rebuild_line_offsets table
     sprintf(scratch->contents + space_pos, "%s\n", str);
     tok->file = scratch;
+    tok->filename = scratch->id;
     tok->loc = scratch->contents + space_pos;
     tok->len = len;
     space_pos += len + 1;

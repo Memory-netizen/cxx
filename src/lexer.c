@@ -782,6 +782,7 @@ SrcFile **get_input_files(void) { return input_files; }
 SrcFile *new_file(char *name, int file_no, char *contents) {
     SrcFile *file = emalloc(sizeof(SrcFile));
     file->name = name;
+    file->id = intern(name, strlen(name));
     file->file_no = file_no;
     file->contents = contents;
     return file;
