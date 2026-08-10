@@ -255,17 +255,26 @@ bool file_exists(char *path) {
 static void print_tokens(Token *tok) {
     FILE *out = open_outfile(opt_o ? opt_o : "-");
 
-    int line = 1;
+    int cur_line = 0;
     for (; tok->kind != TK_EOF; tok = tok->next) {
-        if (line > 1 && tok->is_sol) fprintf(out, "\n");
+        if (cur_line > 0 && tok->is_sol) {
+            int line, col;
+            get_location(tok->file, tok->loc, &line, &col);
+            while (cur_line < line + tok->line_delta) {
+                fprintf(out, "\n");
+                cur_line++;
+            }
+            fprintf(out, "\n");
+            if (col > 2) fprintf(out, "%*s", col - 2, "");
+            cur_line++;
+        }
         if (tok->kind == TK_LINE) {
             fprintf(out, "# %lu \"%s\"", tok->val, str(tok->filename));
-            line++;
+            cur_line = tok->val;
             continue;
         }
         if (tok->is_leadingws) fprintf(out, " ");
         fprintf(out, "%.*s", (int)tok->len, tok->loc);
-        line++;
     }
     fprintf(out, "\n");
 }

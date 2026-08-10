@@ -5,6 +5,18 @@ static Token *expand_macro(Token *dst, Token *list);
 typedef struct Macro Macro;
 static Macro *find_macro(Token *tok);
 
+static Token *filter_tokens(Token *tok) {
+    Token dummy = {}, *cur = &dummy;
+    for (; tok; tok = tok->next) {
+        if (tok->kind == TK_LINE) continue;
+        if (tok->kind == TK_WS) continue;
+        if (tok->kind == TK_NL) continue;
+        if (tok->kind == TK_COMMENT) continue;
+        cur = cur->next = tok;
+    }
+    return dummy.next;
+}
+
 // `#if` can be nested, so we use a stack to manage nested `#if`s.
 typedef enum {
     BLOCK_DEAD,     // this block is dead
@@ -97,11 +109,6 @@ static Token *skip_line(Token *tok) {
     return tok;
 }
 
-static Token *skip_ws(Token *tok) {
-    while (tok->kind == TK_WS || tok->kind == TK_COMMENT) tok = tok->next;
-    return tok;
-}
-
 static Token *copy_token(Token *tok) {
     Token *t = emalloc(sizeof(Token));
     *t = *tok;
@@ -139,7 +146,7 @@ static char *quote_string(char *str) {
 
 static void write_scratch_space(Token *tok, char *str);
 static Token *new_str_token(char *str, Token *tmpl) {
-    Token *new = copy_token(tmpl);
+    Token *new = emalloc(sizeof(Token));
     int len = strlen(str);
     new->kind = TK_STRLIT;
     new->id = intern(str, len);
@@ -151,7 +158,7 @@ static Token *new_str_token(char *str, Token *tmpl) {
 }
 
 static Token *ident_to_num(Token *tok, int64_t val) {
-    Token *new = copy_token(tok);
+    Token *new = emalloc(sizeof(Token));
     new->kind = TK_NUM;
     new->val = val;
     new->ty = ty_long;
@@ -594,7 +601,10 @@ static Token *expand_macro(Token *dst, Token *list) {
         Token *macro_name = cur;
         // Built-in dynamic macro application such as __LINE__
         if (m->handler) {
-            dst = dst->next = m->handler(macro_name);
+            Token *t = m->handler(macro_name);
+            t->is_leadingws = cur->is_leadingws;
+            t->is_sol = cur->is_sol;
+            dst = dst->next = t;
             cur = cur->next;
             continue;
         }
@@ -616,7 +626,7 @@ static Token *expand_macro(Token *dst, Token *list) {
 
         // If a funclike macro token is not followed by an argument list,
         // treat it as a normal identifier.
-        if (!cur->next || cur->next->kind != TK_LPAREN || cur->next->is_leadingws) {
+        if (!cur->next || cur->next->kind != TK_LPAREN) {
             dst = dst->next = cur;
             cur = cur->next;
             continue;
@@ -694,6 +704,7 @@ static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
 
 static Token *include_file(Token *tok, char *path, Token *filename_tok) {
     Token *tok2 = tokenize_file(path);
+    tok2 = filter_tokens(tok2);
     if (!tok2) error(filename_tok, "%s: cannot open file: %s", path, strerror(errno));
     push_file(tok, tok2->file);
     return tok2;
@@ -818,7 +829,7 @@ static Token *preprocess2(Token *tok) {
         }
 
         Token *tk_hash = tok;
-        tok = skip_ws(tok->next);
+        tok = tok->next;
 
         // Preprocessing directives that may alter conditional‑frame state
         if (tok->id == dt[P_IF].id) {
@@ -1044,6 +1055,7 @@ static void prep_cmdline(void) {
     if (!cmd_buf) return;
     SrcFile *cmd_line = new_file("<command line>", 1, cmd_buf);
     Token *tok = tokenize(cmd_line);
+    tok = filter_tokens(tok);
     preprocess2(tok);
 }
 
@@ -1130,7 +1142,7 @@ static Token *time_macro(Token *tmpl) {
 
 SrcFile *scratch;
 static void init_scratch_space(void) {
-    char *scratch_space = vnew(4096, sizeof(char));
+    char *scratch_space = vnew(128 * 1024, sizeof(char));
     scratch_space[0] = '\n';
     scratch = new_file("<scratch space>", 1, scratch_space);
 }
@@ -1190,6 +1202,7 @@ static char built_in[] = {
 static void prep_builtin(void) {
     SrcFile *pred_marcos = new_file("<bulit-in>", 1, built_in);
     Token *tok = tokenize(pred_marcos);
+    tok = filter_tokens(tok);
     preprocess2(tok);
 }
 
@@ -1249,6 +1262,7 @@ void join_adjacent_string_literals(Token *tok1) {
 Token *preprocess(Token *tok) {
     init_macros();
     prep_cmdline();
+    tok = filter_tokens(tok);
     tok = preprocess2(tok);
     convert_keywords(tok);
     convert_ppnumber(tok);

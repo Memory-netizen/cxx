@@ -75,7 +75,7 @@ void dump_raw_tokens(Token *tok) {
         int line, col;
         get_location(tok->file, tok->loc, &line, &col);
 
-        fprintf(stdout, "%-16s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok->loc);
+        fprintf(stdout, "%-18s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok->loc);
         if (tok->is_sol) fprintf(stdout, " [StartOfLine]");
         fprintf(stdout, "  Loc=<%s:%d:%d>\n", str(tok->filename), line, col);
 
@@ -83,30 +83,24 @@ void dump_raw_tokens(Token *tok) {
     }
     int line, col;
     get_location(tok->file, tok->loc, &line, &col);
-    fprintf(stdout, "%-16s ‘’   Loc=<%s:%d:%d>\n", "eof", str(tok->filename), line, col);
+    fprintf(stdout, "%-18s ‘’   Loc=<%s:%d:%d>\n", "eof", str(tok->filename), line, col);
 }
 
 void dump_tokens(Token *tok) {
     int line, col;
-    bool is_leadingws = false;
     for (; tok && tok->kind != TK_EOF; tok = tok->next) {
         if (tok->kind == TK_LINE || tok->kind == TK_NL) continue;
 
-        if (tok->kind == TK_WS || tok->kind == TK_COMMENT) {
-            is_leadingws = true;
-            continue;
-        }
+        if (tok->kind == TK_WS || tok->kind == TK_COMMENT) continue;
 
         Token *orig = tok;
         while (orig->origin) orig = orig->origin;
         get_location(orig->file, orig->loc, &line, &col);
 
-        fprintf(stdout, "%-16s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok->loc);
+        fprintf(stdout, "%-18s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok->loc);
         if (tok->is_sol) fprintf(stdout, " [StartOfLine]");
-        if (is_leadingws) {
-            fprintf(stdout, " [LeadingSpace]");
-            is_leadingws = false;
-        }
+        if (tok->is_leadingws) fprintf(stdout, " [LeadingSpace]");
+
         fprintf(stdout, "  Loc=<%s:%d:%d", str(orig->filename), line + orig->line_delta, col);
 
         if (tok->origin) {
@@ -118,5 +112,5 @@ void dump_tokens(Token *tok) {
     }
 
     get_location(tok->file, tok->loc, &line, &col);
-    fprintf(stdout, "%-16s ‘’   Loc=<%s:%d:%d>\n", "eof", str(tok->filename), line + tok->line_delta, col);
+    fprintf(stdout, "%-18s ‘’   Loc=<%s:%d:%d>\n", "eof", str(tok->filename), line + tok->line_delta, col);
 }

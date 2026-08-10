@@ -254,7 +254,6 @@ struct Token {
     int32_t line_delta;
     uint16_t len;
     uint8_t kind;
-    bool is_broken;
     bool is_sol;        // true if is starting of line
     bool is_leadingws;  // true if is leading space
     bool noexpand;      // true if this token shall not be macro-expanded

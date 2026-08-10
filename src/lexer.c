@@ -6,7 +6,8 @@ static SrcFile *cur_file;
 // A list of all input files.
 static SrcFile **input_files;
 
-static bool is_sol = true;
+static bool is_sol;
+static bool is_leadingws;
 
 // Attempt to match the given token type
 // If matched, consume the token and return true;
@@ -83,8 +84,10 @@ static Token *new_token(uint32_t kind, char *start, char *end) {
     tok->len = end - start;
     tok->file = cur_file;
     tok->filename = cur_file->id;
+    if (kind == TK_NL || kind == TK_WS || kind == TK_COMMENT) return tok;
     tok->is_sol = is_sol;
-    is_sol = false;
+    tok->is_leadingws = is_leadingws;
+    is_sol = is_leadingws = false;
     return tok;
 }
 
@@ -173,7 +176,6 @@ error:
     end = start;
     while (*end != '\n') end++;
     tok = new_token(TK_ERR, start, end + 1);
-    tok->is_broken = true;
     tok->msg = "missing terminating \" character";
     return tok;
 }
@@ -195,7 +197,6 @@ static Token *read_char_literal(char *start, char *quote) {
     return tok;
 error:
     tok = new_token(TK_ERR, start, start + 1);
-    tok->is_broken = true;
     tok->msg = "unclosed char literal";
     return tok;
 }
@@ -618,10 +619,10 @@ Token *tokenize(SrcFile *file) {
     char *p = file->contents;
 
     is_sol = true;
+    is_leadingws = false;
 
     Token dummy = {}, *cur = &dummy;
     Token *tok;
-    int inner_nl = 0;
 
     while (*p) {
         // Read line comments.
@@ -629,6 +630,7 @@ Token *tokenize(SrcFile *file) {
             char *q = p + 2;
             while (*q != '\n') q++;
             tok = new_token(TK_COMMENT, p, q);
+            is_leadingws = true;
             cur = cur->next = tok;
             p = q;
             continue;
@@ -639,15 +641,12 @@ Token *tokenize(SrcFile *file) {
             char *q = strstr(p + 2, "*/");
             if (!q) {
                 tok = new_token(TK_ERR, p, p + 1);
-                tok->is_broken = true;
                 tok->msg = "unterminated /* comment";
                 cur = cur->next = tok;
                 goto end;
             }
-            char *r = p;
-            while (r < q)
-                if (*r++ == '\n') inner_nl++;
             tok = new_token(TK_COMMENT, p, q + 2);
+            is_leadingws = true;
             cur = cur->next = tok;
             p = q + 2;
             continue;
@@ -666,10 +665,9 @@ Token *tokenize(SrcFile *file) {
             tok = new_token(TK_WS, p, q);
             if (nl) {
                 tok->kind = TK_NL;
-                tok->val = nl + inner_nl;
-                inner_nl = 0;
                 is_sol = true;
             }
+            if (*(q - 1) != '\n') is_leadingws = true;
             cur = cur->next = tok;
             p = q;
             continue;
@@ -735,7 +733,6 @@ Token *tokenize(SrcFile *file) {
         continue;
     }
 end:
-
     Token *eof = new_token(TK_EOF, p, p);
     cur->next = eof;
     return dummy.next;
