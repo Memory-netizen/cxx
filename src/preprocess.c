@@ -39,6 +39,7 @@ static struct {
 static uint32_t defined_id;
 static uint32_t vaarg_id;
 static uint32_t vaopt_id;
+static uint32_t once_id;
 
 static Token *expand_macro(Token *dst, Token *list);
 typedef struct Macro Macro;
@@ -863,6 +864,23 @@ static void detect_include_guard2(void) {
     guard[num_guard++].macro = guard_macro;
 }
 
+static uint32_t *pragma_path;
+static int num_pragma;
+
+static void add_pragma(Token *tok) {
+    if (!pragma_path)
+        pragma_path = vnew(16, sizeof(pragma_path[0]));
+    else
+        pragma_path = vgrow(pragma_path, num_pragma + 1);
+    pragma_path[num_pragma++] = tok->file->id;
+}
+
+static bool find_pragma(uint32_t file_id) {
+    for (int i = 0; i < num_pragma; i++)
+        if (pragma_path[i] == file_id) return true;
+    return false;
+}
+
 static Token *new_linemarker(Token *tmpl, int line, uint32_t filename) {
     Token *linemarker = copy_token(tmpl);
     linemarker->kind = TK_LINE;
@@ -875,10 +893,9 @@ static Token *new_linemarker(Token *tmpl, int line, uint32_t filename) {
 static Token *include_file(Token **rest, Token *tok, char *path, Token *filename_tok) {
     uint32_t file_id = intern(path, strlen(path));
     for (int i = 0; i < num_guard; i++)
-        if (guard[i].path == file_id && find_macro(guard[i].macro)) {
-            *rest = tok->next;
-            return tok;
-        }
+        if (guard[i].path == file_id && find_macro(guard[i].macro)) return NULL;
+
+    if (find_pragma(file_id)) return NULL;
 
     Token *tok2 = tokenize_file(path);
     tok2 = filter_tokens(tok2);
@@ -1066,13 +1083,15 @@ static Token *preprocess2(Token *tok) {
                 char *path = format("%s/%s", dirname(strdup(tk_hash->file->name)), filename);
                 if (file_exists(path)) {
                     next_path = 0;
-                    cur = cur->next = include_file(&tok, tok, path, tk_hash->next->next);
+                    Token *tmp = include_file(&tok, tok, path, tk_hash->next->next);
+                    if (tmp) cur = cur->next = tmp;
                     continue;
                 }
             }
 
             char *path = search_include_paths(filename);
-            cur = cur->next = include_file(&tok, tok, path ? path : filename, tk_hash->next->next);
+            Token *tmp = include_file(&tok, tok, path ? path : filename, tk_hash->next->next);
+            if (tmp) cur = cur->next = tmp;
             continue;
         }
 
@@ -1080,7 +1099,8 @@ static Token *preprocess2(Token *tok) {
             bool ignore;
             char *filename = read_include_filename(&tok, tok->next, &ignore);
             char *path = search_include_next(filename);
-            cur = cur->next = include_file(&tok, tok, path ? path : filename, tk_hash->next->next);
+            Token *tmp = include_file(&tok, tok, path ? path : filename, tk_hash->next->next);
+            if (tmp) cur = cur->next = tmp;
             continue;
         }
 
@@ -1121,6 +1141,12 @@ static Token *preprocess2(Token *tok) {
 
         if (tok->kind == TK_PPNUM) {
             cur = cur->next = read_line_marker(&tok, tk_hash);
+            continue;
+        }
+
+        if (tok->id == dt[P_PRAGMA].id && tok->next->id == once_id) {
+            add_pragma(tok);
+            tok = skip_line(tok->next->next);
             continue;
         }
 
@@ -1388,6 +1414,7 @@ void init_macros(void) {
     defined_id = intern("defined", 7);
     vaarg_id = intern("__VA_ARGS__", 11);
     vaopt_id = intern("__VA_OPT__", 10);
+    once_id = intern("once", 4);
 }
 
 // Translation phases 6.
