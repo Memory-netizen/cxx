@@ -46,12 +46,15 @@ static CondIncl *push_cond_incl(Token *tok, BlockState state) {
 // `#include` can be nested, so we use a stack to manage nested `#include`s.
 typedef struct FileStack FileStack;
 struct FileStack {
+    int search_idx;
     int line_delta;
     uint32_t display_name;
     CondIncl *condframe;
     Token *rest;
 };
 
+static int cur_path;
+static int next_path;
 static int line_delta;
 static uint32_t display_name;
 static FileStack *file_stack[256];
@@ -67,11 +70,13 @@ static FileStack *push_file(Token *rest, SrcFile *file) {
 #undef STR1
 
     FileStack *fs = emalloc(sizeof(FileStack));
+    fs->search_idx = cur_path;
     fs->line_delta = line_delta;
     fs->display_name = display_name;
     fs->condframe = cond_incl;
     fs->rest = rest;
 
+    cur_path = next_path;
     line_delta = 0;
     display_name = file->id;
     cond_incl = NULL;
@@ -86,6 +91,7 @@ static Token *pop_file(void) {
     include_depth--;
     FileStack *file = file_stack[include_depth];
 
+    cur_path = file->search_idx;
     cond_incl = file->condframe;
     line_delta = file->line_delta;
     display_name = file->display_name;
@@ -694,10 +700,47 @@ static Token *expand_macro(Token *dst, Token *list) {
 }
 
 static char *search_include_paths(char *filename) {
-    if (filename[0] == '/') return filename;
+    if (filename[0] == '/') {
+        next_path = 0;
+        return filename;
+    }
+
+    uint32_t file_id = intern(filename, strlen(filename));
+
+    static struct {
+        int idx;
+        uint32_t file_id;
+        char *path;
+    } *cache;
+    static int num_cache;
+
+    for (int i = 0; i < num_cache; i++)
+        if (cache[i].file_id == file_id) {
+            next_path = cache[i].idx;
+            return cache[i].path;
+        }
+
+    if (!cache)
+        cache = vnew(16, sizeof(cache[0]));
+    else
+        cache = vgrow(cache, num_cache + 1);
 
     // Search a file from the include paths.
     for (int i = 0; i < num_include_paths; i++) {
+        char *path = format("%s/%s", include_paths[i], filename);
+        if (!file_exists(path)) continue;
+        cache[num_cache].file_id = file_id;
+        cache[num_cache].path = path;
+        cache[num_cache++].idx = i + 1;
+        next_path = i + 1;
+        return path;
+    }
+
+    return NULL;
+}
+
+static char *search_include_next(char *filename) {
+    for (int i = cur_path; i < num_include_paths; i++) {
         char *path = format("%s/%s", include_paths[i], filename);
         if (file_exists(path)) return path;
     }
@@ -791,6 +834,7 @@ static Token *read_line_marker(Token **rest, Token *tok) {
 
 typedef enum {
     P_INCLUDE,
+    P_INCLUDE_NEXT,
     P_IF,
     P_IFDEF,
     P_IFNDEF,
@@ -812,11 +856,14 @@ static struct {
     char *directive;
     uint32_t id;
 } dt[] = {
-    [P_INCLUDE] = {"include", 0},   [P_IF] = {"if", 0},       [P_IFDEF] = {"ifdef", 0},
-    [P_IFNDEF] = {"ifndef", 0},     [P_ELIF] = {"elif", 0},   [P_ELIFDEF] = {"elifdef", 0},
-    [P_ELIFNDEF] = {"elifndef", 0}, [P_ELSE] = {"else", 0},   [P_ENDIF] = {"endif", 0},
-    [P_DEFINE] = {"define", 0},     [P_UNDEF] = {"undef", 0}, [P_ERROR] = {"error", 0},
-    [P_WARNING] = {"warning", 0},   [P_LINE] = {"line", 0},   [P_PRAGMA] = {"pragma", 0},
+    [P_INCLUDE] = {"include", 0}, [P_INCLUDE_NEXT] = {"include_next", 0},
+    [P_IF] = {"if", 0},           [P_IFDEF] = {"ifdef", 0},
+    [P_IFNDEF] = {"ifndef", 0},   [P_ELIF] = {"elif", 0},
+    [P_ELIFDEF] = {"elifdef", 0}, [P_ELIFNDEF] = {"elifndef", 0},
+    [P_ELSE] = {"else", 0},       [P_ENDIF] = {"endif", 0},
+    [P_DEFINE] = {"define", 0},   [P_UNDEF] = {"undef", 0},
+    [P_ERROR] = {"error", 0},     [P_WARNING] = {"warning", 0},
+    [P_LINE] = {"line", 0},       [P_PRAGMA] = {"pragma", 0},
 };
 
 // Visit all tokens in `tok` while evaluating preprocessing
@@ -829,6 +876,7 @@ static Token *preprocess2(Token *tok) {
     Token dummy = {};
     Token *cur = &dummy;
     push_cond_incl(tok, BLOCK_ACTIVE);
+    cur_path = 0;
     line_delta = 0;
     display_name = tok->file->id;
 
@@ -963,6 +1011,7 @@ static Token *preprocess2(Token *tok) {
             if (filename[0] != '/' && is_dquote) {
                 char *path = format("%s/%s", dirname(strdup(tk_hash->file->name)), filename);
                 if (file_exists(path)) {
+                    next_path = 0;
                     tok = include_file(tok, path, tk_hash->next->next);
 
                     get_location(tok->file, tok->loc, &line, &col);
@@ -972,6 +1021,17 @@ static Token *preprocess2(Token *tok) {
             }
 
             char *path = search_include_paths(filename);
+            tok = include_file(tok, path ? path : filename, tk_hash->next->next);
+
+            get_location(tok->file, tok->loc, &line, &col);
+            cur = cur->next = new_linemarker(tok, line + line_delta, display_name);
+            continue;
+        }
+
+        if (tok->id == dt[P_INCLUDE_NEXT].id) {
+            bool ignore;
+            char *filename = read_include_filename(&tok, tok->next, &ignore);
+            char *path = search_include_next(filename);
             tok = include_file(tok, path ? path : filename, tk_hash->next->next);
 
             get_location(tok->file, tok->loc, &line, &col);

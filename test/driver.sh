@@ -128,4 +128,13 @@ check '-x none'
 echo foo | $cxx -E - | grep -q foo
 check -E
 
+# #include_next
+mkdir -p $tmp/next1 $tmp/next2 $tmp/next3
+echo '#include "file1.h"' > $tmp/file.c
+echo '#include_next "file1.h"' > $tmp/next1/file1.h
+echo '#include_next "file2.h"' > $tmp/next2/file1.h
+echo 'foo' > $tmp/next3/file2.h
+$cxx -I$tmp/next1 -I$tmp/next2 -I$tmp/next3 -E $tmp/file.c | grep -q foo
+check '#include_next'
+
 echo OK
