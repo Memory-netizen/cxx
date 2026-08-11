@@ -259,8 +259,11 @@ static void print_tokens(Token *tok) {
     for (; tok->kind != TK_EOF; tok = tok->next) {
         if (cur_line > 0 && tok->is_sol) {
             int line, col;
-            get_location(tok->file, tok->loc, &line, &col);
-            while (cur_line < line + tok->line_delta) {
+            Token *orig = tok;
+            while (orig->origin) orig = orig->origin;
+            get_location(orig->file, orig->loc, &line, &col);
+
+            while (cur_line < line + orig->line_delta) {
                 fprintf(out, "\n");
                 cur_line++;
             }

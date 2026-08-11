@@ -183,6 +183,9 @@ static Token *read_line(Token **rest, Token *tok) {
 }
 
 static uint32_t defined_id;
+static uint32_t vaarg_id;
+static uint32_t vaopt_id;
+
 static Token *read_const_expr(Token **rest, Token *tok) {
     tok = read_line(rest, tok);
 
@@ -391,7 +394,7 @@ static MacroArg *read_macro_arg_one(Token **rest, Token *tok, bool read_rest) {
             level++;
         else if (tok->kind == TK_RPAREN)
             level--;
-        cur = cur->next = tok;
+        cur = cur->next = copy_token(tok);
         tok = tok->next;
     }
 
@@ -425,7 +428,8 @@ static MacroArg *read_macro_args(Token **rest, Token *tok, MacroParam *params, b
             if (pp != params) tok = skip(tok, TK_COMMA);
             arg = read_macro_arg_one(&tok, tok, true);
         }
-        arg->id = intern("__VA_ARGS__", 11);
+        if (vaarg_id == 0) vaarg_id = intern("__VA_ARGS__", 11);
+        arg->id = vaarg_id;
         cur = cur->next = arg;
     } else if (tok->kind != TK_RPAREN) {
         error(tok, "too many arguments");
@@ -488,6 +492,13 @@ static Token *paste(Token *lhs, Token *rhs) {
     return tok;
 }
 
+static bool has_varargs(MacroArg *args) {
+    if (vaarg_id == 0) vaarg_id = intern("__VA_ARGS__", 11);
+    for (MacroArg *ap = args; ap; ap = ap->next)
+        if (ap->id == vaarg_id) return ap->tok->kind != TK_EOF;
+    return false;
+}
+
 // Replace func-like macro parameters with given arguments.
 static Token *subst(Token *tok, MacroArg *args) {
     Token dummy = {};
@@ -541,6 +552,17 @@ static Token *subst(Token *tok, MacroArg *args) {
 
             for (Token *t = arg->tok; t->kind != TK_EOF; t = t->next) cur = cur->next = copy_token(t);
             tok = tok->next;
+            continue;
+        }
+
+        // If __VA_ARG__ is empty, __VA_OPT__(x) is expanded to the
+        // empty token list. Otherwise, __VA_OPT__(x) is expanded to x.
+        if (vaopt_id == 0) vaopt_id = intern("__VA_OPT__", 10);
+        if (tok->id == vaopt_id && tok->next->kind == TK_LPAREN) {
+            MacroArg *arg = read_macro_arg_one(&tok, tok->next->next, true);
+            if (has_varargs(args))
+                for (Token *t = arg->tok; t->kind != TK_EOF; t = t->next) cur = cur->next = t;
+            tok = skip(tok, TK_RPAREN);
             continue;
         }
 
