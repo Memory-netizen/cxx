@@ -268,6 +268,7 @@ typedef struct MacroArg MacroArg;
 struct MacroArg {
     MacroArg *next;
     uint32_t id;
+    bool is_va_args;
     Token *tok;
 };
 
@@ -279,6 +280,7 @@ struct Macro {
     bool is_builtin;
     bool is_objlike;  // Object-like or function-like
     bool is_variadic;
+    uint32_t va_args_id;
     MacroParam *params;
     Token *body;
     macro_handler_fn *handler;
@@ -328,7 +330,7 @@ static Macro *add_macro(uint32_t id, bool is_objlike, Token *body) {
     return m;
 }
 
-static MacroParam *read_macro_params(Token **rest, Token *tok, bool *is_variadic) {
+static MacroParam *read_macro_params(Token **rest, Token *tok, bool *is_variadic, uint32_t *va_args_id) {
     MacroParam dummy = {};
     MacroParam *cur = &dummy;
 
@@ -336,12 +338,20 @@ static MacroParam *read_macro_params(Token **rest, Token *tok, bool *is_variadic
         if (cur != &dummy) tok = skip(tok, TK_COMMA);
         if (tok->kind == TK_ELLIPSIS) {
             *is_variadic = true;
+            *va_args_id = vaarg_id;
             *rest = skip(tok->next, TK_RPAREN);
             return dummy.next;
         }
         if (tok->kind != TK_IDENT) error(tok, " expected parameter name");
         for (MacroParam *p = dummy.next; p; p = p->next)
             if (p->id == tok->id) error(tok, "duplicate macro parameter \"%s\"", str(tok->id));
+
+        if (tok->next->kind == TK_ELLIPSIS) {
+            *is_variadic = true;
+            *va_args_id = tok->id;
+            *rest = skip(tok->next->next, TK_RPAREN);
+            return dummy.next;
+        }
 
         MacroParam *m = emalloc(sizeof(MacroParam));
         m->id = tok->id;
@@ -364,11 +374,13 @@ static void read_macro_definition(Token **rest, Token *tok) {
     if (tok->kind == TK_LPAREN && !tok->is_leadingws) {
         // Function-like macro
         bool is_variadic = false;
-        MacroParam *params = read_macro_params(&tok, tok->next, &is_variadic);
+        uint32_t va_args_id = 0;
+        MacroParam *params = read_macro_params(&tok, tok->next, &is_variadic, &va_args_id);
         if (!tok->is_sol && !tok->is_leadingws) warning(tok, "ISO C99 requires whitespace after the macro name");
         Macro *m = add_macro(name->id, false, read_line(rest, tok));
         m->params = params;
         m->is_variadic = is_variadic;
+        m->va_args_id = va_args_id;
     } else {
         // Object-like macro
         if (!tok->is_sol && !tok->is_leadingws) warning(tok, "ISO C99 requires whitespace after the macro name");
@@ -403,7 +415,7 @@ static MacroArg *read_macro_arg_one(Token **rest, Token *tok, bool read_rest) {
     return arg;
 }
 
-static MacroArg *read_macro_args(Token **rest, Token *tok, MacroParam *params, bool is_variadic) {
+static MacroArg *read_macro_args(Token **rest, Token *tok, MacroParam *params, bool is_variadic, uint32_t va_args_id) {
     tok = tok->next->next;
 
     MacroArg dummy = {};
@@ -426,7 +438,8 @@ static MacroArg *read_macro_args(Token **rest, Token *tok, MacroParam *params, b
             arg = read_macro_arg_one(&tok, tok, true);
         }
 
-        arg->id = vaarg_id;
+        arg->id = va_args_id;
+        arg->is_va_args = true;
         cur = cur->next = arg;
     } else if (tok->kind != TK_RPAREN) {
         error(tok, "too many arguments");
@@ -515,7 +528,7 @@ static Token *subst(Token *tok, MacroArg *args) {
         // __VA_ARGS__.
         if (tok->kind == TK_COMMA && tok->next->kind == TK_HASHHASH) {
             MacroArg *arg = find_arg(args, tok->next->next);
-            if (arg->id == vaarg_id) {
+            if (arg && arg->is_va_args) {
                 if (arg->tok->kind == TK_EOF) {
                     tok = tok->next->next->next;
                 } else {
@@ -666,7 +679,7 @@ static Token *expand_macro(Token *dst, Token *list) {
         }
 
         // Function-like macro application
-        MacroArg *args = read_macro_args(&cur, cur, m->params, m->is_variadic);
+        MacroArg *args = read_macro_args(&cur, cur, m->params, m->is_variadic, m->va_args_id);
         Token *sub = subst(m->body, args);
         for (Token *t = sub; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
 
