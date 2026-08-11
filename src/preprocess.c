@@ -1,6 +1,45 @@
 #include "cxx.h"
 
 struct tm *tm;
+
+enum {
+    P_INCLUDE,
+    P_INCLUDE_NEXT,
+    P_IF,
+    P_IFDEF,
+    P_IFNDEF,
+    P_ELIF,
+    P_ELIFDEF,
+    P_ELIFNDEF,
+    P_ELSE,
+    P_ENDIF,
+    P_DEFINE,
+    P_UNDEF,
+    P_ERROR,
+    P_WARNING,
+    P_LINE,
+    P_PRAGMA,
+    P_CNT,
+};
+
+static struct {
+    char *directive;
+    uint32_t id;
+} dt[] = {
+    [P_INCLUDE] = {"include", 0}, [P_INCLUDE_NEXT] = {"include_next", 0},
+    [P_IF] = {"if", 0},           [P_IFDEF] = {"ifdef", 0},
+    [P_IFNDEF] = {"ifndef", 0},   [P_ELIF] = {"elif", 0},
+    [P_ELIFDEF] = {"elifdef", 0}, [P_ELIFNDEF] = {"elifndef", 0},
+    [P_ELSE] = {"else", 0},       [P_ENDIF] = {"endif", 0},
+    [P_DEFINE] = {"define", 0},   [P_UNDEF] = {"undef", 0},
+    [P_ERROR] = {"error", 0},     [P_WARNING] = {"warning", 0},
+    [P_LINE] = {"line", 0},       [P_PRAGMA] = {"pragma", 0},
+};
+
+static uint32_t defined_id;
+static uint32_t vaarg_id;
+static uint32_t vaopt_id;
+
 static Token *expand_macro(Token *dst, Token *list);
 typedef struct Macro Macro;
 static Macro *find_macro(Token *tok);
@@ -43,6 +82,7 @@ static CondIncl *push_cond_incl(Token *tok, BlockState state) {
     return ci;
 }
 
+Token *guard_macro;
 // `#include` can be nested, so we use a stack to manage nested `#include`s.
 typedef struct FileStack FileStack;
 struct FileStack {
@@ -50,6 +90,7 @@ struct FileStack {
     int line_delta;
     uint32_t display_name;
     CondIncl *condframe;
+    Token *guard_macro;
     Token *rest;
 };
 
@@ -74,12 +115,14 @@ static FileStack *push_file(Token *rest, SrcFile *file) {
     fs->line_delta = line_delta;
     fs->display_name = display_name;
     fs->condframe = cond_incl;
+    fs->guard_macro = guard_macro;
     fs->rest = rest;
 
     cur_path = next_path;
     line_delta = 0;
     display_name = file->id;
     cond_incl = NULL;
+    guard_macro = NULL;
     push_cond_incl(NULL, BLOCK_ACTIVE);
 
     file_stack[include_depth++] = fs;
@@ -93,6 +136,7 @@ static Token *pop_file(void) {
 
     cur_path = file->search_idx;
     cond_incl = file->condframe;
+    guard_macro = file->guard_macro;
     line_delta = file->line_delta;
     display_name = file->display_name;
 
@@ -182,10 +226,6 @@ static Token *read_line(Token **rest, Token *tok) {
     *rest = tok;
     return dummy.next;
 }
-
-static uint32_t defined_id;
-static uint32_t vaarg_id;
-static uint32_t vaopt_id;
 
 static Token *read_const_expr(Token **rest, Token *tok) {
     tok = read_line(rest, tok);
@@ -786,12 +826,41 @@ static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
     return NULL;
 }
 
-static Token *include_file(Token *tok, char *path, Token *filename_tok) {
-    Token *tok2 = tokenize_file(path);
-    tok2 = filter_tokens(tok2);
-    if (!tok2) error(filename_tok, "%s: cannot open file: %s", path, strerror(errno));
-    push_file(tok, tok2->file);
-    return tok2;
+struct {
+    uint32_t path;
+    Token *macro;
+} *guard;
+int num_guard;
+
+static void detect_include_guard1(Token *tok) {
+    if (!is_hash(tok)) return;
+    tok = tok->next;
+
+    if (tok->kind != TK_IDENT || tok->id != dt[P_IFNDEF].id) return;
+    tok = tok->next;
+
+    if (tok->kind != TK_IDENT) return;
+    Token *macro = tok;
+    while (!tok->is_sol) tok = tok->next;
+    if (!is_hash(tok)) return;
+    tok = tok->next;
+
+    if (tok->kind != TK_IDENT || tok->id != dt[P_DEFINE].id) return;
+    tok = tok->next;
+    if (tok->kind != TK_IDENT) return;
+    if (tok->id != macro->id) return;
+
+    guard_macro = macro;
+}
+
+static void detect_include_guard2(void) {
+    if (!guard_macro || !find_macro(guard_macro)) return;
+    if (!guard)
+        guard = vnew(16, sizeof(guard[0]));
+    else
+        guard = vgrow(guard, num_guard + 1);
+    guard[num_guard].path = guard_macro->file->id;
+    guard[num_guard++].macro = guard_macro;
 }
 
 static Token *new_linemarker(Token *tmpl, int line, uint32_t filename) {
@@ -801,6 +870,27 @@ static Token *new_linemarker(Token *tmpl, int line, uint32_t filename) {
     linemarker->filename = filename;
     linemarker->is_sol = true;
     return linemarker;
+}
+
+static Token *include_file(Token **rest, Token *tok, char *path, Token *filename_tok) {
+    uint32_t file_id = intern(path, strlen(path));
+    for (int i = 0; i < num_guard; i++)
+        if (guard[i].path == file_id && find_macro(guard[i].macro)) {
+            *rest = tok->next;
+            return tok;
+        }
+
+    Token *tok2 = tokenize_file(path);
+    tok2 = filter_tokens(tok2);
+    if (!tok2) error(filename_tok, "%s: cannot open file: %s", path, strerror(errno));
+
+    push_file(tok, tok2->file);
+    detect_include_guard1(tok2);
+    *rest = tok2;
+
+    int line, col;
+    get_location(tok2->file, tok2->loc, &line, &col);
+    return new_linemarker(tok2, line, display_name);
 }
 
 // Read #line arguments
@@ -832,46 +922,9 @@ static Token *read_line_marker(Token **rest, Token *tok) {
     return new_linemarker(start, line_no, display_name);
 }
 
-typedef enum {
-    P_INCLUDE,
-    P_INCLUDE_NEXT,
-    P_IF,
-    P_IFDEF,
-    P_IFNDEF,
-    P_ELIF,
-    P_ELIFDEF,
-    P_ELIFNDEF,
-    P_ELSE,
-    P_ENDIF,
-    P_DEFINE,
-    P_UNDEF,
-    P_ERROR,
-    P_WARNING,
-    P_LINE,
-    P_PRAGMA,
-    P_CNT,
-} P_DIRECT;
-
-static struct {
-    char *directive;
-    uint32_t id;
-} dt[] = {
-    [P_INCLUDE] = {"include", 0}, [P_INCLUDE_NEXT] = {"include_next", 0},
-    [P_IF] = {"if", 0},           [P_IFDEF] = {"ifdef", 0},
-    [P_IFNDEF] = {"ifndef", 0},   [P_ELIF] = {"elif", 0},
-    [P_ELIFDEF] = {"elifdef", 0}, [P_ELIFNDEF] = {"elifndef", 0},
-    [P_ELSE] = {"else", 0},       [P_ENDIF] = {"endif", 0},
-    [P_DEFINE] = {"define", 0},   [P_UNDEF] = {"undef", 0},
-    [P_ERROR] = {"error", 0},     [P_WARNING] = {"warning", 0},
-    [P_LINE] = {"line", 0},       [P_PRAGMA] = {"pragma", 0},
-};
-
 // Visit all tokens in `tok` while evaluating preprocessing
 // macros and directives.
 static Token *preprocess2(Token *tok) {
-    if (!dt[0].id) {
-        for (size_t i = 0; i < P_CNT; ++i) dt[i].id = intern(dt[i].directive, strlen(dt[i].directive));
-    }
     int line, col;
     Token dummy = {};
     Token *cur = &dummy;
@@ -998,6 +1051,7 @@ static Token *preprocess2(Token *tok) {
             if (!cond_incl->next) error(tk_hash, "#endif without #if");
             cond_incl = cond_incl->next;
             if (cond_incl->state == BLOCK_ACTIVE) tok = skip_line(tok->next);
+            if (tok->kind == TK_EOF) detect_include_guard2();
             continue;
         }
 
@@ -1012,19 +1066,13 @@ static Token *preprocess2(Token *tok) {
                 char *path = format("%s/%s", dirname(strdup(tk_hash->file->name)), filename);
                 if (file_exists(path)) {
                     next_path = 0;
-                    tok = include_file(tok, path, tk_hash->next->next);
-
-                    get_location(tok->file, tok->loc, &line, &col);
-                    cur = cur->next = new_linemarker(tok, line + line_delta, display_name);
+                    cur = cur->next = include_file(&tok, tok, path, tk_hash->next->next);
                     continue;
                 }
             }
 
             char *path = search_include_paths(filename);
-            tok = include_file(tok, path ? path : filename, tk_hash->next->next);
-
-            get_location(tok->file, tok->loc, &line, &col);
-            cur = cur->next = new_linemarker(tok, line + line_delta, display_name);
+            cur = cur->next = include_file(&tok, tok, path ? path : filename, tk_hash->next->next);
             continue;
         }
 
@@ -1032,10 +1080,7 @@ static Token *preprocess2(Token *tok) {
             bool ignore;
             char *filename = read_include_filename(&tok, tok->next, &ignore);
             char *path = search_include_next(filename);
-            tok = include_file(tok, path ? path : filename, tk_hash->next->next);
-
-            get_location(tok->file, tok->loc, &line, &col);
-            cur = cur->next = new_linemarker(tok, line + line_delta, display_name);
+            cur = cur->next = include_file(&tok, tok, path ? path : filename, tk_hash->next->next);
             continue;
         }
 
@@ -1323,6 +1368,8 @@ void init_macros(void) {
     // Define predefined macros
     time_t now = time(NULL);
     tm = localtime(&now);
+
+    for (size_t i = 0; i < P_CNT; ++i) dt[i].id = intern(dt[i].directive, strlen(dt[i].directive));
 
     prep_builtin();
 
