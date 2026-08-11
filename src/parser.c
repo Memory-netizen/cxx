@@ -165,8 +165,7 @@ static NameSpace *find_ident(Token *tok, bool search_par, bool is_extern) {
                 if (!is_extern) return ns;
                 if (ns->lnk == LK_EXTERN || ns->lnk == LK_INTERN) return ns;
                 if (sc == scope) {
-                    diag("error", tok, "extern declaration of ‘%.*s’ follows declaration with no linkage", tok->len,
-                         tok->loc);
+                    diag("error", tok, "extern declaration of ‘%s’ follows declaration with no linkage", str(tok->id));
                     diag_exit("note", ns->loc, "previous definition is here");
                 }
                 break;
@@ -269,11 +268,11 @@ static Type *find_typedef(Token *tok, bool search_par) {
 
 static void check_decl_compatile(NameSpace *sym, SymKind kind, Type *ty) {
     if (sym->kind != kind) {
-        diag("error", ty->name, "‘%.*s’ redeclared as different kind of symbol", ty->name->len, ty->name->loc);
+        diag("error", ty->name, "‘%s’ redeclared as different kind of symbol", str(ty->name->id));
         goto note;
     }
     if (!is_compatible(sym->ty, ty)) {
-        diag("error", ty->name, "‘%.*s’ redeclared as conflicting type", ty->name->len, ty->name->loc);
+        diag("error", ty->name, "‘%s’ redeclared as conflicting type", str(ty->name->id));
         goto note;
     }
     return;
@@ -881,12 +880,12 @@ static Node *primary(Token **rest, Token *tok) {
         NameSpace *sc = find_ident(tok, true, false);
         if (!sc) {
             if (tok->next->kind == TK_LPAREN)
-                error(tok, "implicit declaration of function ‘%.*s’", tok->len, tok->loc);
+                error(tok, "implicit declaration of function ‘%s’", str(tok->id));
             else
-                error(tok, "use of undeclared identifier ‘%.*s’", tok->len, tok->loc);
+                error(tok, "use of undeclared identifier ‘%s’", str(tok->id));
         }
         while (sc->prev) sc = sc->prev;
-        if (sc->kind == SYM_TYNAME) error(tok, "unexpected type name ‘%.*s’: expected expression", tok->len, tok->loc);
+        if (sc->kind == SYM_TYNAME) error(tok, "unexpected type name ‘%s’: expected expression", str(tok->id));
         if (sc->kind == SYM_ENUM)
             node = new_num(sc->enum_val, tok);
         else
@@ -959,7 +958,7 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
 static Member *get_struct_member(Type *ty, Token *tok) {
     for (Member *mem = ty->members; mem; mem = mem->next)
         if (mem->name->id == tok->id) return mem;
-    error(tok, "no member named ‘%.*s’ in ‘%s’", tok->len, tok->loc, str(ty->uid));
+    error(tok, "no member named ‘%s’ in ‘%s’", str(tok->id), str(ty->uid));
     return NULL;
 }
 
@@ -1027,9 +1026,9 @@ static Node *postfix(Token **rest, Token *tok) {
                 Type *ty = node->ty;
                 Token *dot = tok;
                 tok = tok->next;
-                get_ident(tok);
+                uint32_t mem_id = get_ident(tok);
                 if (ty->kind != TY_STRUCT && ty->kind != TY_UNION)
-                    error(dot, "request for member ‘%.*s’ in something not a structure or union", tok->len, tok->loc);
+                    error(dot, "request for member ‘%s’ in something not a structure or union", str(mem_id));
                 Member *mem = copy_mem(get_struct_member(ty, tok));
                 mem->next = NULL;
                 tok = tok->next;
@@ -1436,28 +1435,30 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
     do {
         Token *start = tok;
         Type *ty = declarator(&tok, tok, basety);
-        if (ty->kind == TY_VOID) error(start, "variable ‘%.*s’ declared void", start->len, start->loc);
+        Token *var_name = ty->name;
+
+        if (ty->kind == TY_VOID) error(start, "variable ‘%s’ declared void", str(var_name->id));
 
         bool is_fn = ty->kind == TY_FUNC;
         SymKind symkind = is_fn ? SYM_FUNC : SYM_VAR;
         bool is_static = sclass & SC_STATIC;
         if (is_fn) {
             if (tok->kind == TK_AS)
-                error(ty->name,
+                error(var_name,
                       "illegal initializer (only variables can be "
                       "initialized)");
-            if (tok->kind == TK_LBRACE) error(ty->name, "function definition is not allowed here");
+            if (tok->kind == TK_LBRACE) error(var_name, "function definition is not allowed here");
             if (is_static) error(start, "function declared in block scope cannot have 'static' storage class");
             sclass |= SC_EXTERN;
         }
         bool is_extern = sclass & SC_EXTERN;
 
         Sym *var;
-        NameSpace *ns = find_ident(ty->name, false, is_extern);
-        uint32_t id = get_ident(ty->name);
+        NameSpace *ns = find_ident(var_name, false, is_extern);
+        uint32_t id = get_ident(var_name);
         if (ns) {
             if (!is_extern) {
-                diag("error", ty->name, "redefinition of ‘%.*s’", ty->name->len, ty->name->loc);
+                diag("error", var_name, "redefinition of ‘%s’", str(var_name->id));
                 diag_exit("note", ns->loc, "previous definition is here");
             }
             check_decl_compatile(ns, symkind, ty);
@@ -1471,7 +1472,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         } else {
             var = new_lvar(id, ty);
         }
-        NameSpace *new_ns = push_namespace(id, symkind, ty, ty->name);
+        NameSpace *new_ns = push_namespace(id, symkind, ty, var_name);
         new_ns->var = var;
         new_ns->prev = ns;
         new_ns->lnk = is_extern ? ns ? ns->lnk : LK_NONE : LK_NONE;
@@ -1480,8 +1481,8 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         var->is_function = is_fn;
         if (tok->kind == TK_AS) {
             if (is_extern)
-                error(ty->name, "declaration of block scope identifier ‘%.*s’ with linkage cannot have an initializer",
-                      ty->name->len, ty->name->loc);
+                error(var_name, "declaration of block scope identifier ‘%s’ with linkage cannot have an initializer",
+                      str(var_name->id));
             if (is_static) {
                 gvar_initializer(&tok, tok->next, var);
             } else {
@@ -1489,7 +1490,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
                 cur = cur->next = new_unary(ND_EXPR_STMT, expr, tok);
             }
         }
-        if (var->ty->size < 0) error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
+        if (var->ty->size < 0) error(var_name, "variable ‘%s’ has incomplete type", str(var_name->id));
     } while (match(&tok, tok, TK_COMMA));
 
     *rest = tok;
@@ -1756,7 +1757,7 @@ static void check_label(uint32_t label, Token *tok) {
     Node *cur = labels;
     while (cur) {
         if (cur->label == label) {
-            diag("error", tok, "redefinition of label ‘%.*s’", tok->len, tok->loc);
+            diag("error", tok, "redefinition of label ‘%s’", str(label));
             diag_exit("note", cur->tok, "previous definition is here");
         }
         cur = cur->goto_next;
@@ -2002,8 +2003,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
         if (ns) {
             ty = ns->ty;
             if (ty->kind != TY_ENUM) {
-                diag("error", tag, "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
-                     tag->loc);
+                diag("error", tag, "use of ‘%s’ with tag type that does not match previous declaration", str(tag->id));
                 goto note;
             }
             return ty;
@@ -2024,8 +2024,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
         if (ns) {
             exist_ty = ns->ty;
             if (exist_ty->kind != TY_ENUM) {
-                diag("error", tag, "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
-                     tag->loc);
+                diag("error", tag, "use of ‘%s’ with tag type that does not match previous declaration", str(tag->id));
                 goto note;
             }
             if (exist_ty->size == -1) {
@@ -2058,7 +2057,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
         EnumVal *tmp = dummy.next;
         while (tmp) {
             if (tmp->name->id == name) {
-                diag("error", enm_name, "redeclaration of enumerator ‘%.*s’", enm_name->len, enm_name->loc);
+                diag("error", enm_name, "redeclaration of enumerator ‘%s’", str(enm_name->id));
                 diag_exit("note", tmp->name, "previous definition is here");
                 exit(1);
             }
@@ -2067,7 +2066,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
         if (!redefine) {
             NameSpace *ns2 = find_ident(enm_name, false, false);
             if (ns2) {
-                diag("error", enm_name, "redeclaration of ‘%.*s’", enm_name->len, enm_name->loc);
+                diag("error", enm_name, "redeclaration of ‘%s’", str(enm_name->id));
                 diag_exit("note", ns2->loc, "previous definition is here");
             }
         }
@@ -2086,7 +2085,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
     ty->enumvals = dummy.next;
     if (redefine) {
         if (!is_compatible(ty, exist_ty)) {
-            diag("error", tag, "conflicting redefinition of enum ‘enum %.*s’", tag->len, tag->loc);
+            diag("error", tag, "conflicting redefinition of enum ‘enum %s’", str(tag->id));
             goto note;
         }
         return exist_ty;
@@ -2111,20 +2110,20 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
 
         while (!match(&tok, tok, TK_SEMI)) {
             if (i++) tok = skip(tok, TK_COMMA);
-            Token *start = tok;
             Member *mem = emalloc(sizeof(Member));
             mem->ty = declarator(&tok, tok, basety);
+            Token *mem_name = mem->ty->name;
             if (align) mem->is_align = true;
             mem->align = MAX(align, mem->ty->align);
-            if (mem->ty->kind == TY_VOID) error(start, "field ‘%.*s’ declared void", start->len, start->loc);
-            if (mem->ty->kind == TY_FUNC) error(start, "field ‘%.*s’ declared as a function", start->len, start->loc);
+            if (mem->ty->kind == TY_VOID) error(mem_name, "field ‘%s’ declared void", str(mem_name->id));
+            if (mem->ty->kind == TY_FUNC) error(mem_name, "field ‘%s’ declared as a function", str(mem_name->id));
             if (mem->ty->size < 0 && tok->next->kind != TK_RBRACE)
-                error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
+                error(mem_name, "variable ‘%s’ has incomplete type", str(mem_name->id));
             mem->name = mem->ty->name;
             Member *tmp = dummy.next;
             while (tmp) {
-                if (tmp->name->id == mem->name->id) {
-                    diag("error", mem->name, "duplicate member ‘%.*s’", mem->name->len, mem->name->loc);
+                if (tmp->name->id == mem_name->id) {
+                    diag("error", mem_name, "duplicate member ‘%s’", str(mem_name->id));
                     diag_exit("note", tmp->name, "previous declaration is here");
                 }
                 tmp = tmp->next;
@@ -2167,8 +2166,7 @@ static Type *record_decl(Token **rest, Token *tok) {
             else if (ty->kind == TY_STRUCT && !is_union)
                 match = true;
             if (!match) {
-                diag("error", tag, "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
-                     tag->loc);
+                diag("error", tag, "use of ‘%s’ with tag type that does not match previous declaration", str(tag->id));
                 goto note;
             }
             return ty;
@@ -2195,8 +2193,7 @@ static Type *record_decl(Token **rest, Token *tok) {
             else if (exist_ty->kind == TY_STRUCT && !is_union)
                 match = true;
             if (!match) {
-                diag("error", tag, "use of ‘%.*s’ with tag type that does not match previous declaration", tag->len,
-                     tag->loc);
+                diag("error", tag, "use of ‘%s’ with tag type that does not match previous declaration", str(tag->id));
                 goto note;
             }
             if (exist_ty->size == -1) {
@@ -2236,7 +2233,7 @@ static Type *record_decl(Token **rest, Token *tok) {
 
     if (redefine) {
         if (!is_compatible(ty, exist_ty)) {
-            diag("error", tag, "redefinition of struct or union ‘%s %.*s’", ty_kind, tag->len, tag->loc);
+            diag("error", tag, "redefinition of struct or union ‘%s %s’", ty_kind, str(tag->id));
             goto note;
         }
         return exist_ty;
@@ -2292,7 +2289,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 if (!sclass) error(tok, "storage class specifier is not allowed in this context");
                 if (*sclass) {
                     if (*sclass & sc)
-                        error(tok, "duplicate ‘%.*s’", tok->len, tok->loc);
+                        error(tok, "duplicate ‘%s’", str(tok->id));
                     else
                         error(tok, "multiple storage classes in declaration specifiers");
                 };
@@ -2654,9 +2651,9 @@ static Token *external_declaration(Token *tok) {
     int cnt = -1;
     while (1) {
         cnt++;
-        Token *start = tok;
         Type *ty = declarator(&tok, tok, basety);
-        NameSpace *ns = find_ident(ty->name, false, false);
+        Token *var_name = ty->name;
+        NameSpace *ns = find_ident(var_name, false, false);
         Sym *var;
         bool is_func = ty->kind == TY_FUNC;
 
@@ -2671,17 +2668,17 @@ static Token *external_declaration(Token *tok) {
                 check_decl_compatile(ns, SYM_FUNC, ty);
                 var = ns->var;
                 if (var->is_defined) {
-                    diag("error", ty->name, "redefinition of ‘%.*s’", ty->name->len, ty->name->loc);
+                    diag("error", var_name, "redefinition of ‘%s’", str(var_name->id));
                     goto note;
                 }
                 if (sclass == SC_STATIC && var->sclass != SC_STATIC) {
-                    diag("error", ty->name, "static declaration of ‘%.*s’ follows non-static declaration",
-                         ty->name->len, ty->name->loc);
+                    diag("error", var_name, "static declaration of ‘%s’ follows non-static declaration",
+                         str(var_name->id));
                     goto note;
                 }
             } else {
-                var = new_gvar(get_ident(ty->name), ty);
-                ns = push_namespace(var->id, SYM_FUNC, ty, ty->name);
+                var = new_gvar(get_ident(var_name), ty);
+                ns = push_namespace(var->id, SYM_FUNC, ty, var_name);
                 ns->var = var;
                 ns->lnk = sclass == SC_STATIC ? LK_INTERN : LK_EXTERN;
                 var->is_function = true;
@@ -2697,7 +2694,7 @@ static Token *external_declaration(Token *tok) {
             Type *param = ty->params;
             while (param) {
                 if (is_pointer(param) && param->is_star)
-                    error(ty->name, "‘[*]’ not allowed in other than function prototype scope");
+                    error(var_name, "‘[*]’ not allowed in other than function prototype scope");
                 uint32_t id = intern("", 0);
                 if (param->name) id = get_ident(param->name);
                 push_namespace(id, SYM_VAR, ty, param->name)->var = new_lvar(id, param);
@@ -2714,8 +2711,8 @@ static Token *external_declaration(Token *tok) {
 
             Type *fn_name = array_of(ty_char, str_len(var->id) + 1);
 
-            NameSpace *tmp = push_namespace(fn_id, SYM_VAR, fn_name, ty->name);
-            NameSpace *tmp2 = push_namespace(fn_id2, SYM_VAR, fn_name, ty->name);
+            NameSpace *tmp = push_namespace(fn_id, SYM_VAR, fn_name, var_name);
+            NameSpace *tmp2 = push_namespace(fn_id2, SYM_VAR, fn_name, var_name);
 
             tmp2->var = tmp->var = new_string_literal(var->id, fn_name);
 
@@ -2733,7 +2730,7 @@ static Token *external_declaration(Token *tok) {
         SymKind symkind = is_func ? SYM_FUNC : SYM_VAR;
         if (tok->kind == TK_AS) {
             if (is_func || sclass & SC_TYPEDEF)
-                error(ty->name,
+                error(var_name,
                       "illegal initializer (only variables can be "
                       "initialized)");
         }
@@ -2743,47 +2740,47 @@ static Token *external_declaration(Token *tok) {
             if (ns)
                 check_decl_compatile(ns, SYM_TYNAME, ty);
             else
-                push_namespace(get_ident(ty->name), SYM_TYNAME, ty, ty->name);
+                push_namespace(get_ident(var_name), SYM_TYNAME, ty, var_name);
         } else {
             if (ns) {
                 check_decl_compatile(ns, symkind, ty);
                 var = ns->var;
                 if (var->is_defined && tok->kind == TK_AS) {
-                    diag("error", ty->name, "redefinition of ‘%.*s’", ty->name->len, ty->name->loc);
+                    diag("error", var_name, "redefinition of ‘%s’", str(var_name->id));
                     goto note;
                 }
                 if (var->sclass & SC_STATIC) {
                     if (!is_func && !(sclass & SC_STATIC)) {
-                        diag("error", ty->name, "non-static declaration of ‘%.*s’ follows static declaration",
-                             ty->name->len, ty->name->loc);
+                        diag("error", var_name, "non-static declaration of ‘%s’ follows static declaration",
+                             str(var_name->id));
                         goto note;
                     }
                 }
                 if (sclass & SC_STATIC) {
                     if (!(var->sclass & SC_STATIC)) {
-                        diag("error", ty->name, "static declaration of ‘%.*s’ follows non-static declaration",
-                             ty->name->len, ty->name->loc);
+                        diag("error", var_name, "static declaration of ‘%s’ follows non-static declaration",
+                             str(var_name->id));
                         goto note;
                     }
                 }
             } else {
-                var = new_gvar(get_ident(ty->name), ty);
+                var = new_gvar(get_ident(var_name), ty);
                 var->is_function = is_func;
                 var->sclass = sclass;
                 var->align = MAX(align, ty->align);
-                ns = push_namespace(var->id, symkind, ty, ty->name);
+                ns = push_namespace(var->id, symkind, ty, var_name);
                 ns->var = var;
                 ns->lnk = sclass & SC_STATIC ? LK_INTERN : LK_EXTERN;
             }
 
-            if (ty->kind == TY_VOID) error(start, "variable ‘%.*s’ declared void", start->len, start->loc);
+            if (ty->kind == TY_VOID) error(var_name, "variable ‘%s’ declared void", str(var_name->id));
 
             if (tok->kind == TK_AS) {
                 gvar_initializer(&tok, tok->next, var);
                 var->is_defined = true;
             }
             if (var->ty->size < 0 && var->ty->kind != TY_ARRAY)
-                error(start, "variable ‘%.*s’ has incomplete type", start->len, start->loc);
+                error(var_name, "variable ‘%s’ has incomplete type", str(var_name->id));
         }
         if (match(&tok, tok, TK_COMMA))
             continue;
