@@ -32,7 +32,7 @@ static void usage(int status) {
 }
 
 static bool take_arg(char *arg) {
-    char *x[] = {"-o", "-I"};
+    char *x[] = {"-o", "-I", "-include"};
     for (size_t i = 0; i < sizeof(x) / sizeof(*x); i++)
         if (!strcmp(arg, x[i])) return true;
     return false;
@@ -97,23 +97,28 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
+        if (!strcmp(argv[i], "-include")) {
+            cmd_include_file(argv[++i]);
+            continue;
+        }
+
         if (!strcmp(argv[i], "-D")) {
-            define_macro(argv[++i]);
+            cmd_define_macro(argv[++i]);
             continue;
         }
 
         if (!strncmp(argv[i], "-D", 2)) {
-            define_macro(argv[i] + 2);
+            cmd_define_macro(argv[i] + 2);
             continue;
         }
 
         if (!strcmp(argv[i], "-U")) {
-            undef_macro(argv[++i]);
+            cmd_undef_macro(argv[++i]);
             continue;
         }
 
         if (!strncmp(argv[i], "-U", 2)) {
-            undef_macro(argv[i] + 2);
+            cmd_undef_macro(argv[i] + 2);
             continue;
         }
 

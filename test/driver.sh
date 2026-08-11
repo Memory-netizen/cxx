@@ -109,4 +109,9 @@ $cxx -c -O -Wall -g -std=c11 -ffreestanding -fno-builtin \
          -m64 -mno-red-zone -w -o /dev/null $tmp/empty.c
 check 'ignored options'
 
+# -include
+echo foo > $tmp/out.h
+echo bar | $cxx -include $tmp/out.h -E -o- - | grep -q -z 'foo.*bar'
+check -include
+
 echo OK

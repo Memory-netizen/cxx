@@ -46,14 +46,12 @@ static CondIncl *push_cond_incl(Token *tok, BlockState state) {
 // `#include` can be nested, so we use a stack to manage nested `#include`s.
 typedef struct FileStack FileStack;
 struct FileStack {
-    SrcFile *srcfile;
     int line_delta;
     uint32_t display_name;
     CondIncl *condframe;
     Token *rest;
 };
 
-static SrcFile *cur_file;
 static int line_delta;
 static uint32_t display_name;
 static FileStack *file_stack[256];
@@ -69,13 +67,11 @@ static FileStack *push_file(Token *rest, SrcFile *file) {
 #undef STR1
 
     FileStack *fs = emalloc(sizeof(FileStack));
-    fs->srcfile = cur_file;
     fs->line_delta = line_delta;
     fs->display_name = display_name;
     fs->condframe = cond_incl;
     fs->rest = rest;
 
-    cur_file = file;
     line_delta = 0;
     display_name = file->id;
     cond_incl = NULL;
@@ -90,7 +86,6 @@ static Token *pop_file(void) {
     include_depth--;
     FileStack *file = file_stack[include_depth];
 
-    cur_file = file->srcfile;
     cond_incl = file->condframe;
     line_delta = file->line_delta;
     display_name = file->display_name;
@@ -834,9 +829,8 @@ static Token *preprocess2(Token *tok) {
     Token dummy = {};
     Token *cur = &dummy;
     push_cond_incl(tok, BLOCK_ACTIVE);
-    cur_file = tok->file;
     line_delta = 0;
-    display_name = cur_file->id;
+    display_name = tok->file->id;
 
     cur = cur->next = new_linemarker(tok, 1, display_name);
 
@@ -1063,7 +1057,21 @@ static void remove_quote(char *buf, const char *str) {
     buf[len] = '\0';
 }
 
-void define_macro(char *str) {
+void cmd_include_file(char *str) {
+    static char buf[4096];
+    remove_quote(buf, str);
+    size_t len = strlen(buf);
+
+    if (!cmd_buf)
+        cmd_buf = vnew(4096, sizeof(char));
+    else
+        cmd_buf = vgrow(cmd_buf, cmd_len + len + 16);
+
+    sprintf(cmd_buf + cmd_len, "#include \"%s\"\n", buf);
+    cmd_len += len + 12;
+}
+
+void cmd_define_macro(char *str) {
     static char buf[4096];
     remove_quote(buf, str);
 
@@ -1086,7 +1094,7 @@ void define_macro(char *str) {
     cmd_len += len + 9;
 }
 
-void undef_macro(char *name) {
+void cmd_undef_macro(char *name) {
     size_t len = strlen(name);
     if (!cmd_buf)
         cmd_buf = vnew(4096, sizeof(char));
@@ -1097,12 +1105,11 @@ void undef_macro(char *name) {
     cmd_len += len + 8;
 }
 
-static void prep_cmdline(void) {
-    if (!cmd_buf) return;
+static Token *prep_cmdline(void) {
+    if (!cmd_buf) return NULL;
     SrcFile *cmd_line = new_file("<command line>", 1, cmd_buf);
     Token *tok = tokenize(cmd_line);
-    tok = filter_tokens(tok);
-    preprocess2(tok);
+    return filter_tokens(tok);
 }
 
 static Macro *add_builtin(char *name, macro_handler_fn *fn) {
@@ -1310,9 +1317,22 @@ void join_adjacent_string_literals(Token *tok1) {
 // Entry point function of the preprocessor.
 Token *preprocess(Token *tok) {
     init_macros();
-    prep_cmdline();
+
     tok = filter_tokens(tok);
-    tok = preprocess2(tok);
+
+    Token *main;
+    Token *tok_cmd = prep_cmdline();
+    if (!tok_cmd) {
+        main = tok;
+    } else {
+        Token *end = tok_cmd;
+        while (end->next->kind != TK_EOF) end = end->next;
+        end->next = tok;
+        main = tok_cmd;
+    }
+
+    tok = preprocess2(main);
+
     convert_keywords(tok);
     convert_ppnumber(tok);
     return tok;

@@ -274,8 +274,9 @@ void get_location(SrcFile *f, char *loc, int *out_line, int *out_col);
 //
 
 void init_macros(void);
-void define_macro(char *str);
-void undef_macro(char *name);
+void cmd_include_file(char *str);
+void cmd_define_macro(char *str);
+void cmd_undef_macro(char *name);
 Token *preprocess(Token *tok);
 void join_adjacent_string_literals(Token *tok1);
 
