@@ -7,6 +7,7 @@ static bool opt_E;
 static bool opt_S;
 static bool opt_ll;
 static bool opt_c;
+static bool opt_P;
 static bool opt_cc1;
 static bool opt_hash_hash_hash;
 static bool opt_ast_dump;
@@ -100,6 +101,11 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-c") || !strcmp(argv[i], "--c")) {
             opt_c = true;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-P")) {
+            opt_P = true;
             continue;
         }
 
@@ -291,18 +297,19 @@ static void print_tokens(Token *tok) {
             Token *orig = tok;
             while (orig->origin) orig = orig->origin;
             get_location(orig->file, orig->loc, &line, &col);
-
-            while (cur_line < line + orig->line_delta) {
-                fprintf(out, "\n");
-                cur_line++;
-            }
+            if (!opt_P)
+                while (cur_line < line + orig->line_delta) {
+                    fprintf(out, "\n");
+                    cur_line++;
+                }
             fprintf(out, "\n");
             if (col > 2) fprintf(out, "%*s", col - 2, "");
             cur_line++;
         }
         if (tok->kind == TK_LINE) {
-            fprintf(out, "# %lu \"%s\"", tok->val, str(tok->filename));
             cur_line = tok->val;
+            if (opt_P) continue;
+            fprintf(out, "# %lu \"%s\"", tok->val, str(tok->filename));
             continue;
         }
         if (tok->is_leadingws) fprintf(out, " ");
