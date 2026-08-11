@@ -192,8 +192,6 @@ static Token *read_const_expr(Token **rest, Token *tok) {
     Token dummy = {};
     Token *cur = &dummy;
 
-    if (!defined_id) defined_id = intern("defined", 7);
-
     while (tok) {
         // "defined(foo)" or "defined foo" becomes "1" if macro "foo"
         // is defined. Otherwise "0".
@@ -356,7 +354,6 @@ static MacroParam *read_macro_params(Token **rest, Token *tok, bool *is_variadic
 
 static void read_macro_definition(Token **rest, Token *tok) {
     if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
-    if (!defined_id) defined_id = intern("defined", 7);
     if (tok->id == defined_id) error(tok, "'defined' cannot be used as a macro name");
     Macro *exist = find_macro(tok);
     if (exist && exist->is_builtin) warning(tok, "redefining builtin macro");
@@ -428,7 +425,7 @@ static MacroArg *read_macro_args(Token **rest, Token *tok, MacroParam *params, b
             if (pp != params) tok = skip(tok, TK_COMMA);
             arg = read_macro_arg_one(&tok, tok, true);
         }
-        if (vaarg_id == 0) vaarg_id = intern("__VA_ARGS__", 11);
+
         arg->id = vaarg_id;
         cur = cur->next = arg;
     } else if (tok->kind != TK_RPAREN) {
@@ -493,7 +490,6 @@ static Token *paste(Token *lhs, Token *rhs) {
 }
 
 static bool has_varargs(MacroArg *args) {
-    if (vaarg_id == 0) vaarg_id = intern("__VA_ARGS__", 11);
     for (MacroArg *ap = args; ap; ap = ap->next)
         if (ap->id == vaarg_id) return ap->tok->kind != TK_EOF;
     return false;
@@ -512,6 +508,22 @@ static Token *subst(Token *tok, MacroArg *args) {
             cur = cur->next = stringize(arg->tok);
             tok = tok->next->next;
             continue;
+        }
+
+        // [GNU] If __VA_ARG__ is empty, `,##__VA_ARGS__` is expanded
+        // to the empty token list. Otherwise, its expaned to `,` and
+        // __VA_ARGS__.
+        if (tok->kind == TK_COMMA && tok->next->kind == TK_HASHHASH) {
+            MacroArg *arg = find_arg(args, tok->next->next);
+            if (arg->id == vaarg_id) {
+                if (arg->tok->kind == TK_EOF) {
+                    tok = tok->next->next->next;
+                } else {
+                    cur = cur->next = copy_token(tok);
+                    tok = tok->next->next;
+                }
+                continue;
+            }
         }
 
         if (tok->kind == TK_HASHHASH) {
@@ -557,7 +569,6 @@ static Token *subst(Token *tok, MacroArg *args) {
 
         // If __VA_ARG__ is empty, __VA_OPT__(x) is expanded to the
         // empty token list. Otherwise, __VA_OPT__(x) is expanded to x.
-        if (vaopt_id == 0) vaopt_id = intern("__VA_OPT__", 10);
         if (tok->id == vaopt_id && tok->next->kind == TK_LPAREN) {
             MacroArg *arg = read_macro_arg_one(&tok, tok->next->next, true);
             if (has_varargs(args))
@@ -1247,6 +1258,9 @@ void init_macros(void) {
     for (Macro *m = macros; m; m = m->next) m->is_builtin = true;
 
     init_scratch_space();
+    defined_id = intern("defined", 7);
+    vaarg_id = intern("__VA_ARGS__", 11);
+    vaopt_id = intern("__VA_OPT__", 10);
 }
 
 // Translation phases 6.
