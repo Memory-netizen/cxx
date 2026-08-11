@@ -124,4 +124,8 @@ echo 'int x;' > $tmp/foo.c
 $cxx -c -x assembler -x none -o $tmp/foo.o $tmp/foo.c
 check '-x none'
 
+# -E
+echo foo | $cxx -E - | grep -q foo
+check -E
+
 echo OK

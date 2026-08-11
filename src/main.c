@@ -186,6 +186,9 @@ static void parse_args(int argc, char **argv) {
         input_paths[num_input++] = argv[i];
     }
     if (!num_input && !base_file) fatal("no input files");
+
+    // -E implies that the input is the C macro language.
+    if (opt_E) opt_x = FILE_C;
 }
 
 static FILE *open_outfile(char *path) {
