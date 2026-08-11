@@ -25,7 +25,7 @@ check -o
 check --help
 
 # -S
-echo 'int main() {}' | $cxx -S -o - - | grep -q 'main:'
+echo 'int main() {}' | $cxx -S -o - -xc - | grep -q 'main:'
 check -S
 
 # Default output file
@@ -56,7 +56,7 @@ check 'multiple input files'
 
 # Run linker
 rm -f $tmp/foo
-echo 'int main() { return 0; }' | $cxx -o $tmp/foo -
+echo 'int main() { return 0; }' | $cxx -o $tmp/foo -xc -
 $tmp/foo
 check linker
 
@@ -77,30 +77,30 @@ check a.out
 
 # -E
 echo foo > $tmp/out
-echo "#include \"$tmp/out\"" | $cxx -E - | grep -q foo
+echo "#include \"$tmp/out\"" | $cxx -E -xc - | grep -q foo
 check -E
 
 echo foo > $tmp/out1
-echo "#include \"$tmp/out1\"" | $cxx -E -o $tmp/out2 -
+echo "#include \"$tmp/out1\"" | $cxx -E -o $tmp/out2 -xc -
 cat $tmp/out2 | grep -q foo
 check '-E and -o'
 
 # -I
 mkdir $tmp/dir
 echo foo > $tmp/dir/i-option-test
-echo "#include \"i-option-test\"" | $cxx -I$tmp/dir -E - | grep -q foo
+echo "#include \"i-option-test\"" | $cxx -I$tmp/dir -E -xc - | grep -q foo
 check -I
 
 # -D
-echo foo | $cxx -Dfoo -E - | grep -q 1
+echo foo | $cxx -Dfoo -E -xc - | grep -q 1
 check -D
 
 # -D
-echo foo | $cxx -Dfoo=bar -E - | grep -q bar
+echo foo | $cxx -Dfoo=bar -E -xc - | grep -q bar
 check -D
 
 # -U
-echo foo | $cxx -Dfoo=bar -Ufoo -E - | grep -q foo
+echo foo | $cxx -Dfoo=bar -Ufoo -E -xc - | grep -q foo
 check -U
 
 # ignored options
@@ -111,7 +111,17 @@ check 'ignored options'
 
 # -include
 echo foo > $tmp/out.h
-echo bar | $cxx -include $tmp/out.h -E -o- - | grep -q -z 'foo.*bar'
+echo bar | $cxx -include $tmp/out.h -E -o- -xc - | grep -q -z 'foo.*bar'
 check -include
+
+# -x
+echo 'int x;' | $cxx -c -xc -o $tmp/foo.o -
+check -xc
+echo 'x:' | $cxx -c -x assembler -o $tmp/foo.o -
+check '-x assembler'
+
+echo 'int x;' > $tmp/foo.c
+$cxx -c -x assembler -x none -o $tmp/foo.o $tmp/foo.c
+check '-x none'
 
 echo OK

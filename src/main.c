@@ -1,5 +1,8 @@
 #include "cxx.h"
 
+typedef enum { FILE_NONE, FILE_C, FILE_ASM, FILE_OBJ } FileType;
+
+static FileType opt_x;
 static bool opt_E;
 static bool opt_S;
 static bool opt_ll;
@@ -32,7 +35,7 @@ static void usage(int status) {
 }
 
 static bool take_arg(char *arg) {
-    char *x[] = {"-o", "-I", "-include"};
+    char *x[] = {"-o", "-I", "-include", "-x"};
     for (size_t i = 0; i < sizeof(x) / sizeof(*x); i++)
         if (!strcmp(arg, x[i])) return true;
     return false;
@@ -45,6 +48,14 @@ static void add_default_include_paths(char *argv0) {
     include_paths[num_include_paths++] = "/usr/local/include";
     include_paths[num_include_paths++] = "/usr/include/x86_64-linux-gnu";
     include_paths[num_include_paths++] = "/usr/include";
+}
+
+static FileType parse_opt_x(char *s) {
+    if (!strcmp(s, "c")) return FILE_C;
+    if (!strcmp(s, "assembler")) return FILE_ASM;
+    if (!strcmp(s, "none")) return FILE_NONE;
+    fatal("<command line>: unknown argument for -x: %s", s);
+    return FILE_NONE;
 }
 
 static void parse_args(int argc, char **argv) {
@@ -119,6 +130,16 @@ static void parse_args(int argc, char **argv) {
 
         if (!strncmp(argv[i], "-U", 2)) {
             cmd_undef_macro(argv[i] + 2);
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-x")) {
+            opt_x = parse_opt_x(argv[++i]);
+            continue;
+        }
+
+        if (!strncmp(argv[i], "-x", 2)) {
+            opt_x = parse_opt_x(argv[i] + 2);
             continue;
         }
 
@@ -356,6 +377,18 @@ static void run_linker(char **inputs, int num_ldarg, char *output) {
     run_subprocess(cmd);
 }
 
+static FileType get_file_type(char *filename) {
+    if (endswith(filename, ".o")) return FILE_OBJ;
+
+    if (opt_x != FILE_NONE) return opt_x;
+
+    if (endswith(filename, ".c")) return FILE_C;
+    if (endswith(filename, ".s")) return FILE_ASM;
+
+    fatal("<command line>: unknown file extension: %s", filename);
+    return FILE_NONE;
+}
+
 int main(int argc, char **argv) {
     atexit(cleanup);
     input_paths = vnew(argc, sizeof(char *));
@@ -389,22 +422,25 @@ int main(int argc, char **argv) {
         else
             output = replace_extn(input, ".o");
 
+        FileType type = get_file_type(input);
+
         // Handle .o — pass straight to linker.
-        if (endswith(input, ".o")) {
+        if (type == FILE_OBJ) {
             ld_args[num_ldarg++] = input;
             continue;
         }
 
         // Handle .s — assemble, unless -S stops here.
-        if (endswith(input, ".s")) {
+
+        if (type == FILE_ASM) {
             if (opt_S) continue;
             assemble(input, output);
-            ld_args[num_ldarg++] = output;
+            if (!opt_c) ld_args[num_ldarg++] = output;
             continue;
         }
 
         // Handle .c (or stdin "-").
-        if (!endswith(input, ".c") && strcmp(input, "-")) fatal("unknown file extension: %s", input);
+        assert(type == FILE_C);
 
         // -E: .c → stdout
         if (opt_E) {
