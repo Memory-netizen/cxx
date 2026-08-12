@@ -43,20 +43,65 @@ Token *skip(Token *tok, uint32_t kind) {
 // Compare if the pending matching string matches the target string
 static inline bool start_with(char *p, char *q) { return strncmp(p, q, strlen(q)) == 0; }
 
+static int from_hex(char c) {
+    if ('0' <= c && c <= '9') return c - '0';
+    if ('a' <= c && c <= 'f') return c - 'a' + 10;
+    return c - 'A' + 10;
+}
+
+uint32_t read_universal_char(char **new_pos, char *p, int len) {
+    if (*p == '{') {
+        char *q = p + 1;
+        while (*q && *q != '}' && *q != '\n') q++;
+        if (!*q || *q != '}') fatal("err");
+        len = q - p - 1;
+        if (len == 0) fatal("err");
+    }
+    uint32_t c = 0;
+    for (int i = 0; i < len; i++) {
+        if (!isxdigit(p[i])) fatal("err");
+        c = (c << 4) | from_hex(p[i]);
+    }
+    if (0xD800 <= c && c <= 0xDFFF) fatal("err");
+    if (c > 0x10FFFF) fatal("err");
+    if (*p == '{') len += 2;
+    *new_pos = p + len;
+    return c;
+}
+
 // Read an identifier and returns the length of it.
 // If p does not point to a valid identifier, 0 is returned.
 static int read_ident(char *start) {
     char *p = start;
-    bool success = false;
-    uint32_t c = decode_utf8(&p, p, &success);
-    if (!success) fatal("err");
-    if (!is_ident1(c)) return 0;
-
-    while (1) {
-        char *q;
+    uint32_t c;
+    if (start_with(p, "\\u")) {
+        c = read_universal_char(&p, p + 2, 4);
+        if (c <= 0x9F) fatal("err2");
+    } else if (start_with(p, "\\U")) {
+        c = read_universal_char(&p, p + 2, 8);
+        if (c <= 0x9F) fatal("err2");
+    } else {
         bool success = false;
-        c = decode_utf8(&q, p, &success);
+        c = decode_utf8(&p, p, &success);
         if (!success) fatal("err");
+    }
+    if (!is_ident1(c)) {
+        if (c > 0x7F) fatal("err");
+        return 0;
+    }
+    char *q = p;
+    while (1) {
+        if (start_with(q, "\\u")) {
+            c = read_universal_char(&q, p + 2, 4);
+            if (c <= 0x9F) fatal("err2");
+        } else if (start_with(q, "\\U")) {
+            c = read_universal_char(&p, p + 2, 8);
+            if (c <= 0x9F) fatal("err2");
+        } else {
+            bool success = false;
+            c = decode_utf8(&q, p, &success);
+            if (!success) fatal("err");
+        }
         if (!is_ident2(c)) return p - start;
         p = q;
     }
@@ -102,12 +147,6 @@ static Token *new_token(uint32_t kind, char *start, char *end) {
     tok->is_leadingws = is_leadingws;
     is_sol = is_leadingws = false;
     return tok;
-}
-
-static int from_hex(char c) {
-    if ('0' <= c && c <= '9') return c - '0';
-    if ('a' <= c && c <= 'f') return c - 'a' + 10;
-    return c - 'A' + 10;
 }
 
 static int read_escaped_char(char **new_pos, char *p) {
@@ -729,7 +768,7 @@ Token *tokenize(SrcFile *file) {
         }
 
         // Punctuator
-        if (ispunct(*p) && ((*p != '`' && *p != '@' && *p != '$'))) {
+        if (*p <= 0x7F && ispunct(*p) && *p != '`' && *p != '@') {
             tok = new_token(TK_PUNCT, p, p);
             tok->len = read_punct(p, tok);
             cur = cur->next = tok;

@@ -40,8 +40,11 @@ static uint32_t defined_id;
 static uint32_t vaarg_id;
 static uint32_t vaopt_id;
 static uint32_t once_id;
+static uint32_t has_include_id;
 
 static Token *expand_macro(Token *dst, Token *list);
+static char *join_tokens(Token *tok);
+static char *search_include_paths(char *filename);
 typedef struct Macro Macro;
 static Macro *find_macro(Token *tok);
 
@@ -258,6 +261,54 @@ static Token *read_const_expr(Token **rest, Token *tok) {
     return dummy.next;
 }
 
+static bool exist_include(Token *tok, char *filename, bool is_dquote) {
+    if (filename[0] != '/' && is_dquote) {
+        char *path = format("%s/%s", dirname(strdup(tok->origin->file->name)), filename);
+        if (file_exists(path)) return true;
+    }
+
+    char *path = search_include_paths(filename);
+    return file_exists(path ? path : filename);
+}
+
+static Token *eval_has_include(Token *tok) {
+    Token dummy = {};
+    Token *cur = &dummy;
+    while (tok) {
+        // __has_include("file") or __has_include(<file>)
+        // becomes "1" if the file can beincluded,
+        // otherwise "0".
+        if (tok->kind == TK_IDENT && tok->id == has_include_id) {
+            Token *start = tok;
+            tok = skip(tok->next, TK_LPAREN);
+
+            bool exists = false;
+            if (tok->kind == TK_STRLIT) {
+                char *path = strndup(tok->loc + 1, tok->len - 2);
+                exists = exist_include(start, path, true);
+            } else if (tok->kind == TK_LT) {
+                Token *lt = tok;
+                for (; tok->kind != TK_GT; tok = tok->next)
+                    if (tok->is_sol || tok->kind == TK_EOF) error(lt, "expected '>' to match this '<'");
+                Token *gt = tok;
+                gt->kind = TK_EOF;
+                char *path = join_tokens(lt->next);
+                exists = exist_include(start, path, false);
+            } else {
+                error(tok, "__has_include expects \"FILENAME\" or <FILENAME>");
+            }
+
+            tok = skip(tok->next, TK_RPAREN);
+            cur = cur->next = ident_to_num(start, exists ? 1 : 0);
+            continue;
+        }
+        cur = cur->next = tok;
+        tok = tok->next;
+    }
+
+    return dummy.next;
+}
+
 // Read and evaluate a constant expression.
 static int64_t eval_const_expr(Token **rest, Token *tok) {
     Token *start = tok;
@@ -269,6 +320,7 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
     cur = expand_macro(cur, expr);
     cur->next = new_eof(cur);
     expr = dummy.next;
+    expr = eval_has_include(expr);
 
     // we replace remaining non-macro identifiers with "0"
     Token dummy2 = {};
@@ -668,20 +720,20 @@ static Token *subst(Token *tok, MacroArg *args) {
 static Token *expand_macro(Token *dst, Token *list) {
     Token *cur = list;
     while (cur && cur->kind != TK_EOF) {
-        if (cur->noexpand || cur->kind != TK_IDENT) {
-            dst = dst->next = cur;
+        if (cur->kind != TK_IDENT) {
+            dst = dst->next = copy_token(cur);
             cur = cur->next;
             continue;
         }
-        if (is_disabled(cur->id)) {
-            dst = dst->next = cur;
+        if (is_disabled(cur->id) || cur->noexpand) {
+            dst = dst->next = copy_token(cur);
             cur = cur->next;
             continue;
         }
 
         Macro *m = find_macro(cur);
         if (!m) {
-            dst = dst->next = cur;
+            dst = dst->next = copy_token(cur);
             cur = cur->next;
             continue;
         }
@@ -715,7 +767,7 @@ static Token *expand_macro(Token *dst, Token *list) {
         // If a funclike macro token is not followed by an argument list,
         // treat it as a normal identifier.
         if (!cur->next || cur->next->kind != TK_LPAREN) {
-            dst = dst->next = cur;
+            dst = dst->next = copy_token(cur);
             cur = cur->next;
             continue;
         }
@@ -977,6 +1029,8 @@ static Token *preprocess2(Token *tok) {
                     tok->filename = display_name;
                     if (tok->kind == TK_ERR) error(tok, tok->msg);
                     if (tok->kind == TK_WARN) warning(tok, tok->msg);
+                    if (tok->id == has_include_id)
+                        error(tok, "'__has_include' must be used within a preprocessing directive");
                     buf = buf->next = tok;
                 }
                 tok = tok->next;
@@ -1371,6 +1425,7 @@ static char built_in[] = {
     "#define __cxx__ 1\n"
     "#define __const__ const\n"
     "#define __gnu_linux__ 1\n"
+    "#define __has_include __has_include\n"
     "#define __inline__ inline\n"
     "#define __linux 1\n"
     "#define __linux__ 1\n"
@@ -1397,6 +1452,12 @@ void init_macros(void) {
 
     for (size_t i = 0; i < P_CNT; ++i) dt[i].id = intern(dt[i].directive, strlen(dt[i].directive));
 
+    defined_id = intern("defined", 7);
+    vaarg_id = intern("__VA_ARGS__", 11);
+    vaopt_id = intern("__VA_OPT__", 10);
+    once_id = intern("once", 4);
+    has_include_id = intern("__has_include", 13);
+
     prep_builtin();
 
     add_builtin("__FILE__", file_macro);
@@ -1411,10 +1472,6 @@ void init_macros(void) {
     for (Macro *m = macros; m; m = m->next) m->is_builtin = true;
 
     init_scratch_space();
-    defined_id = intern("defined", 7);
-    vaarg_id = intern("__VA_ARGS__", 11);
-    vaopt_id = intern("__VA_OPT__", 10);
-    once_id = intern("once", 4);
 }
 
 // Translation phases 6.

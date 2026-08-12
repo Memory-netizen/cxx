@@ -312,7 +312,7 @@ static Ref gen_expr(Node *node) {
             return gen_cond(node);
         case ND_FUNCALL: {
             int nargs = node->narg;
-            Ref call_ops[nargs + 1];
+            Ref *call_ops = emalloc((nargs + 1) * sizeof(Ref));
             call_ops[0] = gen_expr(node->func);
 
             int idx = 1;

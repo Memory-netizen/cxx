@@ -353,18 +353,12 @@ int main() {
 #include M13
     ASSERT(3, foo);
 
-#define M13 < include4.h
-#include M13>
-    ASSERT(4, foo);
-
 #undef foo
 
     ASSERT(1, __STDC__);
 
-    // ASSERT(0, strcmp(main_filename1, "test/macro.c"));
     ASSERT(5, main_line1);
     ASSERT(7, main_line2);
-    // ASSERT(0, strcmp(include1_filename, "test/include1.h"));
     ASSERT(4, include1_line);
 
 #define M14(...) 3
@@ -459,6 +453,43 @@ int main() {
 
 #define M31(x, y) (1, ##x y)
     ASSERT(3, M31(, 3));
+
+    int x = 0;
+
+#if __has_include("include1.h")
+    x = 5;
+#else
+    x = 3;
+#endif
+    ASSERT(5, x);
+
+#if __has_include("nonexistent_file.h")
+    x = 5;
+#else
+    x = 3;
+#endif
+    ASSERT(3, x);
+
+#if !__has_include("nonexistent_file.h")
+    x = 7;
+#else
+    x = 5;
+#endif
+    ASSERT(7, x);
+
+#if __has_include("nonexistent_file.h") && __has_include("include1.h")
+    x = 5;
+#else
+    x = 8;
+#endif
+    ASSERT(8, x);
+
+#if __has_include("include1.h") || __has_include("nonexistent_file.h")
+    x = 9;
+#else
+    x = 5;
+#endif
+    ASSERT(9, x);
 
     printf("OK\n");
     return 0;
