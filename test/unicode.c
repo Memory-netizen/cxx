@@ -17,6 +17,11 @@ int main() {
                あβ0;
            }));
 
+    ASSERT(5, ({
+               int $$$ = 5;
+               $$$;
+           }));
+
     printf("OK\n");
     return 0;
 }

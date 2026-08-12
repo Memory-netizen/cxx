@@ -40,7 +40,7 @@ static void print_ident(uint32_t id) {
     bool needs_quote = false;
     for (int i = 0; i < len; i++) {
         unsigned char c = ident[i];
-        if (c > 0x7F) {
+        if (c > 0x7F || c == '$') {
             needs_quote = true;
             break;
         }

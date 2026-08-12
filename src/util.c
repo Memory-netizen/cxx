@@ -230,7 +230,7 @@ char *escape_char_to_string(char c) {
         buffer[0] = c;
         buffer[1] = '\0';
     } else {
-        sprintf(buffer, "\\%02x", (unsigned char)c);
+        sprintf(buffer, "\\%02X", (unsigned char)c);
     }
     return buffer;
 }
