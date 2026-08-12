@@ -1,8 +1,5 @@
-#ifndef CXX_POW_TABLE_H_
-#define CXX_POW_TABLE_H_
-
 static const double pow10_table[] = {
-    // 1e-324, 0x0000000000000000
+    // 1e-324, 		   0x0000000000000000
     1e-323,  // 0x0200000000000000
     1e-322,  // 0x1400000000000000
     1e-321,  // 0xca00000000000000
@@ -638,7 +635,7 @@ static const double pow10_table[] = {
 };
 
 static const double pow2_table[] = {
-    // 0x1.0p-1075, 0x0000000000000000
+    // 0x1.0p-1075, 		   0x0000000000000000
     0x1.0p-1074,  // 0x0100000000000000
     0x1.0p-1073,  // 0x0200000000000000
     0x1.0p-1072,  // 0x0400000000000000
@@ -2738,4 +2735,3 @@ static const double pow2_table[] = {
     0x1.0p1022,   // 0x000000000000d07f
     0x1.0p1023,   // 0x000000000000e07f
 };
-#endif  // CXX_POW_TABLE_H_
