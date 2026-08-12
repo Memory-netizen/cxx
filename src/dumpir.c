@@ -33,6 +33,35 @@ static const char *ty_str[] = {
     [TY_PTR] = "ptr",   [TY_NULLPTR] = "ptr",
 };
 
+static void print_ident(uint32_t id) {
+    char *ident = str(id);
+    int len = str_len(id);
+
+    bool needs_quote = false;
+    for (int i = 0; i < len; i++) {
+        unsigned char c = ident[i];
+        if (c > 0x7F) {
+            needs_quote = true;
+            break;
+        }
+    }
+
+    if (!needs_quote) {
+        fprintf(out_file, "%s", ident);
+        return;
+    }
+
+    fprintf(out_file, "\"");
+    for (int i = 0; i < len; i++) {
+        unsigned char c = ident[i];
+        if (c <= 0x7F) {
+            fputc(c, out_file);
+        } else
+            fprintf(out_file, "\\%02X", c);
+    }
+    fprintf(out_file, "\"");
+}
+
 static void print_type(Type *ty) {
     if (!ty) {
         fprintf(out_file, "void");
@@ -45,7 +74,8 @@ static void print_type(Type *ty) {
         return;
     }
     if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
-        fprintf(out_file, "%%%s", str(ty->uid));
+        fprintf(out_file, "%%");
+        print_ident(ty->uid);
         return;
     }
     fprintf(out_file, "%s", ty_str[ty->kind]);
@@ -58,22 +88,28 @@ static void printcon(Con *c, Type *ty) {
         else
             fprintf(out_file, "%" PRIi64, c->bits.i);
     } else if (c->type == CAddr) {
-        if (c->bits.i)
-            fprintf(out_file, "getelementptr (i8, ptr @%s, i64 %" PRIi64 ")", str(c->sym), c->bits.i);
-        else if (c->sym)
-            fprintf(out_file, "@%s", str(c->sym));
-        else
+        if (c->bits.i) {
+            fprintf(out_file, "getelementptr (i8, ptr @");
+            print_ident(c->sym);
+            fprintf(out_file, ", i64 %" PRIi64 ")", c->bits.i);
+        } else if (c->sym) {
+            fprintf(out_file, "@");
+            print_ident(c->sym);
+        } else {
             fprintf(out_file, "null");
+        }
     }
 }
 
 static void print_operand(Ref r) {
-    if (r.type == RCon)
+    if (r.type == RCon) {
         printcon(&curm->con[r.val], r.ty);
-    else if (r.type == RGlb)
-        fprintf(out_file, "@%s", str(r.val));
-    else
+    } else if (r.type == RGlb) {
+        fprintf(out_file, "@");
+        print_ident(r.val);
+    } else {
         fprintf(out_file, "%%%d", r.val);
+    }
 }
 
 void dump_blk(Blk *b) {
@@ -293,7 +329,9 @@ void dump_blk(Blk *b) {
 }
 
 void dump_type(Type *ty) {
-    fprintf(out_file, "%%%s = type { ", str(ty->uid));
+    fprintf(out_file, "%%");
+    print_ident(ty->uid);
+    fprintf(out_file, " = type { ");
     Member *mem = ty->members;
     if (ty->kind == TY_STRUCT) {
         int pos = 0;
@@ -406,7 +444,9 @@ static const char *sclass_name[] = {
 };
 
 void dump_data(Sym *data) {
-    fprintf(out_file, "@%s = ", str(data->id));
+    fprintf(out_file, "@");
+    print_ident(data->id);
+    fprintf(out_file, " = ");
     if (data->is_str) {
         char *p = str(data->init_data);
         int len = data->ty->len;
@@ -442,7 +482,9 @@ void dump_fn(Sym *fn) {
     }
 
     print_type(fn->ty->ret);
-    fprintf(out_file, " @%s(", str(fn->id));
+    fprintf(out_file, " @");
+    print_ident(fn->id);
+    fprintf(out_file, "(");
 
     Type *param = fn->ty->params;
     for (uint32_t i = 0; param; i++) {

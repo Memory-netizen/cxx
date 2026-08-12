@@ -1,0 +1,22 @@
+#include "test.h"
+
+int 世界 = 42;
+
+int main() {
+    ASSERT(42, 世界);
+    ASSERT(3, ({
+               int π = 3;
+               π;
+           }));
+    ASSERT(3, ({
+               int 你好 = 3;
+               你好;
+           }));
+    ASSERT(3, ({
+               int あβ0 = 3;
+               あβ0;
+           }));
+
+    printf("OK\n");
+    return 0;
+}

@@ -43,11 +43,24 @@ Token *skip(Token *tok, uint32_t kind) {
 // Compare if the pending matching string matches the target string
 static inline bool start_with(char *p, char *q) { return strncmp(p, q, strlen(q)) == 0; }
 
-// Returns true if c is ident_start.
-static inline bool is_ident0(char c) { return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || c == '_'; }
+// Read an identifier and returns the length of it.
+// If p does not point to a valid identifier, 0 is returned.
+static int read_ident(char *start) {
+    char *p = start;
+    bool success = false;
+    uint32_t c = decode_utf8(&p, p, &success);
+    if (!success) fatal("err");
+    if (!is_ident1(c)) return 0;
 
-// Returns true if c is ident_continue.
-static inline bool is_ident1(char c) { return is_ident0(c) || ('0' <= c && c <= '9'); }
+    while (1) {
+        char *q;
+        bool success = false;
+        c = decode_utf8(&q, p, &success);
+        if (!success) fatal("err");
+        if (!is_ident2(c)) return p - start;
+        p = q;
+    }
+}
 
 static int read_punct(char *p, Token *tok) {
     static struct {
@@ -705,15 +718,13 @@ Token *tokenize(SrcFile *file) {
             continue;
         }
 
-        // Identifier
-        if (is_ident0(*p)) {
-            char *start = p;
-            do {
-                p++;
-            } while (is_ident1(*p));
-            tok = new_token(TK_IDENT, start, p);
+        // Identifier or keyword
+        int ident_len = read_ident(p);
+        if (ident_len) {
+            tok = new_token(TK_IDENT, p, p + ident_len);
             tok->id = intern(tok->loc, tok->len);
             cur = cur->next = tok;
+            p += cur->len;
             continue;
         }
 
