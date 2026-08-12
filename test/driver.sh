@@ -137,4 +137,8 @@ echo 'foo' > $tmp/next3/file2.h
 $cxx -I$tmp/next1 -I$tmp/next2 -I$tmp/next3 -E $tmp/file.c | grep -q foo
 check '#include_next'
 
+# BOM marker
+printf '\xef\xbb\xbfxyz\n' | $cxx -E -o- - | grep -q '^xyz'
+check 'BOM marker'
+
 echo OK

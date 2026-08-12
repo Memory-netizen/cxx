@@ -899,6 +899,10 @@ Token *tokenize_file(char *path) {
     char *p = read_file(path);
     if (!p) return NULL;
 
+    // UTF-8 texts may start with a 3-byte "BOM" marker sequence.
+    // If exists, just skip them because they are useless bytes.
+    if (!memcmp(p, "\xef\xbb\xbf", 3)) p += 3;
+
     canonicalize_newline(p);
     remove_backslash_newline(p);
 
