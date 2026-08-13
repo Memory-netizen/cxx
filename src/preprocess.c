@@ -262,8 +262,11 @@ static Token *read_const_expr(Token **rest, Token *tok) {
 }
 
 static bool exist_include(Token *tok, char *filename, bool is_dquote) {
+    Token *orig = tok;
+    while (orig->origin) orig = orig->origin;
+
     if (filename[0] != '/' && is_dquote) {
-        char *path = format("%s/%s", dirname(strdup(tok->origin->file->name)), filename);
+        char *path = format("%s/%s", dirname(strdup(orig->file->name)), filename);
         if (file_exists(path)) return true;
     }
 
