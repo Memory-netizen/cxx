@@ -36,6 +36,7 @@ static struct {
     [P_LINE] = {"line", 0},       [P_PRAGMA] = {"pragma", 0},
 };
 
+static uint32_t true_id;
 static uint32_t defined_id;
 static uint32_t vaarg_id;
 static uint32_t vaopt_id;
@@ -326,7 +327,7 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
     cur = &dummy2;
     for (Token *t = expr; t; t = t->next) {
         if (t->kind == TK_IDENT)
-            cur = cur->next = ident_to_num(t, 0);
+            cur = cur->next = ident_to_num(t, t->id == true_id ? 1 : 0);
         else
             cur = cur->next = t;
     }
@@ -1451,6 +1452,7 @@ void init_macros(void) {
 
     for (size_t i = 0; i < P_CNT; ++i) dt[i].id = intern(dt[i].directive, strlen(dt[i].directive));
 
+    true_id = intern("true", 4);
     defined_id = intern("defined", 7);
     vaarg_id = intern("__VA_ARGS__", 11);
     vaopt_id = intern("__VA_OPT__", 10);
