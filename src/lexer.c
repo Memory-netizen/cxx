@@ -176,8 +176,23 @@ static int read_ident(char *start) {
     }
 }
 
-static int read_escaped_char(char **new_pos, char *p) {
-    if ('0' <= *p && *p <= '7') {
+static int read_escaped_char(char **new_pos, char *p, char *end) {
+    static struct {
+        char ch;
+        uint32_t val;
+    } simple[] = {
+        {'a', '\a'}, {'b', '\b'}, {'e', 27},    {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
+        {'t', '\t'}, {'v', '\v'}, {'\'', '\''}, {'"', '"'},  {'?', '?'},  {'\\', '\\'},
+    };
+    char c = *p;
+    for (uint32_t i = 0; i < sizeof(simple) / sizeof(simple[0]); i++) {
+        if (c == simple[i].ch) {
+            *new_pos = p + 1;
+            return simple[i].val;
+        }
+    }
+
+    if ('0' <= c && c <= '7') {
         // Read an octal number.
         int c = *p++ - '0';
         if ('0' <= *p && *p <= '7') {
@@ -188,40 +203,54 @@ static int read_escaped_char(char **new_pos, char *p) {
         return c;
     }
 
-    if (*p == 'x') {
+    if (c == 'o') {
+        // Read an octal number.
+        if (p[1] != '{') error_at(cur_file, p, "'\\o' not followed by '{'");
+        p += 2;
+        if (*p == '}') goto empty_error;
+        uint32_t val = 0;
+        while (p < end) {
+            int c = *p;
+            if (c == '}') break;
+            if (c < '0' || c > '7') goto digit_error;
+            val = (val << 3) + c - '0';
+            p++;
+        }
+        if (*p != '}') goto miss_error;
+        *new_pos = p + 1;
+        return val;
+    }
+
+    if (c == 'x') {
         // Read a hexadecimal number.
-        p++;
+        bool has_brace = false;
+        if (p[1] == '{') {
+            has_brace = true;
+            p += 2;
+        } else {
+            p++;
+        }
         if (!isxdigit(*p)) error_at(cur_file, p, "invalid hex escape sequence");
 
         int c = 0;
-        for (; isxdigit(*p); p++) c = (c << 4) + from_hex(*p);
+        for (; p < end && isxdigit(*p); p++) c = (c << 4) + from_hex(*p);
+        if (has_brace && *p++ != '}') goto miss_error;
         *new_pos = p;
         return c;
     }
 
-    *new_pos = p + 1;
+    if (c == 'u' || c == 'U') return read_universal_char(new_pos, p + 1, c);
 
-    switch (*p) {
-        case 'a':
-            return '\a';
-        case 'b':
-            return '\b';
-        case 't':
-            return '\t';
-        case 'n':
-            return '\n';
-        case 'v':
-            return '\v';
-        case 'f':
-            return '\f';
-        case 'r':
-            return '\r';
-        // [GNU] \e for the ASCII escape character is a GNU C extension.
-        case 'e':
-            return 27;
-        default:
-            return (unsigned char)*p;
-    }
+    *new_pos = p + 1;
+    return (unsigned char)*p;
+
+empty_error:
+    error_at(cur_file, p, "empty delimited escape sequence");
+miss_error:
+    error_at(cur_file, p, "‘\\%c{’ not terminated with ‘}’", c);
+digit_error:
+    error_at(cur_file, p, "invalid digit ‘%c’ in escape sequence", *p);
+    return 0;
 }
 
 // Find a closing double-quote.
@@ -242,7 +271,7 @@ static Token *read_string_literal(char *start) {
 
     for (char *p = start + 1; p < end;) {
         if (*p == '\\')
-            buf[len++] = read_escaped_char(&p, p + 1);
+            buf[len++] = read_escaped_char(&p, p + 1, end);
         else
             buf[len++] = *p++;
     }
@@ -259,20 +288,49 @@ error:
     return tok;
 }
 
+uint32_t eval_char_literal(Token *tok) {
+    char *p = tok->loc;
+    while (*p++ != '\'');
+    char *end = tok->loc + tok->len - 1;
+
+    uint32_t val = 0;
+    while (p < end) {
+        if (*p == '\\') {
+            p++;
+            val = (val << 8) + read_escaped_char(&p, p, end);
+        } else {
+            bool success = false;
+            val = (val << 8) + decode_utf8(&p, p, &success);
+            if (!success) fatal("invalid UTF-8 in char literal");
+        }
+    }
+    return val;
+}
+
 static Token *read_char_literal(char *start, char *quote) {
+    Token *tok;
     char *p = quote + 1;
     if (*p == '\0') goto error;
-    int c;
-    if (*p == '\\')
-        c = read_escaped_char(&p, p + 1);
-    else
-        c = (unsigned char)*p++;
 
-    char *end = strchr(p, '\'');
-    if (!end) goto error;
+    while (1) {
+        if (*p == '\\')
+            p += 2;
+        else if (*p == '\n')
+            goto error;
+        else if (*p == '\'')
+            break;
+        else
+            p++;
+    }
 
-    Token *tok = new_token(TK_NUM, start, end + 1);
-    tok->val = c;
+    if (p == quote + 1) {
+        tok = new_token(TK_ERR, start, p + 1);
+        tok->msg = "empty character constant";
+        return tok;
+    }
+
+    tok = new_token(TK_NUM, start, p + 1);
+    tok->val = eval_char_literal(tok);
     return tok;
 error:
     tok = new_token(TK_ERR, start, start + 1);
