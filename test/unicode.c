@@ -22,6 +22,9 @@ int main() {
                $$$;
            }));
 
+    ASSERT(42, \u4e16\u{754c});
+    ASSERT(42, \U00004e16\U{754c});
+
     printf("OK\n");
     return 0;
 }

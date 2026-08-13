@@ -49,24 +49,48 @@ static int from_hex(char c) {
     return c - 'A' + 10;
 }
 
-uint32_t read_universal_char(char **new_pos, char *p, int len) {
+uint32_t read_universal_char(char **new_pos, char *p, int ch) {
+    int len = ch == 'u' ? 4 : 8;
     if (*p == '{') {
-        char *q = p + 1;
-        while (*q && *q != '}' && *q != '\n') q++;
-        if (!*q || *q != '}') fatal("err");
-        len = q - p - 1;
-        if (len == 0) fatal("err");
+        char *q = ++p;
+        while (isxdigit(*q)) q++;
+        if (*q != '}') fatal("‘\\%c{’ not terminated with ‘}’", ch);
+        len = q - p;
+        if (len == 0) fatal("empty delimited universal character name");
     }
     uint32_t c = 0;
     for (int i = 0; i < len; i++) {
-        if (!isxdigit(p[i])) fatal("err");
+        if (!isxdigit(p[i])) fatal("invalid digit ‘%c’ in universal character name", p[i]);
         c = (c << 4) | from_hex(p[i]);
     }
-    if (0xD800 <= c && c <= 0xDFFF) fatal("err");
-    if (c > 0x10FFFF) fatal("err");
-    if (*p == '{') len += 2;
+    if (0xD800 <= c && c <= 0xDFFF) fatal("invalid universal character");
+    if (c > 0x10FFFF) fatal("invalid universal character");
+    if (*(p - 1) == '{') len++;
     *new_pos = p + len;
     return c;
+}
+
+// Replace \u or \U escape sequences with corresponding UTF-8 bytes.
+static char *convert_universal_chars(char *p, int len) {
+    char *end = p + len;
+    char *buf = emalloc(len + 1);
+    char *cur = buf;
+    char *result = buf;
+
+    while (p < end) {
+        if (start_with(p, "\\u")) {
+            uint32_t c = read_universal_char(&p, p + 2, 'u');
+            cur += encode_utf8(cur, c);
+        } else if (start_with(p, "\\U")) {
+            uint32_t c = read_universal_char(&p, p + 2, 'U');
+            cur += encode_utf8(cur, c);
+        } else {
+            *cur++ = *p++;
+        }
+    }
+
+    *cur = '\0';
+    return result;
 }
 
 // Read an identifier and returns the length of it.
@@ -75,35 +99,38 @@ static int read_ident(char *start) {
     char *p = start;
     uint32_t c;
     if (start_with(p, "\\u")) {
-        c = read_universal_char(&p, p + 2, 4);
-        if (c <= 0x9F) fatal("err2");
+        c = read_universal_char(&p, p + 2, 'u');
+        if (c <= 0x9F) fatal("universal character %.*s is not valid in an identifier", p - start, start);
     } else if (start_with(p, "\\U")) {
-        c = read_universal_char(&p, p + 2, 8);
-        if (c <= 0x9F) fatal("err2");
+        c = read_universal_char(&p, p + 2, 'U');
+        if (c <= 0x9F) fatal("universal character %.*s is not valid in an identifier", p - start, start);
     } else {
         bool success = false;
         c = decode_utf8(&p, p, &success);
-        if (!success) fatal("err");
+        if (!success) fatal("invalid UTF-8 in identifier");
     }
     if (!is_ident1(c)) {
-        if (c > 0x7F) fatal("err");
+        if (c > 0x7F) fatal("invalid character %.*s in identifier", p - start, start);
         return 0;
     }
-    char *q = p;
+
     while (1) {
-        if (start_with(q, "\\u")) {
-            c = read_universal_char(&q, p + 2, 4);
-            if (c <= 0x9F) fatal("err2");
-        } else if (start_with(q, "\\U")) {
-            c = read_universal_char(&p, p + 2, 8);
-            if (c <= 0x9F) fatal("err2");
+        char *uc_start = p;
+        if (start_with(p, "\\u")) {
+            c = read_universal_char(&p, p + 2, 'u');
+            if (c <= 0x9F) fatal("universal character %.*s is not valid in an identifier", p - uc_start, uc_start);
+        } else if (start_with(p, "\\U")) {
+            c = read_universal_char(&p, p + 2, 'U');
+            if (c <= 0x9F) fatal("universal character %.*s is not valid in an identifier", p - uc_start, uc_start);
         } else {
             bool success = false;
-            c = decode_utf8(&q, p, &success);
-            if (!success) fatal("err");
+            c = decode_utf8(&p, p, &success);
+            if (!success) fatal("invalid UTF-8 in identifier");
         }
-        if (!is_ident2(c)) return p - start;
-        p = q;
+        if (!is_ident2(c)) {
+            if (c > 0x7F) fatal("invalid character %.*s in identifier", p - uc_start, uc_start);
+            return p - start - 1;
+        }
     }
 }
 
@@ -761,7 +788,8 @@ Token *tokenize(SrcFile *file) {
         int ident_len = read_ident(p);
         if (ident_len) {
             tok = new_token(TK_IDENT, p, p + ident_len);
-            tok->id = intern(tok->loc, tok->len);
+            char *buf = convert_universal_chars(p, ident_len);
+            tok->id = intern(buf, strlen(buf));
             cur = cur->next = tok;
             p += cur->len;
             continue;
