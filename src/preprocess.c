@@ -51,7 +51,6 @@ static Macro *find_macro(Token *tok);
 static Token *filter_tokens(Token *tok) {
     Token dummy = {}, *cur = &dummy;
     for (; tok; tok = tok->next) {
-        if (tok->kind == TK_LINE) continue;
         if (tok->kind == TK_WS) continue;
         if (tok->kind == TK_NL) continue;
         if (tok->kind == TK_COMMENT) continue;
@@ -1294,7 +1293,7 @@ static Token *prep_cmdline(void) {
     if (!cmd_buf) return NULL;
     SrcFile *cmd_line = new_file("<command line>", 1, cmd_buf);
     Token *tok = tokenize(cmd_line);
-    return filter_tokens(tok);
+    return tok;
 }
 
 static Macro *add_builtin(char *name, macro_handler_fn *fn) {
@@ -1509,8 +1508,6 @@ void join_adjacent_string_literals(Token *tok1) {
 Token *preprocess(Token *tok) {
     init_macros();
 
-    tok = filter_tokens(tok);
-
     Token *main;
     Token *tok_cmd = prep_cmdline();
     if (!tok_cmd) {
@@ -1522,7 +1519,8 @@ Token *preprocess(Token *tok) {
         main = tok_cmd;
     }
 
-    tok = preprocess2(main);
+    tok = filter_tokens(main);
+    tok = preprocess2(tok);
 
     convert_keywords(tok);
     convert_ppnumber(tok);

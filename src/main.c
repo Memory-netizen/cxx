@@ -322,9 +322,6 @@ static Token *filter_tokens(Token *tok) {
     Token dummy = {}, *cur = &dummy;
     for (; tok; tok = tok->next) {
         if (tok->kind == TK_LINE) continue;
-        if (tok->kind == TK_WS) continue;
-        if (tok->kind == TK_NL) continue;
-        if (tok->kind == TK_COMMENT) continue;
         cur = cur->next = tok;
     }
     return dummy.next;
