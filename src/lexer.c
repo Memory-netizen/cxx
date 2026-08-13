@@ -9,6 +9,21 @@ static SrcFile **input_files;
 static bool is_sol;
 static bool is_leadingws;
 
+// Create a new token.
+static Token *new_token(uint32_t kind, char *start, char *end) {
+    Token *tok = emalloc(sizeof(Token));
+    tok->kind = kind;
+    tok->loc = start;
+    tok->len = end - start;
+    tok->file = cur_file;
+    tok->filename = cur_file->id;
+    if (kind == TK_NL || kind == TK_WS || kind == TK_COMMENT) return tok;
+    tok->is_sol = is_sol;
+    tok->is_leadingws = is_leadingws;
+    is_sol = is_leadingws = false;
+    return tok;
+}
+
 // Attempt to match the given token type
 // If matched, consume the token and return true;
 // otherwise, leave the token unconsumed and return false.
@@ -159,21 +174,6 @@ static int read_punct(char *p, Token *tok) {
         }
 
     return 0;
-}
-
-// Create a new token.
-static Token *new_token(uint32_t kind, char *start, char *end) {
-    Token *tok = emalloc(sizeof(Token));
-    tok->kind = kind;
-    tok->loc = start;
-    tok->len = end - start;
-    tok->file = cur_file;
-    tok->filename = cur_file->id;
-    if (kind == TK_NL || kind == TK_WS || kind == TK_COMMENT) return tok;
-    tok->is_sol = is_sol;
-    tok->is_leadingws = is_leadingws;
-    is_sol = is_leadingws = false;
-    return tok;
 }
 
 static int read_escaped_char(char **new_pos, char *p) {
