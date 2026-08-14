@@ -22,17 +22,27 @@ BUILD_DIR := ./build
 # Source files
 SRCS := $(wildcard $(SRC_DIR)/*.c)
 OBJS := $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(SRCS))
+
+# Generated headers (from tools scripts)
+GENERATED_HDRS := src/width_property.h src/xid_property.h src/pow_table.h
+
+# All headers (existing + generated)
+HDRS := $(wildcard $(SRC_DIR)/*.h)
+
 TEST_SRCS := $(wildcard test/*.c)
 TESTS := $(TEST_SRCS:.c=.out)
 
-HDRS := $(wildcard $(SRC_DIR)/*.h)
 ALL_SRCS := $(SRCS) $(HDRS)
+
 DEPS := $(OBJS:.o=.d)
 CPPFLAGS := -MMD -MP
 
 # Main target
 $(TARGET): $(OBJS)
 	$(CC) $^ $(LDFLAGS) -o $@
+
+$(BUILD_DIR)/lexer.o: | src/pow_table.h
+$(BUILD_DIR)/unicode.o: | src/width_property.h src/xid_property.h
 
 # C source compilation
 define c_recipe
@@ -41,6 +51,16 @@ define c_recipe
 endef
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c ; $(c_recipe)
+
+# Rules to generate headers from scripts
+src/width_property.h: tools/extract_width.py
+	python3 $< > $@
+
+src/xid_property.h: tools/extract_xid.py
+	python3 $< > $@
+
+src/pow_table.h: tools/gen_pow_table.py
+	python3 $< > $@
 
 .PHONY: test clean linecnt fmt
 
@@ -53,7 +73,7 @@ test: $(TARGET) $(TESTS)
 	@bash test/driver.sh ./cxx
 
 clean:
-	-rm -rf $(TARGET) $(BUILD_DIR) test/*.out test/*.ll test/*.o
+	-rm -rf $(TARGET) $(BUILD_DIR) test/*.out test/*.ll test/*.o $(GENERATED_HDRS)
 
 linecnt:
 	@echo "Total lines of code (excluding blank lines and // comments):"

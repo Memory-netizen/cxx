@@ -8,12 +8,14 @@ Usage:
     python3 extract_width.py
 
 Output:
-    width_property.h
+    width_property.h (written to stdout)
 """
 
 import urllib.request
 import re
 import sys
+import locale
+import os
 
 # Data source URLs
 EAST_ASIAN_WIDTH_URL = "https://www.unicode.org/Public/UCD/latest/ucd/EastAsianWidth.txt"
@@ -21,7 +23,6 @@ GENERAL_CATEGORY_URL = "https://www.unicode.org/Public/UCD/latest/ucd/extracted/
 EMOJI_DATA_URL = "https://www.unicode.org/Public/UCD/latest/emoji/emoji-sequences.txt"
 
 def download_file(url):
-    """Download file content and return decoded UTF-8 string."""
     try:
         with urllib.request.urlopen(url) as response:
             return response.read().decode('utf-8')
@@ -29,8 +30,23 @@ def download_file(url):
         print(f"Failed to download {url}: {e}", file=sys.stderr)
         sys.exit(1)
 
-def parse_east_asian_width(text):
-    """Parse EastAsianWidth.txt, extract W, F, A → double-width."""
+def is_east_asian_locale():
+    try:
+        locale.setlocale(locale.LC_CTYPE, '')
+    except locale.Error:
+        pass
+    loc = locale.getlocale(locale.LC_CTYPE)
+    if loc and loc[0]:
+        lang = loc[0]
+        if lang.startswith(('zh', 'ja', 'ko')):
+            return True
+    for var in ('LC_CTYPE', 'LANG'):
+        lang = os.environ.get(var, '')
+        if lang.startswith(('zh', 'ja', 'ko')):
+            return True
+    return False
+
+def parse_east_asian_width(text, include_ambiguous):
     intervals = []
     line_re = re.compile(r'^([0-9A-Fa-f]+)(?:\.\.([0-9A-Fa-f]+))?\s*;\s*([WFA])\b')
     for line in text.splitlines():
@@ -40,13 +56,15 @@ def parse_east_asian_width(text):
         m = line_re.match(line)
         if not m:
             continue
+        width = m.group(3)
+        if width == 'A' and not include_ambiguous:
+            continue
         start = int(m.group(1), 16)
         end = int(m.group(2), 16) if m.group(2) else start
         intervals.append((start, end))
     return intervals
 
 def parse_general_category(text):
-    """Parse DerivedGeneralCategory.txt, extract zero-width categories."""
     intervals = []
     target_cats = {'Mn', 'Mc', 'Me', 'Cc', 'Cf'}
     line_re = re.compile(r'^([0-9A-Fa-f]+)(?:\.\.([0-9A-Fa-f]+))?\s*;\s*([A-Za-z]+)\b')
@@ -66,7 +84,6 @@ def parse_general_category(text):
     return intervals
 
 def parse_emoji_presentation(text):
-    """Parse emoji-data.txt, extract Emoji_Presentation=Yes."""
     intervals = []
     line_re = re.compile(r'^([0-9A-Fa-f]+)(?:\.\.([0-9A-Fa-f]+))?\s*;\s*Basic_Emoji\b')
     for line in text.splitlines():
@@ -82,7 +99,6 @@ def parse_emoji_presentation(text):
     return intervals
 
 def merge_intervals(intervals):
-    """Merge overlapping or adjacent intervals."""
     if not intervals:
         return []
     sorted_intervals = sorted(intervals)
@@ -99,7 +115,6 @@ def merge_intervals(intervals):
     return merged
 
 def format_c_array(name, intervals, indent=4):
-    """Generate C array source from merged intervals."""
     elements = []
     for start, end in intervals:
         elements.append(f"0x{start:04X}")
@@ -116,36 +131,39 @@ def format_c_array(name, intervals, indent=4):
     return "\n".join(lines)
 
 def main():
-    # Download data
+    east_asian = is_east_asian_locale()
+    print(f"Locale detected: {'East Asian' if east_asian else 'Non-East Asian'}", file=sys.stderr)
+
     eaw_text = download_file(EAST_ASIAN_WIDTH_URL)
     cat_text = download_file(GENERAL_CATEGORY_URL)
-    emoji_text = download_file(EMOJI_DATA_URL)   # Now works
+    emoji_text = download_file(EMOJI_DATA_URL)
 
-    # Parse
-    double_wide_eaw = parse_east_asian_width(eaw_text)
-    double_wide_emoji = parse_emoji_presentation(emoji_text)
     zero_wide = parse_general_category(cat_text)
+    double_wide_eaw = parse_east_asian_width(eaw_text, include_ambiguous=east_asian)
+    double_wide_emoji = parse_emoji_presentation(emoji_text)
 
-    # Merge double-width intervals
     double_merged = merge_intervals(double_wide_eaw + double_wide_emoji)
     zero_merged = merge_intervals(zero_wide)
 
-    # Write header
-    with open('width_property.h', 'w') as f:
-        f.write("// Auto-generated file, do NOT modify manually\n")
-        f.write("// Data sources:\n")
-        f.write(f"//   {EAST_ASIAN_WIDTH_URL}\n")
-        f.write(f"//   {GENERAL_CATEGORY_URL}\n")
-        f.write(f"//   {EMOJI_DATA_URL}\n\n")
-        f.write("#include <stdint.h>\n\n")
-        f.write("#define ZERO_WIDTH_LEN (sizeof(zero_width) / sizeof(uint32_t))\n")
-        f.write("#define DOUBLE_WIDTH_LEN (sizeof(double_width) / sizeof(uint32_t))\n\n")
-        f.write(format_c_array("zero_width", zero_merged))
-        f.write("\n\n")
-        f.write(format_c_array("double_width", double_merged))
-        f.write("\n")
+    output_lines = []
+    output_lines.append("// Auto-generated file, do NOT modify manually")
+    output_lines.append("// Data sources:")
+    output_lines.append(f"//   {EAST_ASIAN_WIDTH_URL}")
+    output_lines.append(f"//   {GENERAL_CATEGORY_URL}")
+    output_lines.append(f"//   {EMOJI_DATA_URL}")
+    output_lines.append(f"// Generated for {'East Asian' if east_asian else 'Non-East Asian'} locale")
+    output_lines.append("")
+    output_lines.append("#include <stdint.h>")
+    output_lines.append("")
+    output_lines.append("#define ZERO_WIDTH_LEN (sizeof(zero_width) / sizeof(uint32_t))")
+    output_lines.append("#define DOUBLE_WIDTH_LEN (sizeof(double_width) / sizeof(uint32_t))")
+    output_lines.append("")
+    output_lines.append(format_c_array("zero_width", zero_merged))
+    output_lines.append("")
+    output_lines.append(format_c_array("double_width", double_merged))
 
-    print("Generated width_property.h successfully.")
+    sys.stdout.write("\n".join(output_lines))
+    print("Generated width_property.h successfully.", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

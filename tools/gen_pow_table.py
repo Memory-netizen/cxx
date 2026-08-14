@@ -16,30 +16,39 @@ Usage:
     python3 gen_pow_table.py
 
 Output:
-    pow_table.h
+    pow_table.h (written to stdout)
 """
 
 import struct
+import sys
 
 def double_to_hex(f):
     """Return the hex representation of the double-precision value f as a C literal."""
     return '0x' + struct.pack('d', f).hex()
 
-with open('pow_table.h', 'w') as f:
-    f.write('static const double pow10_table[] = {\n')
-    f.write(f' // 1e-324, \t\t   {double_to_hex(10.0 ** -324)}\n')
+def main():
+    output_lines = []
+    output_lines.append('static const double pow10_table[] = {')
+    output_lines.append(f' // 1e-324, \t\t   {double_to_hex(10.0 ** -324)}')
     for e in range(-323, 309):
         val = 10.0 ** e
-        f.write(f'    1e{e}, \t\t// {double_to_hex(val)}\n')
-    f.write('};\n')
-    
-    f.write('\n')
-    f.write('static const double pow2_table[] = {\n')
-    f.write(f' // 0x1.0p-1075, \t\t   {double_to_hex(2.0 ** -1075)}\n')
+        output_lines.append(f'    1e{e}, \t\t// {double_to_hex(val)}')
+    output_lines.append('};')
+
+    output_lines.append('')
+    output_lines.append('static const double pow2_table[] = {')
+    output_lines.append(f' // 0x1.0p-1075, \t\t   {double_to_hex(2.0 ** -1075)}')
     for p in range(-1074, 1024):
         val = 2.0 ** p
-        f.write(f'    0x1.0p{p}, \t\t// {double_to_hex(val)}\n')
-    f.write('};\n')
-    f.write('\n')
+        output_lines.append(f'    0x1.0p{p}, \t\t// {double_to_hex(val)}')
+    output_lines.append('};')
+    output_lines.append('')
 
-    print("Generated pow_table.h successfully.")
+    # Write to stdout
+    sys.stdout.write("\n".join(output_lines))
+
+    # Diagnostic message to stderr
+    print("Generated pow_table.h successfully.", file=sys.stderr)
+
+if __name__ == "__main__":
+    main()
