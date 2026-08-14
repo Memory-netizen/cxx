@@ -338,7 +338,9 @@ void dump_type(Type *ty) {
         while (mem) {
             print_type(mem->ty);
             pos += mem->ty->size;
+            int off = mem->offset;
             mem = mem->next;
+            while (mem && mem->offset == off) mem = mem->next;
             if (!mem) break;
             fprintf(out_file, ", ");
             if (pos != mem->offset) {

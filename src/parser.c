@@ -2190,6 +2190,12 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
                 diag("error", mem_name, "duplicate member ‘%s’", str(mem_name->id));
                 diag_exit("note", exist->name, "previous declaration is here");
             }
+
+            if (match(&tok, tok, TK_COLON)) {
+                mem->is_bitfield = true;
+                mem->bit_width = const_expr(&tok, tok);
+            }
+
             cur = cur->next = mem;
         }
     }
@@ -2278,20 +2284,28 @@ static Type *record_decl(Token **rest, Token *tok) {
     struct_members(rest, tok, ty);
 
     // Assign offsets within the struct to members.
-    int offset = 0;
+    int bits = 0;
     uint32_t idx = 0;
     for (Member *mem = ty->members; mem; mem = mem->next) {
         ty->align = MAX(ty->align, mem->align);
         mem->idx = idx++;
         if (is_union) {
-            offset = MAX(offset, mem->ty->size);
+            bits = MAX(bits, mem->ty->size * 8);
             continue;
         }
-        offset = ALIGN_UP(offset, mem->align);
-        mem->offset = offset;
-        offset += mem->ty->size;
+        if (mem->is_bitfield) {
+            int sz = mem->ty->size;
+            if (bits / (sz * 8) != (bits + mem->bit_width - 1) / (sz * 8)) bits = ALIGN_UP(bits, sz * 8);
+            mem->offset = ALIGN_UP(bits / 8, sz);
+            mem->bit_offset = bits % (sz * 8);
+            bits += mem->bit_width;
+        } else {
+            bits = ALIGN_UP(bits, mem->align * 8);
+            mem->offset = bits / 8;
+            bits += mem->ty->size * 8;
+        }
     }
-    ty->size = ALIGN_UP(offset, ty->align);
+    ty->size = ALIGN_UP(bits, ty->align * 8) / 8;
 
     if (redefine) {
         if (!is_compatible(ty, exist_ty)) {

@@ -588,6 +588,11 @@ struct Member {
     int align;
     int offset;
     bool is_align;
+
+    // Bitfield
+    bool is_bitfield;
+    int bit_offset;
+    int bit_width;
 };
 
 struct EnumVal {
