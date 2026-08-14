@@ -476,13 +476,32 @@ static Initializer *new_initializer(Type *ty, bool is_flexible) {
 }
 
 static void string_initializer(Token **rest, Token *tok, Initializer *init) {
-    char *string = str(tok->id);
-    int arrlen = str_len(tok->id) + 1;
+    int arrlen = tok->ty->len;
     if (init->is_flexible) *init = *new_initializer(array_of(init->ty->base, arrlen), false);
 
+    char *string = str(tok->id);
     int len = MIN(init->ty->len, arrlen);
 
-    for (int i = 0; i < len; i++) init->child[i]->expr = new_num(string[i], tok);
+    switch (init->ty->base->size) {
+        case 1: {
+            char *str = string;
+            for (int i = 0; i < len; i++) init->child[i]->expr = new_num(str[i], tok);
+            break;
+        }
+        case 2: {
+            uint16_t *str = (uint16_t *)string;
+            for (int i = 0; i < len; i++) init->child[i]->expr = new_num(str[i], tok);
+            break;
+        }
+        case 4: {
+            uint32_t *str = (uint32_t *)string;
+            for (int i = 0; i < len; i++) init->child[i]->expr = new_num(str[i], tok);
+            break;
+        }
+        default:
+            break;
+    }
+
     *rest = tok->next;
 }
 

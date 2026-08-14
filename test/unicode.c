@@ -1,6 +1,12 @@
 #include "test.h"
 
 #define STR(x) #x
+
+typedef unsigned char char8_t;
+typedef unsigned short char16_t;
+typedef unsigned int char32_t;
+typedef int wchar_t;
+
 int 世界 = 42;
 
 int main() {
@@ -100,6 +106,58 @@ int main() {
     ASSERT(-1, L"\xffffffff"[0] >> 31);
 
     ASSERT(0, strcmp(STR(L"a"), "L\"a\""));
+
+    ASSERT(u8'\xCE', ({
+               char8_t x[] = u8"αβ";
+               x[0];
+           }));
+    ASSERT(u8'\xB1', ({
+               char8_t x[] = u8"αβ";
+               x[1];
+           }));
+    ASSERT(5, ({
+               char8_t x[] = u8"αβ";
+               sizeof(x);
+           }));
+
+    ASSERT(u'α', ({
+               char16_t x[] = u"αβ";
+               x[0];
+           }));
+    ASSERT(u'β', ({
+               char16_t x[] = u"αβ";
+               x[1];
+           }));
+    ASSERT(6, ({
+               char16_t x[] = u"αβ";
+               sizeof(x);
+           }));
+
+    ASSERT(U'🤔', ({
+               char32_t x[] = U"🤔x";
+               x[0];
+           }));
+    ASSERT(U'x', ({
+               char32_t x[] = U"🤔x";
+               x[1];
+           }));
+    ASSERT(12, ({
+               char32_t x[] = U"🤔x";
+               sizeof(x);
+           }));
+
+    ASSERT(L'🤔', ({
+               wchar_t x[] = L"🤔x";
+               x[0];
+           }));
+    ASSERT(L'x', ({
+               wchar_t x[] = L"🤔x";
+               x[1];
+           }));
+    ASSERT(12, ({
+               wchar_t x[] = L"🤔x";
+               sizeof(x);
+           }));
 
     printf("OK\n");
     return 0;
