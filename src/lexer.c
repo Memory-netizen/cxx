@@ -370,7 +370,7 @@ static void convert_utf32_str_literal(Token *tok, char *str, Type *ty) {
     tok->id = intern((char *)buf, len * 4);
 }
 
-static void convert_str_literal(Token *tok) {
+void convert_str_literal(Token *tok) {
     char *str = convert_universal_chars(tok->loc, tok->len);
     uint32_t prefix = tok->enc_prefix;
     switch (prefix) {
@@ -412,7 +412,6 @@ static Token *read_string_literal(char *start, char *quote, uint32_t prefix) {
 
     tok = new_token(TK_STRLIT, start, p + 1);
     tok->enc_prefix = prefix;
-    convert_str_literal(tok);
     return tok;
 error:
     tok = new_token(TK_ERR, start, p);

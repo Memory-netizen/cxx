@@ -275,6 +275,7 @@ SrcFile *new_file(char *name, int file_no, char *contents);
 Token *tokenize(SrcFile *file);
 void convert_ppnumber(Token *tok);
 void convert_keywords(Token *tok);
+void convert_str_literal(Token *tok);
 SrcFile **get_input_files(void);
 void get_location(SrcFile *f, char *loc, int *out_line, int *out_col);
 

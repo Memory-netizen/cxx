@@ -286,7 +286,7 @@ static Token *eval_has_include(Token *tok) {
             tok = skip(tok->next, TK_LPAREN);
 
             bool exists = false;
-            if (tok->kind == TK_STRLIT) {
+            if (tok->kind == TK_STRLIT && tok->enc_prefix == PREFIX_NONE) {
                 char *path = strndup(tok->loc + 1, tok->len - 2);
                 exists = exist_include(start, path, true);
             } else if (tok->kind == TK_LT) {
@@ -846,7 +846,7 @@ static char *search_include_next(char *filename) {
 // Read an #include argument.
 static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
     // Pattern 1: #include "foo.h"
-    if (tok->kind == TK_STRLIT) {
+    if (tok->kind == TK_STRLIT && tok->enc_prefix == PREFIX_NONE) {
         *is_dquote = true;
         *rest = skip_line(tok->next);
         return strndup(tok->loc + 1, tok->len - 2);
@@ -988,8 +988,13 @@ static Token *read_line_marker(Token **rest, Token *tok) {
 
     tok = tok->next;
 
-    if (tok->kind != TK_EOF && tok->kind != TK_STRLIT) error(tok, "filename expected");
-    if (tok->kind == TK_STRLIT) display_name = tok->id;
+    if (tok->kind != TK_EOF && (tok->kind != TK_STRLIT || tok->enc_prefix != PREFIX_NONE))
+        error(tok, "filename expected");
+
+    if (tok->kind == TK_STRLIT) {
+        convert_str_literal(tok);
+        display_name = tok->id;
+    }
 
     return new_linemarker(start, line_no, display_name);
 }
@@ -1483,31 +1488,69 @@ void init_macros(void) {
 // Translation phases 6.
 // Concatenate adjacent string literals into a single string literal
 // as per the C spec.
-void join_adjacent_string_literals(Token *tok1) {
-    while (tok1->kind != TK_EOF) {
+void join_adjacent_string_literals(Token *tok) {
+    // First pass: If regular string literals are adjacent to wide
+    // string literals, regular string literals are converted to a wide
+    // type before concatenation. In this pass, we do the conversion
+    for (Token *tok1 = tok; tok1->kind != TK_EOF;) {
+        if (tok1->kind != TK_STRLIT) {
+            tok1 = tok1->next;
+            continue;
+        }
+
+        if (tok1->next->kind != TK_STRLIT) {
+            convert_str_literal(tok1);
+            tok1 = tok1->next;
+            continue;
+        }
+
+        uint32_t kind = tok1->enc_prefix;
+
+        for (Token *t = tok1->next; t->kind == TK_STRLIT; t = t->next) {
+            uint32_t k = t->enc_prefix;
+            if (k == PREFIX_NONE)
+                continue;
+            else if (kind == PREFIX_NONE)
+                kind = k;
+            else if (kind != k)
+                error(t, "unsupported non-standard concatenation of string literals");
+        }
+
+        for (Token *t = tok1; t->kind == TK_STRLIT; t = t->next) {
+            t->enc_prefix = kind;
+            convert_str_literal(t);
+        }
+
+        while (tok1->kind == TK_STRLIT) tok1 = tok1->next;
+    }
+
+    // Second pass: concatenate adjacent string literals.
+    for (Token *tok1 = tok; tok1->kind != TK_EOF;) {
         if (tok1->kind != TK_STRLIT || tok1->next->kind != TK_STRLIT) {
             tok1 = tok1->next;
             continue;
         }
 
-        Token *tok2 = tok1->next;
-        while (tok2->kind == TK_STRLIT) tok2 = tok2->next;
+        Token *after = tok1->next;
+        while (after->kind == TK_STRLIT) after = after->next;
 
         int len = tok1->ty->len;
-        for (Token *t = tok1->next; t != tok2; t = t->next) len = len + t->ty->len - 1;
+        for (Token *t = tok1->next; t != after; t = t->next) len += t->ty->len - 1;
 
-        char *buf = emalloc(tok1->ty->base->size * len);
+        int base_size = tok1->ty->base->size;
+        char *buf = emalloc(base_size * len);
 
         int i = 0;
-        for (Token *t = tok1; t != tok2; t = t->next) {
-            memcpy(buf + i, str(t->id), t->ty->size);
-            i = i + t->ty->size - t->ty->base->size;
+        for (Token *t = tok1; t != after; t = t->next) {
+            int valid_size = t->ty->size - base_size;
+            memcpy(buf + i, str(t->id), valid_size);
+            i += valid_size;
         }
 
         tok1->ty = array_of(tok1->ty->base, len);
-        tok1->id = intern(buf, len);
-        tok1->next = tok2;
-        tok1 = tok2;
+        tok1->id = intern(buf, base_size * (len - 1));
+        tok1->next = after;
+        tok1 = after;
     }
 }
 
