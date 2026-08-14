@@ -97,6 +97,14 @@ bool file_exists(char *path);
 //
 
 enum {
+    PREFIX_NONE,
+    PREFIX_u8,
+    PREFIX_u,
+    PREFIX_U,
+    PREFIX_L,
+};
+
+enum {
     TK_EOF,
     TK_NL,
     TK_WS,
@@ -254,9 +262,10 @@ struct Token {
     int32_t line_delta;
     uint16_t len;
     uint8_t kind;
-    bool is_sol;        // true if is starting of line
-    bool is_leadingws;  // true if is leading space
-    bool noexpand;      // true if this token shall not be macro-expanded
+    uint8_t enc_prefix;  // Used if kind == TK_CHARLIT or kind == TK_STRLIT
+    bool is_sol;         // true if is starting of line
+    bool is_leadingws;   // true if is leading space
+    bool noexpand;       // true if this token shall not be macro-expanded
 };
 
 bool match(Token **rest, Token *tok, uint32_t kind);

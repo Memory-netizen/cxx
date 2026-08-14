@@ -85,6 +85,43 @@ static int read_punct(char *p, Token *tok) {
     return 0;
 }
 
+static void check_escape_range(Token *tok, uint64_t val) {
+    uint32_t prefix = tok->enc_prefix;
+    switch (prefix) {
+        case PREFIX_NONE:
+        case PREFIX_u8:
+            if (val > 0xFF) error(tok, "escape value out of range for unsigned char (0-255)");
+            break;
+        case PREFIX_u:
+            if (val > 0xFFFF) error(tok, "escape value out of range for char16_t (0-65535)");
+            break;
+        case PREFIX_U:
+            if (val > 0xFFFFFFFF) error(tok, "escape value out of range for char32_t (max 0xFFFFFFFF)");
+            break;
+        case PREFIX_L:
+            if (val > 0xFFFFFFFF) error(tok, "escape value out of range for wchar_t");
+            break;
+    }
+}
+
+static void check_char_range(Token *tok, uint64_t code) {
+    uint32_t prefix = tok->enc_prefix;
+    switch (prefix) {
+        case PREFIX_u8:
+            if (code > 0x7F)
+                error(tok, "UTF-8 character literal contains a character > 0x7F (requires multiple code units)");
+            break;
+        case PREFIX_u:
+            if (code > 0xFFFF)
+                error(tok, "UTF-16 character literal contains a character > 0xFFFF (requires surrogate pair)");
+            break;
+        case PREFIX_NONE:
+        case PREFIX_U:
+        case PREFIX_L:
+            break;
+    }
+}
+
 static int from_hex(char c) {
     if ('0' <= c && c <= '9') return c - '0';
     if ('a' <= c && c <= 'f') return c - 'a' + 10;
@@ -176,10 +213,10 @@ static int read_ident(char *start) {
     }
 }
 
-static int read_escaped_char(char **new_pos, char *p, char *end) {
+static uint64_t read_escaped_char(char **new_pos, char *p, char *end) {
     static struct {
         char ch;
-        uint32_t val;
+        uint8_t val;
     } simple[] = {
         {'a', '\a'}, {'b', '\b'}, {'e', 27},    {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
         {'t', '\t'}, {'v', '\v'}, {'\'', '\''}, {'"', '"'},  {'?', '?'},  {'\\', '\\'},
@@ -208,7 +245,7 @@ static int read_escaped_char(char **new_pos, char *p, char *end) {
         if (p[1] != '{') error_at(cur_file, p, "'\\o' not followed by '{'");
         p += 2;
         if (*p == '}') goto empty_error;
-        uint32_t val = 0;
+        uint64_t val = 0;
         while (p < end) {
             int c = *p;
             if (c == '}') break;
@@ -232,7 +269,7 @@ static int read_escaped_char(char **new_pos, char *p, char *end) {
         }
         if (!isxdigit(*p)) error_at(cur_file, p, "invalid hex escape sequence");
 
-        int c = 0;
+        uint64_t c = 0;
         for (; p < end && isxdigit(*p); p++) c = (c << 4) + from_hex(*p);
         if (has_brace && *p++ != '}') goto miss_error;
         *new_pos = p;
@@ -288,7 +325,7 @@ error:
     return tok;
 }
 
-uint32_t eval_char_literal(Token *tok) {
+static void eval_char_literal(Token *tok) {
     char *p = tok->loc;
     while (*p++ != '\'');
     char *end = tok->loc + tok->len - 1;
@@ -297,17 +334,29 @@ uint32_t eval_char_literal(Token *tok) {
     while (p < end) {
         if (*p == '\\') {
             p++;
-            val = (val << 8) + read_escaped_char(&p, p, end);
+            uint64_t ch = read_escaped_char(&p, p, end);
+            check_escape_range(tok, ch);
+            val = (val << 8) + ch;
         } else {
             bool success = false;
-            val = (val << 8) + decode_utf8(&p, p, &success);
-            if (!success) fatal("invalid UTF-8 in char literal");
+            uint64_t ch = decode_utf8(&p, p, &success);
+            if (!success) error(tok, "invalid UTF-8 in char literal");
+            check_char_range(tok, ch);
+            val = (val << 8) + ch;
         }
     }
-    return val;
+    tok->kind = TK_NUM;
+    tok->val = val;
+
+    uint32_t prefix = tok->enc_prefix;
+    tok->ty = prefix == PREFIX_NONE ? ty_int
+              : prefix == PREFIX_L  ? ty_int
+              : prefix == PREFIX_U  ? ty_uint
+              : prefix == PREFIX_u  ? ty_ushort
+                                    : ty_uchar;
 }
 
-static Token *read_char_literal(char *start, char *quote) {
+static Token *read_char_literal(char *start, char *quote, uint32_t prefix) {
     Token *tok;
     char *p = quote + 1;
     if (*p == '\0') goto error;
@@ -329,8 +378,8 @@ static Token *read_char_literal(char *start, char *quote) {
         return tok;
     }
 
-    tok = new_token(TK_NUM, start, p + 1);
-    tok->val = eval_char_literal(tok);
+    tok = new_token(TK_CHARLIT, start, p + 1);
+    tok->enc_prefix = prefix;
     return tok;
 error:
     tok = new_token(TK_ERR, start, start + 1);
@@ -661,7 +710,9 @@ error:
 
 void convert_ppnumber(Token *tok) {
     while (tok->kind != TK_EOF) {
+        if (tok->kind == TK_ERR) error(tok, tok->msg);
         if (tok->kind == TK_PPNUM) convert_pp_num(tok);
+        if (tok->kind == TK_CHARLIT) eval_char_literal(tok);
         tok = tok->next;
     }
 }
@@ -828,7 +879,31 @@ Token *tokenize(SrcFile *file) {
 
         // Character literal
         if (*p == '\'') {
-            tok = read_char_literal(p, p);
+            tok = read_char_literal(p, p, PREFIX_NONE);
+            cur = cur->next = tok;
+            p += tok->len;
+            continue;
+        }
+
+        // UTF-8 character literal
+        if (start_with(p, "u8'")) {
+            tok = read_char_literal(p, p + 2, PREFIX_u8);
+            cur = cur->next = tok;
+            p += tok->len;
+            continue;
+        }
+
+        // UTF-16 character literal
+        if (start_with(p, "u'")) {
+            tok = read_char_literal(p, p + 1, PREFIX_u);
+            cur = cur->next = tok;
+            p += tok->len;
+            continue;
+        }
+
+        // UTF-32 character literal
+        if (start_with(p, "U'")) {
+            tok = read_char_literal(p, p + 1, PREFIX_U);
             cur = cur->next = tok;
             p += tok->len;
             continue;
@@ -836,7 +911,7 @@ Token *tokenize(SrcFile *file) {
 
         // Wide character literal
         if (start_with(p, "L'")) {
-            tok = read_char_literal(p, p + 1);
+            tok = read_char_literal(p, p + 1, PREFIX_L);
             cur = cur->next = tok;
             p += tok->len;
             continue;
