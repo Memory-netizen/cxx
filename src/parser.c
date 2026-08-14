@@ -974,10 +974,18 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
     return node;
 }
 
-static Member *get_struct_member(Type *ty, Token *tok) {
-    for (Member *mem = ty->members; mem; mem = mem->next)
+// Find a struct member by name.
+static Member *get_struct_member(Member *mem, Token *tok) {
+    for (; mem; mem = mem->next) {
+        // Anonymous struct member
+        if ((mem->ty->kind == TY_STRUCT || mem->ty->kind == TY_UNION) && !mem->name) {
+            if (get_struct_member(mem->ty->members, tok)) return mem;
+            continue;
+        }
+
+        // Regular struct member
         if (mem->name->id == tok->id) return mem;
-    error(tok, "no member named ‘%s’ in ‘%s’", str(tok->id), str(ty->uid));
+    }
     return NULL;
 }
 
@@ -1046,13 +1054,21 @@ static Node *postfix(Token **rest, Token *tok) {
                 Token *dot = tok;
                 tok = tok->next;
                 uint32_t mem_id = get_ident(tok);
+
                 if (ty->kind != TY_STRUCT && ty->kind != TY_UNION)
                     error(dot, "request for member ‘%s’ in something not a structure or union", str(mem_id));
-                Member *mem = copy_mem(get_struct_member(ty, tok));
-                mem->next = NULL;
-                tok = tok->next;
+                Member *mem = get_struct_member(ty->members, tok);
+                if (!mem) error(tok, "no member named ‘%s’ in ‘%s’", str(tok->id), str(ty->uid));
+
+                while (!mem->name) {
+                    node = new_unary(ND_MEMBER, node, dot);
+                    node->member = mem;
+                    mem = get_struct_member(mem->ty->members, tok);
+                }
+
                 node = new_unary(ND_MEMBER, node, dot);
                 node->member = mem;
+                tok = tok->next;
                 continue;
             }
             case TK_INC:
@@ -2116,6 +2132,22 @@ note:
     return NULL;
 }
 
+static void check_anon_mem(Member *mem1, Member *mem2) {
+    for (; mem2; mem2 = mem2->next) {
+        // Anonymous struct member
+        if ((mem2->ty->kind == TY_STRUCT || mem2->ty->kind == TY_UNION) && !mem2->name)
+            check_anon_mem(mem1, mem2->ty->members);
+
+        // Regular struct member
+        Member *exist = get_struct_member(mem1, mem2->name);
+        if (exist) {
+            while (!exist->name) exist = get_struct_member(exist->ty->members, mem2->name);
+            diag("error", mem2->name, "duplicate member ‘%s’", str(mem2->name->id));
+            diag_exit("note", exist->name, "previous declaration is here");
+        }
+    }
+}
+
 // MemDecl  ::= TypeSpec+ (MemDeclr ("," MemDeclr)*)? ";"
 // MemDeclr ::= Declr
 static void struct_members(Token **rest, Token *tok, Type *ty) {
@@ -2127,6 +2159,18 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
         Type *basety = declspecs(&tok, tok, NULL, &align, NULL);
         int i = 0;
 
+        // Anonymous struct member
+        if ((basety->kind == TY_STRUCT || basety->kind == TY_UNION) && match(&tok, tok, TK_SEMI)) {
+            Member *mem = emalloc(sizeof(Member));
+            mem->ty = basety;
+            if (align) mem->is_align = true;
+            mem->align = MAX(align, mem->ty->align);
+            check_anon_mem(dummy.next, mem->ty->members);
+            cur = cur->next = mem;
+            continue;
+        }
+
+        // Regular struct members
         while (!match(&tok, tok, TK_SEMI)) {
             if (i++) tok = skip(tok, TK_COMMA);
             Member *mem = emalloc(sizeof(Member));
@@ -2138,14 +2182,13 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             if (mem->ty->kind == TY_FUNC) error(mem_name, "field ‘%s’ declared as a function", str(mem_name->id));
             if (mem->ty->size < 0 && tok->next->kind != TK_RBRACE)
                 error(mem_name, "variable ‘%s’ has incomplete type", str(mem_name->id));
-            mem->name = mem->ty->name;
-            Member *tmp = dummy.next;
-            while (tmp) {
-                if (tmp->name->id == mem_name->id) {
-                    diag("error", mem_name, "duplicate member ‘%s’", str(mem_name->id));
-                    diag_exit("note", tmp->name, "previous declaration is here");
-                }
-                tmp = tmp->next;
+
+            mem->name = mem_name;
+            Member *exist = get_struct_member(dummy.next, mem_name);
+            if (exist) {
+                while (!exist->name) exist = get_struct_member(exist->ty->members, mem_name);
+                diag("error", mem_name, "duplicate member ‘%s’", str(mem_name->id));
+                diag_exit("note", exist->name, "previous declaration is here");
             }
             cur = cur->next = mem;
         }
