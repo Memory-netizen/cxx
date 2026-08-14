@@ -450,15 +450,34 @@ void dump_data(Sym *data) {
     if (data->is_str) {
         char *p = str(data->init_data);
         int len = data->ty->len;
-        fprintf(out_file, "private unnamed_addr constant [%d x i8]", len);
-        if (len == 1)
+        fprintf(out_file, "private unnamed_addr constant ");
+        print_type(data->ty);
+        if (len == 1) {
             fprintf(out_file, " zeroinitializer");
-        else {
-            fprintf(out_file, " c\"");
-            for (int i = 0; i < len; i++) fprintf(out_file, "%s", escape_char_to_string(p[i]));
-            fprintf(out_file, "\"");
+        } else {
+            if (data->ty->base->size == 1) {
+                fprintf(out_file, " c\"");
+                for (int i = 0; i < len; i++) fprintf(out_file, "%s", escape_char_to_string(p[i]));
+                fprintf(out_file, "\"");
+            } else if (data->ty->base->size == 2) {
+                uint16_t *buf = (uint16_t *)p;
+                fprintf(out_file, " [");
+                for (int i = 0; i < data->ty->len; i++) {
+                    if (i) fprintf(out_file, ", ");
+                    fprintf(out_file, "i16 %d", buf[i]);
+                }
+                fprintf(out_file, "]");
+            } else if (data->ty->base->size == 4) {
+                uint32_t *buf = (uint32_t *)p;
+                fprintf(out_file, " [");
+                for (int i = 0; i < data->ty->len; i++) {
+                    if (i) fprintf(out_file, ", ");
+                    fprintf(out_file, "i32 %d", buf[i]);
+                }
+                fprintf(out_file, "]");
+            }
         }
-        fprintf(out_file, ", align 1\n");
+        fprintf(out_file, ", align %d\n", data->align);
         return;
     }
     fprintf(out_file, "%s global ", sclass_name[data->sclass]);

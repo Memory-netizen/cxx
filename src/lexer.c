@@ -290,42 +290,137 @@ digit_error:
     return 0;
 }
 
-// Find a closing double-quote.
-static char *string_literal_end(char *p) {
-    p++;
-    for (; *p != '"'; p++) {
-        if (*p == '\n' || *p == '\0') return NULL;
-        if (*p == '\\') p++;
-    }
-    return p;
-}
-
-static Token *read_string_literal(char *start) {
-    char *end = string_literal_end(start);
-    if (!end) goto error;
-    char *buf = emalloc(end - start);
+static void convert_utf8_str_literal(Token *tok, char *str, Type *ty) {
+    char *p = str;
+    while (*p++ != '"');
+    char *end = str + strlen(str) - 1;
+    char *buf = emalloc(end - p);
     int len = 0;
 
-    for (char *p = start + 1; p < end;) {
+    while (p < end) {
+        if (*p == '\\') {
+            buf[len++] = read_escaped_char(&p, p + 1, end);
+        } else {
+            buf[len++] = *p++;
+        }
+    }
+
+    tok->ty = array_of(ty, len + 1);
+    tok->id = intern(buf, len);
+}
+
+// Read a UTF-8-encoded string literal and transcode it in UTF-16.
+//
+// UTF-16 is yet another variable-width encoding for Unicode. Code
+// points smaller than U+10000 are encoded in 2 bytes. Code points
+// equal to or larger than that are encoded in 4 bytes. Each 2 bytes
+// in the 4 byte sequence is called "surrogate", and a 4 byte sequence
+// is called a "surrogate pair".
+static void convert_utf16_str_literal(Token *tok, char *str, Type *ty) {
+    char *p = str;
+    while (*p++ != '"');
+    char *end = str + strlen(str) - 1;
+    uint16_t *buf = emalloc(4 * (end - p));
+    int len = 0;
+
+    while (p < end) {
+        if (*p == '\\') {
+            buf[len++] = read_escaped_char(&p, p + 1, end);
+            continue;
+        }
+
+        bool ignored = false;
+        uint32_t c = decode_utf8(&p, p, &ignored);
+
+        if (c < 0x10000) {
+            // Encode a code point in 2 bytes.
+            buf[len++] = c;
+        } else {
+            // Encode a code point in 4 bytes.
+            c -= 0x10000;
+            buf[len++] = 0xD800 + ((c >> 10) & 0x3FF);
+            buf[len++] = 0xDC00 + (c & 0x3FF);
+        }
+    }
+
+    tok->ty = array_of(ty, len + 1);
+    tok->id = intern((char *)buf, len * 2);
+}
+
+// Read a UTF-8-encoded string literal and transcode it in UTF-32.
+//
+// UTF-32 is a fixed-width encoding for Unicode. Each code point is
+// encoded in 4 bytes.
+static void convert_utf32_str_literal(Token *tok, char *str, Type *ty) {
+    char *p = str;
+    while (*p++ != '"');
+    char *end = str + strlen(str) - 1;
+    uint32_t *buf = emalloc(4 * (end - p));
+    int len = 0;
+    bool ignored = false;
+
+    while (p < end) {
         if (*p == '\\')
             buf[len++] = read_escaped_char(&p, p + 1, end);
         else
-            buf[len++] = *p++;
+            buf[len++] = decode_utf8(&p, p, &ignored);
     }
 
-    Token *tok = new_token(TK_STRLIT, start, end + 1);
-    tok->ty = array_of(ty_char, len + 1);
-    tok->id = intern(buf, len);
+    tok->ty = array_of(ty, len + 1);
+    tok->id = intern((char *)buf, len * 4);
+}
+
+static void convert_str_literal(Token *tok) {
+    char *str = convert_universal_chars(tok->loc, tok->len);
+    uint32_t prefix = tok->enc_prefix;
+    switch (prefix) {
+        case PREFIX_NONE:
+            convert_utf8_str_literal(tok, str, ty_char);
+            break;
+        case PREFIX_u8:
+            convert_utf8_str_literal(tok, str, ty_uchar);
+            break;
+        case PREFIX_u:
+            convert_utf16_str_literal(tok, str, ty_ushort);
+            break;
+        case PREFIX_U:
+            convert_utf32_str_literal(tok, str, ty_uint);
+            break;
+        case PREFIX_L:
+            convert_utf32_str_literal(tok, str, ty_int);
+            break;
+        default:
+            break;
+    }
+}
+
+static Token *read_string_literal(char *start, char *quote, uint32_t prefix) {
+    Token *tok;
+    char *p = quote + 1;
+    if (*p == '\0') goto error;
+
+    while (1) {
+        if (*p == '\\')
+            p += 2;
+        else if (*p == '\0' || *p == '\n')
+            goto error;
+        else if (*p == '"')
+            break;
+        else
+            p++;
+    }
+
+    tok = new_token(TK_STRLIT, start, p + 1);
+    tok->enc_prefix = prefix;
+    convert_str_literal(tok);
     return tok;
 error:
-    end = start;
-    while (*end != '\n') end++;
-    tok = new_token(TK_ERR, start, end + 1);
+    tok = new_token(TK_ERR, start, p);
     tok->msg = "missing terminating \" character";
     return tok;
 }
 
-static void eval_char_literal(Token *tok) {
+static void convert_char_literal(Token *tok) {
     char *p = tok->loc;
     while (*p++ != '\'');
     char *end = tok->loc + tok->len - 1;
@@ -364,7 +459,7 @@ static Token *read_char_literal(char *start, char *quote, uint32_t prefix) {
     while (1) {
         if (*p == '\\')
             p += 2;
-        else if (*p == '\n')
+        else if (*p == '\0' || *p == '\n')
             goto error;
         else if (*p == '\'')
             break;
@@ -382,7 +477,7 @@ static Token *read_char_literal(char *start, char *quote, uint32_t prefix) {
     tok->enc_prefix = prefix;
     return tok;
 error:
-    tok = new_token(TK_ERR, start, start + 1);
+    tok = new_token(TK_ERR, start, quote + 1);
     tok->msg = "unclosed char literal";
     return tok;
 }
@@ -712,7 +807,7 @@ void convert_ppnumber(Token *tok) {
     while (tok->kind != TK_EOF) {
         if (tok->kind == TK_ERR) error(tok, tok->msg);
         if (tok->kind == TK_PPNUM) convert_pp_num(tok);
-        if (tok->kind == TK_CHARLIT) eval_char_literal(tok);
+        if (tok->kind == TK_CHARLIT) convert_char_literal(tok);
         tok = tok->next;
     }
 }
@@ -871,7 +966,39 @@ Token *tokenize(SrcFile *file) {
 
         // String literal
         if (*p == '"') {
-            tok = read_string_literal(p);
+            tok = read_string_literal(p, p, PREFIX_NONE);
+            cur = cur->next = tok;
+            p += tok->len;
+            continue;
+        }
+
+        // Character literal
+        if (start_with(p, "u8\"")) {
+            tok = read_string_literal(p, p + 2, PREFIX_u8);
+            cur = cur->next = tok;
+            p += tok->len;
+            continue;
+        }
+
+        // UTF-16 string literal
+        if (start_with(p, "u\"")) {
+            tok = read_string_literal(p, p + 1, PREFIX_u);
+            cur = cur->next = tok;
+            p += tok->len;
+            continue;
+        }
+
+        // UTF-32 string literal
+        if (start_with(p, "U\"")) {
+            tok = read_string_literal(p, p + 1, PREFIX_U);
+            cur = cur->next = tok;
+            p += tok->len;
+            continue;
+        }
+
+        // Wide string literal
+        if (start_with(p, "L\"")) {
+            tok = read_string_literal(p, p + 1, PREFIX_L);
             cur = cur->next = tok;
             p += tok->len;
             continue;
