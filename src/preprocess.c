@@ -153,6 +153,9 @@ static bool is_hash(Token *tok) { return tok->is_sol && tok->kind == TK_HASH; }
 // tokens before newline. This function skips such tokens.
 static Token *skip_line(Token *tok) {
     if (tok->is_sol) return tok;
+
+    tok->line_delta = line_delta;
+    tok->filename = display_name;
     warning(tok, "extra token");
     while (!tok->is_sol) tok = tok->next;
     return tok;
@@ -224,7 +227,14 @@ static Token *read_line(Token **rest, Token *tok) {
     Token dummy = {};
     Token *cur = &dummy;
 
-    for (; !tok->is_sol; tok = tok->next) cur = cur->next = tok;
+    for (; !tok->is_sol; tok = tok->next) {
+        tok->line_delta = line_delta;
+        tok->filename = display_name;
+        cur = cur->next = tok;
+    }
+
+    tok->line_delta = line_delta;
+    tok->filename = display_name;
 
     cur->next = new_eof(tok);
     *rest = tok;
@@ -409,8 +419,11 @@ static void push_disabled(uint32_t id) {
 static void pop_disabled() { hideset = hideset->next; }
 
 static Macro *find_macro(Token *tok) {
-    if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
-
+    if (tok->kind != TK_IDENT) {
+        tok->line_delta = line_delta;
+        tok->filename = display_name;
+        error(tok, "macro name must be an identifier");
+    }
     for (Macro *m = macros; m; m = m->next)
         if (m->id == tok->id) return m->deleted ? NULL : m;
     return NULL;
@@ -460,6 +473,8 @@ static MacroParam *read_macro_params(Token **rest, Token *tok, bool *is_variadic
 }
 
 static void read_macro_definition(Token **rest, Token *tok) {
+    tok = read_line(rest, tok);
+
     if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
     if (tok->id == defined_id) error(tok, "'defined' cannot be used as a macro name");
     Macro *exist = find_macro(tok);
@@ -474,14 +489,14 @@ static void read_macro_definition(Token **rest, Token *tok) {
         uint32_t va_args_id = 0;
         MacroParam *params = read_macro_params(&tok, tok->next, &is_variadic, &va_args_id);
         if (!tok->is_sol && !tok->is_leadingws) warning(tok, "ISO C99 requires whitespace after the macro name");
-        Macro *m = add_macro(name->id, false, read_line(rest, tok));
+        Macro *m = add_macro(name->id, false, tok);
         m->params = params;
         m->is_variadic = is_variadic;
         m->va_args_id = va_args_id;
     } else {
         // Object-like macro
         if (!tok->is_sol && !tok->is_leadingws) warning(tok, "ISO C99 requires whitespace after the macro name");
-        add_macro(name->id, true, read_line(rest, tok));
+        add_macro(name->id, true, tok);
     }
 }
 
@@ -860,7 +875,11 @@ static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
 
         // Find closing ">".
         for (; tok->kind != TK_GT; tok = tok->next)
-            if (tok->is_sol || tok->kind == TK_EOF) error(start, "expected '>' to match this '<'");
+            if (tok->is_sol || tok->kind == TK_EOF) {
+                start->line_delta = line_delta;
+                start->filename = display_name;
+                error(start, "expected '>' to match this '<'");
+            }
 
         *is_dquote = false;
         *rest = skip_line(tok->next);
@@ -878,6 +897,8 @@ static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
         return read_include_filename(&cur, dummy.next, is_dquote);
     }
 
+    tok->line_delta = line_delta;
+    tok->filename = display_name;
     error(tok, "expected \"FILENAME\" or <FILENAME>");
     return NULL;
 }
@@ -954,8 +975,11 @@ static Token *include_file(Token **rest, Token *tok, char *path, Token *filename
 
     Token *tok2 = tokenize_file(path);
     tok2 = filter_tokens(tok2);
-    if (!tok2) error(filename_tok, "%s: cannot open file: %s", path, strerror(errno));
-
+    if (!tok2) {
+        filename_tok->line_delta = line_delta;
+        filename_tok->filename = display_name;
+        error(filename_tok, "%s: cannot open file: %s", path, strerror(errno));
+    }
     push_file(tok, tok2->file);
     detect_include_guard1(tok2);
     *rest = tok2;
@@ -1048,8 +1072,14 @@ static Token *preprocess2(Token *tok) {
             if (tok->kind == TK_EOF) continue;
         }
 
+        tok->line_delta = line_delta;
+        tok->filename = display_name;
+
         Token *tk_hash = tok;
         tok = tok->next;
+
+        tok->line_delta = line_delta;
+        tok->filename = display_name;
 
         // Preprocessing directives that may alter conditional‑frame state
         if (tok->id == dt[P_IF].id) {
@@ -1174,8 +1204,11 @@ static Token *preprocess2(Token *tok) {
         if (tok->id == dt[P_UNDEF].id) {
             tok = tok->next;
             Macro *m = find_macro(tok);
-            if (m && m->is_builtin) warning(tok, "undefining builtin macro");
-
+            if (m && m->is_builtin) {
+                tok->line_delta = line_delta;
+                tok->filename = display_name;
+                warning(tok, "undefining builtin macro");
+            }
             m = add_macro(tok->id, true, NULL);
             m->deleted = true;
 
