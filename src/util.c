@@ -34,12 +34,11 @@ static void emit_diag(char *level, uint32_t filename, int line_delta, SrcFile *d
 
     fprintf(stderr, "%*s", indent, "| ");  // print pos spaces.
 
-    while (start < loc) {
-        if (*start++ == '\t')
-            fprintf(stderr, "\t");
-        else
-            fprintf(stderr, " ");
-    }
+    int width = display_width(start, loc - start);
+    while (start < loc)
+        if (*start++ == '\t') fprintf(stderr, "\t");
+    fprintf(stderr, "%*s", width, "");
+
     fprintf(stderr, "^\n");
 }
 
