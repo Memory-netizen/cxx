@@ -212,17 +212,20 @@ static Ref gen_expr(Node *node) {
         case ND_LVTOR: {
             int align = node->ty->align;
             if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
-            dst = load(gen_expr(node->lhs), node->ty, align);
+            Ref addr = gen_expr(node->lhs);
             if (node->lhs->kind == ND_MEMBER) {
                 Member *mem = node->lhs->member;
                 if (mem->is_bitfield) {
-                    Ref shl = TMP(tmp_id++, node->ty);
-                    new_ins(IR_SHL, shl, (Ref[]){dst, INT(node->ty->size * 8 - mem->bit_width - mem->bit_offset)}, 2);
-                    Ref shr = TMP(tmp_id++, node->ty);
-                    new_ins(IR_SHR, shr, (Ref[]){shl, INT(node->ty->size * 8 - mem->bit_width)}, 2);
-                    return shr;
+                    Type *ty = mem->pad_ty;
+                    dst = load(addr, ty, align);
+                    Ref shl = TMP(tmp_id++, ty);
+                    new_ins(IR_SHL, shl, (Ref[]){dst, INT(ty->size * 8 - mem->bit_width - mem->bit_offset)}, 2);
+                    Ref shr = TMP(tmp_id++, ty);
+                    new_ins(IR_SHR, shr, (Ref[]){shl, INT(ty->size * 8 - mem->bit_width)}, 2);
+                    return cast(shr, ty, node->ty);
                 }
             }
+            dst = load(addr, node->ty, align);
             return dst;
         }
         case ND_VAR:
@@ -259,12 +262,13 @@ static Ref gen_expr(Node *node) {
             if (node->lhs->kind == ND_MEMBER) {
                 Member *mem = node->lhs->member;
                 if (mem->is_bitfield) {
+                    Type *ty = mem->pad_ty;
                     // a. load entire memmory
-                    Ref old = load(addr, node->ty, align);
+                    Ref old = load(addr, ty, align);
 
                     int width = mem->bit_width;
                     int boff = mem->bit_offset;
-                    int total_bits = node->ty->size * 8;
+                    int total_bits = ty->size * 8;
 
                     // b. clear mask
                     int64_t mask = ((1ULL << width) - 1) << boff;
@@ -273,19 +277,23 @@ static Ref gen_expr(Node *node) {
                     Ref clear_mask = INT(clear_mask_val);
 
                     // c. clear old value
-                    Ref old_cleared = TMP(tmp_id++, node->ty);
+                    Ref old_cleared = TMP(tmp_id++, ty);
                     new_ins(IR_AND, old_cleared, (Ref[]){old, clear_mask}, 2);
 
                     // d. trunc new vlaue
-                    Ref dst_masked = TMP(tmp_id++, node->ty);
-                    new_ins(IR_AND, dst_masked, (Ref[]){dst, INT((1ULL << width) - 1)}, 2);
+                    Ref trunc = cast(dst, dst.ty, ty);
 
                     // e. shiht new value
-                    Ref dst_shifted = TMP(tmp_id++, node->ty);
-                    new_ins(IR_SHL, dst_shifted, (Ref[]){dst_masked, INT(boff)}, 2);
+                    Ref dst_shifted;
+                    if (boff > 0) {
+                        dst_shifted = TMP(tmp_id++, ty);
+                        new_ins(IR_SHL, dst_shifted, (Ref[]){trunc, INT(boff)}, 2);
+                    } else {
+                        dst_shifted = trunc;
+                    }
 
                     // f. merge value
-                    Ref new_val = TMP(tmp_id++, node->ty);
+                    Ref new_val = TMP(tmp_id++, ty);
                     new_ins(IR_OR, new_val, (Ref[]){old_cleared, dst_shifted}, 2);
 
                     // g. store

@@ -336,14 +336,15 @@ void dump_type(Type *ty) {
     if (ty->kind == TY_STRUCT) {
         int pos = 0;
         while (mem) {
-            print_type(mem->ty);
-            pos += mem->ty->size;
+            Type *memty = mem->is_bitfield ? mem->pad_ty : mem->ty;
+            print_type(memty);
+            pos += memty->size;
             int off = mem->offset;
             mem = mem->next;
             while (mem && mem->offset == off) mem = mem->next;
             if (!mem) break;
             fprintf(out_file, ", ");
-            if (pos != mem->offset) {
+            if (pos < mem->offset) {
                 fprintf(out_file, "[%d x i8], ", mem->offset - pos);
                 pos = mem->offset;
             }
@@ -392,9 +393,27 @@ static void dump_init(Initializer *init, Type *ty) {
         Member *mem = ty->members;
         int pos = 0;
         while (mem) {
-            dump_init(init->child[mem->idx], mem->ty);
-            pos += mem->ty->size;
-            mem = mem->next;
+            if (mem->is_bitfield) {
+                Member *after = mem->next;
+                int off = mem->offset;
+                while (after && after->offset == off) after = after->next;
+                int64_t val = 0;
+                for (Member *m = mem; m != after; m = m->next) {
+                    int width = m->bit_width;
+                    int boff = m->bit_offset;
+                    int trunc = init->child[m->idx]->val->bits.i & ((1ULL << width) - 1);
+                    val |= trunc << boff;
+                }
+                print_type(mem->pad_ty);
+                fprintf(out_file, " ");
+                printcon(&(Con){CBits, 0, {val}}, mem->pad_ty);
+                pos += mem->pad_ty->size;
+                mem = after;
+            } else {
+                dump_init(init->child[mem->idx], mem->ty);
+                pos += mem->ty->size;
+                mem = mem->next;
+            }
             if (!mem) break;
             fprintf(out_file, ", ");
             if (pos != mem->offset) {
@@ -402,7 +421,7 @@ static void dump_init(Initializer *init, Type *ty) {
                 pos = mem->offset;
             }
         }
-        if (pos < ty->size) fprintf(out_file, "[%d x i8] zeroinitializer, ", ty->size - pos);
+        if (pos < ty->size) fprintf(out_file, ", [%d x i8] zeroinitializer", ty->size - pos);
         fprintf(out_file, " }");
         return;
     }

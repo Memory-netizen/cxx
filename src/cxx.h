@@ -593,6 +593,7 @@ struct Member {
     bool is_bitfield;
     int bit_offset;
     int bit_width;
+    Type *pad_ty;
 };
 
 struct EnumVal {

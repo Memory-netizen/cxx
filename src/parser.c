@@ -2194,6 +2194,8 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             if (match(&tok, tok, TK_COLON)) {
                 mem->is_bitfield = true;
                 mem->bit_width = const_expr(&tok, tok);
+                if (mem->bit_width > mem->ty->size * 8)
+                    error(mem_name, "width of ‘%s’ exceeds its type", str(mem_name->id));
             }
 
             cur = cur->next = mem;
@@ -2207,6 +2209,79 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
 
     *rest = tok->next;
     ty->members = dummy.next;
+}
+
+static Type *get_padtype(int bytes, bool is_unsigned) {
+    if (bytes == 1) return is_unsigned ? ty_uchar : ty_schar;
+    if (bytes == 2) return is_unsigned ? ty_ushort : ty_short;
+    if (bytes == 4) return is_unsigned ? ty_uint : ty_int;
+    return is_unsigned ? ty_ulong : ty_long;
+}
+
+static int min_bytes_for_bits(int bits) {
+    if (bits <= 8) return 1;
+    if (bits <= 16) return 2;
+    if (bits <= 32) return 4;
+    return 8;
+}
+
+static void layout_struct(Type *ty, bool is_union) {
+    ty->align = 1;
+    int offset = 0;
+    int bits = 0;
+    int unit_size = 0;
+    uint32_t idx = 0;
+
+#define END_UNIT()                                      \
+    do {                                                \
+        if (unit_size && bits > 0) offset += unit_size; \
+        unit_size = 0;                                  \
+        bits = 0;                                       \
+    } while (0)
+
+    for (Member *mem = ty->members; mem; mem = mem->next) {
+        ty->align = MAX(ty->align, mem->align);
+        mem->idx = idx++;
+
+        if (is_union) {
+            offset = MAX(offset, mem->ty->size);
+            continue;
+        }
+
+        if (mem->is_bitfield) {
+            int width = mem->bit_width;
+            if (unit_size == 0) {
+                int total_bits = 0;
+                for (Member *m = mem; m && m->is_bitfield; m = m->next) total_bits += m->bit_width;
+
+                unit_size = min_bytes_for_bits(total_bits);
+                bits = 0;
+            }
+
+            if (bits + width > unit_size * 8) {
+                END_UNIT();
+
+                int total_bits = 0;
+                for (Member *m = mem; m && m->is_bitfield; m = m->next) total_bits += m->bit_width;
+
+                unit_size = min_bytes_for_bits(total_bits);
+                bits = 0;
+            }
+            mem->offset = offset;
+            mem->bit_offset = bits;
+            mem->pad_ty = get_padtype(unit_size, mem->ty->is_unsigned);
+            bits += width;
+        } else {
+            END_UNIT();
+            offset = ALIGN_UP(offset, mem->align);
+            mem->offset = offset;
+            mem->pad_ty = mem->ty;
+            offset += mem->ty->size;
+        }
+    }
+
+    END_UNIT();
+    ty->size = ALIGN_UP(offset, ty->align);
 }
 
 // RecordSpec ::= Record Ident ("{" MemDecl+ "}")? | Record "{" MemDecl+ "}"
@@ -2282,30 +2357,7 @@ static Type *record_decl(Token **rest, Token *tok) {
     }
 
     struct_members(rest, tok, ty);
-
-    // Assign offsets within the struct to members.
-    int bits = 0;
-    uint32_t idx = 0;
-    for (Member *mem = ty->members; mem; mem = mem->next) {
-        ty->align = MAX(ty->align, mem->align);
-        mem->idx = idx++;
-        if (is_union) {
-            bits = MAX(bits, mem->ty->size * 8);
-            continue;
-        }
-        if (mem->is_bitfield) {
-            int sz = mem->ty->size;
-            if (bits / (sz * 8) != (bits + mem->bit_width - 1) / (sz * 8)) bits = ALIGN_UP(bits, sz * 8);
-            mem->offset = ALIGN_UP(bits / 8, sz);
-            mem->bit_offset = bits % (sz * 8);
-            bits += mem->bit_width;
-        } else {
-            bits = ALIGN_UP(bits, mem->align * 8);
-            mem->offset = bits / 8;
-            bits += mem->ty->size * 8;
-        }
-    }
-    ty->size = ALIGN_UP(bits, ty->align * 8) / 8;
+    layout_struct(ty, is_union);
 
     if (redefine) {
         if (!is_compatible(ty, exist_ty)) {
