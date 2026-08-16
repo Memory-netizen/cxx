@@ -78,58 +78,6 @@ static void insert_phi(Blk *blk, Phi *phi) {
     blk->phi = phi;
 }
 
-static Ref gen_addr(Node *node) {
-    switch (node->kind) {
-        case ND_VAR:
-            gen_expr(node->var_init);
-            if (node->var->is_local)
-                return SLOT(node->var->vreg, pointer_to(node->ty, 0));
-            else
-                // Global variable
-                return GLB(node->var->id, pointer_to(node->ty, 0));
-        case ND_DEREF:
-            return gen_expr(node->lhs);
-        case ND_MEMBER: {
-            Ref addr = gen_expr(node->lhs);
-            if (node->lhs->ty->kind == TY_UNION) {
-                addr.ty = pointer_to(node->member->ty, 0);
-                return addr;
-            }
-            int pos = 0;
-            int idx = 0;
-            Member *mem = node->member;
-            Member *cur = node->lhs->ty->members;
-            while (cur) {
-                if (cur->idx == mem->idx) break;
-                pos += cur->ty->size;
-                cur = cur->next;
-                if (!cur) break;
-                if (pos < cur->offset) {
-                    pos = cur->offset;
-                    idx++;
-                } else if (pos > cur->offset) {
-                    pos = cur->offset;
-                    idx--;
-                }
-            }
-            Ref gep_ops[] = {addr, INT(0), INT(mem->idx + idx)};
-            Ref dst = TMP(tmp_id++, pointer_to(node->ty, 0));
-            new_ins(IR_GEP, dst, gep_ops, 3);
-            return dst;
-        }
-        default:
-            break;
-    }
-    error(node->tok, "not a lvalue");
-    return R;
-}
-
-static Ref load(Ref addr, Type *ty, int align) {
-    Ref dst = TMP(tmp_id++, ty);
-    new_ins(IR_LORD, dst, (Ref[]){addr, INT(align)}, 2);
-    return dst;
-}
-
 static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
     if (target_ty->kind == TY_BOOL) {
         Ref tmp = TMP(tmp_id++, ty_i1);
@@ -187,6 +135,112 @@ static Ref convert(Node *lhs, Type *target_ty) {
     return cast(lr, lhs->ty, target_ty);
 }
 
+static Ref gen_addr(Node *node) {
+    switch (node->kind) {
+        case ND_VAR:
+            gen_expr(node->var_init);
+            if (node->var->is_local)
+                return SLOT(node->var->vreg, pointer_to(node->ty, 0));
+            else
+                // Global variable
+                return GLB(node->var->id, pointer_to(node->ty, 0));
+        case ND_DEREF:
+            return gen_expr(node->lhs);
+        case ND_MEMBER: {
+            Ref addr = gen_expr(node->lhs);
+            if (node->lhs->ty->kind == TY_UNION) {
+                addr.ty = pointer_to(node->member->ty, 0);
+                return addr;
+            }
+            int pos = 0;
+            int idx = 0;
+            Member *mem = node->member;
+            Member *cur = node->lhs->ty->members;
+            while (cur) {
+                if (cur->idx == mem->idx) break;
+                pos += cur->ty->size;
+                cur = cur->next;
+                if (!cur) break;
+                if (pos < cur->offset) {
+                    pos = cur->offset;
+                    idx++;
+                } else if (pos > cur->offset) {
+                    pos = cur->offset;
+                    idx--;
+                }
+            }
+            Ref gep_ops[] = {addr, INT(0), INT(mem->idx + idx)};
+            Ref dst = TMP(tmp_id++, pointer_to(node->ty, 0));
+            new_ins(IR_GEP, dst, gep_ops, 3);
+            return dst;
+        }
+        default:
+            break;
+    }
+    error(node->tok, "not a lvalue");
+    return R;
+}
+
+static Ref load(Ref addr, Type *type, int align, Member *mem) {
+    if (mem && mem->is_bitfield) {
+        Type *ty = mem->pad_ty;
+        Ref dst = TMP(tmp_id++, ty);
+        new_ins(IR_LORD, dst, (Ref[]){addr, INT(align)}, 2);
+        Ref shl = TMP(tmp_id++, ty);
+        new_ins(IR_SHL, shl, (Ref[]){dst, INT(ty->size * 8 - mem->bit_width - mem->bit_offset)}, 2);
+        Ref shr = TMP(tmp_id++, ty);
+        new_ins(IR_SHR, shr, (Ref[]){shl, INT(ty->size * 8 - mem->bit_width)}, 2);
+        return cast(shr, ty, type);
+    } else {
+        Ref dst = TMP(tmp_id++, type);
+        new_ins(IR_LORD, dst, (Ref[]){addr, INT(align)}, 2);
+        return dst;
+    }
+}
+
+static void store(Ref val, Ref addr, int align, Member *mem) {
+    if (mem && mem->is_bitfield) {
+        Type *ty = mem->pad_ty;
+        // a. load entire memmory unit
+        Ref old = load(addr, ty, align, NULL);
+
+        int width = mem->bit_width;
+        int boff = mem->bit_offset;
+        int total_bits = ty->size * 8;
+
+        // b. clear mask
+        int64_t mask = ((1ULL << width) - 1) << boff;
+        uint64_t clear_mask_val = ~mask;
+        clear_mask_val &= (1ULL << total_bits) - 1;
+        Ref clear_mask = INT(clear_mask_val);
+
+        // c. clear old value
+        Ref old_cleared = TMP(tmp_id++, ty);
+        new_ins(IR_AND, old_cleared, (Ref[]){old, clear_mask}, 2);
+
+        // d. trunc new vlaue
+        Ref trunc = cast(val, val.ty, ty);
+
+        // e. shiht new value
+        Ref dst_shifted;
+        if (boff > 0) {
+            dst_shifted = TMP(tmp_id++, ty);
+            new_ins(IR_SHL, dst_shifted, (Ref[]){trunc, INT(boff)}, 2);
+        } else {
+            dst_shifted = trunc;
+        }
+
+        // f. merge value
+        Ref new_val = TMP(tmp_id++, ty);
+        new_ins(IR_OR, new_val, (Ref[]){old_cleared, dst_shifted}, 2);
+
+        // g. store
+        new_ins(IR_STR, R, (Ref[]){new_val, addr, INT(align)}, 3);
+    } else {
+        new_ins(IR_STR, R, (Ref[]){val, addr, INT(align)}, 3);
+    }
+}
+
 static Ref gen_expr(Node *node) {
     if (!node) return R;
     Ref dst;
@@ -212,21 +266,7 @@ static Ref gen_expr(Node *node) {
         case ND_LVTOR: {
             int align = node->ty->align;
             if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
-            Ref addr = gen_expr(node->lhs);
-            if (node->lhs->kind == ND_MEMBER) {
-                Member *mem = node->lhs->member;
-                if (mem->is_bitfield) {
-                    Type *ty = mem->pad_ty;
-                    dst = load(addr, ty, align);
-                    Ref shl = TMP(tmp_id++, ty);
-                    new_ins(IR_SHL, shl, (Ref[]){dst, INT(ty->size * 8 - mem->bit_width - mem->bit_offset)}, 2);
-                    Ref shr = TMP(tmp_id++, ty);
-                    new_ins(IR_SHR, shr, (Ref[]){shl, INT(ty->size * 8 - mem->bit_width)}, 2);
-                    return cast(shr, ty, node->ty);
-                }
-            }
-            dst = load(addr, node->ty, align);
-            return dst;
+            return load(gen_expr(node->lhs), node->ty, align, node->lhs->member);
         }
         case ND_VAR:
         case ND_MEMBER:
@@ -258,53 +298,7 @@ static Ref gen_expr(Node *node) {
             }
 
             Ref dst = gen_expr(node->rhs);
-
-            if (node->lhs->kind == ND_MEMBER) {
-                Member *mem = node->lhs->member;
-                if (mem->is_bitfield) {
-                    Type *ty = mem->pad_ty;
-                    // a. load entire memmory
-                    Ref old = load(addr, ty, align);
-
-                    int width = mem->bit_width;
-                    int boff = mem->bit_offset;
-                    int total_bits = ty->size * 8;
-
-                    // b. clear mask
-                    int64_t mask = ((1ULL << width) - 1) << boff;
-                    uint64_t clear_mask_val = ~mask;
-                    clear_mask_val &= (1ULL << total_bits) - 1;
-                    Ref clear_mask = INT(clear_mask_val);
-
-                    // c. clear old value
-                    Ref old_cleared = TMP(tmp_id++, ty);
-                    new_ins(IR_AND, old_cleared, (Ref[]){old, clear_mask}, 2);
-
-                    // d. trunc new vlaue
-                    Ref trunc = cast(dst, dst.ty, ty);
-
-                    // e. shiht new value
-                    Ref dst_shifted;
-                    if (boff > 0) {
-                        dst_shifted = TMP(tmp_id++, ty);
-                        new_ins(IR_SHL, dst_shifted, (Ref[]){trunc, INT(boff)}, 2);
-                    } else {
-                        dst_shifted = trunc;
-                    }
-
-                    // f. merge value
-                    Ref new_val = TMP(tmp_id++, ty);
-                    new_ins(IR_OR, new_val, (Ref[]){old_cleared, dst_shifted}, 2);
-
-                    // g. store
-                    new_ins(IR_STR, R, (Ref[]){new_val, addr, INT(align)}, 3);
-
-                    // h. return rhs
-                    return dst;
-                }
-            }
-
-            new_ins(IR_STR, R, (Ref[]){dst, addr, INT(align)}, 3);
+            store(dst, addr, align, node->lhs->member);
             return dst;
         }
         case ND_PREINC:
@@ -315,7 +309,7 @@ static Ref gen_expr(Node *node) {
             Ref addr = gen_expr(node->lhs);
             int align = node->ty->align;
             if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
-            Ref lr = load(addr, node->ty, align);
+            Ref lr = load(addr, node->ty, align, node->lhs->member);
             int addend = (node->kind == ND_PREINC || node->kind == ND_POSTINC) ? 1 : -1;
             union {
                 double f64;
@@ -324,7 +318,7 @@ static Ref gen_expr(Node *node) {
             Ref rr = is_flonum(node->ty) ? DOUBLE(u.bits) : INT(addend);
             dst = TMP(tmp_id++, node->ty);
             new_ins(ir_op, dst, (Ref[]){lr, rr}, 2);
-            new_ins(IR_STR, R, (Ref[]){dst, addr, INT(align)}, 3);
+            store(dst, addr, align, node->lhs->member);
             if (node->kind == ND_PREINC || node->kind == ND_PREDEC)
                 return dst;
             else
@@ -334,11 +328,11 @@ static Ref gen_expr(Node *node) {
             Ref addr = gen_expr(node->lhs);
             int align = node->ty->align;
             if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
-            Ref lr = load(addr, node->ty, align);
+            Ref lr = load(addr, node->ty, align, node->lhs->member);
             Ref rr = gen_expr(node->rhs);
             dst = TMP(tmp_id++, node->ty);
             new_ins(IR_GEP, dst, (Ref[]){lr, rr}, 2);
-            new_ins(IR_STR, R, (Ref[]){dst, addr, INT(align)}, 3);
+            store(dst, addr, align, node->lhs->member);
             return dst;
         }
         case ND_ADDAS:
@@ -354,7 +348,7 @@ static Ref gen_expr(Node *node) {
             Ref addr = gen_expr(node->lhs);
             int align = node->ty->align;
             if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
-            Ref lr = load(addr, node->ty, align);
+            Ref lr = load(addr, node->ty, align, node->lhs->member);
             lr = cast(lr, node->ty, node->compute_ty);
             Ref rr = gen_expr(node->rhs);
             rr = cast(rr, node->rhs->ty, node->compute_ty);
@@ -366,7 +360,7 @@ static Ref gen_expr(Node *node) {
             Ref res = TMP(tmp_id++, node->compute_ty);
             new_ins(bin_op[node->kind], res, (Ref[]){lr, rr}, 2);
             dst = cast(res, node->compute_ty, node->ty);
-            new_ins(IR_STR, R, (Ref[]){dst, addr, INT(align)}, 3);
+            store(dst, addr, align, node->lhs->member);
             return dst;
         }
         case ND_LOGOR:
@@ -900,8 +894,7 @@ static void gen_ret(Node *n) {
     Ref result = gen_expr(n->lhs);
     if (!refeq(result, R)) {
         Type *ty = curf->ty;
-        Ref ops[] = {result, SLOT(ty->nparam + 1, pointer_to(ty->ret, 0)), INT(ty->ret->align)};
-        new_ins(IR_STR, R, ops, 3);
+        store(result, SLOT(ty->nparam + 1, pointer_to(ty->ret, 0)), ty->ret->align, NULL);
     }
 
     curb->jmp.type = IR_JMP;
@@ -995,12 +988,11 @@ Module *irgen(Module *md) {
         //  even though the behavior is undefined for the other functions.
         uint32_t main_id = 0;
         if (main_id == 0) main_id = intern("main", 4);
-        if (curf->id == main_id)
-            new_ins(IR_STR, R, (Ref[]){INT(0), TMP(nparam + 1, pointer_to(ty, 0)), INT(ty->align)}, 3);
+        if (curf->id == main_id) store(INT(0), TMP(nparam + 1, pointer_to(ty, 0)), ty->align, NULL);
 
         Sym *var = fn->locals;
         for (uint32_t i = 0; i < nparam; ++i, var = var->next)
-            new_ins(IR_STR, R, (Ref[]){TMP(i, var->ty), TMP(var->vreg, pointer_to(var->ty, 0)), INT(var->align)}, 3);
+            store(TMP(i, var->ty), TMP(var->vreg, pointer_to(var->ty, 0)), var->align, NULL);
 
         // Body
         gen_stmt(fn->body);
@@ -1010,10 +1002,10 @@ Module *irgen(Module *md) {
         curb = curb->succ1 = fn->end;
         insert_blk(curb);
 
-        if (is_valid)
-            new_ins(IR_LORD, TMP(tmp_id, ty), (Ref[]){SLOT(nparam + 1, pointer_to(ty, 0)), INT(ty->align)}, 2);
+        Ref ret_val = R;
+        if (is_valid) ret_val = load(SLOT(nparam + 1, pointer_to(ty, 0)), ty, ty->align, NULL);
         curb->jmp.type = IR_RET;
-        curb->jmp.arg = is_valid ? TMP(tmp_id, ty) : R;
+        curb->jmp.arg = ret_val;
     }
     return md;
 }
