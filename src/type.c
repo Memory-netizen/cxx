@@ -503,6 +503,8 @@ void add_type(Node *node) {
             if (!node->lhs->is_lvalue) error(node->tok, "lvalue required as unary ‘&’ operand");
             if (node->lhs->kind == ND_VAR && node->lhs->var->sclass & SC_REG)
                 error(node->tok, "address of register variable ‘%s’ requested", str(node->lhs->var->id));
+            if (node->lhs->kind == ND_MEMBER && node->lhs->member->is_bitfield)
+                error(node->tok, "cannot take address of bit-field ‘%s’", str(node->lhs->member->name->id));
             node->ty = pointer_to(node->lhs->ty, 0);
             break;
         case ND_DEREF:
