@@ -6,6 +6,12 @@ struct {
     int c : 10;
 } g45 = {1, 2, 3}, g46 = {};
 
+struct {
+    char a;
+    int : 0;
+    int c : 10;
+} g47 = {1, 2};
+
 int main() {
     ASSERT(4, sizeof(struct { int x : 1; }));
     ASSERT(8, sizeof(struct { long x : 1; }));
@@ -104,6 +110,39 @@ int main() {
                x.c += 5;
                x.c;
            }));
+
+    ASSERT(4, sizeof(struct {
+               int a : 3;
+               int b : 1;
+               int c : 5;
+           }));
+    ASSERT(8, sizeof(struct {
+               int a : 3;
+               int : 0;
+               int c : 5;
+           }));
+    ASSERT(4, sizeof(struct {
+               int a : 3;
+               int : 0;
+           }));
+
+    typedef struct {
+        int a : 4;
+        int : 0;
+        int c : 4;
+    } T4;
+
+    ASSERT(1, ({
+               T4 x = {1, 2};
+               x.a;
+           }));
+    ASSERT(2, ({
+               T4 x = {1, 2};
+               x.c;
+           }));
+
+    ASSERT(1, g47.a);
+    ASSERT(2, g47.c);
 
     printf("OK\n");
     return 0;

@@ -336,12 +336,14 @@ void dump_type(Type *ty) {
     if (ty->kind == TY_STRUCT) {
         int pos = 0;
         while (mem) {
-            Type *memty = mem->is_bitfield ? mem->pad_ty : mem->ty;
+            bool is_bitfield = mem->is_bitfield;
+            Type *memty = is_bitfield ? mem->unit_ty : mem->ty;
             print_type(memty);
             pos += memty->size;
             int off = mem->offset;
-            mem = mem->next;
-            while (mem && mem->offset == off) mem = mem->next;
+            do {
+                mem = mem->next;
+            } while (mem && mem->offset == off);
             if (!mem) break;
             fprintf(out_file, ", ");
             if (pos < mem->offset) {
@@ -401,13 +403,14 @@ static void dump_init(Initializer *init, Type *ty) {
                 for (Member *m = mem; m != after; m = m->next) {
                     int width = m->bit_width;
                     int boff = m->bit_offset;
-                    int trunc = init->child[m->idx]->val->bits.i & ((1ULL << width) - 1);
+                    Con *bit_val = init->child[m->idx]->val;
+                    int trunc = bit_val ? bit_val->bits.i & ((1ULL << width) - 1) : 0;
                     val |= trunc << boff;
                 }
-                print_type(mem->pad_ty);
+                print_type(mem->unit_ty);
                 fprintf(out_file, " ");
-                printcon(&(Con){CBits, 0, {val}}, mem->pad_ty);
-                pos += mem->pad_ty->size;
+                printcon(&(Con){CBits, 0, {val}}, mem->unit_ty);
+                pos += mem->unit_ty->size;
                 mem = after;
             } else {
                 dump_init(init->child[mem->idx], mem->ty);

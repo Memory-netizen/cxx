@@ -593,7 +593,7 @@ struct Member {
     bool is_bitfield;
     int bit_offset;
     int bit_width;
-    Type *pad_ty;
+    Type *unit_ty;
 };
 
 struct EnumVal {
@@ -618,6 +618,7 @@ bool is_pointer(Type *ty);
 bool is_nullptr(Type *ty);
 bool is_null_constant(Node *node);
 bool is_scalar(Type *ty);
+bool is_record(Type *ty);
 bool is_funcptr(Type *ty);
 bool is_compatible(Type *t1, Type *t2);
 void check_asop(Type *dst, Node *src, int ctx);

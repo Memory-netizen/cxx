@@ -555,7 +555,7 @@ static void struct_initializer1(Token **rest, Token *tok, Initializer *init) {
 
     while (!consume_end(rest, tok)) {
         if (mem != init->ty->members) tok = skip(tok, TK_COMMA);
-
+        if (mem && !mem->name && !is_record(mem->ty)) mem = mem->next;
         if (mem) {
             initializer2(&tok, tok, init->child[mem->idx], false);
             mem = mem->next;
@@ -568,11 +568,9 @@ static void struct_initializer1(Token **rest, Token *tok, Initializer *init) {
 }
 
 static void struct_initializer2(Token **rest, Token *tok, Initializer *init) {
-    bool first = true;
-
     for (Member *mem = init->ty->members; mem && !is_end(tok); mem = mem->next) {
-        if (!first) tok = skip(tok, TK_COMMA);
-        first = false;
+        if (mem != init->ty->members) tok = skip(tok, TK_COMMA);
+        if (mem && !mem->name && !is_record(mem->ty)) mem = mem->next;
         initializer2(&tok, tok, init->child[mem->idx], false);
     }
     *rest = tok;
@@ -758,14 +756,14 @@ static bool is_fully_initialized(Initializer *init, Type *ty) {
     switch (ty->kind) {
         case TY_ARRAY:
             if (init->is_flexible && !init->child) return false;
-            for (int i = 0; i < ty->len; i++) {
+            for (int i = 0; i < ty->len; i++)
                 if (!is_fully_initialized(init->child[i], ty->base)) return false;
-            }
+
             return true;
         case TY_STRUCT:
-            for (Member *mem = ty->members; mem; mem = mem->next) {
+            for (Member *mem = ty->members; mem; mem = mem->next)
                 if (!is_fully_initialized(init->child[mem->idx], mem->ty)) return false;
-            }
+
             return true;
         case TY_UNION: {
             if (!is_fully_initialized(init->child[0], ty->members->ty)) return false;
@@ -978,7 +976,8 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
 static Member *get_struct_member(Member *mem, Token *tok) {
     for (; mem; mem = mem->next) {
         // Anonymous struct member
-        if ((mem->ty->kind == TY_STRUCT || mem->ty->kind == TY_UNION) && !mem->name) {
+        if (!mem->name) {
+            if (!is_record(mem->ty)) continue;
             if (get_struct_member(mem->ty->members, tok)) return mem;
             continue;
         }
@@ -2158,9 +2157,14 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
         int align = 0;
         Type *basety = declspecs(&tok, tok, NULL, &align, NULL);
         int i = 0;
+        Token *start = tok;
 
         // Anonymous struct member
-        if ((basety->kind == TY_STRUCT || basety->kind == TY_UNION) && match(&tok, tok, TK_SEMI)) {
+        if (match(&tok, tok, TK_SEMI)) {
+            if (!is_record(basety)) {
+                warning(start, "declaration does not declare anything");
+                continue;
+            }
             Member *mem = emalloc(sizeof(Member));
             mem->ty = basety;
             if (align) mem->is_align = true;
@@ -2174,6 +2178,17 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
         while (!match(&tok, tok, TK_SEMI)) {
             if (i++) tok = skip(tok, TK_COMMA);
             Member *mem = emalloc(sizeof(Member));
+
+            if (match(&tok, tok, TK_COLON)) {
+                if (align) error(start, "'_Alignas' cannot be applied to a bit-field");
+                mem->ty = basety;
+                mem->align = mem->ty->align;
+                mem->is_bitfield = true;
+                mem->bit_width = const_expr(&tok, tok);
+                cur = cur->next = mem;
+                continue;
+            }
+
             mem->ty = declarator(&tok, tok, basety);
             Token *mem_name = mem->ty->name;
             if (align) mem->is_align = true;
@@ -2192,8 +2207,10 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             }
 
             if (match(&tok, tok, TK_COLON)) {
+                if (align) error(start, "'_Alignas' cannot be applied to a bit-field");
                 mem->is_bitfield = true;
                 mem->bit_width = const_expr(&tok, tok);
+                if (mem->bit_width == 0) error(mem_name, "zero width for bit-field ‘%s’", str(mem_name->id));
                 if (mem->bit_width > mem->ty->size * 8)
                     error(mem_name, "width of ‘%s’ exceeds its type", str(mem_name->id));
             }
@@ -2211,7 +2228,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
     ty->members = dummy.next;
 }
 
-static Type *get_padtype(int bytes, bool is_unsigned) {
+static Type *get_unit_ty(int bytes, bool is_unsigned) {
     if (bytes == 1) return is_unsigned ? ty_uchar : ty_schar;
     if (bytes == 2) return is_unsigned ? ty_ushort : ty_short;
     if (bytes == 4) return is_unsigned ? ty_uint : ty_int;
@@ -2250,9 +2267,16 @@ static void layout_struct(Type *ty, bool is_union) {
 
         if (mem->is_bitfield) {
             int width = mem->bit_width;
+
+            if (width == 0) {
+                END_UNIT();
+                offset = ALIGN_UP(offset, mem->align);
+            }
+
             if (unit_size == 0) {
-                int total_bits = 0;
-                for (Member *m = mem; m && m->is_bitfield; m = m->next) total_bits += m->bit_width;
+                int total_bits = width;
+                for (Member *m = mem->next; m && m->is_bitfield && m->bit_width; m = m->next)
+                    total_bits += m->bit_width;
 
                 unit_size = min_bytes_for_bits(total_bits);
                 bits = 0;
@@ -2261,21 +2285,22 @@ static void layout_struct(Type *ty, bool is_union) {
             if (bits + width > unit_size * 8) {
                 END_UNIT();
 
-                int total_bits = 0;
-                for (Member *m = mem; m && m->is_bitfield; m = m->next) total_bits += m->bit_width;
+                int total_bits = width;
+                for (Member *m = mem->next; m && m->is_bitfield && m->bit_width; m = m->next)
+                    total_bits += m->bit_width;
 
                 unit_size = min_bytes_for_bits(total_bits);
                 bits = 0;
             }
             mem->offset = offset;
             mem->bit_offset = bits;
-            mem->pad_ty = get_padtype(unit_size, mem->ty->is_unsigned);
+            mem->unit_ty = get_unit_ty(unit_size, mem->ty->is_unsigned);
             bits += width;
         } else {
             END_UNIT();
             offset = ALIGN_UP(offset, mem->align);
             mem->offset = offset;
-            mem->pad_ty = mem->ty;
+            mem->unit_ty = mem->ty;
             offset += mem->ty->size;
         }
     }

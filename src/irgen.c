@@ -152,24 +152,25 @@ static Ref gen_addr(Node *node) {
                 addr.ty = pointer_to(node->member->ty, 0);
                 return addr;
             }
+
             int pos = 0;
             int idx = 0;
-            Member *mem = node->member;
+            int mem_off = node->member->offset;
             Member *cur = node->lhs->ty->members;
-            while (cur) {
-                if (cur->idx == mem->idx) break;
-                pos += cur->ty->size;
-                cur = cur->next;
-                if (!cur) break;
+
+            while (cur->offset != mem_off) {
+                pos += cur->unit_ty->size;
+                idx++;
+                int off = cur->offset;
+                do {
+                    cur = cur->next;
+                } while (cur->offset == off);
                 if (pos < cur->offset) {
                     pos = cur->offset;
                     idx++;
-                } else if (pos > cur->offset) {
-                    pos = cur->offset;
-                    idx--;
                 }
             }
-            Ref gep_ops[] = {addr, INT(0), INT(mem->idx + idx)};
+            Ref gep_ops[] = {addr, INT(0), INT(idx)};
             Ref dst = TMP(tmp_id++, pointer_to(node->ty, 0));
             new_ins(IR_GEP, dst, gep_ops, 3);
             return dst;
@@ -183,7 +184,7 @@ static Ref gen_addr(Node *node) {
 
 static Ref load(Ref addr, Type *type, int align, Member *mem) {
     if (mem && mem->is_bitfield) {
-        Type *ty = mem->pad_ty;
+        Type *ty = mem->unit_ty;
         Ref dst = TMP(tmp_id++, ty);
         new_ins(IR_LORD, dst, (Ref[]){addr, INT(align)}, 2);
         Ref shl = TMP(tmp_id++, ty);
@@ -200,7 +201,7 @@ static Ref load(Ref addr, Type *type, int align, Member *mem) {
 
 static void store(Ref val, Ref addr, int align, Member *mem) {
     if (mem && mem->is_bitfield) {
-        Type *ty = mem->pad_ty;
+        Type *ty = mem->unit_ty;
         // a. load entire memmory unit
         Ref old = load(addr, ty, align, NULL);
 
