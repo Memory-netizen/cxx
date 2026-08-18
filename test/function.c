@@ -170,6 +170,7 @@ int main() {
                fn(2, 5);
            }));
     ASSERT(6, fnptr(add_all)(3, 1, 2, 3));
+    ASSERT(5, (***add2)(2, 3));
 
     ASSERT(3, param_decay3(ret3));
 

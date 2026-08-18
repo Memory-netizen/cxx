@@ -32,6 +32,7 @@ static int64_t eval(Node *node);
 static int64_t eval2(Node *node, uint32_t *sym);
 static int64_t eval_rval(Node *node, uint32_t *sym);
 static double eval_double(Node *node);
+static void array_initializer2(Token **rest, Token *tok, Initializer *init, int i);
 
 static Node *new_node(NodeKind kind, Token *tok) {
     Node *node = emalloc(sizeof(Node));
@@ -516,6 +517,29 @@ static int count_array_init_elements(Token *tok, Type *ty) {
     return i;
 }
 
+// array-designator = "[" const-expr "]"
+static int array_designator(Token **rest, Token *tok, Type *ty) {
+    Token *start = tok;
+    int i = const_expr(&tok, tok->next);
+    if (i >= ty->len) error(start, "array designator index exceeds array bounds");
+    *rest = skip(tok, TK_RBRACKET);
+    return i;
+}
+
+// designation = ("[" const-expr "]")* "=" initializer
+static void designation(Token **rest, Token *tok, Initializer *init) {
+    if (tok->kind == TK_LBRACKET) {
+        if (init->ty->kind != TY_ARRAY) error(tok, "array index in non-array initializer");
+        int i = array_designator(&tok, tok, init->ty);
+        designation(&tok, tok, init->child[i]);
+        array_initializer2(rest, tok, init, i + 1);
+        return;
+    }
+
+    tok = skip(tok, TK_AS);
+    initializer2(rest, tok, init, false);
+}
+
 static void array_initializer1(Token **rest, Token *tok, Initializer *init) {
     tok = skip(tok, TK_LBRACE);
 
@@ -524,8 +548,16 @@ static void array_initializer1(Token **rest, Token *tok, Initializer *init) {
         *init = *new_initializer(array_of(init->ty->base, len), false);
     }
 
+    bool first = true;
     for (int i = 0; !consume_end(rest, tok); i++) {
-        if (i > 0) tok = skip(tok, TK_COMMA);
+        if (!first) tok = skip(tok, TK_COMMA);
+
+        first = false;
+        if (tok->kind == TK_LBRACKET) {
+            i = array_designator(&tok, tok, init->ty);
+            designation(&tok, tok, init->child[i]);
+            continue;
+        }
         if (i < init->ty->len)
             initializer2(&tok, tok, init->child[i], false);
         else
@@ -535,14 +567,19 @@ static void array_initializer1(Token **rest, Token *tok, Initializer *init) {
     return;
 }
 
-static void array_initializer2(Token **rest, Token *tok, Initializer *init) {
+static void array_initializer2(Token **rest, Token *tok, Initializer *init, int i) {
     if (init->is_flexible) {
         int len = count_array_init_elements(tok, init->ty);
         *init = *new_initializer(array_of(init->ty->base, len), false);
     }
 
-    for (int i = 0; i < init->ty->len && !is_end(tok); i++) {
+    for (; i < init->ty->len && !is_end(tok); i++) {
+        Token *start = tok;
         if (i > 0) tok = skip(tok, TK_COMMA);
+        if (tok->kind == TK_LBRACKET) {
+            *rest = start;
+            return;
+        }
         initializer2(&tok, tok, init->child[i], false);
     }
     *rest = tok;
@@ -599,7 +636,7 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
         if (tok->kind == TK_LBRACE)
             array_initializer1(rest, tok, init);
         else if (!need_brace)
-            array_initializer2(rest, tok, init);
+            array_initializer2(rest, tok, init, 0);
         else
             error(tok, "array initializer must be an initializer list");
         return;
