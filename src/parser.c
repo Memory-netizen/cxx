@@ -33,6 +33,7 @@ static int64_t eval2(Node *node, uint32_t *sym);
 static int64_t eval_rval(Node *node, uint32_t *sym);
 static double eval_double(Node *node);
 static void array_initializer2(Token **rest, Token *tok, Initializer *init, int i);
+static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Member *mem);
 
 static Node *new_node(NodeKind kind, Token *tok) {
     Node *node = emalloc(sizeof(Node));
@@ -515,6 +516,22 @@ static int array_designator(Token **rest, Token *tok, Type *ty) {
     return i;
 }
 
+// struct-designator = "." ident
+static Member *struct_designator(Token **rest, Token *tok, Type *ty) {
+    tok = skip(tok, TK_DOT);
+    if (tok->kind != TK_IDENT) error(tok, "expected a field designator");
+
+    for (Member *mem = ty->members; mem; mem = mem->next) {
+        if (mem->name->id == tok->id) {
+            *rest = tok->next;
+            return mem;
+        }
+    }
+
+    error(tok, "struct has no such member");
+    return NULL;
+}
+
 // designation = ("[" const-expr "]")* "=" initializer
 static void designation(Token **rest, Token *tok, Initializer *init) {
     if (tok->kind == TK_LBRACKET) {
@@ -524,6 +541,16 @@ static void designation(Token **rest, Token *tok, Initializer *init) {
         array_initializer2(rest, tok, init, i + 1);
         return;
     }
+
+    if (tok->kind == TK_DOT && init->ty->kind == TY_STRUCT) {
+        Member *mem = struct_designator(&tok, tok, init->ty);
+        designation(&tok, tok, init->child[mem->idx]);
+        init->expr = NULL;
+        struct_initializer2(rest, tok, init, mem->next);
+        return;
+    }
+
+    if (tok->kind == TK_DOT) error(tok, "field name not in struct or union initializer");
 
     tok = skip(tok, TK_AS);
     initializer2(rest, tok, init, false);
@@ -588,7 +615,7 @@ static void array_initializer2(Token **rest, Token *tok, Initializer *init, int 
     for (; i < init->ty->len && !is_end(tok); i++) {
         Token *start = tok;
         if (i > 0) tok = skip(tok, TK_COMMA);
-        if (tok->kind == TK_LBRACKET) {
+        if (tok->kind == TK_LBRACKET || tok->kind == TK_DOT) {
             *rest = start;
             return;
         }
@@ -601,9 +628,17 @@ static void struct_initializer1(Token **rest, Token *tok, Initializer *init) {
     tok = skip(tok, TK_LBRACE);
 
     Member *mem = init->ty->members;
-
+    bool first = true;
     while (!consume_end(rest, tok)) {
-        if (mem != init->ty->members) tok = skip(tok, TK_COMMA);
+        if (!first) tok = skip(tok, TK_COMMA);
+        first = false;
+        if (tok->kind == TK_DOT) {
+            mem = struct_designator(&tok, tok, init->ty);
+            designation(&tok, tok, init->child[mem->idx]);
+            mem = mem->next;
+            continue;
+        }
+
         if (mem && !mem->name && !is_record(mem->ty)) mem = mem->next;
         if (mem) {
             initializer2(&tok, tok, init->child[mem->idx], false);
@@ -616,9 +651,17 @@ static void struct_initializer1(Token **rest, Token *tok, Initializer *init) {
     return;
 }
 
-static void struct_initializer2(Token **rest, Token *tok, Initializer *init) {
-    for (Member *mem = init->ty->members; mem && !is_end(tok); mem = mem->next) {
-        if (mem != init->ty->members) tok = skip(tok, TK_COMMA);
+static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Member *mem) {
+    bool first = true;
+    for (; mem && !is_end(tok); mem = mem->next) {
+        Token *start = tok;
+        if (!first) tok = skip(tok, TK_COMMA);
+        first = false;
+        if (tok->kind == TK_LBRACKET || tok->kind == TK_DOT) {
+            *rest = start;
+            return;
+        }
+
         if (mem && !mem->name && !is_record(mem->ty)) mem = mem->next;
         initializer2(&tok, tok, init->child[mem->idx], false);
     }
@@ -666,7 +709,7 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
             return;
         }
         if (!need_brace)
-            struct_initializer2(rest, tok, init);
+            struct_initializer2(rest, tok, init, init->ty->members);
         else
             error(tok, "invalid initializer");
         return;
