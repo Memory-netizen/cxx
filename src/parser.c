@@ -506,17 +506,6 @@ static void string_initializer(Token **rest, Token *tok, Initializer *init) {
     *rest = tok->next;
 }
 
-static int count_array_init_elements(Token *tok, Type *ty) {
-    Initializer *dummy = new_initializer(ty->base, false);
-
-    int i;
-    for (i = 0; !consume_end(&tok, tok); i++) {
-        if (i > 0) tok = skip(tok, TK_COMMA);
-        initializer2(&tok, tok, dummy, false);
-    }
-    return i;
-}
-
 // array-designator = "[" const-expr "]"
 static int array_designator(Token **rest, Token *tok, Type *ty) {
     Token *start = tok;
@@ -538,6 +527,29 @@ static void designation(Token **rest, Token *tok, Initializer *init) {
 
     tok = skip(tok, TK_AS);
     initializer2(rest, tok, init, false);
+}
+
+static int count_array_init_elements(Token *tok, Type *ty) {
+    Initializer *dummy = new_initializer(ty->base, true);
+
+    bool first = true;
+    int i = 0, max = 0;
+    while (!consume_end(&tok, tok)) {
+        if (!first) tok = skip(tok, TK_COMMA);
+        first = false;
+        if (tok->kind == TK_LBRACKET) {
+            i = const_expr(&tok, tok->next);
+            if (tok->kind == TK_ELLIPSIS) i = const_expr(&tok, tok->next);
+            tok = skip(tok, TK_RBRACKET);
+            designation(&tok, tok, dummy);
+        } else {
+            initializer2(&tok, tok, dummy, false);
+        }
+
+        i++;
+        max = MAX(max, i);
+    }
+    return max;
 }
 
 static void array_initializer1(Token **rest, Token *tok, Initializer *init) {
