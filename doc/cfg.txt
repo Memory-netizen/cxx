@@ -34,9 +34,12 @@ TypeSpec    ::= "void" | "_Bool" | "char" | "short" | "int" | "long"
             | RecordSpec
             | EnumSpec
             | TypedefName
+            | TypeofSpec
+
 TypeQual    ::= "const" | "restrict" | "volatile"
 FuncSpec    ::= "inline" | "_Noreturn"
 TypedefName ::= Ident
+TypeofSpec  ::= ("typeof" | "typeof_unqual") "(" (Exp | TypeName) ")"
 AlignSpec   ::= "alignas" "(" (TypeName | ConstExp) ")"
 
 TypeName    ::= DeclSpecs AbsDeclr?

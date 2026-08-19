@@ -2567,6 +2567,27 @@ note:
     return NULL;
 }
 
+// TypeofSpec ::= ("typeof" | "typeof_unqual") "(" (Exp | TypeName) ")"
+static Type *typeof_specifier(Token **rest, Token *tok, bool is_unqual) {
+    tok = skip(tok->next, TK_LPAREN);
+
+    Type *ty;
+    if (is_typename(tok, true)) {
+        ty = typename(&tok, tok);
+    } else {
+        Node *node = expr(&tok, tok);
+        add_type(node);
+        if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+        if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_FUNC) node = node->lhs;
+        if (node->kind == ND_MEMBER && node->member->is_bitfield)
+            error(node->tok, "invalid application of 'typeof' to bit-field ‘%s’", str(node->member->name->id));
+        ty = node->ty;
+    }
+    if (is_unqual) ty = type_unqual(ty);
+    *rest = skip(tok, TK_RPAREN);
+    return ty;
+}
+
 // DeclSpecs ::= DeclSpec+
 // DeclSpec  ::= SCSpec | TypeSpecQual | FuncSpec
 // SCSpec    ::= "typedef" | "static" | "extern" | "register"
@@ -2576,6 +2597,7 @@ note:
 //            | RecordSpec
 //            | EnumSpec
 //            | TypedefName
+//            | TypeofSpec
 // AlignSpec ::= "alignas" "(" (TypeName | ConstExp) ")"
 // TypeQual  ::= "const" | "restrict" | "volatile"
 // FuncSpec  ::= "inline" | "_Noreturn"
@@ -2652,6 +2674,11 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 goto check_type;
             case TK_ENUM:
                 ty = enum_decl(&tok, tok);
+                typespec_cnt += OTHER;
+                goto check_type;
+            case TK_TYPEOF:
+            case TK_TYPEOF_U:
+                ty = typeof_specifier(&tok, tok, tok->kind == TK_TYPEOF_U);
                 typespec_cnt += OTHER;
                 goto check_type;
             case TK_ALIGNAS:
