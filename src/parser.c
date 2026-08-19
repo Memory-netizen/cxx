@@ -369,7 +369,6 @@ static Type *pointers(Token **rest, Token *tok, Type *ty) {
 
 // ArrAbsDeclr  ::= DirAbsDeclr? ArrDimen
 // FuncAbsDeclr ::= DirAbsDeclr? "(" ParamList? ")"
-
 static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool is_param) {
     ty = pointers(&tok, tok, ty);
 
@@ -508,16 +507,20 @@ static void string_initializer(Token **rest, Token *tok, Initializer *init) {
     *rest = tok->next;
 }
 
-// array-designator = "[" const-expr "]"
-static int array_designator(Token **rest, Token *tok, Type *ty) {
-    Token *start = tok;
-    int i = const_expr(&tok, tok->next);
-    if (i >= ty->len) error(start, "array designator index exceeds array bounds");
+static void array_designator(Token **rest, Token *tok, Type *ty, int *begin, int *end) {
+    *begin = const_expr(&tok, tok->next);
+    if (*begin >= ty->len) error(tok, "array designator index exceeds array bounds");
+
+    if (tok->kind == TK_ELLIPSIS) {
+        *end = const_expr(&tok, tok->next);
+        if (*end >= ty->len) error(tok, "array designator index exceeds array bounds");
+        if (*end < *begin) error(tok, "array designator range [%d, %d] is empty", *begin, *end);
+    } else {
+        *end = *begin;
+    }
     *rest = skip(tok, TK_RBRACKET);
-    return i;
 }
 
-// struct-designator = "." ident
 static Member *struct_designator(Token **rest, Token *tok, Type *ty) {
     Token *start = tok;
     tok = skip(tok, TK_DOT);
@@ -544,13 +547,15 @@ static Member *struct_designator(Token **rest, Token *tok, Type *ty) {
     return NULL;
 }
 
-// designation = ("[" const-expr "]")* "=" initializer
 static void designation(Token **rest, Token *tok, Initializer *init) {
     if (tok->kind == TK_LBRACKET) {
         if (init->ty->kind != TY_ARRAY) error(tok, "array index in non-array initializer");
-        int i = array_designator(&tok, tok, init->ty);
-        designation(&tok, tok, init->child[i]);
-        array_initializer2(rest, tok, init, i + 1);
+        int begin, end;
+        array_designator(&tok, tok, init->ty, &begin, &end);
+        Token *tok2;
+        for (int i = begin; i <= end; i++) designation(&tok2, tok, init->child[i]);
+
+        array_initializer2(rest, tok2, init, end + 1);
         return;
     }
 
@@ -612,8 +617,13 @@ static void array_initializer1(Token **rest, Token *tok, Initializer *init) {
 
         first = false;
         if (tok->kind == TK_LBRACKET) {
-            i = array_designator(&tok, tok, init->ty);
-            designation(&tok, tok, init->child[i]);
+            int begin, end;
+            array_designator(&tok, tok, init->ty, &begin, &end);
+
+            Token *tok2;
+            for (int j = begin; j <= end; j++) designation(&tok2, tok, init->child[j]);
+            tok = tok2;
+            i = end;
             continue;
         }
         if (i < init->ty->len)
@@ -621,7 +631,6 @@ static void array_initializer1(Token **rest, Token *tok, Initializer *init) {
         else
             tok = skip_excess_element(tok);
     }
-
     return;
 }
 
