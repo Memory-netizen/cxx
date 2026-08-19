@@ -783,6 +783,43 @@ int main() {
                x.a;
            }));
 
+    ASSERT(1, ({
+               struct {
+                   struct {
+                       int a;
+                       struct {
+                           int b;
+                       };
+                   };
+                   int c;
+               } x = {1, 2, 3, .b = 4, 5};
+               x.a;
+           }));
+    ASSERT(4, ({
+               struct {
+                   struct {
+                       int a;
+                       struct {
+                           int b;
+                       };
+                   };
+                   int c;
+               } x = {1, 2, 3, .b = 4, 5};
+               x.b;
+           }));
+    ASSERT(5, ({
+               struct {
+                   struct {
+                       int a;
+                       struct {
+                           int b;
+                       };
+                   };
+                   int c;
+               } x = {1, 2, 3, .b = 4, 5};
+               x.c;
+           }));
+
     printf("OK\n");
     return 0;
 }

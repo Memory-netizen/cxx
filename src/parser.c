@@ -34,6 +34,7 @@ static int64_t eval_rval(Node *node, uint32_t *sym);
 static double eval_double(Node *node);
 static void array_initializer2(Token **rest, Token *tok, Initializer *init, int i);
 static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Member *mem);
+static Member *get_struct_member(Member *mem, Token *tok);
 
 static Node *new_node(NodeKind kind, Token *tok) {
     Node *node = emalloc(sizeof(Node));
@@ -518,10 +519,21 @@ static int array_designator(Token **rest, Token *tok, Type *ty) {
 
 // struct-designator = "." ident
 static Member *struct_designator(Token **rest, Token *tok, Type *ty) {
+    Token *start = tok;
     tok = skip(tok, TK_DOT);
     if (tok->kind != TK_IDENT) error(tok, "expected a field designator");
 
     for (Member *mem = ty->members; mem; mem = mem->next) {
+        // Anonymous struct member
+        if (mem->ty->kind == TY_STRUCT && !mem->name) {
+            if (get_struct_member(mem, tok)) {
+                *rest = start;
+                return mem;
+            }
+            continue;
+        }
+
+        // Regular struct member
         if (mem->name->id == tok->id) {
             *rest = tok->next;
             return mem;
