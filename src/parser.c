@@ -550,6 +550,13 @@ static void designation(Token **rest, Token *tok, Initializer *init) {
         return;
     }
 
+    if (tok->kind == TK_DOT && init->ty->kind == TY_UNION) {
+        Member *mem = struct_designator(&tok, tok, init->ty);
+        init->mem = mem;
+        designation(rest, tok, init->child[mem->idx]);
+        return;
+    }
+
     if (tok->kind == TK_DOT) error(tok, "field name not in struct or union initializer");
 
     tok = skip(tok, TK_AS);
@@ -670,12 +677,33 @@ static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Mem
 
 static void union_initializer1(Token **rest, Token *tok, Initializer *init) {
     tok = skip(tok, TK_LBRACE);
-    initializer2(&tok, tok, init->child[0], false);
-    match(&tok, tok, TK_COMMA);
-    *rest = skip(tok, TK_RBRACE);
+
+    Member *mem = init->ty->members;
+    bool first = true;
+    while (!consume_end(rest, tok)) {
+        if (!first) tok = skip(tok, TK_COMMA);
+        first = false;
+        if (tok->kind == TK_DOT) {
+            mem = struct_designator(&tok, tok, init->ty);
+            init->mem = mem;
+            designation(&tok, tok, init->child[mem->idx]);
+            continue;
+        }
+
+        if (!init->mem) {
+            init->mem = mem;
+            initializer2(&tok, tok, init->child[mem->idx], false);
+            continue;
+        }
+
+        tok = skip_excess_element(tok);
+    }
+
+    return;
 }
 
 static void union_initializer2(Token **rest, Token *tok, Initializer *init) {
+    init->mem = init->ty->members;
     initializer2(rest, tok, init->child[0], false);
 }
 
@@ -831,8 +859,9 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
     }
 
     if (ty->kind == TY_UNION && !init->expr) {
-        InitDesg desg2 = {desg, 0, ty->members, NULL};
-        return create_lvar_init(init->child[0], ty->members->ty, &desg2, tok);
+        Member *mem = init->mem ? init->mem : ty->members;
+        InitDesg desg2 = {desg, 0, mem, NULL};
+        return create_lvar_init(init->child[mem->idx], mem->ty, &desg2, tok);
     }
 
     if (!init->expr) return new_node(ND_NOP, tok);
@@ -850,16 +879,15 @@ static bool is_fully_initialized(Initializer *init, Type *ty) {
             if (init->is_flexible && !init->child) return false;
             for (int i = 0; i < ty->len; i++)
                 if (!is_fully_initialized(init->child[i], ty->base)) return false;
-
             return true;
         case TY_STRUCT:
             for (Member *mem = ty->members; mem; mem = mem->next)
                 if (!is_fully_initialized(init->child[mem->idx], mem->ty)) return false;
-
             return true;
         case TY_UNION: {
-            if (!is_fully_initialized(init->child[0], ty->members->ty)) return false;
-            return ty->members->ty->size == ty->size;
+            Member *mem = init->mem ? init->mem : ty->members;
+            if (!is_fully_initialized(init->child[mem->idx], mem->ty)) return false;
+            return mem->ty->size == ty->size;
         }
         default:
             return init->expr != NULL;
@@ -900,8 +928,9 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
     }
 
     if (ty->kind == TY_UNION) {
-        eval_gvar_data(init->child[0], ty->members->ty);
-        init->is_inited |= init->child[0]->is_inited;
+        Member *mem = init->mem ? init->mem : ty->members;
+        eval_gvar_data(init->child[mem->idx], mem->ty);
+        init->is_inited |= init->child[mem->idx]->is_inited;
     }
 
     if (init->expr) {

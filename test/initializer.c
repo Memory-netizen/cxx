@@ -768,6 +768,21 @@ int main() {
     ASSERT(5, ((struct { int a, b, c; }){.c = 5}).c);
     ASSERT(0, ((struct { int a, b, c; }){.c = 5}).a);
 
+    ASSERT(0x00ff, ({
+               union {
+                   unsigned short a;
+                   char b[2];
+               } x = {.b[0] = 0xff};
+               x.a;
+           }));
+    ASSERT(0xff00, ({
+               union {
+                   unsigned short a;
+                   char b[2];
+               } x = {.b[1] = 0xff};
+               x.a;
+           }));
+
     printf("OK\n");
     return 0;
 }

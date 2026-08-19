@@ -494,6 +494,10 @@ struct Initializer {
 
     // For aggregate type
     Initializer **child;
+
+    // Only one member can be initialized for a union.
+    // `mem` is used to clarify which member is initialized.
+    Member *mem;
 };
 
 int64_t const_expr(Token **rest, Token *tok);
