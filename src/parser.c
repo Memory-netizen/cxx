@@ -547,6 +547,7 @@ static Member *struct_designator(Token **rest, Token *tok, Type *ty) {
     return NULL;
 }
 
+// Desig ::= "[" (ConstExp | ConstRangeExp) "]" | "." Ident
 static void designation(Token **rest, Token *tok, Initializer *init) {
     if (tok->kind == TK_LBRACKET) {
         if (init->ty->kind != TY_ARRAY) error(tok, "array index in non-array initializer");
@@ -729,11 +730,19 @@ static void union_initializer2(Token **rest, Token *tok, Initializer *init) {
 }
 
 // Init       ::= AsExp | BracedInit
-// BracedInit ::= "{" Init ("," Init)*)? ","? "}"
+// BracedInit ::= "{" ((Desig+ "=")? Init ("," (Desig+ "=")? Init)* ","?)? "}"
 static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_brace) {
-    if (init->ty->kind == TY_ARRAY && tok->kind == TK_STRLIT) {
-        string_initializer(rest, tok, init);
-        return;
+    if (init->ty->kind == TY_ARRAY) {
+        if (tok->kind == TK_STRLIT ||
+            (tok->kind == TK_LBRACE && tok->next->kind == TK_STRLIT && tok->next->next->kind == TK_RBRACE)) {
+            bool has_brace = match(&tok, tok, TK_LBRACE);
+            if (!(is_char(init->ty->base) && is_char(tok->ty->base)) && !is_compatible(tok->ty, init->ty))
+                error(tok, "array of inappropriate type initialized from string constant");
+            string_initializer(&tok, tok, init);
+            if (has_brace) tok = skip(tok, TK_RBRACE);
+            *rest = tok;
+            return;
+        }
     }
 
     if (init->ty->kind == TY_ARRAY) {
@@ -1232,6 +1241,7 @@ static Node *postfix(Token **rest, Token *tok) {
 // UnaryExp ::= PostExp | UnaryOP CastExp | ("++" | "--") UnaryExp
 //          | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
 //          | "alignof" UnaryExp | "alignof" "(" TypeName ")"
+//          | "_Countof" UnaryExp | "_Countof" "(" TypeName ")"
 // UnaryOp  ::= "+" | "-" | "~" | "!" | "&" | "*"
 static Node *unary(Token **rest, Token *tok) {
     switch (tok->kind) {
@@ -1288,6 +1298,23 @@ static Node *unary(Token **rest, Token *tok) {
             if (node->ty->size < 0) error(start, "invalid application of ‘alignof’ to incomplete type");
             return new_ulong(node->ty->align, tok);
         }
+        case TK_COUNTOF: {
+            Token *start = tok;
+            if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, true)) {
+                Type *ty = typename(&tok, tok->next->next);
+                if (ty->kind != TY_ARRAY) error(start, "‘_Countof’ requires an argument of array type");
+                if (ty->size < 0) error(start, "invalid application of ‘_Countof’ to incomplete type");
+                *rest = skip(tok, TK_RPAREN);
+                return new_ulong(ty->len, start);
+            }
+            Node *node = unary(rest, tok->next);
+            add_type(node);
+            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+            if (node->ty->kind != TY_ARRAY) error(start, "‘_Countof’ requires an argument of array type");
+            if (node->ty->size < 0) error(start, "invalid application of ‘_Countof’ to incomplete type");
+            return new_ulong(node->ty->len, tok);
+        }
+
         default:
             break;
     }

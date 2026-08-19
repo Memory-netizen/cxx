@@ -615,6 +615,7 @@ enum {
 
 bool is_void(Type *ty);
 bool is_bool(Type *ty);
+bool is_char(Type *ty);
 bool is_integer(Type *ty);
 bool is_flonum(Type *ty);
 bool is_arith(Type *ty);

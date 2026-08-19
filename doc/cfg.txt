@@ -6,7 +6,8 @@ Decl        ::= DeclSpecs InitDecls? ";"
 InitDecls   ::= InitDeclr ("," InitDeclr)*
 InitDeclr   ::= Declr ("=" Init)?
 Init        ::= AsExp | BracedInit
-BracedInit  ::= "{" Init ("," Init)*? "}"
+BracedInit  ::= "{" ((Desig+ "=")? Init ("," (Desig+ "=")? Init)* ","?)? "}"
+Desig       ::= "[" (ConstExp | ConstRangeExp) "]" | "." Ident
 
 Declr       ::= Ptr? DirDeclr
 Ptr         ::= ("*" TypeQual*)+
@@ -110,6 +111,8 @@ CastExp     ::= UnaryExp | "(" TypeName ")" CastExp
 UnaryExp    ::= PostExp | UnaryOP CastExp | ("++" | "--") UnaryExp
             | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
             | "alignof" UnaryExp | "alignof" "(" TypeName ")"
+            | "_Countof" UnaryExp | "_Countof" "(" TypeName ")"
+
 UnaryOp     ::= "+" | "-" | "~" | "!" | "&" | "*"
 
 PostExp     ::= (PrimExp | CompLit) PostFix*

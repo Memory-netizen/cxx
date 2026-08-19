@@ -28,6 +28,7 @@ Type *ty_i64 = TYPE(TY_I64, 8, 8, false);
 
 bool is_bool(Type *ty) { return ty->kind == TY_BOOL; }
 bool is_void(Type *ty) { return ty->kind == TY_VOID; }
+bool is_char(Type *ty) { return ty->kind == TY_CHAR || ty->kind == TY_UCHAR || ty->kind == TY_SCHAR; }
 bool is_obj(Type *ty) { return ty->kind != TY_VOID && ty->kind != TY_FUNC; }
 
 bool is_objptr(Type *ty) {
