@@ -306,6 +306,8 @@ typedef enum {
     SC_REG = 1 << 2,
     SC_THREAD = 1 << 3,
     SC_TYPEDEF = 1 << 4,
+    SC_AUTO = 1 << 5,
+    SC_CONSTEXPR = 1 << 6,
 } SClass;
 
 // Variable or function

@@ -457,8 +457,8 @@ static void dump_node(Node *node) {
 }
 
 static const char *sclass_name[] = {
-    [SC_NONE] = "none",     [SC_TYPEDEF] = "typedef",     [SC_EXTERN] = "extern",
-    [SC_STATIC] = "static", [SC_THREAD] = "thread_local", [SC_REG] = "register",
+    [SC_NONE] = "none",           [SC_TYPEDEF] = "typedef", [SC_EXTERN] = "extern", [SC_STATIC] = "static",
+    [SC_THREAD] = "thread_local", [SC_REG] = "register",    [SC_AUTO] = "auto",     [SC_CONSTEXPR] = "constexpr",
 };
 
 void dump_ast(Module *prog) {

@@ -15,8 +15,8 @@
 static Module *curm;
 
 static const SClass sc_table[] = {
-    [TK_EXTERN] = SC_EXTERN, [TK_REGISTER] = SC_REG,    [TK_STATIC] = SC_STATIC,
-    [TK_THREAD] = SC_THREAD, [TK_TYPEDEF] = SC_TYPEDEF,
+    [TK_EXTERN] = SC_EXTERN,   [TK_REGISTER] = SC_REG, [TK_STATIC] = SC_STATIC,       [TK_THREAD] = SC_THREAD,
+    [TK_TYPEDEF] = SC_TYPEDEF, [TK_AUTO] = SC_AUTO,    [TK_CONSTEXPR] = SC_CONSTEXPR,
 };
 
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec);
@@ -1151,7 +1151,7 @@ static Node *postfix(Token **rest, Token *tok) {
         // Compound literal
         SClass sclass = 0;
         while (TK_CONSTEXPR <= tok->kind && tok->kind <= TK_TYPEDEF) {
-            sclass = sc_table[tok->kind];
+            sclass |= sc_table[tok->kind];
             tok = tok->next;
         }
         Type *ty = typename(&tok, tok);
@@ -1352,7 +1352,7 @@ static Node *cast(Token **rest, Token *tok) {
         tok = tok->next;
         SClass sclass = 0;
         while (TK_CONSTEXPR <= tok->kind && tok->kind <= TK_TYPEDEF) {
-            sclass = sc_table[tok->kind];
+            sclass |= sc_table[tok->kind];
             tok = tok->next;
         }
         Type *ty = typename(&tok, tok);
@@ -2623,6 +2623,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
     while (is_typename(tok, true)) {
         Token *ty_tok = tok;
         switch (tok->kind) {
+            case TK_AUTO:
             case TK_TYPEDEF:
             case TK_STATIC:
             case TK_EXTERN:
@@ -3012,6 +3013,7 @@ static Token *external_declaration(Token *tok) {
             if (sclass & SC_TYPEDEF) error(tok, "function definition declared ‘typedef’");
             if (sclass & SC_THREAD) error(tok, "function definition declared ‘thread_local’");
             if (sclass & SC_REG) error(tok, "function definition declared ‘register’");
+            if (sclass & SC_AUTO) error(tok, "function definition declared ‘auto’");
 
             if (ns) {
                 check_decl_compatile(ns, SYM_FUNC, ty);
@@ -3083,7 +3085,8 @@ static Token *external_declaration(Token *tok) {
                       "illegal initializer (only variables can be "
                       "initialized)");
         }
-        if (sclass & SC_REG) error(tok, "illegal storage class ‘register’ on file-scoped variable");
+        if (sclass & SC_REG) error(var_name, "file-scope declaration of ‘%s’ specifies ‘register’", str(var_name->id));
+        if (sclass & SC_AUTO) error(var_name, "file-scope declaration of ‘%s’ specifies ‘auto’", str(var_name->id));
 
         if (sclass & SC_TYPEDEF) {
             if (ns)
