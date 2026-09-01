@@ -825,6 +825,11 @@ static void insert_ty(Type *ty, char *kind) {
 }
 
 static Initializer *initializer(Token **rest, Token *tok, Type *ty, Type **new_ty) {
+    if (ty->kind == TY_NONE) {
+        Token *dummy;
+        Type *ty_init = assign(&dummy, tok)->ty;
+        ty = type_qual(ty_init, ty->qual);
+    }
     Initializer *init = new_initializer(ty, true);
     initializer2(rest, tok, init, true);
     if ((ty->kind == TY_STRUCT || ty->kind == TY_UNION) && ty->is_flexible) {
@@ -2613,7 +2618,8 @@ static Type *typeof_specifier(Token **rest, Token *tok, bool is_unqual) {
 // TypeQual  ::= "const" | "restrict" | "volatile"
 // FuncSpec  ::= "inline" | "_Noreturn"
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec) {
-    Type *ty = ty_int;
+    Type *ty;
+    bool seen_auto = false;
     int typespec_cnt = 0;
     int qual = 0;
     enum {
@@ -2635,6 +2641,9 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
         Token *ty_tok = tok;
         switch (tok->kind) {
             case TK_AUTO:
+                if (seen_auto) error(tok, "duplicate ‘auto’");
+                seen_auto = true;
+                break;
             case TK_TYPEDEF:
             case TK_STATIC:
             case TK_EXTERN:
@@ -2814,7 +2823,17 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
         }
     }
 loop_end:
-    if (!typespec_cnt) error(tok, "a type specifier is required for all declarations");
+    if (!typespec_cnt) {
+        if (!seen_auto) error(tok, "a type specifier is required for all declarations");
+        ty = ty_none;
+        seen_auto = false;
+    }
+
+    if (seen_auto) {
+        if (!sclass) error(tok, "storage class specifier is not allowed in this context");
+        if (*sclass) error(tok, "multiple storage classes in declaration specifiers");
+        *sclass = SC_AUTO;
+    }
     *rest = tok;
     return type_qual(ty, qual);
 }

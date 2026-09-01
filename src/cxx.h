@@ -51,6 +51,7 @@ typedef struct Member Member;
 typedef struct EnumVal EnumVal;
 typedef struct Initializer Initializer;
 
+extern Type *ty_none;
 extern Type *ty_void;
 extern Type *ty_nullptr;
 extern Type *ty_bool;
@@ -521,6 +522,7 @@ enum {
 };
 
 typedef enum {
+    TY_NONE,
     TY_VOID,
     TY_NULLPTR,
     TY_I1,

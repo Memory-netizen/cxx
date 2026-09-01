@@ -179,6 +179,8 @@ static void print_type(Type *ty) {
         case TY_UNION:
             fprintf(stdout, "union %s", str(ty->uid));
             break;
+        case TY_NONE:
+            break;
     }
 }
 

@@ -3,6 +3,7 @@
 #define TYPE(kind, size, align, is_unsigned) \
     &(Type) { kind, 0, size, align, is_unsigned, 0, 0, NULL, NULL, NULL, {0} }
 
+Type *ty_none = TYPE(TY_NONE, -1, 1, false);
 Type *ty_void = TYPE(TY_VOID, 1, 1, false);
 Type *ty_nullptr = TYPE(TY_NULLPTR, 8, 8, true);
 Type *ty_bool = TYPE(TY_BOOL, 1, 1, true);
@@ -234,6 +235,8 @@ bool is_compatible(Type *t1, Type *t2) {
                 if (enm1->val != enm2->val) return false;
             }
             return enm1 == NULL && enm2 == NULL;
+        case TY_NONE:
+            return false;
     }
     return false;
 }
