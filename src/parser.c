@@ -1634,6 +1634,10 @@ static Node *expr(Token **rest, Token *tok) {
 // InitDecls ::= InitDeclr ("," InitDeclr)*
 // InitDeclr ::= Declr ("=" Init)?
 static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclass, int align) {
+    bool is_static = sclass & SC_STATIC;
+    bool is_constexpr = sclass & SC_CONSTEXPR;
+    bool is_typedef = sclass & SC_TYPEDEF;
+
     Node dummy, *cur = &dummy;
     do {
         Token *start = tok;
@@ -1644,18 +1648,19 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
 
         bool is_fn = ty->kind == TY_FUNC;
         SymKind symkind = is_fn ? SYM_FUNC : SYM_VAR;
-        bool is_static = sclass & SC_STATIC;
-        if (is_fn) {
+        if (is_fn || is_typedef) {
             if (tok->kind == TK_AS)
                 error(var_name,
                       "illegal initializer (only variables can be "
                       "initialized)");
-            if (tok->kind == TK_LBRACE) error(var_name, "function definition is not allowed here");
-            if (is_static) error(start, "function declared in block scope cannot have 'static' storage class");
-            sclass |= SC_EXTERN;
+            if (is_fn) {
+                if (tok->kind == TK_LBRACE) error(var_name, "function definition is not allowed here");
+                if (is_static) error(start, "function declared in block scope cannot have 'static' storage class");
+            }
         }
-        bool is_extern = sclass & SC_EXTERN;
+        if (is_constexpr && tok->kind != TK_AS) error(tok, "‘constexpr’ requires an initialized data declaration");
 
+        bool is_extern = sclass & SC_EXTERN || is_fn;
         Sym *var;
         NameSpace *ns = find_ident(var_name, false, is_extern);
         uint32_t id = get_ident(var_name);
@@ -1673,6 +1678,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             uint32_t uid = new_unique_varname(intern(name, strlen(name)));
             var = new_gvar(uid, ty);
         } else {
+            if (is_constexpr) ty = type_qual(ty, Q_CONST);
             var = new_lvar(id, ty);
         }
         NameSpace *new_ns = push_namespace(id, symkind, ty, var_name);
@@ -1680,6 +1686,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         new_ns->prev = ns;
         new_ns->lnk = is_extern ? ns ? ns->lnk : LK_NONE : LK_NONE;
         var->sclass = sclass;
+        if (is_extern) var->sclass |= SC_EXTERN;
         var->align = MAX(align, ty->align);
         var->is_function = is_fn;
         if (tok->kind == TK_AS) {
@@ -2163,6 +2170,10 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
 
             if (sclass & SC_TYPEDEF) {
                 Type *ty = declarator(&tok, tok, basety);
+                if (tok->kind == TK_AS)
+                    error(tok,
+                          "illegal initializer (only variables can be "
+                          "initialized)");
                 push_namespace(get_ident(ty->name), SYM_TYNAME, ty, ty->name);
             } else {
                 cur = cur->next = declaration(&tok, tok, basety, sclass, align);
@@ -2964,6 +2975,7 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
 static Node *declaration(Token **rest, Token *tok, Type *basety, SClass sclass, int align) {
     Node *node = new_node(ND_DECL, tok);
     if (tok->kind == TK_SEMI) {
+        if (sclass & SC_CONSTEXPR) error(tok, "‘constexpr’ requires an initialized data declaration");
         *rest = tok->next;
         return node;
     }
@@ -3012,6 +3024,7 @@ static Token *external_declaration(Token *tok) {
             if (cnt || !is_func) error(tok, "expected ‘=’, ‘,’, ‘;’ before ‘{’ token");
             if (sclass & SC_TYPEDEF) error(tok, "function definition declared ‘typedef’");
             if (sclass & SC_THREAD) error(tok, "function definition declared ‘thread_local’");
+            if (sclass & SC_CONSTEXPR) error(tok, "function definition declared ‘constexpr’");
             if (sclass & SC_REG) error(tok, "function definition declared ‘register’");
             if (sclass & SC_AUTO) error(tok, "function definition declared ‘auto’");
 
@@ -3084,7 +3097,10 @@ static Token *external_declaration(Token *tok) {
                 error(var_name,
                       "illegal initializer (only variables can be "
                       "initialized)");
+        } else if (sclass & SC_CONSTEXPR) {
+            error(var_name, "‘constexpr’ requires an initialized data declaration");
         }
+
         if (sclass & SC_REG) error(var_name, "file-scope declaration of ‘%s’ specifies ‘register’", str(var_name->id));
         if (sclass & SC_AUTO) error(var_name, "file-scope declaration of ‘%s’ specifies ‘auto’", str(var_name->id));
 
@@ -3116,13 +3132,14 @@ static Token *external_declaration(Token *tok) {
                     }
                 }
             } else {
+                if (sclass & SC_CONSTEXPR) ty = type_qual(ty, Q_CONST);
                 var = new_gvar(get_ident(var_name), ty);
                 var->is_function = is_func;
                 var->sclass = sclass;
                 var->align = MAX(align, ty->align);
                 ns = push_namespace(var->id, symkind, ty, var_name);
                 ns->var = var;
-                ns->lnk = sclass & SC_STATIC ? LK_INTERN : LK_EXTERN;
+                ns->lnk = sclass & (SC_STATIC | SC_CONSTEXPR) ? LK_INTERN : LK_EXTERN;
             }
 
             if (ty->kind == TY_VOID) error(var_name, "variable ‘%s’ declared void", str(var_name->id));

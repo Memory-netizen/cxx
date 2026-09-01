@@ -461,10 +461,8 @@ static void dump_init(Initializer *init, Type *ty) {
 }
 
 static const char *sclass_name[] = {
-    [SC_NONE] = "dso_local",
-    [SC_EXTERN] = "external",
-    [SC_STATIC] = "internal",
-    [SC_THREAD] = "thread_local",
+    [SC_NONE] = "dso_local",     [SC_EXTERN] = "external",     [SC_STATIC] = "internal",
+    [SC_CONSTEXPR] = "internal", [SC_THREAD] = "thread_local",
 };
 
 void dump_data(Sym *data) {

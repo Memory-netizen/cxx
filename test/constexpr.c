@@ -3,6 +3,9 @@
 float g40 = 1.5;
 double g41 = 0.0 ? 55 : (0, 1 + 1 * 5.0 / 2 * (double)2 * (int)2.0);
 
+constexpr int g42 = 42;
+constexpr int g43 = 43 + 5 - 5 * 1;
+
 int main() {
     ASSERT(10, ({
                enum { ten = 1 + 2 + 3 + 4 };
@@ -129,15 +132,15 @@ int main() {
                sizeof(x);
            }));
     ASSERT(8, ({
-               char x[(int*)0 + 2];
+               char x[(int *)0 + 2];
                sizeof(x);
            }));
     ASSERT(12, ({
-               char x[(int*)16 - 1];
+               char x[(int *)16 - 1];
                sizeof(x);
            }));
     ASSERT(3, ({
-               char x[(int*)16 - (int*)4];
+               char x[(int *)16 - (int *)4];
                sizeof(x);
            }));
 
@@ -175,6 +178,29 @@ int main() {
            }));
     ASSERT(1, g40 == 1.5);
     ASSERT(1, g41 == 11);
+
+    {
+        int constexpr x = 42;
+    }
+    {
+        constexpr int x = 42;
+    }
+    ASSERT(5, ({
+               constexpr int x = 5;
+               x;
+           }));
+    ASSERT(8, ({
+               constexpr int x = 8;
+               const int *y = &x;
+               *y;
+           }));
+    ASSERT(6, ({
+               constexpr int x = 6;
+               *(int *)&x;
+           }));
+
+    ASSERT(42, g42);
+    ASSERT(43, g43);
 
     printf("OK\n");
     return 0;
