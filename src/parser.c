@@ -27,7 +27,7 @@ static const char *sclass_name[] = {
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec);
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty, bool is_param);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
-static Node *declaration(Token **rest, Token *tok, Type *ty, SClass sclass, int align);
+static Node *declaration(Token **rest, Token *tok, Type *ty, SClass sclass, int align, int funcspec);
 static Node *stmt(Token **rest, Token *tok);
 static Node *compound_stmt(Token **rest, Token *tok);
 static Node *expr(Token **rest, Token *tok);
@@ -1643,7 +1643,7 @@ static Node *expr(Token **rest, Token *tok) {
 
 // InitDecls ::= InitDeclr ("," InitDeclr)*
 // InitDeclr ::= Declr ("=" Init)?
-static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclass, int align) {
+static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclass, int align, int funcspec) {
     bool is_static = sclass & SC_STATIC;
     bool is_constexpr = sclass & SC_CONSTEXPR;
     bool is_typedef = sclass & SC_TYPEDEF;
@@ -1657,6 +1657,10 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         if (ty->kind == TY_VOID) error(start, "variable ‘%s’ declared void", str(var_name->id));
 
         bool is_fn = ty->kind == TY_FUNC;
+        if (funcspec && !is_fn) {
+            if (funcspec & Q_NORETURN) error(tok, "‘noreturn’ can only appear on functions");
+            if (funcspec & Q_INLINE) error(tok, "‘inline’ can only appear on functions");
+        }
         SymKind symkind = is_fn ? SYM_FUNC : SYM_VAR;
         if (is_fn || is_typedef) {
             if (tok->kind == TK_AS)
@@ -1698,6 +1702,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         if (is_extern) var->sclass |= SC_EXTERN;
         var->align = MAX(align, ty->align);
         var->is_function = is_fn;
+        var->funcspec |= funcspec;
         if (tok->kind == TK_AS) {
             if (is_extern)
                 error(var_name, "declaration of block scope identifier ‘%s’ with linkage cannot have an initializer",
@@ -1745,7 +1750,7 @@ static Node *select_head(Token **rest, Token *tok) {
         int funcspec = 0;
         Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
         node = new_node(ND_DECL, tok);
-        if (tok->kind != TK_SEMI) node->body = init_decl_list(&tok, tok, basety, sclass, align);
+        if (tok->kind != TK_SEMI) node->body = init_decl_list(&tok, tok, basety, sclass, align, funcspec);
         if (tok->kind == TK_SEMI) {
             Node *stmt = node->body;
             while (stmt->next) stmt = stmt->next;
@@ -1862,7 +1867,7 @@ static Node *for_stmt(Token **rest, Token *tok) {
         int align = 0;
         int funcspec = 0;
         Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
-        node->init = declaration(&tok, tok, basety, sclass, align);
+        node->init = declaration(&tok, tok, basety, sclass, align, funcspec);
     } else {
         node->init = expr_stmt(&tok, tok);
     }
@@ -1953,6 +1958,8 @@ static Node *break_stmt(Token **rest, Token *tok) {
 
 // RetStmt ::= "return" Exp? ";"
 static Node *return_stmt(Token **rest, Token *tok) {
+    if (cur_fn->funcspec & Q_NORETURN)
+        warning(tok, "function ‘%s’ declared 'noreturn' should not return", str(cur_fn->id));
     Node *node = new_node(ND_RETURN, tok);
     Type *ret = cur_fn->ty->ret;
     if (tok->next->kind == TK_SEMI) {
@@ -1962,7 +1969,7 @@ static Node *return_stmt(Token **rest, Token *tok) {
     }
 
     node->lhs = expr(&tok, tok->next);
-    if (ret->kind == TY_VOID) error(tok, "void function ‘%s’ should not return a value", str(cur_fn->id));
+    if (ret->kind == TY_VOID) error(node->tok, "void function ‘%s’ should not return a value", str(cur_fn->id));
     *rest = skip(tok, TK_SEMI);
 
     add_type(node);
@@ -2185,7 +2192,7 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
                           "initialized)");
                 push_namespace(get_ident(ty->name), SYM_TYNAME, ty, ty->name);
             } else {
-                cur = cur->next = declaration(&tok, tok, basety, sclass, align);
+                cur = cur->next = declaration(&tok, tok, basety, sclass, align, funcspec);
             }
 
             add_type(cur);
@@ -3028,14 +3035,14 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
 }
 
 // Decl ::= DeclSpecs InitDecls? ";"
-static Node *declaration(Token **rest, Token *tok, Type *basety, SClass sclass, int align) {
+static Node *declaration(Token **rest, Token *tok, Type *basety, SClass sclass, int align, int funcspec) {
     Node *node = new_node(ND_DECL, tok);
     if (tok->kind == TK_SEMI) {
         if (sclass & SC_CONSTEXPR) error(tok, "‘constexpr’ requires an initialized data declaration");
         *rest = tok->next;
         return node;
     }
-    node->body = init_decl_list(&tok, tok, basety, sclass, align);
+    node->body = init_decl_list(&tok, tok, basety, sclass, align, funcspec);
     *rest = skip(tok, TK_SEMI);
     return node;
 }
@@ -3073,11 +3080,15 @@ static Token *external_declaration(Token *tok) {
         Token *var_name = ty->name;
         NameSpace *ns = find_ident(var_name, false, false);
         Sym *var;
-        bool is_func = ty->kind == TY_FUNC;
+        bool is_fn = ty->kind == TY_FUNC;
+        if (funcspec && !is_fn) {
+            if (funcspec & Q_NORETURN) error(tok, "‘noreturn’ can only appear on functions");
+            if (funcspec & Q_INLINE) error(tok, "‘inline’ can only appear on functions");
+        }
 
         // function-definition
         if (tok->kind == TK_LBRACE) {
-            if (cnt || !is_func) error(tok, "expected ‘=’, ‘,’, ‘;’ before ‘{’ token");
+            if (cnt || !is_fn) error(tok, "expected ‘=’, ‘,’, ‘;’ before ‘{’ token");
             if (sclass & SC_TYPEDEF) error(tok, "function definition declared ‘typedef’");
             if (sclass & SC_THREAD) error(tok, "function definition declared ‘thread_local’");
             if (sclass & SC_CONSTEXPR) error(tok, "function definition declared ‘constexpr’");
@@ -3147,9 +3158,9 @@ static Token *external_declaration(Token *tok) {
         }
 
         // declaration
-        SymKind symkind = is_func ? SYM_FUNC : SYM_VAR;
+        SymKind symkind = is_fn ? SYM_FUNC : SYM_VAR;
         if (tok->kind == TK_AS) {
-            if (is_func || sclass & SC_TYPEDEF)
+            if (is_fn || sclass & SC_TYPEDEF)
                 error(var_name,
                       "illegal initializer (only variables can be "
                       "initialized)");
@@ -3174,7 +3185,7 @@ static Token *external_declaration(Token *tok) {
                     goto note;
                 }
                 if (var->sclass & SC_STATIC) {
-                    if (!is_func && !(sclass & SC_STATIC)) {
+                    if (!is_fn && !(sclass & SC_STATIC)) {
                         diag("error", var_name, "non-static declaration of ‘%s’ follows static declaration",
                              str(var_name->id));
                         goto note;
@@ -3189,7 +3200,7 @@ static Token *external_declaration(Token *tok) {
                 }
             } else {
                 var = new_gvar(get_ident(var_name), ty);
-                var->is_function = is_func;
+                var->is_function = is_fn;
                 var->sclass = sclass;
                 var->align = MAX(align, ty->align);
                 ns = push_namespace(var->id, symkind, ty, var_name);
@@ -3203,6 +3214,7 @@ static Token *external_declaration(Token *tok) {
                 gvar_initializer(&tok, tok->next, var);
                 var->is_defined = true;
             }
+            var->funcspec |= funcspec;
             if (var->ty->size < 0 && var->ty->kind != TY_ARRAY)
                 error(var_name, "variable ‘%s’ has incomplete type", str(var_name->id));
         }
