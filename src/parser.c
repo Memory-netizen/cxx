@@ -19,6 +19,11 @@ static const SClass sc_table[] = {
     [TK_TYPEDEF] = SC_TYPEDEF, [TK_AUTO] = SC_AUTO,    [TK_CONSTEXPR] = SC_CONSTEXPR,
 };
 
+static const char *sclass_name[] = {
+    [SC_NONE] = "none",           [SC_TYPEDEF] = "typedef", [SC_EXTERN] = "extern", [SC_STATIC] = "static",
+    [SC_THREAD] = "thread_local", [SC_REG] = "register",    [SC_AUTO] = "auto",     [SC_CONSTEXPR] = "constexpr",
+};
+
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec);
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty, bool is_param);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
@@ -1683,7 +1688,6 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             uint32_t uid = new_unique_varname(intern(name, strlen(name)));
             var = new_gvar(uid, ty);
         } else {
-            if (is_constexpr) ty = type_qual(ty, Q_CONST);
             var = new_lvar(id, ty);
         }
         NameSpace *new_ns = push_namespace(id, symkind, ty, var_name);
@@ -2620,6 +2624,8 @@ static Type *typeof_specifier(Token **rest, Token *tok, bool is_unqual) {
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec) {
     Type *ty;
     bool seen_auto = false;
+    bool is_constexpr = false;
+    bool is_thread = false;
     int typespec_cnt = 0;
     int qual = 0;
     enum {
@@ -2644,17 +2650,23 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 if (seen_auto) error(tok, "duplicate ‘auto’");
                 seen_auto = true;
                 break;
+            case TK_CONSTEXPR:
+                if (is_constexpr) error(tok, "duplicate ‘constexpr’");
+                is_constexpr = true;
+                break;
+            case TK_THREAD:
+                if (is_thread) error(tok, "duplicate ‘thread_local’");
+                is_thread = true;
+                break;
             case TK_TYPEDEF:
             case TK_STATIC:
             case TK_EXTERN:
-            case TK_THREAD:
-            case TK_REGISTER:
-            case TK_CONSTEXPR: {
+            case TK_REGISTER: {
                 SClass sc = sc_table[tok->kind];
                 if (!sclass) error(tok, "storage class specifier is not allowed in this context");
                 if (*sclass) {
                     if (*sclass & sc)
-                        error(tok, "duplicate ‘%s’", str(tok->id));
+                        error(tok, "duplicate ‘%s’", sclass_name[sc]);
                     else
                         error(tok, "multiple storage classes in declaration specifiers");
                 };
@@ -2823,17 +2835,42 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
         }
     }
 loop_end:
+    if (sclass && *sclass == SC_TYPEDEF) {
+        if (seen_auto) error(tok, "‘auto’ not allowed in typedef");
+        if (is_constexpr) error(tok, "‘constexpr’ not allowed in typedef");
+        if (is_thread) error(tok, "‘thread_local’ not allowed in typedef");
+    }
+
     if (!typespec_cnt) {
         if (!seen_auto) error(tok, "a type specifier is required for all declarations");
         ty = ty_none;
         seen_auto = false;
     }
 
-    if (seen_auto) {
+    if (seen_auto || is_constexpr || is_thread) {
         if (!sclass) error(tok, "storage class specifier is not allowed in this context");
+    }
+
+    if (seen_auto) {
         if (*sclass) error(tok, "multiple storage classes in declaration specifiers");
         *sclass = SC_AUTO;
     }
+
+    if (is_constexpr) {
+        if (*sclass & ~(SC_AUTO | SC_REG | SC_STATIC)) error(tok, "‘constexpr’ used with ‘%s’", sclass_name[*sclass]);
+        if (is_thread) error(tok, "‘constexpr’ used with ‘thread_local’");
+        if (qual & Q_VOLATILE) error(tok, "constexpr variable cannot have qualifiers ‘volatile’");
+        *sclass |= SC_CONSTEXPR;
+        qual |= Q_CONST;
+    }
+
+    if (is_thread) {
+        if (*sclass & ~(SC_EXTERN | SC_STATIC)) error(tok, "‘thread_local’ used with ‘%s’", sclass_name[*sclass]);
+        if (scope->next && !(*sclass & (SC_EXTERN | SC_STATIC)))
+            error(tok, "‘thread_local’ variables must have global storage");
+        *sclass |= SC_THREAD;
+    }
+
     *rest = tok;
     return type_qual(ty, qual);
 }
@@ -3151,7 +3188,6 @@ static Token *external_declaration(Token *tok) {
                     }
                 }
             } else {
-                if (sclass & SC_CONSTEXPR) ty = type_qual(ty, Q_CONST);
                 var = new_gvar(get_ident(var_name), ty);
                 var->is_function = is_func;
                 var->sclass = sclass;
