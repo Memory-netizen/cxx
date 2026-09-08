@@ -1697,9 +1697,13 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         NameSpace *new_ns = push_namespace(id, symkind, ty, var_name);
         new_ns->var = var;
         new_ns->prev = ns;
-        new_ns->lnk = is_extern ? ns ? ns->lnk : LK_NONE : LK_NONE;
+        if (is_extern) {
+            if (ns)
+                new_ns->lnk = ns->lnk;
+            else
+                new_ns->lnk = LK_EXTERN;
+        }
         var->sclass = sclass;
-        if (is_extern) var->sclass |= SC_EXTERN;
         var->align = MAX(align, ty->align);
         var->is_function = is_fn;
         var->funcspec |= funcspec;
@@ -3113,7 +3117,7 @@ static Token *external_declaration(Token *tok) {
                 ns->var = var;
                 ns->lnk = sclass == SC_STATIC ? LK_INTERN : LK_EXTERN;
                 var->is_function = true;
-                var->sclass = sclass ? sclass : SC_EXTERN;
+                var->sclass = sclass;
             }
 
             var->is_defined = true;
@@ -3185,7 +3189,7 @@ static Token *external_declaration(Token *tok) {
                     goto note;
                 }
                 if (var->sclass & SC_STATIC) {
-                    if (!is_fn && !(sclass & SC_STATIC)) {
+                    if (!is_fn && !(sclass & (SC_EXTERN | SC_STATIC))) {
                         diag("error", var_name, "non-static declaration of ‘%s’ follows static declaration",
                              str(var_name->id));
                         goto note;
