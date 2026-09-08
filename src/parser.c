@@ -1010,7 +1010,90 @@ static uint32_t get_ident(Token *tok) {
     return tok->id;
 }
 
-// PrimExp ::= "true" | "false" | "nullptr" | Num | Str | Ident | "(" Exp ")" | "(" CompStmt ")"
+typedef struct {
+    Type **generic_ty;
+    Token **generic_tok;
+    int generic_num;
+} Generic_s;
+
+static void push_generic(Type *ty, Token *tok, Generic_s *gen) {
+    for (int i = 0; i < gen->generic_num; i++)
+        if (is_compatible(ty, gen->generic_ty[i])) {
+            diag("error", tok, "‘_Generic’ specifies two compatible types");
+            diag_exit("note", gen->generic_tok[i], "compatible type is here");
+        }
+    gen->generic_ty = vgrow(gen->generic_ty, gen->generic_num + 1);
+    gen->generic_tok = vgrow(gen->generic_tok, gen->generic_num + 1);
+    gen->generic_ty[gen->generic_num] = ty;
+    gen->generic_tok[gen->generic_num] = tok;
+    gen->generic_num++;
+}
+
+// GenSel   ::= "_Generic" "(" (AsExp | TypeName) "," GenAssoc ("," GenAssoc)* ")"
+// GenAssoc ::= TypeName ":" AsExp | "default" ":" AsExp
+static Node *generic_selection(Token **rest, Token *tok) {
+    Token *start = tok = skip(tok->next, TK_LPAREN);
+
+    Type *t1;
+    if (is_typename(tok, true)) {
+        t1 = typename(&tok, tok);
+    } else {
+        Node *expr = assign(&tok, tok);
+        lvalue_convert(&expr);
+        t1 = expr->ty;
+    }
+
+    if (t1->kind == TY_FUNC)
+        t1 = pointer_to(t1, 0);
+    else if (t1->kind == TY_ARRAY)
+        t1 = pointer_to(t1->base, 0);
+
+    Generic_s dummy, *gen = &dummy;
+    gen->generic_ty = vnew(16, sizeof(Type *));
+    gen->generic_tok = vnew(16, sizeof(Token *));
+    gen->generic_num = 0;
+
+    Node *ret_expr, *default_expr;
+    Token *ret_tok = NULL, *default_tok = NULL;
+
+    while (!match(rest, tok, TK_RPAREN)) {
+        Token *as_tok = tok = skip(tok, TK_COMMA);
+
+        if (tok->kind == TK_DEFAULT) {
+            if (default_tok) {
+                diag("error", tok, "duplicate ‘default’ case in ‘_Generic’");
+                diag_exit("note", default_tok, "original ‘default’ is here");
+            }
+            default_tok = tok;
+            tok = skip(tok->next, TK_COLON);
+            default_expr = assign(&tok, tok);
+            continue;
+        }
+
+        Type *t2 = typename(&tok, tok);
+        tok = skip(tok, TK_COLON);
+        Node *node = assign(&tok, tok);
+        push_generic(t2, as_tok, gen);
+        if (is_compatible(t1, t2)) {
+            if (ret_tok) {
+                diag("error", as_tok, "‘_Generic’ selector matches multiple associations");
+                diag_exit("note", ret_tok, "other match is here");
+            }
+            ret_tok = as_tok;
+            ret_expr = node;
+        }
+    }
+
+    if (ret_tok) return ret_expr;
+    if (default_tok) return default_expr;
+    error(start, "‘_Generic’ selector is not compatible with any association");
+    return NULL;
+}
+
+// PrimExp     ::= "true" | "false" | "nullptr"
+// | Num | Str | Ident
+// | "(" Exp ")" | "(" CompStmt ")"
+// | GenSel
 static Node *primary(Token **rest, Token *tok) {
     Node *node;
     if (tok->kind == TK_LPAREN && tok->next->kind == TK_LBRACE) {
@@ -1053,6 +1136,9 @@ static Node *primary(Token **rest, Token *tok) {
         Sym *var = new_string_literal(tok->id, tok->ty);
         *rest = tok->next;
         return new_var_node(var, tok);
+    }
+    if (tok->kind == TK_GENERIC) {
+        return generic_selection(rest, tok);
     }
     if (tok->kind == TK_IDENT) {
         Token *start = tok;
@@ -1198,7 +1284,7 @@ static Node *postfix(Token **rest, Token *tok) {
     while (1) {
         add_type(node);
         if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base, 0));
-        if (node->ty->kind == TY_FUNC && node->kind == ND_VAR) new_imcast(&node, pointer_to(node->ty, 0));
+        if (node->ty->kind == TY_FUNC) new_imcast(&node, pointer_to(node->ty, 0));
         switch (tok->kind) {
             case TK_LPAREN:
                 // foo()

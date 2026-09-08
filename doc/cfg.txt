@@ -123,4 +123,10 @@ CompLit     ::= "(" SCSpec* TypeName ")" BracedInit
 PostFix     ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident | "++" | "--"
 ArgList     ::= AsExp ("," AsExp)*
 
-PrimExp     ::= "true" | "false" | "nullptr" | Num | Str | Ident | "(" Exp ")" | "(" CompStmt ")"
+PrimExp     ::= "true" | "false" | "nullptr"
+              | Num | Str | Ident
+              | "(" Exp ")" | "(" CompStmt ")"
+              | GenSel
+
+GenSel      ::= "_Generic" "(" (AsExp | TypeName) "," GenAssoc ("," GenAssoc)* ")"
+GenAssoc    ::= TypeName ":" AsExp | "default" ":" AsExp
