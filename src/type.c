@@ -1,7 +1,7 @@
 #include "cxx.h"
 
 #define TYPE(kind, size, align, is_unsigned) \
-    &(Type) { kind, 0, size, align, is_unsigned, 0, 0, NULL, NULL, NULL, {0} }
+    &(Type) { kind, 0, size, align, is_unsigned, 0, 0, NULL, NULL, NULL, NULL, {0} }
 
 Type *ty_none = TYPE(TY_NONE, -1, 1, false);
 Type *ty_void = TYPE(TY_VOID, 1, 1, false);
@@ -91,6 +91,7 @@ Type *copy_type(Type *ty) {
     Type *ret = emalloc(sizeof(Type));
     *ret = *ty;
     if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) copy_struct_type(ret, ty);
+    ret->origin = ty->origin ? ty->origin : ty;
     return ret;
 }
 
@@ -175,6 +176,12 @@ bool is_compatible(Type *t1, Type *t2) {
 
     if (t1->kind != t2->kind) return false;
     if (t1->qual != t2->qual) return false;
+
+    if (t1->origin) t1 = t1->origin;
+    if (t2->origin) t2 = t2->origin;
+
+    if (t1 == t2) return true;
+
     if (check_set(t1, t2)) return true;
 
     switch (t1->kind) {

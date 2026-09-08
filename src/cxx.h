@@ -559,6 +559,7 @@ struct Type {
     Token *name;
     Type *next;
     Type *base;
+    Type *origin;  // for type compatibility check
 
     // Data
     union {

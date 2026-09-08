@@ -839,6 +839,7 @@ static Initializer *initializer(Token **rest, Token *tok, Type *ty, Type **new_t
     initializer2(rest, tok, init, true);
     if ((ty->kind == TY_STRUCT || ty->kind == TY_UNION) && ty->is_flexible) {
         ty = copy_type(ty);
+        ty->origin = NULL;
         insert_ty(ty, ty->kind == TY_UNION ? "union" : "struct");
 
         Member *mem = ty->members;
@@ -1054,6 +1055,19 @@ static Node *primary(Token **rest, Token *tok) {
         return new_var_node(var, tok);
     }
     if (tok->kind == TK_IDENT) {
+        Token *start = tok;
+        // builtin_fnuction
+        static uint32_t ty_compatible = 0;
+        if (!ty_compatible)
+            ty_compatible = intern("__builtin_types_compatible_p", sizeof("__builtin_types_compatible_p") - 1);
+        if (tok->id == ty_compatible) {
+            tok = skip(tok->next, TK_LPAREN);
+            Type *t1 = typename(&tok, tok);
+            tok = skip(tok, TK_COMMA);
+            Type *t2 = typename(&tok, tok);
+            *rest = skip(tok, TK_RPAREN);
+            return new_num(is_compatible(type_unqual(t1), type_unqual(t2)), start);
+        }
         // Variable, function or enum constant
         NameSpace *sc = find_ident(tok, true, false);
         if (!sc) {
