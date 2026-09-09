@@ -171,4 +171,12 @@ echo 'double sqrt(double x); int main(void){ sqrt(25.0); }' > $tmp/main.c
 $cxx -o $tmp/sqrt $tmp/main.c -lm
 check '-l'
 
+
+# -M
+echo '#include "out2.h"' > $tmp/out.c
+echo '#include "out3.h"' >> $tmp/out.c
+touch $tmp/out2.h $tmp/out3.h
+$cxx -M -I$tmp $tmp/out.c | grep -q -z '^out.o: .*/out\.c .*/out2\.h .*/out3\.h'
+check -M
+
 echo OK
