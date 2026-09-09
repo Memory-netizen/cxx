@@ -12,6 +12,7 @@ typedef enum {
 static FileType opt_x;
 static bool opt_E;
 static bool opt_M;
+static bool opt_MP;
 static bool opt_S;
 static bool opt_ll;
 static bool opt_c;
@@ -192,6 +193,11 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-MF")) {
             opt_MF = argv[++i];
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-MP")) {
+            opt_MP = true;
             continue;
         }
 
@@ -382,6 +388,9 @@ static void print_dependencies(void) {
 
     for (int i = 0; files[i] && files[i]->id; i++) fprintf(out, " \\\n  %s", files[i]->name);
     fprintf(out, "\n\n");
+
+    if (opt_MP)
+        for (int i = 1; files[i] && files[i]->id; i++) fprintf(out, "%s:\n\n", files[i]->name);
 }
 
 // Stage 1: .c → .ll  (cc1: tokenize + preprocess + parse + irgen)
