@@ -267,4 +267,11 @@ echo 'int foo(); int bar=3; int main() { foo(); }' > $tmp/bar.c
 $compiler -o $tmp/foo $tmp/bar.c -L$tmp -lfoobar
 check -L
 
+# -Wl,
+echo 'int foo() {}' | $compiler -c -o $tmp/foo.o -xc -
+echo 'int foo() {}' | $compiler -c -o $tmp/bar.o -xc -
+echo 'int main() {}' | $compiler -c -o $tmp/baz.o -xc -
+$compiler -Wl,-z,muldefs,--data-sections -o $tmp/foo $tmp/foo.o $tmp/bar.o $tmp/baz.o
+check -Wl,
+
 echo OK

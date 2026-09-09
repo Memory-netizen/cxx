@@ -232,7 +232,7 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
-        if (!strncmp(argv[i], "-l", 2)) {
+        if (!strncmp(argv[i], "-l", 2) || !strncmp(argv[i], "-Wl,", 4)) {
             input_paths[num_input++] = argv[i];
             continue;
         }
@@ -622,6 +622,18 @@ int main(int argc, char **argv) {
 
         if (!strncmp(input, "-l", 2)) {
             ld_args[num_ldarg++] = input;
+            continue;
+        }
+
+        if (!strncmp(input, "-Wl,", 4)) {
+            char *s = strdup(input + 4);
+            char *arg = strtok(s, ",");
+            int i = 1;
+            while (arg) {
+                ld_args = vgrow(ld_args, argc + i++);
+                ld_args[num_ldarg++] = arg;
+                arg = strtok(NULL, ",");
+            }
             continue;
         }
 
