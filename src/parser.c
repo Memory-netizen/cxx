@@ -1392,6 +1392,7 @@ static Node *unary(Token **rest, Token *tok) {
             Node *node = unary(rest, tok->next);
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_FUNC) node = node->lhs;
             if (node->ty->size < 0) error(start, "invalid application of ‘sizeof’ to incomplete type");
             return new_ulong(node->ty->size, tok);
         }
@@ -1405,6 +1406,7 @@ static Node *unary(Token **rest, Token *tok) {
             Node *node = unary(rest, tok->next);
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_FUNC) node = node->lhs;
             if (node->ty->size < 0) error(start, "invalid application of ‘alignof’ to incomplete type");
             return new_ulong(node->ty->align, tok);
         }

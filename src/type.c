@@ -109,6 +109,13 @@ Type *pointer_to(Type *base, uint32_t qual) {
 Type *func_type(Type *return_ty) {
     Type *ty = emalloc(sizeof(Type));
     ty->kind = TY_FUNC;
+    // The C spec disallows sizeof(<function type>) and
+    // _Alignof(<function type>), but
+    // GCC allows them.
+    // sizeof(<function type>) is evaluated to 1.
+    // _Alignof(<function type>) is evaluated to 4.
+    ty->size = 1;
+    ty->align = 4;
     ty->ret = return_ty;
     return ty;
 }

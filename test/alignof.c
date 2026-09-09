@@ -86,6 +86,8 @@ int main() {
     ASSERT(1, _Alignof(false));
     ASSERT(8, _Alignof(nullptr));
 
+    ASSERT(4, _Alignof(main));
+
     printf("OK\n");
     return 0;
 }
