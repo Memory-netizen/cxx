@@ -292,4 +292,8 @@ check '-fcommon'
 ! echo 'int foo;' | $compiler -fno-common -S -emit-llvm -o- -xc - | grep -q 'common'
 check '-fno-common'
 
+# -w
+! echo '#warning warning' | $compiler -w -S -o /dev/null -xc - 2>&1 | grep -q 'warning'
+check -w
+
 echo OK

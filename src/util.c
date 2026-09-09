@@ -71,7 +71,9 @@ void error(Token *tok, const char *msg, ...) {
     exit(1);
 }
 
+extern bool opt_nowarn;
 void warning(Token *tok, const char *msg, ...) {
+    if (opt_nowarn) return;
     va_list ap;
     va_start(ap, msg);
     Token *orig = tok;
