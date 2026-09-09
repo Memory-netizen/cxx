@@ -254,4 +254,10 @@ echo 'int foo(); int bar=3; int main() { foo(); }' > $tmp/main.c
 $cxx -o $tmp/foo $tmp/main.c $tmp/foo.so
 check -fPIC
 
+# -shared
+echo 'extern int bar; int foo() { return bar; }' > $tmp/foo.c
+echo 'int foo(); int bar=3; int main() { foo(); }' > $tmp/bar.c
+$cxx -fPIC -shared -o $tmp/foo.so $tmp/foo.c $tmp/bar.c
+check -shared
+
 echo OK

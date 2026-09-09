@@ -247,6 +247,11 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
+        if (!strcmp(argv[i], "-shared")) {
+            ld_extra_args[num_ld_exarg++] = "-shared";
+            continue;
+        }
+
         if (!strcmp(argv[i], "-MF")) {
             opt_MF = argv[++i];
             continue;
