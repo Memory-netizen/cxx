@@ -281,4 +281,15 @@ echo 'int main() {}' | $compiler -c -o $tmp/baz.o -xc -
 $compiler -Xlinker -z -Xlinker muldefs -Xlinker --data-sections -o $tmp/foo $tmp/foo.o $tmp/bar.o $tmp/baz.o
 check -Xlinker
 
+# -fcommon
+! echo 'int foo;' | $compiler -S -emit-llvm -o- -xc - | grep -q 'common'
+check '-fno-common (default)'
+
+echo 'int foo;' | $compiler -fcommon -S -emit-llvm -o- -xc - | grep -q 'common'
+check '-fcommon'
+
+# -fno-common
+! echo 'int foo;' | $compiler -fno-common -S -emit-llvm -o- -xc - | grep -q 'common'
+check '-fno-common'
+
 echo OK

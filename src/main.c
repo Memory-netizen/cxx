@@ -51,6 +51,7 @@ char **ld_extra_args;
 int num_ld_exarg;
 
 bool opt_fpic;
+bool opt_fcommon;
 
 static void usage(int status) {
     fprintf(stderr,
@@ -302,6 +303,16 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-fno-pic") || !strcmp(argv[i], "-fno-PIC")) {
             opt_fpic = false;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-fcommon")) {
+            opt_fcommon = true;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-fno-common")) {
+            opt_fcommon = false;
             continue;
         }
 

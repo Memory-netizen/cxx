@@ -3,6 +3,7 @@
 static FILE *out_file;
 static Module *curm;
 extern bool opt_fpic;
+extern bool opt_fcommon;
 
 static const char *op_str[][3] = {
     [IR_ADD] = {"add", "add", "fadd"},
@@ -503,8 +504,10 @@ void dump_data(Sym *data) {
         fprintf(out_file, ", align %d\n", data->align);
         return;
     }
+
+    if (!data->is_defined && !data->sclass && opt_fcommon) fprintf(out_file, "common ");
     fprintf(out_file, "%s global ", (!data->sclass && opt_fpic) ? "" : sclass_name[data->sclass]);
-    if (data->sclass == SC_EXTERN)
+    if (data->sclass & SC_EXTERN)
         print_type(data->ty);
     else
         dump_init(data->init, data->ty);
@@ -517,7 +520,7 @@ void dump_fn(Sym *fn) {
         fprintf(out_file, "declare ");
     } else {
         fprintf(out_file, "define ");
-        if (fn->sclass == SC_STATIC)
+        if (fn->sclass & SC_STATIC)
             fprintf(out_file, "internal ");
         else if (!opt_fpic)
             fprintf(out_file, "dso_local ");
