@@ -61,7 +61,7 @@ static void usage(int status) {
 
 static bool take_arg(char *arg) {
     char *x[] = {
-        "-o", "-I", "-include", "-x", "-idirafter", "-MF", "-MT", "-MQ",
+        "-o", "-I", "-include", "-x", "-idirafter", "-MF", "-MT", "-MQ", "-Xlinker",
     };
     for (size_t i = 0; i < sizeof(x) / sizeof(*x); i++)
         if (!strcmp(arg, x[i])) return true;
@@ -261,6 +261,11 @@ static void parse_args(int argc, char **argv) {
         if (!strncmp(argv[i], "-L", 2)) {
             ld_extra_args[num_ld_exarg++] = "-L";
             ld_extra_args[num_ld_exarg++] = argv[i] + 2;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-Xlinker")) {
+            ld_extra_args[num_ld_exarg++] = argv[++i];
             continue;
         }
 

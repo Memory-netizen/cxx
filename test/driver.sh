@@ -274,4 +274,11 @@ echo 'int main() {}' | $compiler -c -o $tmp/baz.o -xc -
 $compiler -Wl,-z,muldefs,--data-sections -o $tmp/foo $tmp/foo.o $tmp/bar.o $tmp/baz.o
 check -Wl,
 
+# -Xlinker
+echo 'int foo() {}' | $compiler -c -o $tmp/foo.o -xc -
+echo 'int foo() {}' | $compiler -c -o $tmp/bar.o -xc -
+echo 'int main() {}' | $compiler -c -o $tmp/baz.o -xc -
+$compiler -Xlinker -z -Xlinker muldefs -Xlinker --data-sections -o $tmp/foo $tmp/foo.o $tmp/bar.o $tmp/baz.o
+check -Xlinker
+
 echo OK
