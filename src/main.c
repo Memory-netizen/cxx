@@ -31,6 +31,9 @@ int num_include_paths;
 char **dirafter;
 int num_dirafter;
 
+char **ld_extra_args;
+int num_ld_exarg;
+
 static void usage(int status) {
     fprintf(stderr,
             "cxx [ -o <path> ] [ -S | -c | -E ] [ -ast-dump ] [ -dump-tokens ]"
@@ -162,6 +165,10 @@ static void parse_args(int argc, char **argv) {
             opt_x = parse_opt_x(argv[i] + 2);
             continue;
         }
+        if (!strcmp(argv[i], "-s")) {
+            ld_extra_args[num_ld_exarg++] = "-s";
+            continue;
+        }
 
         if (!strcmp(argv[i], "-cc1")) {
             opt_cc1 = true;
@@ -275,7 +282,7 @@ static void run_subprocess(char **argv) {
 }
 
 static void run_cc1(int argc, char **argv, char *input, char *output) {
-    char **args = calloc(argc + 10, sizeof(char *));
+    char **args = vnew(argc + 10, sizeof(char *));
     memcpy(args, argv, argc * sizeof(char *));
     args[argc++] = "-cc1";
 
@@ -389,13 +396,12 @@ static void assemble(char *input, char *output) {
 }
 
 // Stage 4: .o → executable  (via cc)
-static void run_linker(char **inputs, int num_ldarg, char *output) {
-    char **cmd = vnew(num_ldarg + 16, sizeof(char *));
-    cmd[0] = "cc";
-    cmd[1] = "-o";
-    cmd[2] = output;
-    for (int i = 0; i < num_ldarg; i++) cmd[i + 3] = inputs[i];
-    run_subprocess(cmd);
+static void run_linker(char **ld_args, int num_ldarg, char *output) {
+    ld_args[0] = "cc";
+    ld_args[1] = "-o";
+    ld_args[2] = output;
+    memcpy(ld_args + num_ldarg, ld_extra_args, num_ld_exarg * sizeof(char *));
+    run_subprocess(ld_args);
 }
 
 static FileType get_file_type(char *filename) {
@@ -416,6 +422,7 @@ int main(int argc, char **argv) {
     tmpfiles = vnew(argc * 4, sizeof(char *));
     include_paths = vnew(argc + 4, sizeof(char *));
     dirafter = vnew(argc, sizeof(char *));
+    ld_extra_args = vnew(argc, sizeof(char *));
 
     parse_args(argc, argv);
 
@@ -429,8 +436,8 @@ int main(int argc, char **argv) {
     if (num_input > 1 && opt_o && (opt_c || opt_S || opt_E))
         fatal("cannot specify '-o' with '-c' ,'-S' or '-E' with multiple files");
 
-    char **ld_args = vnew(argc, sizeof(char *));
-    int num_ldarg = 0;
+    char **ld_args = vnew(argc + 4, sizeof(char *));
+    int num_ldarg = 3;
 
     for (int i = 0; i < num_input; i++) {
         char *input = input_paths[i];
@@ -499,7 +506,7 @@ int main(int argc, char **argv) {
         ld_args[num_ldarg++] = tmp_o;
     }
 
-    if (num_ldarg > 0) run_linker(ld_args, num_ldarg, opt_o ? opt_o : "a.out");
+    if (num_ldarg > 3) run_linker(ld_args, num_ldarg, opt_o ? opt_o : "a.out");
 
     return 0;
 }
