@@ -23,6 +23,7 @@ static bool opt_dump_tokens;
 static bool opt_dump_raw_tokens;
 
 static char *opt_o;
+static char *opt_MF;
 
 char *base_file;
 static char *output_file;
@@ -51,7 +52,7 @@ static void usage(int status) {
 
 static bool take_arg(char *arg) {
     char *x[] = {
-        "-o", "-I", "-include", "-x", "-idirafter",
+        "-o", "-I", "-include", "-x", "-idirafter", "-MF",
     };
     for (size_t i = 0; i < sizeof(x) / sizeof(*x); i++)
         if (!strcmp(arg, x[i])) return true;
@@ -186,6 +187,11 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-s")) {
             ld_extra_args[num_ld_exarg++] = "-s";
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-MF")) {
+            opt_MF = argv[++i];
             continue;
         }
 
@@ -369,7 +375,7 @@ static Token *filter_tokens(Token *tok) {
 
 // If -M options is given, the compiler write a list of input files to stdout
 static void print_dependencies(void) {
-    FILE *out = open_outfile(opt_o ? opt_o : "-");
+    FILE *out = open_outfile(opt_MF ? opt_MF : opt_o ? opt_o : "-");
     fprintf(out, "%s:", replace_extn(base_file, ".o"));
 
     SrcFile **files = get_input_files();
