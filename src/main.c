@@ -172,6 +172,12 @@ static void parse_args(int argc, char **argv) {
             opt_x = parse_opt_x(argv[i] + 2);
             continue;
         }
+
+        if (!strncmp(argv[i], "-l", 2)) {
+            input_paths[num_input++] = argv[i];
+            continue;
+        }
+
         if (!strcmp(argv[i], "-s")) {
             ld_extra_args[num_ld_exarg++] = "-s";
             continue;
@@ -449,6 +455,11 @@ int main(int argc, char **argv) {
 
     for (int i = 0; i < num_input; i++) {
         char *input = input_paths[i];
+
+        if (!strncmp(input, "-l", 2)) {
+            ld_args[num_ldarg++] = input;
+            continue;
+        }
 
         char *output;
         if (opt_o)

@@ -166,4 +166,9 @@ echo 'void foo(); void bar(); int main() { foo(); bar(); }' > $tmp/main.c
 $cxx -o $tmp/foo $tmp/main.c $tmp/foo.so
 check '.so'
 
+# -l
+echo 'double sqrt(double x); int main(void){ sqrt(25.0); }' > $tmp/main.c
+$cxx -o $tmp/sqrt $tmp/main.c -lm
+check '-l'
+
 echo OK
