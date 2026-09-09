@@ -107,7 +107,7 @@ XorExp      ::= BAndExp  ("^" BAndExp)*
 BOrExp      ::= XorExp   ("|" XorExp)*
 LAndExp     ::= BOrExp   ("&&" BOrExp)*;
 LOrExp      ::= LAndExp  ("||" LAndExp)*;
-CondExp     ::= LOrExp   ("?" Exp ":" CondExp)?
+CondExp     ::= LOrExp   ("?" Exp? ":" CondExp)?
 ConstExp    ::= CondExp
 
 CastExp     ::= UnaryExp | "(" TypeName ")" CastExp

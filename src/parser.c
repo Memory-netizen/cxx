@@ -1528,13 +1528,26 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
     return lhs;
 }
 
-// CondExp ::= LOrExp ("?" Exp ":" CondExp)?
+// CondExp ::= LOrExp ("?" Exp? ":" CondExp)?
 static Node *conditional(Token **rest, Token *tok) {
     Node *cond = binexpr(&tok, tok, 0);
 
     if (tok->kind != TK_QUESTION) {
         *rest = tok;
         return cond;
+    }
+
+    if (tok->next->kind == TK_COLON) {
+        // [GNU] Compile `a ?: b` as `tmp = a, tmp ? tmp : b`.
+        // Omitting the middle operand uses the value already computed
+        // without the undesirable effects of recomputing it
+        Sym *var = new_lvar(intern("", 0), cond->ty);
+        Node *lhs = new_binary(ND_AS, new_var_node(var, tok), cond, tok);
+        Node *rhs = new_node(ND_COND, tok);
+        rhs->cond = new_var_node(var, tok);
+        rhs->then = new_var_node(var, tok);
+        rhs->els = conditional(rest, tok->next->next);
+        return new_binary(ND_COMMA, lhs, rhs, tok);
     }
 
     Node *node = new_node(ND_COND, tok);
