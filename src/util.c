@@ -5,9 +5,19 @@
 #define ALIGNMENT _Alignof(max_align_t)
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
+#define COLOR_RESET "\033[0m"
+#define COLOR_BOLD "\033[1m"
+#define COLOR_RED "\033[0;1;31m"
+#define COLOR_GREEN "\033[0;1;32m"
+#define COLOR_MAGENTA "\033[0;1;35m"
+
 // Reports an error and exit.
 void fatal(char *fmt, ...) {
-    fprintf(stderr, "cxx: fatal error: ");
+    bool use_color = isatty(fileno(stderr));
+    if (use_color)
+        fprintf(stderr, COLOR_BOLD "cxx:" COLOR_RESET COLOR_RED " fatal error: " COLOR_RESET);
+    else
+        fprintf(stderr, "cxx: fatal error: ");
     va_list ap;
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
@@ -25,7 +35,23 @@ static void emit_diag(char *level, uint32_t filename, int line_delta, SrcFile *d
     char *start = p + diagfile->line_offsets[line - 1];
     char *end = p + diagfile->line_offsets[line] - 1;
 
-    fprintf(stderr, "%s:%d:%d: %s: ", str(filename), line + line_delta, col, level);
+    bool use_color = isatty(fileno(stderr));
+    if (use_color)
+        fprintf(stderr, COLOR_BOLD "%s:%d:%d: " COLOR_RESET, str(filename), line + line_delta, col);
+    else
+        fprintf(stderr, "%s:%d:%d: ", str(filename), line + line_delta, col);
+    if (use_color) {
+        char *color;
+        if (!strcmp(level, "error"))
+            color = COLOR_RED;
+        else if (!strcmp(level, "warning"))
+            color = COLOR_MAGENTA;
+        else
+            color = COLOR_GREEN;
+        fprintf(stderr, "%s%s: " COLOR_RESET, color, level);
+    } else {
+        fprintf(stderr, "%s: ", level);
+    }
     vfprintf(stderr, msg, ap);
     fputc('\n', stderr);
 
@@ -39,7 +65,10 @@ static void emit_diag(char *level, uint32_t filename, int line_delta, SrcFile *d
         if (*start++ == '\t') fprintf(stderr, "\t");
     fprintf(stderr, "%*s", width, "");
 
-    fprintf(stderr, "^\n");
+    if (use_color)
+        fprintf(stderr, COLOR_GREEN "^\n" COLOR_RESET);
+    else
+        fprintf(stderr, "^\n");
 }
 
 void diag(char *level, Token *tok, const char *msg, ...) {
