@@ -12,6 +12,7 @@ typedef enum {
 static FileType opt_x;
 static bool opt_E;
 static bool opt_M;
+static bool opt_MD;
 static bool opt_MP;
 static bool opt_S;
 static bool opt_ll;
@@ -114,6 +115,11 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-M")) {
             opt_M = true;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-MD")) {
+            opt_MD = true;
             continue;
         }
 
@@ -390,7 +396,16 @@ static Token *filter_tokens(Token *tok) {
 
 // If -M options is given, the compiler write a list of input files to stdout
 static void print_dependencies(void) {
-    FILE *out = open_outfile(opt_MF ? opt_MF : opt_o ? opt_o : "-");
+    char *path;
+    if (opt_MF)
+        path = opt_MF;
+    else if (opt_MD)
+        path = replace_extn(opt_o ? opt_o : base_file, ".d");
+    else if (opt_o)
+        path = opt_o;
+    else
+        path = "-";
+    FILE *out = open_outfile(path);
 
     fprintf(out, "%s:", opt_MT ? opt_MT : replace_extn(base_file, ".o"));
 
@@ -414,10 +429,10 @@ static void cc1(void) {
 
     if (opt_dump_tokens) dump_tokens(tok);
 
-    // If -M is given, print file dependencies.
-    if (opt_M) {
+    // If -M or -MD is given, print file dependencies.
+    if (opt_M || opt_MD) {
         print_dependencies();
-        return;
+        if (opt_M) return;
     }
 
     // If -E is given, print out preprocessed C code as a result.
