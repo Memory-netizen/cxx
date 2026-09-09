@@ -12,6 +12,7 @@ typedef enum {
 static FileType opt_x;
 static bool opt_E;
 static bool opt_M;
+static bool opt_MM;
 static bool opt_MD;
 static bool opt_MP;
 static bool opt_S;
@@ -40,6 +41,9 @@ static int num_tmpfiles;
 char **include_paths;
 int num_include_paths;
 
+char **std_include_paths;
+int num_std_include_paths;
+
 char **dirafter;
 int num_dirafter;
 
@@ -63,12 +67,14 @@ static bool take_arg(char *arg) {
 }
 
 static void add_default_include_paths(char *argv0) {
-    include_paths[num_include_paths++] = format("%s/include", dirname(strdup(argv0)));
+    std_include_paths = vnew(8, sizeof(char *));
+    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
+        format("%s/include", dirname(strdup(argv0)));
 
     // Add standard include paths.
-    include_paths[num_include_paths++] = "/usr/local/include";
-    include_paths[num_include_paths++] = "/usr/include/x86_64-linux-gnu";
-    include_paths[num_include_paths++] = "/usr/include";
+    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/local/include";
+    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include/x86_64-linux-gnu";
+    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include";
 }
 
 static void add_dirafter(void) {
@@ -141,6 +147,11 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-M")) {
             opt_M = true;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-MM")) {
+            opt_M = opt_MM = true;
             continue;
         }
 
@@ -428,6 +439,15 @@ static Token *filter_tokens(Token *tok) {
     return dummy.next;
 }
 
+static bool in_std_include_path(char *path) {
+    for (int i = 0; i < num_std_include_paths; i++) {
+        char *dir = std_include_paths[i];
+        int len = strlen(dir);
+        if (strncmp(dir, path, len) == 0 && path[len] == '/') return true;
+    }
+    return false;
+}
+
 // If -M options is given, the compiler write a list of input files to stdout
 static void print_dependencies(void) {
     char *path;
@@ -447,12 +467,17 @@ static void print_dependencies(void) {
         fprintf(out, "%s:", quote_makefile(replace_extn(base_file, ".o")));
 
     SrcFile **files = get_input_files();
-
-    for (int i = 0; files[i] && files[i]->id; i++) fprintf(out, " \\\n  %s", files[i]->name);
+    for (int i = 0; files[i] && files[i]->id; i++) {
+        if (opt_MM && in_std_include_path(files[i]->name)) continue;
+        fprintf(out, " \\\n  %s", files[i]->name);
+    }
     fprintf(out, "\n\n");
 
     if (opt_MP)
-        for (int i = 1; files[i] && files[i]->id; i++) fprintf(out, "%s:\n\n", quote_makefile(files[i]->name));
+        for (int i = 1; files[i] && files[i]->id; i++) {
+            if (opt_MM && in_std_include_path(files[i]->name)) continue;
+            fprintf(out, "%s:\n\n", quote_makefile(files[i]->name));
+        }
 }
 
 // Stage 1: .c → .ll  (cc1: tokenize + preprocess + parse + irgen)

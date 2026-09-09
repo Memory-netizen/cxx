@@ -215,4 +215,11 @@ check -MQ
 $cxx -MQ foo -MQ bar -M -I$tmp $tmp/out.c | grep -q '^foo bar:'
 check -MQ
 
+#-MM
+echo '#include <stdbool.h>' > $tmp/sys.c
+! $cxx -MM -I$tmp $tmp/sys.c | grep -q 'stdbool.h'
+check -MM
+$cxx -M -I$tmp $tmp/sys.c | grep -q 'stdbool.h'
+check -M
+
 echo OK
