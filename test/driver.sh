@@ -247,4 +247,10 @@ check -static
 file $tmp/foo | grep -q 'statically linked'
 check -static
 
+echo 'extern int bar; int foo() { return bar; }' | $cxx -fPIC -xc -c -o $tmp/foo.o -
+cc -shared -o $tmp/foo.so $tmp/foo.o
+echo 'int foo(); int bar=3; int main() { foo(); }' > $tmp/main.c
+$cxx -o $tmp/foo $tmp/main.c $tmp/foo.so
+check -fPIC
+
 echo OK

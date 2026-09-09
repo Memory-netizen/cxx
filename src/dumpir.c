@@ -2,6 +2,7 @@
 
 static FILE *out_file;
 static Module *curm;
+extern bool opt_fpic;
 
 static const char *op_str[][3] = {
     [IR_ADD] = {"add", "add", "fadd"},
@@ -502,7 +503,7 @@ void dump_data(Sym *data) {
         fprintf(out_file, ", align %d\n", data->align);
         return;
     }
-    fprintf(out_file, "%s global ", sclass_name[data->sclass]);
+    fprintf(out_file, "%s global ", (!data->sclass && opt_fpic) ? "" : sclass_name[data->sclass]);
     if (data->sclass == SC_EXTERN)
         print_type(data->ty);
     else
@@ -518,7 +519,7 @@ void dump_fn(Sym *fn) {
         fprintf(out_file, "define ");
         if (fn->sclass == SC_STATIC)
             fprintf(out_file, "internal ");
-        else
+        else if (!opt_fpic)
             fprintf(out_file, "dso_local ");
     }
 

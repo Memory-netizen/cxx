@@ -50,6 +50,8 @@ int num_dirafter;
 char **ld_extra_args;
 int num_ld_exarg;
 
+bool opt_fpic;
+
 static void usage(int status) {
     fprintf(stderr,
             "cxx [ -o <path> ] [ -S | -c | -E ] [ -ast-dump ] [ -dump-tokens ]"
@@ -268,6 +270,11 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-MP")) {
             opt_MP = true;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-fpic") || !strcmp(argv[i], "-fPIC")) {
+            opt_fpic = true;
             continue;
         }
 
