@@ -2849,7 +2849,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 else
                     *align = const_expr(&tok, tok);
                 if (*align & (*align - 1))
-                    error(ty_tok, "requested alignment ‘%ld’ is not a positive power of 2", *align);
+                    error(ty_tok, "requested alignment ‘%d’ is not a positive power of 2", *align);
                 tok = skip(tok, TK_RPAREN);
                 continue;
             case TK_VOID:
@@ -3025,7 +3025,7 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
         Token *start = tok;
         Type *basety = declspecs(&tok, tok, NULL, NULL, NULL);
         Type *paramty = abstract_declarator(&tok, tok, basety, true);
-        if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type", start->len, start->loc);
+        if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type");
         // "array of T" is converted to "pointer to T" in the parameter
         // context. For example, *argv[] is converted to **argv by this.
 

@@ -13,6 +13,10 @@
 #define BIT_SUPERSET(a, b) (((a) & (b)) == (b))
 #define BIT_SUBSET(a, b) (((a) & (b)) == (a))
 
+#ifndef __GNUC__
+#define __attribute__(x)
+#endif
+
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
@@ -839,19 +843,19 @@ int display_width(char *p, int len);
 // util.c
 //
 
-void fatal(char *fmt, ...);
-void error_at(SrcFile *file, char *loc, const char *msg, ...);
-void error(Token *tok, const char *msg, ...);
-void warning(Token *tok, const char *msg, ...);
-void diag(char *level, Token *tok, const char *msg, ...);
-void diag_exit(char *level, Token *tok, const char *msg, ...);
+void fatal(char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void error_at(SrcFile *file, char *loc, const char *msg, ...) __attribute__((format(printf, 3, 4)));
+void error(Token *tok, const char *msg, ...) __attribute__((format(printf, 2, 3)));
+void warning(Token *tok, const char *msg, ...) __attribute__((format(printf, 2, 3)));
+void diag(char *level, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));
+void diag_exit(char *level, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 
 void *emalloc(size_t n);
 void freeall(void);
 void *vnew(size_t len, size_t esz);
 void *vgrow(void *data, size_t len);
 
-char *format(char *s, ...);
+char *format(char *s, ...) __attribute__((format(printf, 1, 2)));
 uint32_t intern(char *s, uint32_t len);
 char *str(uint32_t id);
 uint32_t str_len(uint32_t id);

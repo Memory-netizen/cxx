@@ -431,7 +431,7 @@ static void modifiable_lvalue(Node *node) {
             char *start = lhs->tok->loc;
             Token *cur = lhs->tok;
             while (cur->next != node->tok) cur = cur->next;
-            error(node->tok, "assignment of read-only location ‘%.*s’", cur->loc - start + cur->len, start);
+            error(node->tok, "assignment of read-only location ‘%.*s’", (int)(cur->loc - start + cur->len), start);
         }
     }
     if (is_void(lhs->ty)) error(node->tok, "incomplete type ‘void’ is not assignable");

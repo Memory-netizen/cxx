@@ -1059,8 +1059,8 @@ static Token *preprocess2(Token *tok) {
                 if (concat) {
                     tok->line_delta = line_delta;
                     tok->filename = display_name;
-                    if (tok->kind == TK_ERR) error(tok, tok->msg);
-                    if (tok->kind == TK_WARN) warning(tok, tok->msg);
+                    if (tok->kind == TK_ERR) error(tok, "%s", tok->msg);
+                    if (tok->kind == TK_WARN) warning(tok, "%s", tok->msg);
                     if (tok->id == has_include_id)
                         error(tok, "'__has_include' must be used within a preprocessing directive");
                     buf = buf->next = tok;

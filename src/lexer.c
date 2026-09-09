@@ -179,17 +179,17 @@ static int read_ident(char *start) {
     uint32_t c;
     if (start_with(p, "\\u")) {
         c = read_universal_char(&p, p + 2, 'u');
-        if (c <= 0x9F) fatal("universal character %.*s is not valid in an identifier", p - start, start);
+        if (c <= 0x9F) fatal("universal character %.*s is not valid in an identifier", (int)(p - start), start);
     } else if (start_with(p, "\\U")) {
         c = read_universal_char(&p, p + 2, 'U');
-        if (c <= 0x9F) fatal("universal character %.*s is not valid in an identifier", p - start, start);
+        if (c <= 0x9F) fatal("universal character %.*s is not valid in an identifier", (int)(p - start), start);
     } else {
         bool success = false;
         c = decode_utf8(&p, p, &success);
         if (!success) fatal("invalid UTF-8 in identifier");
     }
     if (!is_ident1(c)) {
-        if (c > 0x7F) fatal("invalid character %.*s in identifier", p - start, start);
+        if (c > 0x7F) fatal("invalid character %.*s in identifier", (int)(p - start), start);
         return 0;
     }
 
@@ -197,17 +197,19 @@ static int read_ident(char *start) {
         char *uc_start = p;
         if (start_with(p, "\\u")) {
             c = read_universal_char(&p, p + 2, 'u');
-            if (c <= 0x9F) fatal("universal character %.*s is not valid in an identifier", p - uc_start, uc_start);
+            if (c <= 0x9F)
+                fatal("universal character %.*s is not valid in an identifier", (int)(p - uc_start), uc_start);
         } else if (start_with(p, "\\U")) {
             c = read_universal_char(&p, p + 2, 'U');
-            if (c <= 0x9F) fatal("universal character %.*s is not valid in an identifier", p - uc_start, uc_start);
+            if (c <= 0x9F)
+                fatal("universal character %.*s is not valid in an identifier", (int)(p - uc_start), uc_start);
         } else {
             bool success = false;
             c = decode_utf8(&p, p, &success);
             if (!success) fatal("invalid UTF-8 in identifier");
         }
         if (!is_ident2(c)) {
-            if (c > 0x7F) fatal("invalid character %.*s in identifier", p - uc_start, uc_start);
+            if (c > 0x7F) fatal("invalid character %.*s in identifier", (int)(p - uc_start), uc_start);
             return p - start - 1;
         }
     }
@@ -617,7 +619,8 @@ static void convert_pp_num(Token *t) {
                     break;
             }
             text += 2;
-            if (!is_valid_digit(*text, base)) error(t, "invalid suffix ‘%.*s’ on integer constant", end - text, text);
+            if (!is_valid_digit(*text, base))
+                error(t, "invalid suffix ‘%.*s’ on integer constant", (int)(end - text), text);
         }
     } else if (first_ch == '.') {
         clean[ci++] = '0';  // canonicalize
@@ -799,12 +802,12 @@ extract_end:
     return;
 error:
     text--;
-    error(t, "invalid suffix ‘%.*s’ on constant", end - text, text);
+    error(t, "invalid suffix ‘%.*s’ on constant", (int)(end - text), text);
 }
 
 void convert_ppnumber(Token *tok) {
     while (tok->kind != TK_EOF) {
-        if (tok->kind == TK_ERR) error(tok, tok->msg);
+        if (tok->kind == TK_ERR) error(tok, "%s", tok->msg);
         if (tok->kind == TK_PPNUM) convert_pp_num(tok);
         if (tok->kind == TK_CHARLIT) convert_char_literal(tok);
         tok = tok->next;
