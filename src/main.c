@@ -28,6 +28,9 @@ static int num_tmpfiles;
 char **include_paths;
 int num_include_paths;
 
+char **dirafter;
+int num_dirafter;
+
 static void usage(int status) {
     fprintf(stderr,
             "cxx [ -o <path> ] [ -S | -c | -E ] [ -ast-dump ] [ -dump-tokens ]"
@@ -36,7 +39,9 @@ static void usage(int status) {
 }
 
 static bool take_arg(char *arg) {
-    char *x[] = {"-o", "-I", "-include", "-x"};
+    char *x[] = {
+        "-o", "-I", "-include", "-x", "-idirafter",
+    };
     for (size_t i = 0; i < sizeof(x) / sizeof(*x); i++)
         if (!strcmp(arg, x[i])) return true;
     return false;
@@ -49,6 +54,10 @@ static void add_default_include_paths(char *argv0) {
     include_paths[num_include_paths++] = "/usr/local/include";
     include_paths[num_include_paths++] = "/usr/include/x86_64-linux-gnu";
     include_paths[num_include_paths++] = "/usr/include";
+}
+
+static void add_dirafter(void) {
+    for (int i = 0; i < num_dirafter; i++) include_paths[num_include_paths++] = dirafter[i];
 }
 
 static FileType parse_opt_x(char *s) {
@@ -111,6 +120,11 @@ static void parse_args(int argc, char **argv) {
 
         if (!strncmp(argv[i], "-I", 2)) {
             include_paths[num_include_paths++] = argv[i] + 2;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-idirafter")) {
+            dirafter[num_dirafter++] = argv[++i];
             continue;
         }
 
@@ -401,11 +415,13 @@ int main(int argc, char **argv) {
     input_paths = vnew(argc, sizeof(char *));
     tmpfiles = vnew(argc * 4, sizeof(char *));
     include_paths = vnew(argc + 4, sizeof(char *));
+    dirafter = vnew(argc, sizeof(char *));
 
     parse_args(argc, argv);
 
     if (opt_cc1) {
         add_default_include_paths(argv[0]);
+        add_dirafter();
         cc1();
         return 0;
     }

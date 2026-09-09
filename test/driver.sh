@@ -141,4 +141,13 @@ check '#include_next'
 printf '\xef\xbb\xbfxyz\n' | $cxx -E -o- - | grep -q '^xyz'
 check 'BOM marker'
 
+# -idirafter
+mkdir -p $tmp/dir1 $tmp/dir2
+echo foo > $tmp/dir1/idirafter
+echo bar > $tmp/dir2/idirafter
+echo "#include \"idirafter\"" | $cxx -I$tmp/dir1 -I$tmp/dir2 -E - | grep -q foo
+check -idirafter
+echo "#include \"idirafter\"" | $cxx -idirafter $tmp/dir1 -I$tmp/dir2 -E - | grep -q bar
+check -idirafter
+
 echo OK
