@@ -240,6 +240,11 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
+        if (!strcmp(argv[i], "-static")) {
+            ld_extra_args[num_ld_exarg++] = "-static";
+            continue;
+        }
+
         if (!strcmp(argv[i], "-MF")) {
             opt_MF = argv[++i];
             continue;

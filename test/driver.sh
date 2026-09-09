@@ -239,4 +239,12 @@ echo 'int main(){}' >> $tmp/sys.c
 ! $cxx -MMD -I$tmp $tmp/sys.c | grep -q 'stdbool.h'
 check -MMD
 
+# -static
+echo 'extern int bar; int foo() { return bar; }' > $tmp/foo.c
+echo 'int foo(); int bar=3; int main() { foo(); }' > $tmp/bar.c
+$cxx -static -o $tmp/foo $tmp/foo.c $tmp/bar.c
+check -static
+file $tmp/foo | grep -q 'statically linked'
+check -static
+
 echo OK
