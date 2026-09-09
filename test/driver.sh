@@ -296,4 +296,8 @@ check '-fno-common'
 ! echo '#warning warning' | $compiler -w -S -o /dev/null -xc - 2>&1 | grep -q 'warning'
 check -w
 
+# -Werror
+echo '#warning warning' | $compiler -Werror -S -o /dev/null -xc - 2>&1 | grep -q 'error'
+check -Werror
+
 echo OK

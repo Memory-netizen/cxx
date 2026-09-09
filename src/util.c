@@ -72,14 +72,16 @@ void error(Token *tok, const char *msg, ...) {
 }
 
 extern bool opt_nowarn;
+extern bool opt_werror;
 void warning(Token *tok, const char *msg, ...) {
     if (opt_nowarn) return;
     va_list ap;
     va_start(ap, msg);
     Token *orig = tok;
     while (orig->origin) orig = orig->origin;
-    emit_diag("warning", orig->filename, orig->line_delta, orig->file, orig->loc, msg, ap);
+    emit_diag(opt_werror ? "error" : "warning", orig->filename, orig->line_delta, orig->file, orig->loc, msg, ap);
     va_end(ap);
+    if (opt_werror) exit(1);
 }
 
 void error_at(SrcFile *file, char *loc, const char *msg, ...) {

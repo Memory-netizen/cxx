@@ -53,6 +53,7 @@ int num_ld_exarg;
 bool opt_fpic;
 bool opt_fcommon;
 bool opt_nowarn;
+bool opt_werror;
 
 static void usage(int status) {
     fprintf(stderr,
@@ -349,6 +350,11 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-w")) {
             opt_nowarn = true;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-Werror")) {
+            opt_werror = true;
             continue;
         }
 
