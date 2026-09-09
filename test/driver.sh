@@ -16,12 +16,12 @@ check() {
 
 # -o
 rm -f $tmp/out
-./cxx -o $tmp/out $tmp/empty.c
+$cxx -o $tmp/out $tmp/empty.c
 [ -f $tmp/out ]
 check -o
 
 # --help
-./cxx --help 2>&1 | grep -q cxx
+$cxx --help 2>&1 | grep -q cxx
 check --help
 
 # -S
@@ -215,11 +215,28 @@ check -MQ
 $cxx -MQ foo -MQ bar -M -I$tmp $tmp/out.c | grep -q '^foo bar:'
 check -MQ
 
-#-MM
+# -MM
 echo '#include <stdbool.h>' > $tmp/sys.c
 ! $cxx -MM -I$tmp $tmp/sys.c | grep -q 'stdbool.h'
 check -MM
 $cxx -M -I$tmp $tmp/sys.c | grep -q 'stdbool.h'
 check -M
+
+# -MMD
+echo '#include "out2.h"' > $tmp/mmd2.c
+echo '#include "out3.h"' > $tmp/mmd3.c
+(cd $tmp; $OLDPWD/$cxx -c -MMD -I. mmd2.c mmd3.c)
+grep -q -z '^mmd2.o:.* mmd2\.c .* ./out2\.h' $tmp/mmd2.d
+check -MMD
+grep -q -z '^mmd3.o:.* mmd3\.c .* ./out3\.h' $tmp/mmd3.d
+check -MMD
+
+$cxx -c -MMD -MF $tmp/mmd-mf.d -I. $tmp/mmd2.c
+grep -q -z '^mmd2.o:.*mmd2\.c .*/out2\.h' $tmp/mmd-mf.d
+check -MMD-MF
+
+echo 'int main(){}' >> $tmp/sys.c
+! $cxx -MMD -I$tmp $tmp/sys.c | grep -q 'stdbool.h'
+check -MMD
 
 echo OK

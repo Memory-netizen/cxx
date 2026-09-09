@@ -160,6 +160,11 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
+        if (!strcmp(argv[i], "-MMD")) {
+            opt_MM = opt_MD = true;
+            continue;
+        }
+
         if (!strcmp(argv[i], "-S")) {
             opt_S = true;
             continue;
