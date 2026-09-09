@@ -55,7 +55,7 @@ static void usage(int status) {
 
 static bool take_arg(char *arg) {
     char *x[] = {
-        "-o", "-I", "-include", "-x", "-idirafter", "-MF", "-MT",
+        "-o", "-I", "-include", "-x", "-idirafter", "-MF", "-MT", "-MQ",
     };
     for (size_t i = 0; i < sizeof(x) / sizeof(*x); i++)
         if (!strcmp(arg, x[i])) return true;
@@ -81,6 +81,32 @@ static FileType parse_opt_x(char *s) {
     if (!strcmp(s, "none")) return FILE_NONE;
     fatal("<command line>: unknown argument for -x: %s", s);
     return FILE_NONE;
+}
+
+char *quote_makefile(const char *s) {
+    char *buf = vnew(strlen(s) * 2 + 1, sizeof(char));
+    for (int i = 0, j = 0; s[i]; i++) {
+        switch (s[i]) {
+            case '$':
+                buf[j++] = '$';
+                buf[j++] = '$';
+                break;
+            case '#':
+            case ' ':
+            case '\t':
+            case '\\':
+            case ':':
+            case '=':
+            case '%':
+                buf[j++] = '\\';
+                buf[j++] = s[i];
+                break;
+            default:
+                buf[j++] = s[i];
+                break;
+        }
+    }
+    return buf;
 }
 
 static void parse_args(int argc, char **argv) {
@@ -208,6 +234,14 @@ static void parse_args(int argc, char **argv) {
                 opt_MT = argv[++i];
             else
                 opt_MT = format("%s %s", opt_MT, argv[++i]);
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-MQ")) {
+            if (opt_MT == NULL)
+                opt_MT = quote_makefile(argv[++i]);
+            else
+                opt_MT = format("%s %s", opt_MT, quote_makefile(argv[++i]));
             continue;
         }
 
@@ -407,7 +441,10 @@ static void print_dependencies(void) {
         path = "-";
     FILE *out = open_outfile(path);
 
-    fprintf(out, "%s:", opt_MT ? opt_MT : replace_extn(base_file, ".o"));
+    if (opt_MT)
+        fprintf(out, "%s:", opt_MT);
+    else
+        fprintf(out, "%s:", quote_makefile(replace_extn(base_file, ".o")));
 
     SrcFile **files = get_input_files();
 
@@ -415,7 +452,7 @@ static void print_dependencies(void) {
     fprintf(out, "\n\n");
 
     if (opt_MP)
-        for (int i = 1; files[i] && files[i]->id; i++) fprintf(out, "%s:\n\n", files[i]->name);
+        for (int i = 1; files[i] && files[i]->id; i++) fprintf(out, "%s:\n\n", quote_makefile(files[i]->name));
 }
 
 // Stage 1: .c → .ll  (cc1: tokenize + preprocess + parse + irgen)
