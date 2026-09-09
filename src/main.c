@@ -278,6 +278,11 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
+        if (!strcmp(argv[i], "-fno-pic") || !strcmp(argv[i], "-fno-PIC")) {
+            opt_fpic = false;
+            continue;
+        }
+
         if (!strcmp(argv[i], "-cc1")) {
             opt_cc1 = true;
             continue;
