@@ -1706,6 +1706,11 @@ static int64_t eval2(Node *node, uint32_t *sym) {
                 error(node->tok, "invalid initializer");
             *sym = node->var->id;
             return 0;
+        case ND_LABEL_VAL:
+            if (!sym || !cur_fn) error(node->tok, "not a compile-time constant");
+            char *lbl = format("%s..%s", str(cur_fn->id), str(node->label));
+            *sym = intern(lbl, strlen(lbl));
+            return 0;
         default:
             error(node->tok, "not a compile-time constant");
     }
@@ -3295,6 +3300,7 @@ static Token *external_declaration(Token *tok) {
             resolve_goto_labels();
 
             leave_scope();
+            cur_fn = NULL;
             return tok;
         }
 

@@ -83,6 +83,27 @@ static void print_type(Type *ty) {
     fprintf(out_file, "%s", ty_str[ty->kind]);
 }
 
+static int get_blkid(uint32_t fn_id, uint32_t lbl_id) {
+    for (Sym *fn = curm->fns; fn; fn = fn->next)
+        if (fn->id == fn_id) {
+            for (Node *y = fn->labels; y; y = y->goto_next)
+                if (y->label == lbl_id) return y->blk->blk_id;
+        }
+    return 0;
+}
+
+static void print_label(Con *c, char *sym, char *dot) {
+    *dot = '\0';
+    uint32_t fn_id = intern(sym, strlen(sym));
+    uint32_t lbl_id = intern(dot + 2, strlen(dot + 2));
+
+    if (c->bits.i) fprintf(out_file, "getelementptr (i8, ptr ");
+    fprintf(out_file, "blockaddress(@");
+    print_ident(fn_id);
+    fprintf(out_file, ", %%%d)", get_blkid(fn_id, lbl_id));
+    if (c->bits.i) fprintf(out_file, ", i64 %" PRIi64 ")", c->bits.i);
+}
+
 static void printcon(Con *c, Type *ty) {
     if (c->type == CBits) {
         if (is_flonum(ty))
@@ -90,6 +111,14 @@ static void printcon(Con *c, Type *ty) {
         else
             fprintf(out_file, "%" PRIi64, c->bits.i);
     } else if (c->type == CAddr) {
+        if (c->sym) {
+            char *sym = strdup(str(c->sym));
+            char *dot = strchr(sym, '.');
+            if (dot && dot[1] == '.') {
+                print_label(c, sym, dot);
+                return;
+            }
+        }
         if (c->bits.i) {
             fprintf(out_file, "getelementptr (i8, ptr @");
             print_ident(c->sym);
