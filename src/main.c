@@ -72,7 +72,7 @@ static bool take_arg(char *arg) {
 }
 
 static void add_default_include_paths(char *argv0) {
-    std_include_paths = vnew(8, sizeof(char *));
+    std_include_paths = emalloc(8 * sizeof(char *));
     std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
         format("%s/include", dirname(strdup(argv0)));
 
@@ -95,7 +95,7 @@ static FileType parse_opt_x(char *s) {
 }
 
 char *quote_makefile(const char *s) {
-    char *buf = vnew(strlen(s) * 2 + 1, sizeof(char));
+    char *buf = emalloc(strlen(s) * 2 + 1);
     for (int i = 0, j = 0; s[i]; i++) {
         switch (s[i]) {
             case '$':
@@ -439,7 +439,7 @@ static void run_subprocess(char **argv) {
 }
 
 static void run_cc1(int argc, char **argv, char *input, char *output) {
-    char **args = vnew(argc + 10, sizeof(char *));
+    char **args = emalloc((argc + 10) * sizeof(char *));
     memcpy(args, argv, argc * sizeof(char *));
     args[argc++] = "-cc1";
 
@@ -623,11 +623,11 @@ static FileType get_file_type(char *filename) {
 
 int main(int argc, char **argv) {
     atexit(cleanup);
-    input_paths = vnew(argc, sizeof(char *));
-    tmpfiles = vnew(argc * 4, sizeof(char *));
-    include_paths = vnew(argc + 4, sizeof(char *));
-    dirafter = vnew(argc, sizeof(char *));
-    ld_extra_args = vnew(argc, sizeof(char *));
+    input_paths = emalloc(argc * sizeof(char *));
+    tmpfiles = emalloc(argc * 4 * sizeof(char *));
+    include_paths = emalloc((argc + 8) * sizeof(char *));
+    dirafter = emalloc(argc * sizeof(char *));
+    ld_extra_args = emalloc(argc * 2 * sizeof(char *));
 
     parse_args(argc, argv);
 
