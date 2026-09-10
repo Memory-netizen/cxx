@@ -265,6 +265,12 @@ static Ref gen_expr(Node *node) {
         case ND_STMT_EXPR:
             for (Node *n = node->body; n; n = n->next) dst = gen_stmt(n);
             return dst;
+        case ND_LABEL_VAL:
+            dst.type = RLabel;
+            dst.ty = node->ty;
+            dst.val = curf->id;
+            dst.blk = node->target->blk;
+            return dst;
         case ND_LVTOR: {
             int align = node->ty->align;
             if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
@@ -872,6 +878,18 @@ static void gen_goto(Node *n) {
     curb = unreach;
 }
 
+static void gen_indirectgoto(Node *n) {
+    curb->jmp.type = IR_INDIRECTBR;
+    curb->jmp.arg = gen_expr(n->lhs);
+    curb->narg = curf->num_indirectbr;
+    curb->succ = emalloc(curb->narg * sizeof(Blk *));
+    for (int i = 0; i < curf->num_indirectbr; i++) {
+        curb->succ[i] = curf->indirectbr[i];
+        add_pred(curb, curb->succ[i]);
+    }
+    curb = unreach;
+}
+
 static void gen_break(Node *n) {
     curb->jmp.type = IR_JMP;
     if (n->target) {
@@ -930,6 +948,9 @@ static Ref gen_stmt(Node *node) {
         case ND_GOTO:
             gen_goto(node);
             break;
+        case ND_GOTO_EXPR:
+            gen_indirectgoto(node);
+            break;
         case ND_BREAK:
             gen_break(node);
             break;
@@ -964,13 +985,22 @@ Module *irgen(Module *md) {
         tail = &dummy;
         fn->start = new_blk();
         fn->end = new_blk();
+        int num_indirectgoto = 0;
         for (Node *y = fn->labels; y; y = y->goto_next) {
-            if (!y->blk) y->blk = new_blk();
+            if (y->is_addr) num_indirectgoto++;
+            if (y->blk) continue;
+            y->blk = new_blk();
             Node *tmp = y->label_ring;
             while (tmp != y) {
                 tmp->blk = y->blk;
                 tmp = tmp->label_ring;
             }
+        }
+        fn->num_indirectbr = num_indirectgoto;
+        fn->indirectbr = emalloc(num_indirectgoto * sizeof(Blk *));
+        for (Node *y = fn->labels; num_indirectgoto && y; y = y->goto_next) {
+            if (!y->is_addr) continue;
+            fn->indirectbr[--num_indirectgoto] = y->blk;
         }
         brk_blk = cont_blk = NULL;
 

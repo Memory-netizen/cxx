@@ -109,6 +109,10 @@ static void print_operand(Ref r) {
     } else if (r.type == RGlb) {
         fprintf(out_file, "@");
         print_ident(r.val);
+    } else if (r.type == RLabel) {
+        fprintf(out_file, "blockaddress(@");
+        print_ident(r.val);
+        fprintf(out_file, ", %%%d)", r.blk->blk_id);
     } else {
         fprintf(out_file, "%%%d", r.val);
     }
@@ -323,7 +327,18 @@ void dump_blk(Blk *b) {
                 fprintf(out_file, ", label %%%d\n", b->succ[i]->blk_id);
             }
             if (b->narg) fprintf(out_file, "  ]\n");
-
+            break;
+        case IR_INDIRECTBR:
+            fprintf(out_file, "indirectbr ");
+            print_type(b->jmp.arg.ty);
+            fprintf(out_file, " ");
+            print_operand(b->jmp.arg);
+            fprintf(out_file, ", [");
+            for (uint32_t i = 0; i < b->narg; i++) {
+                if (i) fprintf(out_file, ", ");
+                fprintf(out_file, "label %%%d", b->succ[i]->blk_id);
+            }
+            fprintf(out_file, "]\n");
             break;
         default:
             break;

@@ -87,7 +87,7 @@ IterStmt    ::= "while" "(" Exp ")" Stmt
               | "do" Stmt "while" "(" Exp ")" ";"
               | "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt
 
-JmpStmt     ::= "goto" Ident ";"
+JmpStmt     ::= "goto" (Ident | "*" Exp) ";"
               | "continue" Ident? ";"
               | "break" Ident? ";"
               | "return" Exp? ";"
@@ -115,6 +115,7 @@ UnaryExp    ::= PostExp | UnaryOP CastExp | ("++" | "--") UnaryExp
             | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
             | "alignof" UnaryExp | "alignof" "(" TypeName ")"
             | "_Countof" UnaryExp | "_Countof" "(" TypeName ")"
+            | "&&" Ident
 
 UnaryOp     ::= "+" | "-" | "~" | "!" | "&" | "*"
 

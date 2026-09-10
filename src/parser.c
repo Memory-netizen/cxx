@@ -1352,6 +1352,7 @@ static Node *postfix(Token **rest, Token *tok) {
 //          | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
 //          | "alignof" UnaryExp | "alignof" "(" TypeName ")"
 //          | "_Countof" UnaryExp | "_Countof" "(" TypeName ")"
+//          | "&&" Ident
 // UnaryOp  ::= "+" | "-" | "~" | "!" | "&" | "*"
 static Node *unary(Token **rest, Token *tok) {
     switch (tok->kind) {
@@ -1426,7 +1427,17 @@ static Node *unary(Token **rest, Token *tok) {
             if (node->ty->size < 0) error(start, "invalid application of ‘_Countof’ to incomplete type");
             return new_ulong(node->ty->len, tok);
         }
+        // [GNU] labels-as-values
+        case TK_AND: {
+            Node *node = new_node(ND_LABEL_VAL, tok);
+            node->label = get_ident(tok->next);
 
+            node->goto_next = gotos;
+            gotos = node;
+
+            *rest = tok->next->next;
+            return node;
+        }
         default:
             break;
     }
@@ -2008,12 +2019,21 @@ static Node *for_stmt(Token **rest, Token *tok) {
     return node;
 }
 
-// JmpStmt ::= "goto" Ident ";"
+// JmpStmt ::= "goto" (Ident | "*" Exp) ";"
 //          | "continue" Ident? ";"
 //          | "break" Ident? ";"
 //          | "return" Exp? ";"
 // GotoStmt ::= "goto" Ident ";"
 static Node *goto_stmt(Token **rest, Token *tok) {
+    if (tok->next->kind == TK_STAR) {
+        // [GNU] `goto *ptr` jumps to the address specified by `ptr`.
+        Node *node = new_node(ND_GOTO_EXPR, tok);
+        node->lhs = expr(&tok, tok->next->next);
+        lvalue_convert(&node->lhs);
+        if (!is_pointer(node->lhs->ty)) error(node->lhs->tok, "computed goto must be pointer type");
+        *rest = skip(tok, TK_SEMI);
+        return node;
+    }
     Node *node = new_node(ND_GOTO, tok);
     node->label = get_ident(tok->next);
 
@@ -3171,6 +3191,8 @@ static void resolve_goto_labels(void) {
         for (Node *y = labels; y; y = y->goto_next)
             if (x->label == y->label) {
                 x->target = y;
+                y->is_ref = true;
+                if (x->kind == ND_LABEL_VAL) y->is_addr = true;
                 break;
             }
 

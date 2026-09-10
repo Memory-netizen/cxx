@@ -712,9 +712,13 @@ void add_type(Node *node) {
             node->ty = ty;
             break;
         }
+        case ND_LABEL_VAL:
+            node->ty = pointer_to(ty_void, 0);
+            break;
         // other
         case ND_NOP:
         case ND_GOTO:
+        case ND_GOTO_EXPR:
         case ND_BREAK:
         case ND_CONTINUE:
         case ND_PTRAS:

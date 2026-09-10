@@ -345,6 +345,9 @@ struct Sym {
 
     Blk *start;
     Blk *end;
+
+    int num_indirectbr;
+    Blk **indirectbr;
 };
 
 typedef enum {
@@ -409,7 +412,9 @@ typedef enum {
     ND_STMT_EXPR,  // Statement expression
     ND_COMP_STMT,  // {...}
     ND_GOTO,       // "goto"
+    ND_GOTO_EXPR,  // "goto" labels-as-values
     ND_LABEL,      // Labeled statement
+    ND_LABEL_VAL,  // [GNU] Labels-as-values
     ND_BREAK,      // "break"
     ND_CONTINUE,   // "continue"
     ND_SWITCH,     // "switch"
@@ -474,6 +479,8 @@ struct Node {
             Node *loop_next;
             bool is_loop;
             bool is_switch;
+            bool is_ref;
+            bool is_addr;
             Blk *blk;
         };
         struct {
@@ -656,6 +663,7 @@ typedef enum {
     IR_JMP,
     IR_JNZ,
     IR_SWITCH,
+    IR_INDIRECTBR,
     IR_HLT,
 
     // Arithmetic
@@ -719,18 +727,19 @@ enum {
     RCon,
     RSlot,
     RGlb,
+    RLabel,
 };
 
 #define R \
-    (Ref) { RUndef, 0, NULL }
+    (Ref) { RUndef, 0, NULL, NULL }
 #define TMP(x, ty) \
-    (Ref) { RTmp, x, ty }
+    (Ref) { RTmp, x, ty, NULL }
 #define SLOT(x, ty) \
-    (Ref) { RSlot, x, ty }
+    (Ref) { RSlot, x, ty, NULL }
 #define GLB(x, ty) \
-    (Ref) { RGlb, x, ty }
+    (Ref) { RGlb, x, ty, NULL }
 #define CON(x, ty) \
-    (Ref) { RCon, x, ty }
+    (Ref) { RCon, x, ty, NULL }
 
 #define BOOL(x)                    \
     ({                             \
@@ -773,6 +782,7 @@ struct Ref {
     uint32_t type;
     uint32_t val;
     Type *ty;
+    Blk *blk;
 };
 
 static inline int refeq(Ref a, Ref b) { return a.type == b.type && a.val == b.val && a.ty == b.ty; }

@@ -64,7 +64,9 @@ static const char *node_kind_name[] = {
     [ND_STMT_EXPR] = "STMT_EXPR",
     [ND_COMP_STMT] = "COMP_STMT",
     [ND_GOTO] = "GOTO",
+    [ND_GOTO_EXPR] = "INDIRECTGOTO",
     [ND_LABEL] = "LABEL",
+    [ND_LABEL_VAL] = "ADDRLABELEXPR",
     [ND_BREAK] = "BREAK",
     [ND_CONTINUE] = "CONTINUE",
     [ND_SWITCH] = "SWITCH",
@@ -434,9 +436,18 @@ static void dump_node(Node *node) {
             dump_node(node->label_body);
             depth--;
             break;
+        case ND_LABEL_VAL:
+            fprintf(stdout, "  label=‘%s’\n", str(node->label));
+            break;
 
         case ND_GOTO:
             fprintf(stdout, "  label=‘%s’\n", str(node->label));
+            break;
+        case ND_GOTO_EXPR:
+            fprintf(stdout, "\n");
+            depth++;
+            dump_node(node->lhs);
+            depth--;
             break;
 
         case ND_BREAK:
