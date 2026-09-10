@@ -72,13 +72,20 @@ static bool take_arg(char *arg) {
 }
 
 static void add_default_include_paths(char *argv0) {
-    std_include_paths = emalloc(8 * sizeof(char *));
+    std_include_paths = emalloc(16 * sizeof(char *));
     std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
         format("%s/include", dirname(strdup(argv0)));
 
     // Add standard include paths.
+    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
+        "/usr/lib/gcc/aarch64-linux-gnu/15/include";
+    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
+        "/usr/lib/llvm-21/lib/clang/21/include";
     std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/local/include";
     std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include/x86_64-linux-gnu";
+    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include/aarch64-linux-gnu";
+    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include/riscv64-linux-gnu";
+    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include/riscv32-linux-gnu";
     std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include";
 }
 
@@ -625,7 +632,7 @@ int main(int argc, char **argv) {
     atexit(cleanup);
     input_paths = emalloc(argc * sizeof(char *));
     tmpfiles = emalloc(argc * 4 * sizeof(char *));
-    include_paths = emalloc((argc + 8) * sizeof(char *));
+    include_paths = emalloc((argc + 16) * sizeof(char *));
     dirafter = emalloc(argc * sizeof(char *));
     ld_extra_args = emalloc(argc * 2 * sizeof(char *));
 
