@@ -238,7 +238,11 @@ void dump_blk(Blk *b) {
                 print_operand(ir->args[2]);
                 fprintf(out_file, ", i1 false)\n");
                 break;
-
+            case IR_TLSADDR:
+                fprintf(out_file, "call ptr @llvm.threadlocal.address.p0(ptr ");
+                print_operand(ir->args[0]);
+                fprintf(out_file, ")\n");
+                break;
             case IR_CALL:
                 fprintf(out_file, "call ");
                 if (refeq(ir->dst, R))
@@ -506,6 +510,40 @@ static void dump_init(Initializer *init, Type *ty) {
     printcon(init->val, init->ty);
 }
 
+static void dump_str(Sym *data) {
+    char *p = str(data->init_data);
+    int len = data->ty->len;
+    fprintf(out_file, "private unnamed_addr constant ");
+    print_type(data->ty);
+    if (len == 1) {
+        fprintf(out_file, " zeroinitializer");
+    } else {
+        if (data->ty->base->size == 1) {
+            fprintf(out_file, " c\"");
+            for (int i = 0; i < len; i++) fprintf(out_file, "%s", escape_char_to_string(p[i]));
+            fprintf(out_file, "\"");
+        } else if (data->ty->base->size == 2) {
+            uint16_t *buf = (uint16_t *)p;
+            fprintf(out_file, " [");
+            for (int i = 0; i < data->ty->len; i++) {
+                if (i) fprintf(out_file, ", ");
+                fprintf(out_file, "i16 %d", buf[i]);
+            }
+            fprintf(out_file, "]");
+        } else if (data->ty->base->size == 4) {
+            uint32_t *buf = (uint32_t *)p;
+            fprintf(out_file, " [");
+            for (int i = 0; i < data->ty->len; i++) {
+                if (i) fprintf(out_file, ", ");
+                fprintf(out_file, "i32 %d", buf[i]);
+            }
+            fprintf(out_file, "]");
+        }
+    }
+    fprintf(out_file, ", align %d\n", data->align);
+    return;
+}
+
 static const char *sclass_name[] = {
     [SC_NONE] = "dso_local",     [SC_EXTERN] = "external",     [SC_STATIC] = "internal",
     [SC_CONSTEXPR] = "internal", [SC_THREAD] = "thread_local",
@@ -516,42 +554,20 @@ void dump_data(Sym *data) {
     print_ident(data->id);
     fprintf(out_file, " = ");
     if (data->is_str) {
-        char *p = str(data->init_data);
-        int len = data->ty->len;
-        fprintf(out_file, "private unnamed_addr constant ");
-        print_type(data->ty);
-        if (len == 1) {
-            fprintf(out_file, " zeroinitializer");
-        } else {
-            if (data->ty->base->size == 1) {
-                fprintf(out_file, " c\"");
-                for (int i = 0; i < len; i++) fprintf(out_file, "%s", escape_char_to_string(p[i]));
-                fprintf(out_file, "\"");
-            } else if (data->ty->base->size == 2) {
-                uint16_t *buf = (uint16_t *)p;
-                fprintf(out_file, " [");
-                for (int i = 0; i < data->ty->len; i++) {
-                    if (i) fprintf(out_file, ", ");
-                    fprintf(out_file, "i16 %d", buf[i]);
-                }
-                fprintf(out_file, "]");
-            } else if (data->ty->base->size == 4) {
-                uint32_t *buf = (uint32_t *)p;
-                fprintf(out_file, " [");
-                for (int i = 0; i < data->ty->len; i++) {
-                    if (i) fprintf(out_file, ", ");
-                    fprintf(out_file, "i32 %d", buf[i]);
-                }
-                fprintf(out_file, "]");
-            }
-        }
-        fprintf(out_file, ", align %d\n", data->align);
+        dump_str(data);
         return;
     }
 
+    int sclass = data->sclass;
+    bool is_tls = sclass & SC_THREAD;
+    sclass &= ~(SC_THREAD);
+
     if (!data->is_defined && !data->sclass && opt_fcommon) fprintf(out_file, "common ");
-    fprintf(out_file, "%s global ", (!data->sclass && opt_fpic) ? "" : sclass_name[data->sclass]);
-    if (data->sclass & SC_EXTERN)
+    if (data->sclass || !opt_fpic) fprintf(out_file, "%s ", sclass_name[sclass]);
+    if (is_tls) fprintf(out_file, "thread_local ");
+    fprintf(out_file, "global ");
+
+    if (sclass & SC_EXTERN)
         print_type(data->ty);
     else
         dump_init(data->init, data->ty);
@@ -604,7 +620,8 @@ void dump_module(Module *md, FILE *out) {
     SrcFile **files = get_input_files();
     fprintf(out_file, "; ModuleID = '%s'\nsource_filename = \"%s\"\n\n", files[0]->name, files[0]->name);
     fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
-    fprintf(out_file, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n\n");
+    fprintf(out_file, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n");
+    fprintf(out_file, "declare ptr @llvm.threadlocal.address.p0(ptr)\n\n");
 
     for (Type *ty = md->tys; ty; ty = ty->next) dump_type(ty);
     if (md->tys) fprintf(out_file, "\n");

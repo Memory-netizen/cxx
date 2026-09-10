@@ -688,6 +688,7 @@ typedef enum {
     IR_GEP,
     IR_MEMCPY,
     IR_MEMSET,
+    IR_TLSADDR,
 
     // Conversion
     IR_EXT,

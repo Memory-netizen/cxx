@@ -136,7 +136,8 @@ struct Scope {
 };
 
 // Represents currently scope.
-static Scope *scope = &(Scope){0};
+static Scope *scope;
+static Scope *file_scope;
 
 static void enter_scope(void) {
     Scope *sc = emalloc(sizeof(Scope));
@@ -147,6 +148,8 @@ static void enter_scope(void) {
 }
 
 static void leave_scope(void) { scope = scope->next; }
+
+static bool is_file_scope(void) { return scope == file_scope; }
 
 // All local variable instances created during parsing are
 // accumulated to this list.
@@ -1267,7 +1270,7 @@ static Node *postfix(Token **rest, Token *tok) {
         Type *ty = typename(&tok, tok);
         tok = skip(tok, TK_RPAREN);
         Sym *var;
-        if (scope->next == NULL || sclass & SC_STATIC) {
+        if (is_file_scope() || sclass & SC_STATIC) {
             uint32_t uid = new_unique_varname(intern(".compoundliteral", 16));
             var = new_gvar(uid, ty);
             gvar_initializer(&tok, tok, var);
@@ -3017,7 +3020,7 @@ loop_end:
 
     if (is_thread) {
         if (*sclass & ~(SC_EXTERN | SC_STATIC)) error(tok, "‘thread_local’ used with ‘%s’", sclass_name[*sclass]);
-        if (scope->next && !(*sclass & (SC_EXTERN | SC_STATIC)))
+        if (!is_file_scope() && !(*sclass & (SC_EXTERN | SC_STATIC)))
             error(tok, "‘thread_local’ variables must have global storage");
         *sclass |= SC_THREAD;
     }
@@ -3385,7 +3388,11 @@ Module *parse(Token *tok) {
     cont_depth = 0;
     brk_depth = 0;
     globals = NULL;
+
+    enter_scope();
+    file_scope = scope;
     while (tok->kind != TK_EOF) tok = external_declaration(tok);
+    leave_scope();
 
     for (Sym *sym = globals; sym;) {
         Sym *next = sym->next;

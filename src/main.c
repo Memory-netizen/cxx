@@ -80,7 +80,11 @@ static void add_default_include_paths(char *argv0) {
     std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
         "/usr/lib/gcc/aarch64-linux-gnu/15/include";
     std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
+        "/usr/lib/gcc/x86_64-linux-gnu/13/include";
+    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
         "/usr/lib/llvm-21/lib/clang/21/include";
+    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
+        "/usr/lib/llvm-18/lib/clang/18/include";
     std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/local/include";
     std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include/x86_64-linux-gnu";
     std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include/aarch64-linux-gnu";

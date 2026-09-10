@@ -139,11 +139,16 @@ static Ref gen_addr(Node *node) {
     switch (node->kind) {
         case ND_VAR:
             gen_expr(node->var_init);
-            if (node->var->is_local)
+            if (node->var->is_local) {
                 return SLOT(node->var->vreg, pointer_to(node->ty, 0));
-            else
-                // Global variable
+            } else if (node->var->sclass & SC_THREAD) {
+                Ref dst = TMP(tmp_id++, pointer_to(node->ty, 0));
+                Ref ops[] = {GLB(node->var->id, pointer_to(node->ty, 0))};
+                new_ins(IR_TLSADDR, dst, ops, 1);
+                return dst;
+            } else {  // Global variable
                 return GLB(node->var->id, pointer_to(node->ty, 0));
+            }
         case ND_DEREF:
             return gen_expr(node->lhs);
         case ND_MEMBER: {
