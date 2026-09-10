@@ -205,9 +205,9 @@ check -MD
 grep -q -z '^md3.o:.* md3\.c .* ./out3\.h' $tmp/md3.d
 check -MD
 
-$compiler -c -MD -MF $tmp/md-mf.d -I. $tmp/md2.c
+(cd $tmp; $OLDPWD/$compiler -c -MD -MF md-mf.d -I. md2.c)
 grep -q -z '^md2.o:.*md2\.c .*/out2\.h' $tmp/md-mf.d
-check -MD
+check -MD-MF
 
 # -MQ
 $compiler -MQ foo -M -I$tmp $tmp/out.c | grep -q '^foo:'
@@ -231,12 +231,12 @@ check -MMD
 grep -q -z '^mmd3.o:.* mmd3\.c .* ./out3\.h' $tmp/mmd3.d
 check -MMD
 
-$compiler -c -MMD -MF $tmp/mmd-mf.d -I. $tmp/mmd2.c
+(cd $tmp; $OLDPWD/$compiler -c -MMD -MF mmd-mf.d -I. mmd2.c)
 grep -q -z '^mmd2.o:.*mmd2\.c .*/out2\.h' $tmp/mmd-mf.d
 check -MMD-MF
 
 echo 'int main(){}' >> $tmp/sys.c
-! $compiler -MMD -I$tmp $tmp/sys.c | grep -q 'stdbool.h'
+(cd $tmp; ! $OLDPWD/$compiler -MMD -I$tmp sys.c | grep -q 'stdbool.h')
 check -MMD
 
 # -static
