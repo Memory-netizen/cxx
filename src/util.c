@@ -10,6 +10,7 @@
 #define COLOR_RED "\033[0;1;31m"
 #define COLOR_GREEN "\033[0;1;32m"
 #define COLOR_MAGENTA "\033[0;1;35m"
+#define COLOR_CYAN "\033[0;1;36m"
 
 // Reports an error and exit.
 void fatal(char *fmt, ...) {
@@ -47,7 +48,7 @@ static void emit_diag(char *level, uint32_t filename, int line_delta, SrcFile *d
         else if (!strcmp(level, "warning"))
             color = COLOR_MAGENTA;
         else
-            color = COLOR_GREEN;
+            color = COLOR_CYAN;
         fprintf(stderr, "%s%s: " COLOR_RESET, color, level);
     } else {
         fprintf(stderr, "%s: ", level);

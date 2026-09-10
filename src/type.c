@@ -456,6 +456,7 @@ void new_imcast(Node **expr, Type *ty) {
 static Type *get_common_type(Type *ty1, Type *ty2) {
     if (ty1->base) return pointer_to(ty1->base, 0);
 
+    if (ty1->kind == TY_LDOUBLE || ty2->kind == TY_LDOUBLE) return ty_ldouble;
     if (ty1->kind == TY_DOUBLE || ty2->kind == TY_DOUBLE) return ty_double;
     if (ty1->kind == TY_FLOAT || ty2->kind == TY_FLOAT) return ty_float;
 

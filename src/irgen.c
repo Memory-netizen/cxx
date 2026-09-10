@@ -253,6 +253,7 @@ static Ref gen_expr(Node *node) {
         case ND_NUM:
             if (node->ty->kind == TY_FLOAT) return FLOAT(node->val);
             if (node->ty->kind == TY_DOUBLE) return DOUBLE(node->val);
+            if (node->ty->kind == TY_LDOUBLE) return DOUBLE(node->val);
             if (node->ty->size == 1)
                 dst = BOOL(node->val);
             else if (node->ty->size == 4)

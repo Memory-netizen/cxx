@@ -2949,7 +2949,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 ty = ty_double;
                 break;
             case LONG + DOUBLE:
-                ty = ty_double;  // now "long double" as an alias for "double"
+                ty = ty_ldouble;
                 break;
             case NONE:
             case OTHER:
