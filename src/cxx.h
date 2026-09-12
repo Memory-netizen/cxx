@@ -554,6 +554,7 @@ typedef enum {
     TY_PTR,
     TY_FUNC,
     TY_ARRAY,
+    TY_VLA,  // variable-length array
     TY_STRUCT,
     TY_UNION,
 } TypeKind;
@@ -575,6 +576,9 @@ struct Type {
     // Data
     union {
         struct {
+            // Variable-length array
+            Node *vla_len;  // # of elements
+            Sym *vla_size;  // sizeof() value
             // Array or ptr
             int len;
             bool is_static;
@@ -646,6 +650,7 @@ void check_asop(Type *dst, Node *src, int ctx);
 Type *pointer_to(Type *base, uint32_t qual);
 Type *func_type(Type *return_ty);
 Type *array_of(Type *base, int size);
+Type *vla_of(Type *base, Node *len);
 Type *struct_type(bool is_union);
 Type *enum_type(void);
 Type *copy_type(Type *ty);
@@ -871,6 +876,7 @@ void dump_module(Module *module, FILE *out);
 void dump_ast(Module *prog);
 void dump_raw_tokens(Token *tok);
 void dump_tokens(Token *tok);
+Node *fold_node(Node *node);
 void fold_ast(Module *prog);
 
 //

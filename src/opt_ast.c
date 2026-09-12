@@ -252,7 +252,7 @@ static Node *fold_bool(Node *node) {
 
 // Recursively fold an AST subtree. Returns the folded node
 // (which may be the original or a replacement).
-static Node *fold_node(Node *node) {
+Node *fold_node(Node *node) {
     if (!node) return NULL;
 
     // Fold children first (bottom-up).

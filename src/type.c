@@ -130,6 +130,17 @@ Type *array_of(Type *base, int len) {
     return ty;
 }
 
+Type *vla_of(Type *base, Node *len) {
+    Type *ty = emalloc(sizeof(Type));
+    ty->kind = TY_VLA;
+    ty->size = -1;
+    ty->align = base->align;
+    ty->base = base;
+    ty->vla_len = len;
+    ty->len = -1;
+    return ty;
+}
+
 Type *struct_type(bool is_union) {
     Type *ty = emalloc(sizeof(Type));
     ty->kind = is_union ? TY_UNION : TY_STRUCT;
@@ -221,6 +232,7 @@ bool is_compatible(Type *t1, Type *t2) {
             for (; p1 && p2; p1 = p1->next, p2 = p2->next)
                 if (!is_compatible(p1, p2)) return false;
             return p1 == NULL && p2 == NULL;
+        case TY_VLA:
         case TY_ARRAY:
             if (!is_compatible(t1->base, t2->base)) return false;
             return t1->len < 0 || t2->len < 0 || t1->len == t2->len;

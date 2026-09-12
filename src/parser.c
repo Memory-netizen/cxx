@@ -1,3 +1,5 @@
+#include <stdbool.h>
+
 #include "cxx.h"
 
 #define reverse_list(type, init, next_field)          \
@@ -87,6 +89,49 @@ static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs, Token *tok) {
     return node;
 }
 
+static bool is_const_expr(Node *node) {
+    add_type(node);
+
+    switch (node->kind) {
+        case ND_ADD:
+        case ND_SUB:
+        case ND_MUL:
+        case ND_DIV:
+        case ND_MOD:
+        case ND_BAND:
+        case ND_BOR:
+        case ND_XOR:
+        case ND_LEFT:
+        case ND_RIGHT:
+        case ND_EQ:
+        case ND_NE:
+        case ND_LT:
+        case ND_LE:
+        case ND_LOGAND:
+        case ND_LOGOR:
+        case ND_PTRADD:
+            return is_const_expr(node->lhs) && is_const_expr(node->rhs);
+        case ND_COND:
+            if (!is_const_expr(node->cond)) return false;
+            return is_const_expr(eval(node->cond) ? node->then : node->els);
+        case ND_COMMA:
+            return is_const_expr(node->rhs);
+        case ND_PLUS:
+        case ND_NEG:
+        case ND_NOT:
+        case ND_INVERT:
+        case ND_EXCAST:
+        case ND_IMCAST:
+            return is_const_expr(node->lhs);
+        case ND_NUM:
+            return true;
+        default:
+            break;
+    }
+    return false;
+}
+
+static Sym *builtin_alloca;
 typedef enum {
     SYM_VAR,
     SYM_FUNC,
@@ -1287,6 +1332,7 @@ static Node *postfix(Token **rest, Token *tok) {
     while (1) {
         add_type(node);
         if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base, 0));
+        if (node->ty->kind == TY_VLA) new_imcast(&node, pointer_to(node->ty->base, 0));
         if (node->ty->kind == TY_FUNC) new_imcast(&node, pointer_to(node->ty, 0));
         switch (tok->kind) {
             case TK_LPAREN:
@@ -1371,6 +1417,7 @@ static Node *unary(Token **rest, Token *tok) {
             Node *node = cast(rest, tok->next);
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_VLA) node = node->lhs;
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_FUNC) node = node->lhs;
             return new_unary(ND_ADDR, node, tok);
         }
@@ -1378,6 +1425,7 @@ static Node *unary(Token **rest, Token *tok) {
             Node *node = new_unary(ND_DEREF, cast(rest, tok->next), tok);
             add_type(node);
             if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base, 0));
+            if (node->ty->kind == TY_VLA) new_imcast(&node, pointer_to(node->ty->base, 0));
             if (node->ty->kind == TY_FUNC) new_imcast(&node, pointer_to(node->ty, 0));
             return node;
         }
@@ -1390,13 +1438,16 @@ static Node *unary(Token **rest, Token *tok) {
             if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, true)) {
                 Type *ty = typename(&tok, tok->next->next);
                 *rest = skip(tok, TK_RPAREN);
+                if (ty->kind == TY_VLA) return new_var_node(ty->vla_size, tok);
                 if (ty->size < 0) error(start, "invalid application of ‘sizeof’ to incomplete type");
                 return new_ulong(ty->size, start);
             }
             Node *node = unary(rest, tok->next);
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_VLA) node = node->lhs;
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_FUNC) node = node->lhs;
+            if (node->ty->kind == TY_VLA) return new_var_node(node->ty->vla_size, tok);
             if (node->ty->size < 0) error(start, "invalid application of ‘sizeof’ to incomplete type");
             return new_ulong(node->ty->size, tok);
         }
@@ -1410,6 +1461,7 @@ static Node *unary(Token **rest, Token *tok) {
             Node *node = unary(rest, tok->next);
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_VLA) node = node->lhs;
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_FUNC) node = node->lhs;
             if (node->ty->size < 0) error(start, "invalid application of ‘alignof’ to incomplete type");
             return new_ulong(node->ty->align, tok);
@@ -1426,6 +1478,7 @@ static Node *unary(Token **rest, Token *tok) {
             Node *node = unary(rest, tok->next);
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_VLA) node = node->lhs;
             if (node->ty->kind != TY_ARRAY) error(start, "‘_Countof’ requires an argument of array type");
             if (node->ty->size < 0) error(start, "invalid application of ‘_Countof’ to incomplete type");
             return new_ulong(node->ty->len, tok);
@@ -1775,6 +1828,37 @@ static Node *expr(Token **rest, Token *tok) {
     return node;
 }
 
+// Generate code for computing a VLA size.
+static Node *compute_vla_size(Type *ty, Token *tok) {
+    Node *node = new_node(ND_NOP, tok);
+    if (ty->base) node = new_binary(ND_COMMA, node, compute_vla_size(ty->base, tok), tok);
+
+    if (ty->kind != TY_VLA) return node;
+
+    Node *base_sz;
+    if (ty->base->kind == TY_VLA)
+        base_sz = new_var_node(ty->base->vla_size, tok);
+    else
+        base_sz = new_num(ty->base->size, tok);
+
+    ty->vla_size = new_lvar(intern("", 0), ty_ulong);
+    Node *expr = new_binary(ND_AS, new_var_node(ty->vla_size, tok), new_binary(ND_MUL, ty->vla_len, base_sz, tok), tok);
+    return new_binary(ND_COMMA, node, expr, tok);
+}
+
+static Node *new_alloca(Node *sz) {
+    check_asop(ty_ulong, sz, CTX_CALL);
+    Node *node = new_node(ND_FUNCALL, sz->tok);
+    Node *fn = new_var_node(builtin_alloca, sz->tok);
+    lvalue_convert(&fn);
+    node->func = fn;
+    node->func_ty = builtin_alloca->ty;
+    node->ty = builtin_alloca->ty->ret;
+    node->args = sz;
+    node->narg = 1;
+    return node;
+}
+
 // InitDecls ::= InitDeclr ("," InitDeclr)*
 // InitDeclr ::= Declr ("=" Init)?
 static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclass, int align, int funcspec) {
@@ -1841,6 +1925,23 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         var->align = MAX(align, ty->align);
         var->is_function = is_fn;
         var->funcspec |= funcspec;
+
+        // Generate code for computing a VLA size. We need to do this
+        // even if ty is not VLA because ty may be a pointer to VLA
+        // (e.g. int (*foo)[n][m] where n and m are variables.)
+        cur = cur->next = new_unary(ND_EXPR_STMT, compute_vla_size(ty, tok), tok);
+        if (ty->kind == TY_VLA) {
+            if (tok->kind == TK_AS) error(tok, "variable-sized object may not be initialized");
+
+            // Variable length arrays (VLAs) are translated to alloca() calls.
+            // For example, `int x[n+2]` is translated to `tmp = n + 2,
+            // x = alloca(tmp)`.
+            Token *tok = ty->name;
+            Node *expr = new_binary(ND_AS, new_var_node(var, tok), new_alloca(new_var_node(ty->vla_size, tok)), tok);
+
+            cur = cur->next = new_unary(ND_EXPR_STMT, expr, tok);
+            continue;
+        }
         if (tok->kind == TK_AS) {
             if (is_extern)
                 error(var_name, "declaration of block scope identifier ‘%s’ with linkage cannot have an initializer",
@@ -2752,6 +2853,7 @@ static Type *typeof_specifier(Token **rest, Token *tok, bool is_unqual) {
         Node *node = expr(&tok, tok);
         add_type(node);
         if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+        if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_VLA) node = node->lhs;
         if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_FUNC) node = node->lhs;
         if (node->kind == ND_MEMBER && node->member->is_bitfield)
             error(node->tok, "invalid application of 'typeof' to bit-field ‘%s’", str(node->member->name->id));
@@ -3102,7 +3204,7 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
 //           | "[" TypeQual+ "static" AsExp "]"
 //           | "[" TypeQual* "*" "]"
 static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param) {
-    int sz = -1;
+    Node *len = NULL;
     bool is_star = false;
     tok = skip(tok, TK_LBRACKET);
 
@@ -3119,19 +3221,27 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
     if (!is_param && qual) error(tmp, "type qualifier used in array declarator outside of function prototype");
 
     if (is_static) {
-        sz = const_expr(&tok, tok);
+        len = conditional(&tok, tok);
     } else if (tok->kind == TK_STAR && tok->next->kind == TK_RBRACKET) {
         if (!is_param) error(tok, "[*] used outside of function prototype");
         is_star = true;
         tok = tok->next;
     } else if (tok->kind != TK_RBRACKET) {
-        sz = const_expr(&tok, tok);
+        len = conditional(&tok, tok);
     }
 
     tok = skip(tok, TK_RBRACKET);
     ty = decl_suffix(rest, tok, ty, is_param);
-
-    ty = array_of(ty, sz);
+    if (ty->kind != TY_VLA) {
+        if (!len)
+            ty = array_of(ty, -1);
+        else if (is_const_expr(len))
+            ty = array_of(ty, eval(len));
+        else
+            ty = vla_of(ty, len);
+    } else {
+        ty = vla_of(ty, len);
+    }
     ty->qual = qual;
     ty->is_static = is_static;
     ty->is_star = is_star;
@@ -3379,20 +3489,21 @@ static Token *external_declaration(Token *tok) {
     }
 }
 
-static void declare_builtin_function(uint32_t id, Type *ty) {
+static Sym *declare_builtin_function(uint32_t id, Type *ty) {
     Sym *builtin = new_gvar(id, ty);
     builtin->is_function = true;
     builtin->is_defined = false;
     NameSpace *ns = push_namespace(id, SYM_FUNC, ty, NULL);
     ns->var = builtin;
     ns->lnk = LK_EXTERN;
+    return builtin;
 }
 
 static void declare_builtin_functions(void) {
     Type *ty = func_type(pointer_to(ty_void, 0));
     ty->params = copy_type(ty_ulong);
     uint32_t id = intern("__builtin_alloca", 16);
-    declare_builtin_function(id, ty);
+    builtin_alloca = declare_builtin_function(id, ty);
 }
 
 // TransUnit ::= ExDecl+

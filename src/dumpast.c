@@ -1,7 +1,7 @@
 #include "cxx.h"
 
 static int depth;
-
+static void dump_node(Node *node);
 static void print_indent(void) {
     for (int i = 0; i < depth; i++) fprintf(stdout, "  ");
 }
@@ -164,6 +164,11 @@ static void print_type(Type *ty) {
             print_type(ty->base);
             fprintf(stdout, "[%d]", ty->len);
             break;
+        case TY_VLA:
+            print_type(ty->base);
+            fprintf(stdout, "len=");
+            dump_node(ty->vla_len);
+            break;
         case TY_FUNC:
             print_type(ty->ret);
             fprintf(stdout, " (");
@@ -185,8 +190,6 @@ static void print_type(Type *ty) {
             break;
     }
 }
-
-static void dump_node(Node *node);
 
 static void dump_node_list(Node *node) {
     while (node) {
