@@ -78,6 +78,21 @@ static void insert_phi(Blk *blk, Phi *phi) {
     blk->phi = phi;
 }
 
+static bool is_builtin_fn(uint32_t id) {
+    if (id == intern("__builtin_alloca", 16)) return true;
+    return false;
+}
+
+static Ref gen_builtin_fn(Node *node) {
+    if (node->func->lhs->var->id == intern("__builtin_alloca", 16)) {
+        Ref size = gen_expr(node->args);
+        Ref dst = TMP(tmp_id++, pointer_to(ty_char, 0));
+        new_ins(IR_ALLOCA, dst, (Ref[]){size, INT(16)}, 2);
+        return dst;
+    }
+    return R;
+}
+
 static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
     if (target_ty->kind == TY_BOOL) {
         Ref tmp = TMP(tmp_id++, ty_i1);
@@ -383,6 +398,7 @@ static Ref gen_expr(Node *node) {
         case ND_COND:
             return gen_cond(node);
         case ND_FUNCALL: {
+            if (node->func->kind == ND_IMCAST && is_builtin_fn(node->func->lhs->var->id)) return gen_builtin_fn(node);
             int nargs = node->narg;
             Ref *call_ops = emalloc((nargs + 1) * sizeof(Ref));
             call_ops[0] = gen_expr(node->func);

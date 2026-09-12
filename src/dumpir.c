@@ -181,8 +181,14 @@ void dump_blk(Blk *b) {
             case IR_ALLOCA:
                 fprintf(out_file, "alloca ");
                 print_type(ir->dst.ty->base);
+                if (ir->narg == 2) {
+                    fprintf(out_file, ", ");
+                    print_type(ir->args[0].ty);
+                    fprintf(out_file, " ");
+                    print_operand(ir->args[0]);
+                }
                 fprintf(out_file, ", align ");
-                print_operand(ir->args[0]);
+                print_operand(ir->args[ir->narg - 1]);
                 fprintf(out_file, "\n");
                 break;
             case IR_LORD:

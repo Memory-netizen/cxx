@@ -3379,6 +3379,22 @@ static Token *external_declaration(Token *tok) {
     }
 }
 
+static void declare_builtin_function(uint32_t id, Type *ty) {
+    Sym *builtin = new_gvar(id, ty);
+    builtin->is_function = true;
+    builtin->is_defined = false;
+    NameSpace *ns = push_namespace(id, SYM_FUNC, ty, NULL);
+    ns->var = builtin;
+    ns->lnk = LK_EXTERN;
+}
+
+static void declare_builtin_functions(void) {
+    Type *ty = func_type(pointer_to(ty_void, 0));
+    ty->params = copy_type(ty_ulong);
+    uint32_t id = intern("__builtin_alloca", 16);
+    declare_builtin_function(id, ty);
+}
+
 // TransUnit ::= ExDecl+
 Module *parse(Token *tok) {
     Module *md = emalloc(sizeof(Module));
@@ -3391,6 +3407,8 @@ Module *parse(Token *tok) {
 
     enter_scope();
     file_scope = scope;
+    declare_builtin_functions();
+
     while (tok->kind != TK_EOF) tok = external_declaration(tok);
     leave_scope();
 
