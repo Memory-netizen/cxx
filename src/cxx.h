@@ -686,7 +686,12 @@ typedef enum {
     IR_LORD,
     IR_STR,
     IR_GEP,
+    IR_FENCE,
+    IR_CMPXCHG,
+    IR_ATOMICRMW,
+
     IR_MEMCPY,
+    IR_MEMMOV,
     IR_MEMSET,
     IR_TLSADDR,
 
@@ -697,6 +702,7 @@ typedef enum {
     IR_FPTOINT,
     IR_PTRTOINT,
     IR_INTTOPTR,
+    IR_BITCAST,
 
     // Compare
     IR_CMP_NE,
@@ -706,8 +712,35 @@ typedef enum {
 
     // Other
     IR_CALL,
+    IR_VA_ARG,
+    IR_VA_START,
+    IR_VA_COPY,
+    IR_VA_END,
+    IR_SELECT,
     IR_CNT,
 } IrKind;
+
+enum {
+    A_XCHG,
+    A_ADD,
+    A_SUB,
+    A_AND,
+    A_NAND,
+    A_OR,
+    A_XOR,
+    A_MAX,
+    A_MIN,
+    A_UMAX,
+    A_UMIN,
+    A_FADD,
+    A_FSUB,
+    A_FMAX,
+    A_FMIN,
+    A_UINC_WRAP,
+    A_UDEC_WRAP,
+    A_USUB_COND,
+    A_USUB_SAT,
+};
 
 struct Con {
     enum {
