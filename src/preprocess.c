@@ -379,7 +379,7 @@ struct MacroArg {
     Token *tok;
 };
 
-typedef Token *macro_handler_fn(Token *);
+typedef Token *macro_handler_fn(Token **, Token *);
 struct Macro {
     Macro *next;
     uint32_t id;
@@ -759,11 +759,10 @@ static Token *expand_macro(Token *dst, Token *list) {
         Token *macro_name = cur;
         // Built-in dynamic macro application such as __LINE__
         if (m->handler) {
-            Token *t = m->handler(macro_name);
-            t->is_leadingws = cur->is_leadingws;
-            t->is_sol = cur->is_sol;
+            Token *t = m->handler(&cur, macro_name);
+            t->is_leadingws = macro_name->is_leadingws;
+            t->is_sol = macro_name->is_sol;
             dst = dst->next = t;
-            cur = cur->next;
             continue;
         }
 
@@ -774,8 +773,8 @@ static Token *expand_macro(Token *dst, Token *list) {
             dst = expand_macro(dst, m->body);
             pop_disabled();
             if (prev->next) {
-                prev->next->is_leadingws = cur->is_leadingws;
-                prev->next->is_sol = cur->is_sol;
+                prev->next->is_leadingws = macro_name->is_leadingws;
+                prev->next->is_sol = macro_name->is_sol;
             }
             for (Token *t = prev->next; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
             cur = cur->next;
@@ -1344,13 +1343,15 @@ static Macro *add_builtin(char *name, macro_handler_fn *fn) {
     return m;
 }
 
-static Token *file_macro(Token *tmpl) {
+static Token *file_macro(Token **rest, Token *tmpl) {
+    *rest = tmpl->next;
     Token *orig = tmpl;
     while (orig->origin) orig = orig->origin;
     return new_str_token(str(orig->filename), tmpl);
 }
 
-static Token *line_macro(Token *tmpl) {
+static Token *line_macro(Token **rest, Token *tmpl) {
+    *rest = tmpl->next;
     Token *orig = tmpl;
     while (orig->origin) orig = orig->origin;
     int line, col;
@@ -1359,7 +1360,8 @@ static Token *line_macro(Token *tmpl) {
 }
 
 // __COUNTER__ is expanded to serial values starting from 0.
-static Token *counter_macro(Token *tmpl) {
+static Token *counter_macro(Token **rest, Token *tmpl) {
+    *rest = tmpl->next;
     static int i = 0;
     return ident_to_num(tmpl, i++);
 }
@@ -1367,7 +1369,8 @@ static Token *counter_macro(Token *tmpl) {
 // __TIMESTAMP__ is expanded to a string describing the last
 // modification time of the current file. E.g.
 // "Fri Jul 24 01:32:50 2020"
-static Token *timestamp_macro(Token *tmpl) {
+static Token *timestamp_macro(Token **rest, Token *tmpl) {
+    *rest = tmpl->next;
     struct stat st;
     if (stat(tmpl->file->name, &st) != 0) return new_str_token("??? ??? ?? ??:??:?? ????", tmpl);
 
@@ -1377,7 +1380,8 @@ static Token *timestamp_macro(Token *tmpl) {
     return new_str_token(buf, tmpl);
 }
 
-static Token *base_file_macro(Token *tmpl) {
+static Token *base_file_macro(Token **rest, Token *tmpl) {
+    *rest = tmpl->next;
     static Token *exist;
     if (exist) {
         Token *new = copy_token(exist);
@@ -1389,7 +1393,8 @@ static Token *base_file_macro(Token *tmpl) {
 }
 
 // __DATE__ is expanded to the current date, e.g. "May 17 2020".
-static Token *date_macro(Token *tmpl) {
+static Token *date_macro(Token **rest, Token *tmpl) {
+    *rest = tmpl->next;
     static char mon[][4] = {
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     };
@@ -1406,7 +1411,8 @@ static Token *date_macro(Token *tmpl) {
 }
 
 // __TIME__ is expanded to the current time, e.g. "13:34:03".
-static Token *time_macro(Token *tmpl) {
+static Token *time_macro(Token **rest, Token *tmpl) {
+    *rest = tmpl->next;
     static Token *exist;
     if (exist) {
         Token *new = copy_token(exist);
@@ -1417,6 +1423,17 @@ static Token *time_macro(Token *tmpl) {
     sprintf(buf, "%02d:%02d:%02d", tm->tm_hour, tm->tm_min, tm->tm_sec);
     exist = new_str_token(buf, tmpl);
     return exist;
+}
+
+static Token *builtin_fn_macro(Token **rest, Token *tmpl) {
+    Token *tok = skip(tmpl->next, TK_LPAREN);
+    if (tok->kind != TK_IDENT) {
+        tok->line_delta = line_delta;
+        tok->filename = display_name;
+        error(tok, "macro __has_builtin requires an identifier");
+    }
+    *rest = skip(tok->next, TK_RPAREN);
+    return ident_to_num(tmpl, is_builtin_fn(tok->id));
 }
 
 SrcFile *scratch;
@@ -1512,6 +1529,7 @@ void init_macros(void) {
 
     add_builtin("__DATE__", date_macro);
     add_builtin("__TIME__", time_macro);
+    add_builtin("__has_builtin", builtin_fn_macro);
 
     for (Macro *m = macros; m; m = m->next) m->is_builtin = true;
 

@@ -1181,6 +1181,7 @@ static Node *primary(Token **rest, Token *tok) {
 bool is_builtin_fn(uint32_t id) {
     if (id == intern("__builtin_alloca", 16)) return true;
     if (id == intern("__builtin_alloca_with_align", 27)) return true;
+    if (id == intern("__builtin_types_compatible_p", 28)) return true;
     return false;
 }
 

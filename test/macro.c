@@ -491,6 +491,34 @@ int main() {
 #endif
     ASSERT(9, x);
 
+#if !defined(__has_builtin)
+    x = 9;
+#else
+    x = 5;
+#endif
+    ASSERT(5, x);
+
+#ifdef __has_builtin
+    x = 9;
+#else
+    x = 5;
+#endif
+    ASSERT(9, x);
+
+#if __has_builtin(no_such_builtin_fn)
+    x = 9;
+#else
+    x = 5;
+#endif
+    ASSERT(5, x);
+
+#if __has_builtin(__builtin_alloca_with_align)
+    x = 9;
+#else
+    x = 5;
+#endif
+    ASSERT(9, x);
+
     printf("OK\n");
     return 0;
 }
