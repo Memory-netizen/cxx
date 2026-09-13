@@ -78,16 +78,18 @@ static void insert_phi(Blk *blk, Phi *phi) {
     blk->phi = phi;
 }
 
-static bool is_builtin_fn(uint32_t id) {
-    if (id == intern("__builtin_alloca", 16)) return true;
-    return false;
-}
-
 static Ref gen_builtin_fn(Node *node) {
     if (node->func->lhs->var->id == intern("__builtin_alloca", 16)) {
         Ref size = gen_expr(node->args);
         Ref dst = TMP(tmp_id++, pointer_to(ty_char, 0));
         new_ins(IR_ALLOCA, dst, (Ref[]){size, INT(16)}, 2);
+        return dst;
+    }
+    if (node->func->lhs->var->id == intern("__builtin_alloca_with_align", 27)) {
+        Ref size = gen_expr(node->args);
+        int align = node->args->next->val;
+        Ref dst = TMP(tmp_id++, pointer_to(ty_char, 0));
+        new_ins(IR_ALLOCA, dst, (Ref[]){size, INT(align)}, 2);
         return dst;
     }
     return R;

@@ -1178,6 +1178,27 @@ static Node *primary(Token **rest, Token *tok) {
     return NULL;
 }
 
+bool is_builtin_fn(uint32_t id) {
+    if (id == intern("__builtin_alloca", 16)) return true;
+    if (id == intern("__builtin_alloca_with_align", 27)) return true;
+    return false;
+}
+
+static void check_builtin_fn(Node *node) {
+    uint32_t id = node->func->lhs->var->id;
+    if (node->func->kind != ND_IMCAST || !is_builtin_fn(id)) return;
+    if (id == intern("__builtin_alloca_with_align", 27)) {
+        Node *arg1 = node->args->next;
+        if (!is_integer(arg1->ty))
+            error(node->tok, "argument to ‘__builtin_alloca_with_align’ must be a constant integer");
+        int64_t align = eval(arg1);
+        if (align & (align - 1)) error(arg1->tok, "requested alignment ‘%ld’ is not a positive power of 2", align);
+        if (align < 8) error(arg1->tok, "requested alignment must be 8 or greater");
+        node->args->next = new_ulong(align, arg1->tok);
+        return;
+    }
+}
+
 static Node *fncall(Token **rest, Token *tok, Node *fn) {
     if (fn->ty->kind != TY_FUNC && !is_funcptr(fn->ty))
         error(tok, "called object ‘%.*s’ is not a function or function pointer", fn->tok->len, fn->tok->loc);
@@ -1233,6 +1254,7 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
 
     node->args = dummy.next;
     node->narg = i;
+    check_builtin_fn(node);
     return node;
 }
 
@@ -3392,6 +3414,12 @@ static void declare_builtin_functions(void) {
     Type *ty = func_type(pointer_to(ty_void, 0));
     ty->params = copy_type(ty_ulong);
     uint32_t id = intern("__builtin_alloca", 16);
+    declare_builtin_function(id, ty);
+
+    ty = func_type(pointer_to(ty_void, 0));
+    ty->params = copy_type(ty_ulong);
+    ty->params->next = copy_type(ty_ulong);
+    id = intern("__builtin_alloca_with_align", 27);
     declare_builtin_function(id, ty);
 }
 

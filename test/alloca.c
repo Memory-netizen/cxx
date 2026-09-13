@@ -10,6 +10,7 @@ int main() {
     char *p3 = 1 + (char *)__builtin_alloca(3) + 1;
     p3 -= 2;
     char *p4 = fn(1, __builtin_alloca(16), 3);
+    char *p5 = fn(1, __builtin_alloca_with_align(16, 16), 3);
 
     ASSERT(16, p1 - p2);
     ASSERT(16, p2 - p3);
