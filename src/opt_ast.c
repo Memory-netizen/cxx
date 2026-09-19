@@ -6,12 +6,35 @@ static bool is_int_const(Node *node) { return node && node->kind == ND_NUM && is
 // Returns true if node is a floating-point constant.
 static bool is_float_const(Node *node) { return node && node->kind == ND_NUM && is_flonum(node->ty); }
 
+static Node *new_lognot(Node *tmpl) {
+    Node *node = emalloc(sizeof(Node));
+    node->kind = ND_NOT;
+    node->lhs = tmpl;
+    node->ty = ty_int;
+    node->tok = tmpl->tok;
+    return node;
+}
+
 // Create a folded integer constant node with the given type.
 static Node *folded_int(int64_t val, Type *ty, Node *tmpl) {
     Node *node = emalloc(sizeof(Node));
     node->kind = ND_NUM;
     node->ty = ty;
     node->tok = tmpl->tok;
+
+    if (is_integer(ty)) {
+        int bits = ty->size * 8;
+        if (bits > 0 && bits < 64) {
+            uint64_t mask = ((uint64_t)1u << bits) - 1;
+            uint64_t u = (uint64_t)val & mask;
+            if (!ty->is_unsigned && (u >> (bits - 1)))
+                val = (int64_t)(u | ~mask);
+            else
+                val = (int64_t)u;
+        }
+        // bits == 64: int64_t
+    }
+
     node->val = val;
     return node;
 }
@@ -175,18 +198,14 @@ static Node *fold_cast(Node *node) {
         if (is_bool(node->ty)) return folded_int(lhs->val != 0, ty_bool, node);
 
         int64_t v = lhs->val;
-        switch (node->ty->size) {
-            case 1:
-                v = node->ty->is_unsigned ? (uint8_t)v : (int8_t)v;
-                break;
-            case 2:
-                v = node->ty->is_unsigned ? (uint16_t)v : (int16_t)v;
-                break;
-            case 4:
-                v = node->ty->is_unsigned ? (uint32_t)v : (int32_t)v;
-                break;
-            default:
-                break;
+        int bits = node->ty->size * 8;
+        if (bits > 0 && bits < 64) {
+            uint64_t mask = ((uint64_t)1u << bits) - 1;
+            uint64_t u = (uint64_t)v & mask;
+            if (!node->ty->is_unsigned && (u >> (bits - 1)))
+                v = (int64_t)(u | ~mask);
+            else
+                v = (int64_t)u;
         }
         return folded_int(v, node->ty, node);
     }
@@ -233,12 +252,21 @@ static Node *fold_cond(Node *node) {
 // 0 && x → 0,  1 && x → x,  0 || x → x,  1 || x → 1
 static Node *fold_logical(Node *node) {
     Node *lhs = node->lhs;
-    if (!is_int_const(lhs)) return NULL;
+    if (!is_int_const(lhs) && !is_float_const(lhs)) return NULL;
+    Node *rhs = node->rhs;
+    if (is_int_const(rhs) || is_float_const(rhs)) {
+        int64_t lv = lhs->val;
+        int64_t rv = rhs->val;
+        if (node->kind == ND_LOGAND)
+            return folded_int(lv && rv, ty_int, node);
+        else
+            return folded_int(lv || rv, ty_int, node);
+    }
 
     if (node->kind == ND_LOGAND)
-        return lhs->val ? node->rhs : folded_int(0, ty_int, node);
+        return lhs->val ? new_lognot(node->rhs) : folded_int(0, ty_int, node);
     else  // ND_LOGOR
-        return lhs->val ? folded_int(1, ty_int, node) : node->rhs;
+        return lhs->val ? folded_int(1, ty_int, node) : new_lognot(node->rhs);
 }
 
 // Fold a boolean conversion to an integer constant when possible.
@@ -252,7 +280,7 @@ static Node *fold_bool(Node *node) {
 
 // Recursively fold an AST subtree. Returns the folded node
 // (which may be the original or a replacement).
-static Node *fold_node(Node *node) {
+Node *fold_node(Node *node) {
     if (!node) return NULL;
 
     // Fold children first (bottom-up).
@@ -272,6 +300,7 @@ static Node *fold_node(Node *node) {
         case ND_NE:
         case ND_LT:
         case ND_LE:
+        case ND_PTRADD:
             node->lhs = fold_node(node->lhs);
             node->rhs = fold_node(node->rhs);
             return fold_binary(node) ?: fold_binary_float(node) ?: node;
@@ -349,6 +378,7 @@ static Node *fold_node(Node *node) {
             return node;
 
         // Assignment-like: fold rhs only
+        case ND_INIT:
         case ND_AS:
         case ND_ADDAS:
         case ND_SUBAS:
@@ -360,6 +390,8 @@ static Node *fold_node(Node *node) {
         case ND_XORAS:
         case ND_LEFTAS:
         case ND_RIGHTAS:
+        case ND_PTRAS:
+            node->lhs = fold_node(node->lhs);
             node->rhs = fold_node(node->rhs);
             return node;
 
@@ -367,20 +399,38 @@ static Node *fold_node(Node *node) {
         case ND_ADDR:
         case ND_DEREF:
         case ND_MEMBER:
+        case ND_PREINC:
+        case ND_PREDEC:
+        case ND_POSTINC:
+        case ND_POSTDEC:
             node->lhs = fold_node(node->lhs);
             return node;
 
         case ND_FUNCALL:
             for (Node *a = node->args; a; a = a->next) fold_node(a);
             return node;
-
+        case ND_CASE:
         case ND_LABEL:
             node->label_body = fold_node(node->label_body);
             return node;
-
-        default:
-            return node;
+        case ND_GOTO_EXPR:
+            break;
+        case ND_LABEL_VAL:
+            break;
+        case ND_VAR:
+            break;
+        case ND_NUM:
+            break;
+        case ND_NULLPTR:
+            break;
+        case ND_NOP:
+        case ND_MEMZERO:
+        case ND_GOTO:
+        case ND_BREAK:
+        case ND_CONTINUE:
+            break;
     }
+    return node;
 }
 
 // Entry point: fold constants in the AST.

@@ -872,7 +872,12 @@ void dump_module(Module *module, FILE *out);
 void dump_ast(Module *prog);
 void dump_raw_tokens(Token *tok);
 void dump_tokens(Token *tok);
+
+//
+// opt_ast.c
+//
 void fold_ast(Module *prog);
+Node *fold_node(Node *node);
 
 //
 // unicode.c
@@ -896,7 +901,6 @@ void diag(char *level, Token *tok, const char *msg, ...) __attribute__((format(p
 void diag_exit(char *level, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 
 void *emalloc(size_t n);
-void freeall(void);
 void *vnew(size_t len, size_t esz);
 void *vgrow(void *data, size_t len);
 
