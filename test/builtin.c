@@ -44,6 +44,14 @@ int main() {
                __builtin_types_compatible_p(typeof(x.a), typeof(x.b));
            }));
 
+    ASSERT(1, __builtin_constant_p(5u));
+    ASSERT(1, __builtin_constant_p(3.5 + 6.f));
+
+    ASSERT(0, ({
+               int x;
+               __builtin_constant_p(x);
+           }));
+
     printf("OK\n");
     return 0;
 }

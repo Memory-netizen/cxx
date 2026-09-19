@@ -519,6 +519,13 @@ int main() {
 #endif
     ASSERT(9, x);
 
+#if !__has_builtin(__builtin_constant_p)
+    x = 9;
+#else
+    x = 5;
+#endif
+    ASSERT(5, x);
+
     printf("OK\n");
     return 0;
 }

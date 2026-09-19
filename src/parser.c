@@ -1032,6 +1032,11 @@ bool is_builtin_fn(uint32_t id) {
     return false;
 }
 
+static bool is_const_expr(Node *node) {
+    node = fold_node(node);
+    return node->kind == ND_NUM;
+}
+
 static Node *parse_builtin_fn(Token **rest, Token *tok) {
     Token *start = tok;
     if (tok->id == intern("__builtin_types_compatible_p", 28)) {
@@ -1041,6 +1046,12 @@ static Node *parse_builtin_fn(Token **rest, Token *tok) {
         Type *t2 = typename(&tok, tok);
         *rest = skip(tok, TK_RPAREN);
         return new_num(is_compatible(type_unqual(t1), type_unqual(t2)), start);
+    }
+    if (tok->id == intern("__builtin_constant_p", 20)) {
+        tok = skip(tok->next, TK_LPAREN);
+        Node *node = assign(&tok, tok);
+        *rest = skip(tok, TK_RPAREN);
+        return new_num(is_const_expr(node), start);
     }
     return NULL;
 }
