@@ -1013,6 +1013,38 @@ static uint32_t get_ident(Token *tok) {
     return tok->id;
 }
 
+bool is_builtin_fn(uint32_t id) {
+    static struct {
+        char *name;
+        uint32_t id;
+    } builtin_fn[] = {
+        {"__builtin_alloca", 0},
+        {"__builtin_alloca_with_align", 0},
+        {"__builtin_constant_p", 0},
+        {"__builtin_types_compatible_p", 0},
+    };
+    if (!builtin_fn[0].id) {
+        for (size_t i = 0; i < sizeof(builtin_fn) / sizeof(builtin_fn[0]); ++i)
+            builtin_fn[i].id = intern(builtin_fn[i].name, strlen(builtin_fn[i].name));
+    }
+    for (size_t i = 0; i < sizeof(builtin_fn) / sizeof(builtin_fn[0]); ++i)
+        if (id == builtin_fn[i].id) return true;
+    return false;
+}
+
+static Node *parse_builtin_fn(Token **rest, Token *tok) {
+    Token *start = tok;
+    if (tok->id == intern("__builtin_types_compatible_p", 28)) {
+        tok = skip(tok->next, TK_LPAREN);
+        Type *t1 = typename(&tok, tok);
+        tok = skip(tok, TK_COMMA);
+        Type *t2 = typename(&tok, tok);
+        *rest = skip(tok, TK_RPAREN);
+        return new_num(is_compatible(type_unqual(t1), type_unqual(t2)), start);
+    }
+    return NULL;
+}
+
 typedef struct {
     Type **generic_ty;
     Token **generic_tok;
@@ -1144,18 +1176,10 @@ static Node *primary(Token **rest, Token *tok) {
         return generic_selection(rest, tok);
     }
     if (tok->kind == TK_IDENT) {
-        Token *start = tok;
         // builtin_fnuction
-        static uint32_t ty_compatible = 0;
-        if (!ty_compatible)
-            ty_compatible = intern("__builtin_types_compatible_p", sizeof("__builtin_types_compatible_p") - 1);
-        if (tok->id == ty_compatible) {
-            tok = skip(tok->next, TK_LPAREN);
-            Type *t1 = typename(&tok, tok);
-            tok = skip(tok, TK_COMMA);
-            Type *t2 = typename(&tok, tok);
-            *rest = skip(tok, TK_RPAREN);
-            return new_num(is_compatible(type_unqual(t1), type_unqual(t2)), start);
+        if (is_builtin_fn(tok->id)) {
+            Node *node = parse_builtin_fn(rest, tok);
+            if (node) return node;
         }
         // Variable, function or enum constant
         NameSpace *sc = find_ident(tok, true, false);
@@ -1176,13 +1200,6 @@ static Node *primary(Token **rest, Token *tok) {
     }
     error(tok, "expected expression before ‘%.*s’", tok->len, tok->loc);
     return NULL;
-}
-
-bool is_builtin_fn(uint32_t id) {
-    if (id == intern("__builtin_alloca", 16)) return true;
-    if (id == intern("__builtin_alloca_with_align", 27)) return true;
-    if (id == intern("__builtin_types_compatible_p", 28)) return true;
-    return false;
 }
 
 static void check_builtin_fn(Node *node) {
