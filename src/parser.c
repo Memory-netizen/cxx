@@ -137,6 +137,7 @@ struct Scope {
     int vla_num;
     Node **vla_expr;
     Sym *stack_top;
+    bool sp_saved;
 };
 
 // Represents currently scope.
@@ -150,7 +151,18 @@ static void enter_scope(void) {
     scope = sc;
 }
 
-static void leave_scope(void) { scope = scope->next; }
+static Node *leave_scope(Token *tok) {
+    Node *node = NULL;
+    if (scope->sp_saved) {
+        node = new_var_node(scope->stack_top, tok);
+        add_type(node);
+        lvalue_convert(&node);
+        node = new_unary(ND_SP_RESTORE, node, tok);
+        node->ty = ty_void;
+    }
+    scope = scope->next;
+    return node;
+}
 
 static bool is_file_scope(void) { return scope == file_scope; }
 
@@ -312,6 +324,16 @@ static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
 
     if (!is_pointer(lhs->ty) || !is_integer(rhs->ty)) error(tok, "invalid operands to binary ‘+’");
 
+    // VLA + num
+    if (lhs->ty->base->kind == TY_VLA) {
+        Type *base_ty = lhs->ty->base;
+        while (base_ty->kind == TY_VLA) {
+            rhs = new_binary(ND_MUL, rhs, new_var_node(base_ty->vla_cnt, tok), tok);
+            base_ty = base_ty->base;
+        }
+        return new_binary(ND_PTRADD, lhs, rhs, tok);
+    }
+
     // ptr + num
     return new_binary(ND_PTRADD, lhs, rhs, tok);
 }
@@ -324,8 +346,7 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
     if (is_arith(lhs->ty) && is_arith(rhs->ty)) return new_binary(ND_SUB, lhs, rhs, tok);
 
     // ptr - num
-    if (is_pointer(lhs->ty) && is_integer(rhs->ty))
-        return new_binary(ND_PTRADD, lhs, new_unary(ND_NEG, rhs, rhs->tok), tok);
+    if (is_pointer(lhs->ty) && is_integer(rhs->ty)) return new_add(lhs, new_unary(ND_NEG, rhs, rhs->tok), tok);
 
     if (!is_pointer(lhs->ty) || !is_pointer(rhs->ty) ||
         !is_compatible(type_unqual(lhs->ty->base), type_unqual(rhs->ty->base)))
@@ -1216,6 +1237,24 @@ static Node *primary(Token **rest, Token *tok) {
     return NULL;
 }
 
+static Node *new_alloca_with_align(Node *size, int align, Type *base_ty, Token *tok) {
+    Node *node = new_node(ND_FUNCALL, tok);
+    Node *fn = new_var_node(builtin_alloca_with_align, tok);
+    add_type(fn);
+    new_imcast(&fn, pointer_to(fn->ty, 0));
+    lvalue_convert(&fn);
+    node->func = fn;
+
+    Type *ty = (fn->ty->kind == TY_FUNC) ? fn->ty : fn->ty->base;
+    node->base_ty = base_ty;
+    node->ty = ty->ret;
+
+    node->args = size;
+    node->args->next = new_ulong(align * 8, tok);
+    node->narg = 2;
+    return node;
+}
+
 static void check_builtin_fn(Node *node) {
     uint32_t id = node->func->lhs->var->id;
     if (node->func->kind != ND_IMCAST || !is_builtin_fn(id)) return;
@@ -1241,7 +1280,6 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
 
     Type *ty = (fn->ty->kind == TY_FUNC) ? fn->ty : fn->ty->base;
     Type *param_ty = ty->params;
-    node->func_ty = ty;
     node->ty = ty->ret;
 
     tok = tok->next;
@@ -1841,7 +1879,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
     Node dummy, *cur = &dummy;
     do {
         Token *start = tok;
-        int vla_num = scope->vla_num;
+        scope->vla_num = 0;
         Type *ty = declarator(&tok, tok, basety);
         Token *var_name = ty->name;
 
@@ -1909,9 +1947,36 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
                 cur = cur->next = new_unary(ND_EXPR_STMT, expr, tok);
             }
         }
-        for (int i = vla_num; i < scope->vla_num; i++) {
+        for (int i = 0; i < scope->vla_num; i++) {
             cur = cur->next = new_unary(ND_EXPR_STMT, scope->vla_expr[i], scope->vla_expr[i]->tok);
         }
+        if (var->ty->kind == TY_VLA) {
+            if (!scope->sp_saved) {
+                scope->sp_saved = true;
+                curm->has_vla = true;
+                Node *sp = new_var_node(scope->stack_top, tok);
+                add_type(sp);
+                Node *save = new_node(ND_SP_SAVE, tok);
+                save->ty = sp->ty;
+                Node *save_expr = new_binary(ND_AS, sp, save, tok);
+                save_expr->ty = pointer_to(ty_void, 0);
+                cur = cur->next = save_expr;
+            }
+            Node *size = scope->vla_expr[0];
+            for (int i = 1; i < scope->vla_num; i++) {
+                size = new_binary(ND_MUL, size, scope->vla_expr[i], tok);
+            }
+            Type *base_ty = var->ty;
+            while (base_ty->kind == TY_VLA) base_ty = base_ty->base;
+            add_type(size);
+            Node *alloc = new_alloca_with_align(size, var->align, base_ty, tok);
+            Node *vla_var = new_var_node(var, tok);
+            add_type(vla_var);
+            Node *expr = new_binary(ND_AS, vla_var, alloc, tok);
+            expr->ty = var->ty;
+            cur = cur->next = expr;
+        }
+        scope->vla_num = 0;
         if (var->ty->size < 0 && (var->ty->kind != TY_ARRAY && var->ty->kind != TY_VLA))
             error(var_name, "variable ‘%s’ has incomplete type", str(var_name->id));
     } while (match(&tok, tok, TK_COMMA));
@@ -1978,7 +2043,9 @@ static Node *if_stmt(Token **rest, Token *tok) {
     // Else
     if (tok->kind == TK_ELSE) node->els = stmt(&tok, tok->next);
     *rest = tok;
-    leave_scope();
+
+    Node *restore = leave_scope(tok);
+    if (restore) node = new_binary(ND_COMMA, node, restore, tok);
     return node;
 }
 
@@ -2000,11 +2067,11 @@ static Node *switch_stmt(Token **rest, Token *tok) {
     node->body = stmt(rest, tok);
 
     brk_depth--;
-    leave_scope();
     cur_sw = sw;
-
     node->case_next = reverse_list(Node, node->case_next, case_next);
 
+    Node *restore = leave_scope(tok);
+    if (restore) node = new_binary(ND_COMMA, node, restore, tok);
     return node;
 }
 
@@ -2027,7 +2094,8 @@ static Node *while_stmt(Token **rest, Token *tok) {
 
     cont_depth--;
     brk_depth--;
-    leave_scope();
+    Node *restore = leave_scope(tok);
+    if (restore) node = new_binary(ND_COMMA, node, restore, tok);
     return node;
 }
 
@@ -2049,7 +2117,8 @@ static Node *do_stmt(Token **rest, Token *tok) {
 
     cont_depth--;
     brk_depth--;
-    leave_scope();
+    Node *restore = leave_scope(tok);
+    if (restore) node = new_binary(ND_COMMA, node, restore, tok);
     return node;
 }
 
@@ -2084,7 +2153,8 @@ static Node *for_stmt(Token **rest, Token *tok) {
 
     cont_depth--;
     brk_depth--;
-    leave_scope();
+    Node *restore = leave_scope(tok);
+    if (restore) node = new_binary(ND_COMMA, node, restore, tok);
     return node;
 }
 
@@ -2358,9 +2428,19 @@ static Node *stmt(Token **rest, Token *tok) {
 // CompStmt ::= "{" BlkItem* "}"
 // BlkItem  ::= Decl | UnLabelStmt | Label
 static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
-    if (!is_func_body) enter_scope();
-    Node *node = new_node(ND_COMP_STMT, tok);
     Node dummy, *cur = &dummy;
+    Node *node = new_node(ND_COMP_STMT, tok);
+
+    if (!is_func_body) {
+        enter_scope();
+    } else {
+        Scope *scp = scope->next;
+        for (int i = 0; i < scp->vla_num; i++) {
+            cur = cur->next = new_unary(ND_EXPR_STMT, scp->vla_expr[i]->rhs, scp->vla_expr[i]->rhs->tok);
+            add_type(cur);
+        }
+        scp->vla_num = 0;
+    }
 
     tok = tok->next;
     while (tok->kind != TK_RBRACE) {
@@ -2411,11 +2491,15 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
         cur = cur->next = stmt(&tok, tok);
         add_type(cur);
     }
+
+    if (!is_func_body) {
+        Node *restore = leave_scope(tok);
+        if (restore) cur = cur->next = restore;
+    }
     cur->next = NULL;
     *rest = skip(tok, TK_RBRACE);
 
     node->body = dummy.next;
-    if (!is_func_body) leave_scope();
     return node;
 }
 
@@ -3098,8 +3182,6 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
         return func_type(ty);
     }
 
-    enter_scope();
-
     uint32_t nparam = 0;
     bool is_variadic = false;
     Type dummy = {}, *cur = &dummy;
@@ -3134,18 +3216,17 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
 
         if (paramty->size < 0)
             error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len, paramty->name->loc);
-        cur = cur->next = copy_type(paramty);
-        nparam++;
-        uint32_t id = intern("", 0);
-        if (cur->name) {
-            id = get_ident(cur->name);
-            NameSpace *ns = find_ident(cur->name, false, false);
-            if (ns) {
-                diag("error", cur->name, "redefinition of parameter ‘%s’", str(id));
-                diag_exit("note", ns->loc, "previous definition is here");
+        if (paramty->name) {
+            uint32_t id = get_ident(paramty->name);
+            for (Type *p = dummy.next; p && p->name; p = p->next) {
+                if (id == p->name->id) {
+                    diag("error", paramty->name, "redefinition of parameter ‘%s’", str(id));
+                    diag_exit("note", p->name, "previous definition is here");
+                }
             }
         }
-        push_namespace(id, SYM_VAR, ty, cur->name)->var = new_lvar(id, cur);
+        cur = cur->next = copy_type(paramty);
+        nparam++;
     }
 
     *rest = skip(tok, TK_RPAREN);
@@ -3155,7 +3236,6 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
     ty->params = dummy.next;
     ty->nparam = nparam;
 
-    leave_scope();
     return ty;
 }
 
@@ -3193,11 +3273,11 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
     tok = skip(tok, TK_RBRACKET);
     ty = decl_suffix(rest, tok, ty, is_param);
 
-    //
     if (!len) {
         ty = array_of(ty, -1);
     } else if (ty->kind == TY_VLA || !is_const_expr(len)) {
         ty = vla_of(ty, len);
+        if (!scope->stack_top) scope->stack_top = new_lvar(intern("", 0), pointer_to(ty_void, 0));
         ty->vla_cnt = new_lvar(intern("", 0), ty_ulong);
         ty->vla_len = len;
         Node *expr = new_binary(ND_AS, new_var_node(ty->vla_cnt, tok), len, tok);
@@ -3206,7 +3286,7 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
     } else {
         ty = array_of(ty, eval(len));
     }
-    //
+
     ty->qual = qual;
     ty->is_static = is_static;
     ty->is_star = is_star;
@@ -3378,7 +3458,12 @@ static Token *external_declaration(Token *tok) {
             var->labels = labels;
             resolve_goto_labels();
 
-            leave_scope();
+            Node *restore = leave_scope(tok);
+            if (restore) {
+                Node *stmt = var->body->body;
+                while (stmt->next) stmt = stmt->next;
+                stmt->next = restore;
+            }
             cur_fn = NULL;
             return tok;
         }
@@ -3493,7 +3578,7 @@ Module *parse(Token *tok) {
     declare_builtin_functions();
 
     while (tok->kind != TK_EOF) tok = external_declaration(tok);
-    leave_scope();
+    leave_scope(tok);
 
     for (Sym *sym = globals; sym;) {
         Sym *next = sym->next;

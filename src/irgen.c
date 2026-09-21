@@ -88,8 +88,9 @@ static Ref gen_builtin_fn(Node *node) {
     if (node->func->lhs->var->id == intern("__builtin_alloca_with_align", 27)) {
         Ref size = gen_expr(node->args);
         int align = node->args->next->val;
-        Ref dst = TMP(tmp_id++, pointer_to(ty_char, 0));
-        new_ins(IR_ALLOCA, dst, (Ref[]){size, INT(align)}, 2);
+        Type *base_ty = node->base_ty ?: ty_char;
+        Ref dst = TMP(tmp_id++, pointer_to(base_ty, 0));
+        new_ins(IR_ALLOCA, dst, (Ref[]){size, INT(align / 8)}, 2);
         return dst;
     }
     return R;
@@ -128,6 +129,10 @@ static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
     }
 
     if (target_ty->kind == TY_VOID) return val;
+    if (src_ty->kind == TY_VLA && is_pointer(target_ty)) {
+        val.ty = target_ty;
+        return val;
+    }
     if (target_ty->size == src_ty->size) {
         val.ty = target_ty;
         return val;
@@ -214,6 +219,8 @@ static Ref load(Ref addr, Type *type, int align, Member *mem) {
         Ref shr = TMP(tmp_id++, ty);
         new_ins(IR_SHR, shr, (Ref[]){shl, INT(ty->size * 8 - mem->bit_width)}, 2);
         return cast(shr, ty, type);
+    } else if (type->kind == TY_VLA) {
+        return addr;
     } else {
         Ref dst = TMP(tmp_id++, type);
         new_ins(IR_LORD, dst, (Ref[]){addr, INT(align)}, 2);
@@ -268,6 +275,14 @@ static Ref gen_expr(Node *node) {
     if (!node) return R;
     Ref dst;
     switch (node->kind) {
+        case ND_SP_SAVE:
+            dst = TMP(tmp_id++, node->ty);
+            new_ins(IR_SP_SAVE, dst, NULL, 0);
+            return dst;
+        case ND_SP_RESTORE:
+            dst = gen_expr(node->lhs);
+            new_ins(IR_SP_RESTORE, R, (Ref[]){dst}, 1);
+            return R;
         case ND_NOP:
             return R;
         case ND_NULLPTR:
@@ -285,7 +300,10 @@ static Ref gen_expr(Node *node) {
             dst.ty = node->ty;
             return dst;
         case ND_STMT_EXPR:
-            for (Node *n = node->body; n; n = n->next) dst = gen_stmt(n);
+            for (Node *n = node->body; n; n = n->next) {
+                Ref tmp = gen_stmt(n);
+                if (n->kind != ND_SP_RESTORE) dst = tmp;
+            }
             return dst;
         case ND_LABEL_VAL:
             dst.type = RLabel;
@@ -328,7 +346,11 @@ static Ref gen_expr(Node *node) {
             }
 
             Ref dst = gen_expr(node->rhs);
-            store(dst, addr, align, node->lhs->member);
+            if (node->ty->kind == TY_VLA) {
+                node->lhs->var->vreg = dst.val;
+            } else {
+                store(dst, addr, align, node->lhs->member);
+            }
             return dst;
         }
         case ND_PREINC:
@@ -455,10 +477,20 @@ static Ref gen_expr(Node *node) {
     if (node->kind == ND_COMMA) return rr;
 
     switch (node->kind) {
-        case ND_PTRADD:
-            dst = TMP(tmp_id++, node->ty);
+        case ND_PTRADD: {
+            Type *ty;
+            if (node->ty->base->kind == TY_VLA) {
+                ty = node->ty->base;
+                while (ty->kind == TY_VLA) ty = ty->base;
+                ty = pointer_to(ty, 0);
+                lr.ty = ty;
+            } else {
+                ty = node->ty;
+            }
+            dst = TMP(tmp_id++, ty);
             new_ins(IR_GEP, dst, (Ref[]){lr, rr}, 2);
             return dst;
+        }
         // binary and bit arithmetic operation
         case ND_ADD:
         case ND_SUB:

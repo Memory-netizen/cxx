@@ -680,7 +680,7 @@ void add_type(Node *node) {
         case ND_STMT_EXPR:
             if (node->body) {
                 Node *stmt = node->body;
-                while (stmt->next) stmt = stmt->next;
+                while (stmt->next && stmt->next->kind != ND_SP_RESTORE) stmt = stmt->next;
                 if (stmt->kind == ND_EXPR_STMT && stmt->lhs) node->ty = stmt->lhs->ty;
             }
             break;
@@ -720,7 +720,7 @@ void add_type(Node *node) {
             break;
         case ND_DECL:
         case ND_COMP_STMT: {
-            Type *ty;
+            Type *ty = NULL;
             for (Node *n = node->body; n; n = n->next) {
                 add_type(n);
                 ty = n->ty;
@@ -739,6 +739,8 @@ void add_type(Node *node) {
         case ND_CONTINUE:
         case ND_PTRAS:
         case ND_FUNCALL:
+        case ND_SP_SAVE:
+        case ND_SP_RESTORE:
             // Nothing to do
             break;
     }

@@ -454,6 +454,8 @@ Node *fold_node(Node *node) {
         case ND_GOTO:
         case ND_BREAK:
         case ND_CONTINUE:
+        case ND_SP_SAVE:
+        case ND_SP_RESTORE:
             break;
     }
     return node;

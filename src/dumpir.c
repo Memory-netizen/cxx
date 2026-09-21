@@ -266,6 +266,14 @@ void dump_blk(Blk *b) {
                 }
                 fprintf(out_file, ")\n");
                 break;
+            case IR_SP_SAVE:
+                fprintf(out_file, "call ptr @llvm.stacksave.p0()\n");
+                break;
+            case IR_SP_RESTORE:
+                fprintf(out_file, "call void @llvm.stackrestore.p0(ptr ");
+                print_operand(ir->args[0]);
+                fprintf(out_file, ")\n");
+                break;
             // conversion
             case IR_EXT:
             case IR_TRUNC:
@@ -627,7 +635,12 @@ void dump_module(Module *md, FILE *out) {
     fprintf(out_file, "; ModuleID = '%s'\nsource_filename = \"%s\"\n\n", files[0]->name, files[0]->name);
     fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
     fprintf(out_file, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n");
-    fprintf(out_file, "declare ptr @llvm.threadlocal.address.p0(ptr)\n\n");
+    fprintf(out_file, "declare ptr @llvm.threadlocal.address.p0(ptr)\n");
+    if (curm->has_vla) {
+        fprintf(out_file, "declare ptr @llvm.stacksave.p0()\n");
+        fprintf(out_file, "declare void @llvm.stackrestore.p0(ptr)\n");
+    }
+    fprintf(out_file, "\n");
 
     for (Type *ty = md->tys; ty; ty = ty->next) dump_type(ty);
     if (md->tys) fprintf(out_file, "\n");

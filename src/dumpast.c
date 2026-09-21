@@ -467,6 +467,12 @@ static void dump_node(Node *node) {
             dump_node_list(node->body);
             depth--;
             break;
+        case ND_SP_SAVE:
+            fprintf(stdout, "stack save\n");
+            break;
+        case ND_SP_RESTORE:
+            fprintf(stdout, "stack restore\n");
+            break;
     }
 }
 

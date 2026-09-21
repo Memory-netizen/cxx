@@ -428,6 +428,8 @@ typedef enum {
     ND_VAR,      // Variable
     ND_NUM,      // Int
     ND_NULLPTR,  // nullptr
+    ND_SP_SAVE,
+    ND_SP_RESTORE,
 } NodeKind;
 
 // AST node type
@@ -466,9 +468,9 @@ struct Node {
         struct {
             // Function call
             Node *func;
-            Type *func_ty;
             Node *args;
             uint32_t narg;
+            Type *base_ty;
         };
         struct {
             uint32_t label;
@@ -703,6 +705,8 @@ typedef enum {
     IR_MEMMOV,
     IR_MEMSET,
     IR_TLSADDR,
+    IR_SP_SAVE,
+    IR_SP_RESTORE,
 
     // Conversion
     IR_EXT,
@@ -873,6 +877,7 @@ struct Module {
     Type *tys;
     Con *con;
     int ncon;
+    bool has_vla;
 };
 
 Module *irgen(Module *node);
