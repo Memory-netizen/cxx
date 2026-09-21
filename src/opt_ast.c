@@ -6,6 +6,11 @@ static bool is_int_const(Node *node) { return node && node->kind == ND_NUM && is
 // Returns true if node is a floating-point constant.
 static bool is_float_const(Node *node) { return node && node->kind == ND_NUM && is_flonum(node->ty); }
 
+// Returns true if node is a pointer constant.
+static bool is_ptr_const(Node *node) {
+    return node && node->kind == ND_EXCAST && is_pointer(node->ty) && is_int_const(node->lhs);
+}
+
 static Node *new_lognot(Node *tmpl) {
     Node *node = emalloc(sizeof(Node));
     node->kind = ND_NOT;
@@ -98,8 +103,10 @@ static Node *fold_binary(Node *node) {
             if (r >= width || r < 0) return NULL;
             // Don't fold signed right shift — the result of >> on
             // negative values is platform-dependent (arithmetic vs logical).
-            if (!unsig) return NULL;
-            return folded_int((int64_t)(ul >> r), lhs->ty, node);
+            if (!unsig)
+                return folded_int((l >> r), lhs->ty, node);
+            else
+                return folded_int((int64_t)(ul >> r), lhs->ty, node);
         case ND_EQ:
             return folded_int(l == r, ty_int, node);
         case ND_NE:
@@ -239,6 +246,13 @@ static Node *fold_cast(Node *node) {
     // float → float cast: (float)3.14159, (double)1.0f
     if (is_float_const(lhs) && is_flonum(node->ty)) return folded_float(lhs->fval, node->ty, node);
 
+    if (is_integer(node->ty)) {
+        if (lhs->kind == ND_EXCAST || lhs->kind == ND_IMCAST) {
+            if (is_pointer(lhs->ty) && is_integer(lhs->lhs->ty)) {
+                if (is_int_const(lhs->lhs)) return folded_int(lhs->lhs->val, node->ty, node);
+            }
+        }
+    }
     return NULL;
 }
 
@@ -278,6 +292,15 @@ static Node *fold_bool(Node *node) {
     return folded_int(lhs->val != 0, ty_bool, node);
 }
 
+static Node *fold_ptradd(Node *node) {
+    Node *lhs = node->lhs;
+    if (!is_ptr_const(lhs)) return NULL;
+    Node *rhs = node->rhs;
+    if (!is_int_const(rhs)) return NULL;
+    lhs->lhs->val += rhs->val * node->ty->base->size;
+    return lhs->lhs;
+}
+
 // Recursively fold an AST subtree. Returns the folded node
 // (which may be the original or a replacement).
 Node *fold_node(Node *node) {
@@ -300,11 +323,13 @@ Node *fold_node(Node *node) {
         case ND_NE:
         case ND_LT:
         case ND_LE:
-        case ND_PTRADD:
             node->lhs = fold_node(node->lhs);
             node->rhs = fold_node(node->rhs);
             return fold_binary(node) ?: fold_binary_float(node) ?: node;
-
+        case ND_PTRADD:
+            node->lhs = fold_node(node->lhs);
+            node->rhs = fold_node(node->rhs);
+            return fold_ptradd(node) ?: node;
         // Unary arithmetic
         case ND_PLUS:
         case ND_NEG:
@@ -343,6 +368,7 @@ Node *fold_node(Node *node) {
         case ND_COMMA:
             node->lhs = fold_node(node->lhs);
             node->rhs = fold_node(node->rhs);
+            if (is_int_const(node->lhs) || is_float_const(node->lhs)) return node->rhs;
             return node;
 
         // Statements: fold sub-expressions

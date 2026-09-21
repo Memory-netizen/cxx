@@ -1035,8 +1035,10 @@ Module *irgen(Module *md) {
         // Entry
         if (is_valid) new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(ty, 0)), (Ref[]){INT(ty->align)}, 1);
 
-        for (Sym *var = fn->locals; var; var = var->next)
+        for (Sym *var = fn->locals; var; var = var->next) {
+            if (var->ty->kind == TY_VLA) continue;
             new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty, 0)), (Ref[]){INT(var->align)}, 1);
+        }
 
         // The C spec defines a special rule for the main function.
         //  Reaching the end of the main function is equivalent to returning 0,

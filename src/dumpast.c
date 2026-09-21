@@ -160,6 +160,7 @@ static void print_type(Type *ty) {
             }
             break;
         }
+        case TY_VLA:
         case TY_ARRAY:
             print_type(ty->base);
             fprintf(stdout, "[%d]", ty->len);

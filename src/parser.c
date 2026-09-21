@@ -13,6 +13,7 @@
     })
 
 static Module *curm;
+static Sym *builtin_alloca_with_align;
 
 static const SClass sc_table[] = {
     [TK_EXTERN] = SC_EXTERN,   [TK_REGISTER] = SC_REG, [TK_STATIC] = SC_STATIC,       [TK_THREAD] = SC_THREAD,
@@ -133,6 +134,9 @@ struct Scope {
     // the other is for variables/function/enumerator/typedefs
     NameSpace *vars;
     TagNameSpace *tags;
+    int vla_num;
+    Node **vla_expr;
+    Sym *stack_top;
 };
 
 // Represents currently scope.
@@ -141,8 +145,7 @@ static Scope *file_scope;
 
 static void enter_scope(void) {
     Scope *sc = emalloc(sizeof(Scope));
-    sc->vars = NULL;
-    sc->tags = NULL;
+    sc->vla_expr = vnew(2, sizeof(Node *));
     sc->next = scope;
     scope = sc;
 }
@@ -1091,7 +1094,7 @@ static Node *generic_selection(Token **rest, Token *tok) {
 
     if (t1->kind == TY_FUNC)
         t1 = pointer_to(t1, 0);
-    else if (t1->kind == TY_ARRAY)
+    else if (t1->kind == TY_ARRAY || t1->kind == TY_VLA)
         t1 = pointer_to(t1->base, 0);
 
     Generic_s dummy, *gen = &dummy;
@@ -1338,6 +1341,7 @@ static Node *postfix(Token **rest, Token *tok) {
     while (1) {
         add_type(node);
         if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base, 0));
+        if (node->ty->kind == TY_VLA) new_imcast(&node, pointer_to(node->ty->base, 0));
         if (node->ty->kind == TY_FUNC) new_imcast(&node, pointer_to(node->ty, 0));
         switch (tok->kind) {
             case TK_LPAREN:
@@ -1422,6 +1426,7 @@ static Node *unary(Token **rest, Token *tok) {
             Node *node = cast(rest, tok->next);
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_VLA) node = node->lhs;
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_FUNC) node = node->lhs;
             return new_unary(ND_ADDR, node, tok);
         }
@@ -1429,6 +1434,7 @@ static Node *unary(Token **rest, Token *tok) {
             Node *node = new_unary(ND_DEREF, cast(rest, tok->next), tok);
             add_type(node);
             if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base, 0));
+            if (node->ty->kind == TY_VLA) new_imcast(&node, pointer_to(node->ty->base, 0));
             if (node->ty->kind == TY_FUNC) new_imcast(&node, pointer_to(node->ty, 0));
             return node;
         }
@@ -1436,50 +1442,48 @@ static Node *unary(Token **rest, Token *tok) {
             return new_unary(ND_PREINC, unary(rest, tok->next), tok);
         case TK_DEC:
             return new_unary(ND_PREDEC, unary(rest, tok->next), tok);
+        case TK_ALIGNOF:
+        case TK_COUNTOF:
         case TK_SIZEOF: {
             Token *start = tok;
+            Type *ty;
             if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, true)) {
-                Type *ty = typename(&tok, tok->next->next);
+                ty = typename(&tok, tok->next->next);
                 *rest = skip(tok, TK_RPAREN);
-                if (ty->size < 0) error(start, "invalid application of ‘sizeof’ to incomplete type");
-                return new_ulong(ty->size, start);
+            } else {
+                Node *node = unary(rest, tok->next);
+                add_type(node);
+                if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY)
+                    node = node->lhs;
+                else if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_VLA)
+                    node = node->lhs;
+                else if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_FUNC)
+                    node = node->lhs;
+                ty = node->ty;
             }
-            Node *node = unary(rest, tok->next);
-            add_type(node);
-            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
-            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_FUNC) node = node->lhs;
-            if (node->ty->size < 0) error(start, "invalid application of ‘sizeof’ to incomplete type");
-            return new_ulong(node->ty->size, tok);
-        }
-        case TK_ALIGNOF: {
-            Token *start = tok;
-            if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, true)) {
-                Type *ty = typename(&tok, tok->next->next);
-                *rest = skip(tok, TK_RPAREN);
-                return new_ulong(ty->align, start);
+            if (ty->size < 0 && (ty->kind != TY_ARRAY && ty->kind != TY_VLA)) {
+                error(start, "invalid application of ‘%*.s’ to incomplete type", start->len, start->loc);
             }
-            Node *node = unary(rest, tok->next);
-            add_type(node);
-            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
-            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_FUNC) node = node->lhs;
-            if (node->ty->size < 0) error(start, "invalid application of ‘alignof’ to incomplete type");
-            return new_ulong(node->ty->align, tok);
-        }
-        case TK_COUNTOF: {
-            Token *start = tok;
-            if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, true)) {
-                Type *ty = typename(&tok, tok->next->next);
-                if (ty->kind != TY_ARRAY) error(start, "‘_Countof’ requires an argument of array type");
+            if (start->kind == TK_ALIGNOF) return new_ulong(ty->align, start);
+            if (start->kind == TK_COUNTOF) {
+                if (ty->kind != TY_ARRAY && ty->kind != TY_VLA)
+                    error(start, "‘_Countof’ requires an argument of array type");
+                if (ty->kind == TY_VLA) return new_var_node(ty->vla_cnt, start);
                 if (ty->size < 0) error(start, "invalid application of ‘_Countof’ to incomplete type");
-                *rest = skip(tok, TK_RPAREN);
                 return new_ulong(ty->len, start);
             }
-            Node *node = unary(rest, tok->next);
-            add_type(node);
-            if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
-            if (node->ty->kind != TY_ARRAY) error(start, "‘_Countof’ requires an argument of array type");
-            if (node->ty->size < 0) error(start, "invalid application of ‘_Countof’ to incomplete type");
-            return new_ulong(node->ty->len, tok);
+            if (ty->kind == TY_VLA) {
+                Node *vla_len = new_var_node(ty->vla_cnt, start);
+                Type *base_ty = ty->base;
+                while (base_ty->kind == TY_VLA) {
+                    vla_len = new_binary(ND_MUL, vla_len, new_var_node(base_ty->vla_cnt, start), start);
+                    base_ty = base_ty->base;
+                }
+                Node *base_sz = new_ulong(base_ty->size, start);
+                return new_binary(ND_MUL, vla_len, base_sz, start);
+            }
+            if (ty->size < 0) error(start, "invalid application of ‘sizeof’ to incomplete type");
+            return new_ulong(ty->size, start);
         }
         // [GNU] labels-as-values
         case TK_AND: {
@@ -1695,6 +1699,7 @@ static int64_t eval2(Node *node, uint32_t *sym) {
         case ND_INVERT:
             return ~eval(node->lhs);
         case ND_COMMA:
+            eval(node->lhs);
             return eval2(node->rhs, sym);
         case ND_ADD:
             return eval(node->lhs) + eval(node->rhs);
@@ -1756,7 +1761,7 @@ static int64_t eval2(Node *node, uint32_t *sym) {
             return eval_rval(node->lhs, sym) + node->member->offset;
         case ND_VAR:
             if (!sym) error(node->tok, "not a compile-time constant");
-            if (node->var->ty->kind != TY_ARRAY && node->var->ty->kind != TY_FUNC)
+            if (node->var->ty->kind != TY_ARRAY && node->var->ty->kind != TY_VLA && node->var->ty->kind != TY_FUNC)
                 error(node->tok, "invalid initializer");
             *sym = node->var->id;
             return 0;
@@ -1836,6 +1841,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
     Node dummy, *cur = &dummy;
     do {
         Token *start = tok;
+        int vla_num = scope->vla_num;
         Type *ty = declarator(&tok, tok, basety);
         Token *var_name = ty->name;
 
@@ -1903,7 +1909,11 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
                 cur = cur->next = new_unary(ND_EXPR_STMT, expr, tok);
             }
         }
-        if (var->ty->size < 0) error(var_name, "variable ‘%s’ has incomplete type", str(var_name->id));
+        for (int i = vla_num; i < scope->vla_num; i++) {
+            cur = cur->next = new_unary(ND_EXPR_STMT, scope->vla_expr[i], scope->vla_expr[i]->tok);
+        }
+        if (var->ty->size < 0 && (var->ty->kind != TY_ARRAY && var->ty->kind != TY_VLA))
+            error(var_name, "variable ‘%s’ has incomplete type", str(var_name->id));
     } while (match(&tok, tok, TK_COMMA));
 
     *rest = tok;
@@ -2803,6 +2813,7 @@ static Type *typeof_specifier(Token **rest, Token *tok, bool is_unqual) {
         Node *node = expr(&tok, tok);
         add_type(node);
         if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
+        if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_VLA) node = node->lhs;
         if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_FUNC) node = node->lhs;
         if (node->kind == ND_MEMBER && node->member->is_bitfield)
             error(node->tok, "invalid application of 'typeof' to bit-field ‘%s’", str(node->member->name->id));
@@ -3108,7 +3119,7 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
         // "array of T" is converted to "pointer to T" in the parameter
         // context. For example, *argv[] is converted to **argv by this.
 
-        if (paramty->kind == TY_ARRAY) {
+        if (paramty->kind == TY_ARRAY || paramty->kind == TY_VLA) {
             Type *arr = paramty;
             paramty = pointer_to(paramty->base, paramty->qual);
             paramty->name = arr->name;
@@ -3153,7 +3164,7 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
 //           | "[" TypeQual+ "static" AsExp "]"
 //           | "[" TypeQual* "*" "]"
 static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param) {
-    int sz = -1;
+    Node *len = NULL;
     bool is_star = false;
     tok = skip(tok, TK_LBRACKET);
 
@@ -3170,19 +3181,32 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
     if (!is_param && qual) error(tmp, "type qualifier used in array declarator outside of function prototype");
 
     if (is_static) {
-        sz = const_expr(&tok, tok);
+        len = assign(&tok, tok);
     } else if (tok->kind == TK_STAR && tok->next->kind == TK_RBRACKET) {
         if (!is_param) error(tok, "[*] used outside of function prototype");
         is_star = true;
         tok = tok->next;
     } else if (tok->kind != TK_RBRACKET) {
-        sz = const_expr(&tok, tok);
+        len = assign(&tok, tok);
     }
 
     tok = skip(tok, TK_RBRACKET);
     ty = decl_suffix(rest, tok, ty, is_param);
 
-    ty = array_of(ty, sz);
+    //
+    if (!len) {
+        ty = array_of(ty, -1);
+    } else if (ty->kind == TY_VLA || !is_const_expr(len)) {
+        ty = vla_of(ty, len);
+        ty->vla_cnt = new_lvar(intern("", 0), ty_ulong);
+        ty->vla_len = len;
+        Node *expr = new_binary(ND_AS, new_var_node(ty->vla_cnt, tok), len, tok);
+        scope->vla_expr = vgrow(scope->vla_expr, scope->vla_num + 1);
+        scope->vla_expr[scope->vla_num++] = expr;
+    } else {
+        ty = array_of(ty, eval(len));
+    }
+    //
     ty->qual = qual;
     ty->is_static = is_static;
     ty->is_star = is_star;
@@ -3199,7 +3223,8 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty, bool is_param) {
         ty = array_dimensions(&tok, tok, ty, is_param);
 
     // int arr[]()
-    if (ty->kind == TY_ARRAY && ty->base->kind == TY_FUNC) error(tok, "declaration as array of functions");
+    if ((ty->kind == TY_ARRAY || ty->kind == TY_VLA) && ty->base->kind == TY_FUNC)
+        error(tok, "declaration as array of functions");
     // void foo()[]
     if (tok->kind == TK_LBRACKET) error(tok, "function cannot return array type");
     // void foo()()
@@ -3416,7 +3441,7 @@ static Token *external_declaration(Token *tok) {
                 var->is_defined = true;
             }
             var->funcspec |= funcspec;
-            if (var->ty->size < 0 && var->ty->kind != TY_ARRAY)
+            if (var->ty->size < 0 && (var->ty->kind != TY_ARRAY && var->ty->kind != TY_VLA))
                 error(var_name, "variable ‘%s’ has incomplete type", str(var_name->id));
         }
         if (match(&tok, tok, TK_COMMA))
@@ -3430,13 +3455,14 @@ static Token *external_declaration(Token *tok) {
     }
 }
 
-static void declare_builtin_function(uint32_t id, Type *ty) {
+static Sym *declare_builtin_function(uint32_t id, Type *ty) {
     Sym *builtin = new_gvar(id, ty);
     builtin->is_function = true;
     builtin->is_defined = false;
     NameSpace *ns = push_namespace(id, SYM_FUNC, ty, NULL);
     ns->var = builtin;
     ns->lnk = LK_EXTERN;
+    return builtin;
 }
 
 static void declare_builtin_functions(void) {
@@ -3449,7 +3475,7 @@ static void declare_builtin_functions(void) {
     ty->params = copy_type(ty_ulong);
     ty->params->next = copy_type(ty_ulong);
     id = intern("__builtin_alloca_with_align", 27);
-    declare_builtin_function(id, ty);
+    builtin_alloca_with_align = declare_builtin_function(id, ty);
 }
 
 // TransUnit ::= ExDecl+

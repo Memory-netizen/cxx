@@ -554,6 +554,7 @@ typedef enum {
     TY_ENUM,
     TY_PTR,
     TY_FUNC,
+    TY_VLA,
     TY_ARRAY,
     TY_STRUCT,
     TY_UNION,
@@ -580,6 +581,11 @@ struct Type {
             int len;
             bool is_static;
             bool is_star;
+        };
+        struct {
+            // Variable-length array
+            Node *vla_len;  // # of elements
+            Sym *vla_cnt;   // _Countof() value
         };
         struct {
             // Function
@@ -641,12 +647,14 @@ bool is_nullptr(Type *ty);
 bool is_null_constant(Node *node);
 bool is_scalar(Type *ty);
 bool is_record(Type *ty);
+bool is_array(Type *ty);
 bool is_funcptr(Type *ty);
 bool is_compatible(Type *t1, Type *t2);
 void check_asop(Type *dst, Node *src, int ctx);
 Type *pointer_to(Type *base, uint32_t qual);
 Type *func_type(Type *return_ty);
 Type *array_of(Type *base, int size);
+Type *vla_of(Type *base, Node *expr);
 Type *struct_type(bool is_union);
 Type *enum_type(void);
 Type *copy_type(Type *ty);
