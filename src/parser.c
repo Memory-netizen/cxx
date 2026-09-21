@@ -1485,9 +1485,12 @@ static Node *unary(Token **rest, Token *tok) {
         case TK_SIZEOF: {
             Token *start = tok;
             Type *ty;
+            bool tyname = false;
             if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, true)) {
+                scope->vla_num = 0;
                 ty = typename(&tok, tok->next->next);
                 *rest = skip(tok, TK_RPAREN);
+                tyname = true;
             } else {
                 Node *node = unary(rest, tok->next);
                 add_type(node);
@@ -1503,10 +1506,20 @@ static Node *unary(Token **rest, Token *tok) {
                 error(start, "invalid application of ‘%*.s’ to incomplete type", start->len, start->loc);
             }
             if (start->kind == TK_ALIGNOF) return new_ulong(ty->align, start);
+            Node *size = NULL;
+            if (tyname) {
+                size = new_node(ND_NOP, tok);
+                for (int i = 0; i < scope->vla_num; i++) {
+                    size = new_binary(ND_COMMA, size, scope->vla_expr[i], tok);
+                }
+            }
+            scope->vla_num = 0;
             if (start->kind == TK_COUNTOF) {
                 if (ty->kind != TY_ARRAY && ty->kind != TY_VLA)
                     error(start, "‘_Countof’ requires an argument of array type");
-                if (ty->kind == TY_VLA) return new_var_node(ty->vla_cnt, start);
+                if (ty->kind == TY_VLA) {
+                    return new_binary(ND_COMMA, size, new_var_node(ty->vla_cnt, start), start);
+                }
                 if (ty->size < 0) error(start, "invalid application of ‘_Countof’ to incomplete type");
                 return new_ulong(ty->len, start);
             }
@@ -1518,7 +1531,7 @@ static Node *unary(Token **rest, Token *tok) {
                     base_ty = base_ty->base;
                 }
                 Node *base_sz = new_ulong(base_ty->size, start);
-                return new_binary(ND_MUL, vla_len, base_sz, start);
+                return new_binary(ND_COMMA, size, new_binary(ND_MUL, vla_len, base_sz, start), start);
             }
             if (ty->size < 0) error(start, "invalid application of ‘sizeof’ to incomplete type");
             return new_ulong(ty->size, start);
