@@ -1475,7 +1475,6 @@ static char built_in[] = {
     "#define __STDC_NO_ATOMICS__ 1\n"
     "#define __STDC_NO_COMPLEX__ 1\n"
     "#define __STDC_NO_THREADS__ 1\n"
-    "#define __STDC_NO_VLA__ 1\n"
     "#define __STDC_UTF_16__ 1\n"
     "#define __STDC_UTF_32__ 1\n"
     "#define __STDC_VERSION__ 201112L\n"
