@@ -1366,6 +1366,12 @@ static Token *counter_macro(Token **rest, Token *tmpl) {
     return ident_to_num(tmpl, i++);
 }
 
+// __INCLUDE_LEVEL__ is expanded to serial values include depth.
+static Token *include_depth_macro(Token **rest, Token *tmpl) {
+    *rest = tmpl->next;
+    return ident_to_num(tmpl, include_depth);
+}
+
 // __TIMESTAMP__ is expanded to a string describing the last
 // modification time of the current file. E.g.
 // "Fri Jul 24 01:32:50 2020"
@@ -1525,6 +1531,7 @@ void init_macros(void) {
     add_builtin("__COUNTER__", counter_macro);
     add_builtin("__TIMESTAMP__", timestamp_macro);
     add_builtin("__BASE_FILE__", base_file_macro);
+    add_builtin("__INCLUDE_LEVEL__", include_depth_macro);
 
     add_builtin("__DATE__", date_macro);
     add_builtin("__TIME__", time_macro);
