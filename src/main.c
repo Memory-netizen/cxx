@@ -1,4 +1,16 @@
+#include "config.h"
 #include "cxx.h"
+
+Target T;
+extern Target T_amd64;
+extern Target T_arm64;
+extern Target T_rv64;
+extern Target T_rv32;
+extern Target T_rv32b;
+
+static Target *tlist[] = {
+    &T_amd64, &T_arm64, &T_rv64, &T_rv32, &T_rv32b, 0,
+};
 
 typedef enum {
     FILE_NONE,
@@ -64,7 +76,7 @@ static void usage(int status) {
 
 static bool take_arg(char *arg) {
     char *x[] = {
-        "-o", "-I", "-include", "-x", "-idirafter", "-MF", "-MT", "-MQ", "-Xlinker",
+        "-o", "-I", "-include", "-x", "-idirafter", "-MF", "-MT", "-MQ", "-Xlinker", "-target",
     };
     for (size_t i = 0; i < sizeof(x) / sizeof(*x); i++)
         if (!strcmp(arg, x[i])) return true;
@@ -326,6 +338,21 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-fno-common")) {
             opt_fcommon = false;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-target")) {
+            char *t_name = argv[++i];
+            for (Target **t = tlist;; t++) {
+                if (!*t) {
+                    fprintf(stderr, "unknown target '%s'\n", t_name);
+                    exit(1);
+                }
+                if (strcmp(t_name, (*t)->name) == 0) {
+                    T = **t;
+                    break;
+                }
+            }
             continue;
         }
 
@@ -634,6 +661,8 @@ static FileType get_file_type(char *filename) {
 
 int main(int argc, char **argv) {
     atexit(cleanup);
+    T = Deftgt;
+
     input_paths = emalloc(argc * sizeof(char *));
     tmpfiles = emalloc(argc * 4 * sizeof(char *));
     include_paths = emalloc((argc + 16) * sizeof(char *));

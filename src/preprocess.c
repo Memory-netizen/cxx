@@ -1462,49 +1462,8 @@ static void write_scratch_space(Token *tok, char *str) {
     space_pos += len + 1;
 }
 
-static char built_in[] = {
-    "#define _LP64 1\n"
-    "#define __C99_MACRO_WITH_VA_ARGS 1\n"
-    "#define __ELF__ 1\n"
-    "#define __LP64__ 1\n"
-    "#define __SIZEOF_DOUBLE__ 8\n"
-    "#define __SIZEOF_FLOAT__ 4\n"
-    "#define __SIZEOF_INT__ 4\n"
-    "#define __SIZEOF_LONG_DOUBLE__ 8\n"
-    "#define __SIZEOF_LONG_LONG__ 8\n"
-    "#define __SIZEOF_POINTER__ 8\n"
-    "#define __SIZEOF_PTRDIFF_T__ 8\n"
-    "#define __SIZEOF_SHORT__ 2\n"
-    "#define __SIZEOF_SIZE_T__ 8\n"
-    "#define __SIZE_TYPE__ unsigned long\n"
-    "#define __STDC_HOSTED__ 1\n"
-    "#define __STDC_NO_ATOMICS__ 1\n"
-    "#define __STDC_NO_COMPLEX__ 1\n"
-    "#define __STDC_NO_THREADS__ 1\n"
-    "#define __STDC_UTF_16__ 1\n"
-    "#define __STDC_UTF_32__ 1\n"
-    "#define __STDC_VERSION__ 201112L\n"
-    "#define __STDC__ 1\n"
-    "#define __USER_LABEL_PREFIX__\n"
-    "#define __alignof__ _Alignof\n"
-    "#define __cxx__ 1\n"
-    "#define __const__ const\n"
-    "#define __gnu_linux__ 1\n"
-    "#define __has_include __has_include\n"
-    "#define __inline__ inline\n"
-    "#define __linux 1\n"
-    "#define __linux__ 1\n"
-    "#define __signed__ signed\n"
-    "#define __typeof__ typeof\n"
-    "#define __unix 1\n"
-    "#define __unix__ 1\n"
-    "#define __volatile__ volatile\n"
-    "#define linux 1\n"
-    "#define unix 1\n",
-};
-
 static void prep_builtin(void) {
-    SrcFile *pred_marcos = new_file("<bulit-in>", 1, built_in);
+    SrcFile *pred_marcos = new_file("<bulit-in>", 1, T.predef);
     Token *tok = tokenize(pred_marcos);
     tok = filter_tokens(tok);
     preprocess2(tok);

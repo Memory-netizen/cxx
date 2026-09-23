@@ -58,7 +58,10 @@ dkms.conf
 src/width_property.h
 src/xid_property.h
 src/pow_table.h
+src/config.h
+compile_commands.json
 
+*cache
 test.*
 cxx
 *.txt

@@ -54,6 +54,14 @@ typedef struct Con Con;
 typedef struct Member Member;
 typedef struct EnumVal EnumVal;
 typedef struct Initializer Initializer;
+typedef struct Target Target;
+
+struct Target {
+    char name[32];
+    char *predef;
+};
+
+extern Target T;
 
 extern Type *ty_none;
 extern Type *ty_void;

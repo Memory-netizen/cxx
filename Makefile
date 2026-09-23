@@ -1,7 +1,15 @@
+# Compiler
+CC := clang
+
+# Directories
+SRC_DIR   := ./src
+BUILD_DIR := ./build
+
 # Settings
 TARGET := cxx
 CFLAGS := -Wall -Wextra -Werror -std=c23 -fno-common
 CFLAGS += -D_GNU_SOURCE
+CFLAGS += -I$(SRC_DIR)
 LDFLAGS :=
 
 # Debug flags
@@ -12,16 +20,10 @@ else
 CFLAGS += -g -O0
 endif
 
-# Compiler
-CC := clang
-
-# Directories
-SRC_DIR := ./src
-BUILD_DIR := ./build
-
 # Source files
-SRCS := $(wildcard $(SRC_DIR)/*.c)
-OBJS := $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(SRCS))
+SRCS := $(shell find $(SRC_DIR) -name '*.c')
+OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
+OBJS_DIRS := $(sort $(dir $(OBJS)))
 
 # Generated headers (from tools scripts)
 GENERATED_HDRS := src/width_property.h src/xid_property.h src/pow_table.h
