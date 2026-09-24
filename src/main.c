@@ -50,6 +50,8 @@ static int num_input;
 static char **tmpfiles;
 static int num_tmpfiles;
 
+static char *opt_sysroot;
+
 char **include_paths;
 int num_include_paths;
 
@@ -75,9 +77,8 @@ static void usage(int status) {
 }
 
 static bool take_arg(char *arg) {
-    char *x[] = {
-        "-o", "-I", "-include", "-x", "-idirafter", "-MF", "-MT", "-MQ", "-Xlinker", "-target", "-isystem",
-    };
+    char *x[] = {"-o",  "-I",  "-include", "-x",      "-idirafter", "-MF",
+                 "-MT", "-MQ", "-Xlinker", "-target", "-isystem",   "--sysroot"};
     for (size_t i = 0; i < sizeof(x) / sizeof(*x); i++)
         if (!strcmp(arg, x[i])) return true;
     return false;
@@ -138,11 +139,12 @@ static void add_default_include_paths(char *argv0) {
 
     add_gcc_include_paths(T.triple);
 
-    if (T.sysroot) {
+    char *sysroot = opt_sysroot ?: T.sysroot;
+    if (sysroot) {
         std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
-            format("%s/usr/include", T.sysroot);
+            format("%s/usr/include", sysroot);
         std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
-            format("%s/usr/include/%s", T.sysroot, T.triple);
+            format("%s/usr/include/%s", sysroot, T.triple);
     } else {
         std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
             format("/usr/%s/include", T.triple);
@@ -262,6 +264,18 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-P")) {
             opt_P = true;
+            continue;
+        }
+
+        if (!strncmp(argv[i], "--sysroot=", 10)) {
+            opt_sysroot = argv[i] + 10;
+            ld_extra_args[num_ld_exarg++] = argv[i];
+            continue;
+        }
+
+        if (!strcmp(argv[i], "--sysroot")) {
+            opt_sysroot = argv[++i];
+            ld_extra_args[num_ld_exarg++] = format("--sysroot=%s", opt_sysroot);
             continue;
         }
 
