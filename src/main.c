@@ -76,37 +76,89 @@ static void usage(int status) {
 
 static bool take_arg(char *arg) {
     char *x[] = {
-        "-o", "-I", "-include", "-x", "-idirafter", "-MF", "-MT", "-MQ", "-Xlinker", "-target",
+        "-o", "-I", "-include", "-x", "-idirafter", "-MF", "-MT", "-MQ", "-Xlinker", "-target", "-isystem",
     };
     for (size_t i = 0; i < sizeof(x) / sizeof(*x); i++)
         if (!strcmp(arg, x[i])) return true;
     return false;
 }
 
-static void add_default_include_paths(char *argv0) {
-    std_include_paths = emalloc(16 * sizeof(char *));
-    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
-        format("%s/include", dirname(strdup(argv0)));
+static char *get_clang_resource_dir(void) {
+    FILE *fp = popen("clang -print-resource-dir 2>/dev/null", "r");
+    if (!fp) return NULL;
+    char buf[PATH_MAX];
+    char *result = NULL;
+    if (fgets(buf, sizeof(buf), fp)) {
+        buf[strcspn(buf, "\n")] = '\0';
+        result = strdup(buf);
+    }
+    pclose(fp);
+    return result;
+}
 
-    // Add standard include paths.
-    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
-        "/usr/lib/gcc/aarch64-linux-gnu/15/include";
-    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
-        "/usr/lib/gcc/x86_64-linux-gnu/13/include";
-    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
-        "/usr/lib/llvm-21/lib/clang/21/include";
-    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
-        "/usr/lib/llvm-18/lib/clang/18/include";
-    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/local/include";
-    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include/x86_64-linux-gnu";
-    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include/aarch64-linux-gnu";
-    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include/riscv64-linux-gnu";
-    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include/riscv32-linux-gnu";
-    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include";
+#include <glob.h>
+static void add_gcc_include_paths(char *triple) {
+    char pattern[PATH_MAX];
+    snprintf(pattern, sizeof(pattern), "/usr/lib/gcc/%s/*/include", triple);
+
+    glob_t g;
+    if (glob(pattern, 0, NULL, &g) == 0) {
+        for (size_t i = 0; i < g.gl_pathc; i++)
+            std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = strdup(g.gl_pathv[i]);
+        globfree(&g);
+    }
+}
+
+static bool is_host_triple(char *triple) {
+    static char *host = NULL;
+    if (!host) {
+        FILE *fp = popen("cc -dumpmachine 2>/dev/null", "r");
+        if (fp) {
+            char buf[256];
+            if (fgets(buf, sizeof(buf), fp)) {
+                buf[strcspn(buf, "\n")] = '\0';
+                host = strdup(buf);
+            }
+            pclose(fp);
+        }
+    }
+    return host && !strcmp(host, triple);
+}
+
+static void add_default_include_paths(char *argv0) {
+    for (int i = 0; i < num_std_include_paths; i++) include_paths[num_include_paths++] = std_include_paths[i];
+    char *exe_inc = format("%s/include", dirname(strdup(argv0)));
+    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = exe_inc;
+
+    char *res_dir = get_clang_resource_dir();
+    if (res_dir) {
+        char *inc = format("%s/include", res_dir);
+        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = inc;
+    }
+
+    add_gcc_include_paths(T.triple);
+
+    if (T.sysroot) {
+        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
+            format("%s/usr/include", T.sysroot);
+        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
+            format("%s/usr/include/%s", T.sysroot, T.triple);
+    } else {
+        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
+            format("/usr/%s/include", T.triple);
+        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
+            format("/usr/include/%s", T.triple);
+    }
+
+    if (is_host_triple(T.triple)) {
+        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/local/include";
+        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include";
+    }
 }
 
 static void add_dirafter(void) {
-    for (int i = 0; i < num_dirafter; i++) include_paths[num_include_paths++] = dirafter[i];
+    for (int i = 0; i < num_dirafter; i++)
+        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = dirafter[i];
 }
 
 static FileType parse_opt_x(char *s) {
@@ -215,6 +267,11 @@ static void parse_args(int argc, char **argv) {
 
         if (!strncmp(argv[i], "-I", 2)) {
             include_paths[num_include_paths++] = argv[i] + 2;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-isystem")) {
+            std_include_paths[num_std_include_paths++] = argv[++i];
             continue;
         }
 
@@ -547,7 +604,8 @@ static bool in_std_include_path(char *path) {
     for (int i = 0; i < num_std_include_paths; i++) {
         char *dir = std_include_paths[i];
         int len = strlen(dir);
-        if (strncmp(dir, path, len) == 0 && path[len] == '/') return true;
+        while (len > 1 && dir[len - 1] == '/') len--;
+        if (strncmp(dir, path, len) == 0 && (path[len] == '/' || path[len] == '\0')) return true;
     }
     return false;
 }
@@ -667,6 +725,7 @@ int main(int argc, char **argv) {
     input_paths = emalloc(argc * sizeof(char *));
     tmpfiles = emalloc(argc * 4 * sizeof(char *));
     include_paths = emalloc((argc + 16) * sizeof(char *));
+    std_include_paths = emalloc((argc + 16) * sizeof(char *));
     dirafter = emalloc(argc * sizeof(char *));
     ld_extra_args = emalloc(argc * 2 * sizeof(char *));
 

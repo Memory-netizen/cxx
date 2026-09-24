@@ -150,6 +150,32 @@ check -idirafter
 echo "#include \"idirafter\"" | $compiler -idirafter $tmp/dir1 -I$tmp/dir2 -E - | grep -q bar
 check -idirafter
 
+# -isystem
+mkdir -p $tmp/sys1 $tmp/sys2
+echo foo > $tmp/sys1/isystem
+echo bar > $tmp/sys2/isystem
+echo "#include \"isystem\"" | $compiler -isystem $tmp/sys1 -E - | grep -q foo
+check -isystem
+
+# -isystem multiple
+echo "#include \"isystem\"" | $compiler -isystem $tmp/sys1 -isystem $tmp/sys2 -E - | grep -q foo
+check -isystem
+
+# -I takes precedence over -isystem, regardless of command-line order
+echo "#include \"isystem\"" | $compiler -isystem $tmp/sys1 -I$tmp/sys2 -E - | grep -q bar
+check '-I before -isystem'
+echo "#include \"isystem\"" | $compiler -I$tmp/sys2 -isystem $tmp/sys1 -E - | grep -q bar
+check '-I before -isystem'
+
+# -isystem paths are treated as system headers, filtered by -MM
+mkdir -p $tmp/sysinc
+echo foo > $tmp/sysinc/sysinc.h
+echo '#include <sysinc.h>' > $tmp/sysmain.c
+! $compiler -MM -isystem $tmp/sysinc $tmp/sysmain.c | grep -q 'sysinc.h'
+check '-isystem with -MM'
+$compiler -M -isystem $tmp/sysinc $tmp/sysmain.c | grep -q 'sysinc.h'
+check '-isystem with -M'
+
 # .a file
 echo 'void foo() {}' | $compiler -c -xc -o $tmp/foo.o -
 echo 'void bar() {}' | $compiler -c -xc -o $tmp/bar.o -
