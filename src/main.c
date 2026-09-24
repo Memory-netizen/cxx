@@ -627,7 +627,8 @@ static void cc1(void) {
 
 // Stage 2: .ll → .s  (via clang)
 static void compile(char *input, char *output) {
-    char *cmd[] = {"clang", "-S", "-fno-addrsig", "-Wno-override-module", "-x", "ir", input, "-o", output, NULL};
+    char *cmd[] = {"clang", "-target", T.name, "-S", "-fno-addrsig", "-Wno-override-module",
+                   "-x",    "ir",      input,  "-o", output,         NULL};
     run_subprocess(cmd);
 }
 

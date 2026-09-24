@@ -58,6 +58,7 @@ typedef struct Target Target;
 
 struct Target {
     char name[32];
+    char *datalayout;
     char *predef;
 };
 
