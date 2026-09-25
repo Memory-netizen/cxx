@@ -57,10 +57,13 @@ typedef struct Initializer Initializer;
 typedef struct Target Target;
 
 struct Target {
-    char name[32];
+    char *name;
     char *triple;
     char *datalayout;
     char *sysroot;
+    uint64_t int_max, uint_max;
+    uint64_t long_max, ulong_max;
+    uint64_t llong_max;
     char *predef;
 };
 
@@ -111,6 +114,17 @@ bool file_exists(char *path);
 //
 // Lexer
 //
+
+enum {
+    SUF_UNSIGNED = 0x001,
+    SUF_LONG = 0x002,
+    SUF_LLONG = 0x004,
+    SUF_FLOAT = 0x08,
+    SUF_DOUBLE = 0x010,
+    SUF_LDOUBLE = 0x020,
+    SUF_BITINT = 0x040,
+    SUF_NONDEC = 0x080,
+};
 
 enum {
     PREFIX_NONE,
@@ -278,10 +292,13 @@ struct Token {
     int32_t line_delta;
     uint16_t len;
     uint8_t kind;
-    uint8_t enc_prefix;  // Used if kind == TK_CHARLIT or kind == TK_STRLIT
-    bool is_sol;         // true if is starting of line
-    bool is_leadingws;   // true if is leading space
-    bool noexpand;       // true if this token shall not be macro-expanded
+    union {
+        uint8_t lit_suffix;  // Uesd if kind == TK_NUM
+        uint8_t enc_prefix;  // Used if kind == TK_CHARLIT or kind == TK_STRLIT
+    };
+    bool is_sol;        // true if is starting of line
+    bool is_leadingws;  // true if is leading space
+    bool noexpand;      // true if this token shall not be macro-expanded
 };
 
 bool match(Token **rest, Token *tok, uint32_t kind);
@@ -936,5 +953,12 @@ char *escape_char_to_string(char c);
 
 Ref newcon(Con *c0, Module *md);
 Ref getcon(int64_t val, Module *md);
+
+//
+// literal.c
+//
+Type *infer_numtype(Token *tok);
+Type *infer_chartype(Token *tok);
+Type *infer_strtype(Token *tok);
 
 #endif  // CXX_H_

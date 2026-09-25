@@ -5,6 +5,11 @@ Target T_arm64 = {
     .triple = "aarch64-linux-gnu",
     .datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32",
     .sysroot = NULL,
+    .int_max = 2147483647,
+    .uint_max = 4294967295U,
+    .long_max = 9223372036854775807L,
+    .ulong_max = 18446744073709551615UL,
+    .llong_max = 9223372036854775807LL,
     .predef =
         "#define _LP64 1\n"
         "#define __AARCH64EL__ 1\n"

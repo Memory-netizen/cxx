@@ -56,30 +56,39 @@ Token *skip(Token *tok, uint32_t kind) {
 }
 
 // Compare if the pending matching string matches the target string
-static inline bool start_with(char *p, char *q) { return strncmp(p, q, strlen(q)) == 0; }
+static inline bool start_with(char *p, char *q) {
+    while (*q) {
+        if (*p++ != *q++) return false;
+    }
+    return true;
+}
 
 static int read_punct(char *p, Token *tok) {
     static struct {
         char *punct;
         uint32_t type;
+        int len;
     } punct[] = {
-        {"%:%:", TK_HASHHASH}, {"<<=", TK_LEFTAS}, {">>=", TK_RIGHTAS}, {"...", TK_ELLIPSIS}, {"<%", TK_LBRACE},
-        {"%>", TK_RBRACE},     {"%:", TK_HASH},    {"%=", TK_MODAS},    {"+=", TK_ADDAS},     {"-=", TK_SUBAS},
-        {"*=", TK_MULAS},      {"/=", TK_DIVAS},   {"&=", TK_ANDAS},    {"^=", TK_XORAS},     {"|=", TK_ORAS},
-        {"::", TK_COLONCOLON}, {"<<", TK_LEFT},    {">>", TK_RIGHT},    {"==", TK_EQ},        {"!=", TK_NE},
-        {"<=", TK_LE},         {">=", TK_GE},      {"&&", TK_AND},      {"||", TK_OR},        {"->", TK_ARROW},
-        {"++", TK_INC},        {"--", TK_DEC},     {"##", TK_HASHHASH}, {"<:", TK_LBRACKET},  {":>", TK_RBRACKET},
-        {"%", TK_MOD},         {"[", TK_LBRACKET}, {"]", TK_RBRACKET},  {"(", TK_LPAREN},     {")", TK_RPAREN},
-        {"{", TK_LBRACE},      {"}", TK_RBRACE},   {"&", TK_BAND},      {"*", TK_STAR},       {"+", TK_PLUS},
-        {"-", TK_MINUS},       {"~", TK_INVERT},   {"!", TK_NOT},       {"/", TK_SLASH},      {"<", TK_LT},
-        {">", TK_GT},          {"^", TK_XOR},      {"|", TK_BOR},       {"?", TK_QUESTION},   {":", TK_COLON},
-        {";", TK_SEMI},        {".", TK_DOT},      {"=", TK_AS},        {",", TK_COMMA},      {"#", TK_HASH},
+        {"%:%:", TK_HASHHASH, 4}, {"<<=", TK_LEFTAS, 3},  {">>=", TK_RIGHTAS, 3}, {"...", TK_ELLIPSIS, 3},
+        {"<%", TK_LBRACE, 2},     {"%>", TK_RBRACE, 2},   {"%:", TK_HASH, 2},     {"%=", TK_MODAS, 2},
+        {"+=", TK_ADDAS, 2},      {"-=", TK_SUBAS, 2},    {"*=", TK_MULAS, 2},    {"/=", TK_DIVAS, 2},
+        {"&=", TK_ANDAS, 2},      {"^=", TK_XORAS, 2},    {"|=", TK_ORAS, 2},     {"::", TK_COLONCOLON, 2},
+        {"<<", TK_LEFT, 2},       {">>", TK_RIGHT, 2},    {"==", TK_EQ, 2},       {"!=", TK_NE, 2},
+        {"<=", TK_LE, 2},         {">=", TK_GE, 2},       {"&&", TK_AND, 2},      {"||", TK_OR, 2},
+        {"->", TK_ARROW, 2},      {"++", TK_INC, 2},      {"--", TK_DEC, 2},      {"##", TK_HASHHASH, 2},
+        {"<:", TK_LBRACKET, 2},   {":>", TK_RBRACKET, 2}, {"%", TK_MOD, 1},       {"[", TK_LBRACKET, 1},
+        {"]", TK_RBRACKET, 1},    {"(", TK_LPAREN, 1},    {")", TK_RPAREN, 1},    {"{", TK_LBRACE, 1},
+        {"}", TK_RBRACE, 1},      {"&", TK_BAND, 1},      {"*", TK_STAR, 1},      {"+", TK_PLUS, 1},
+        {"-", TK_MINUS, 1},       {"~", TK_INVERT, 1},    {"!", TK_NOT, 1},       {"/", TK_SLASH, 1},
+        {"<", TK_LT, 1},          {">", TK_GT, 1},        {"^", TK_XOR, 1},       {"|", TK_BOR, 1},
+        {"?", TK_QUESTION, 1},    {":", TK_COLON, 1},     {";", TK_SEMI, 1},      {".", TK_DOT, 1},
+        {"=", TK_AS, 1},          {",", TK_COMMA, 1},     {"#", TK_HASH, 1},
     };
 
     for (size_t i = 0; i < sizeof(punct) / sizeof(punct[0]); ++i)
         if (start_with(p, punct[i].punct)) {
             tok->kind = punct[i].type;
-            return strlen(punct[i].punct);
+            return punct[i].len;
         }
 
     return 0;
@@ -154,14 +163,10 @@ static char *convert_universal_chars(char *p, int len) {
     char *end = p + len;
     char *buf = emalloc(len + 1);
     char *cur = buf;
-    char *result = buf;
 
     while (p < end) {
-        if (start_with(p, "\\u")) {
-            uint32_t c = read_universal_char(&p, p + 2, 'u');
-            cur += encode_utf8(cur, c);
-        } else if (start_with(p, "\\U")) {
-            uint32_t c = read_universal_char(&p, p + 2, 'U');
+        if (*p == '\\' && (p[1] == 'u' || p[1] == 'U')) {
+            uint32_t c = read_universal_char(&p, p + 2, p[1]);
             cur += encode_utf8(cur, c);
         } else {
             *cur++ = *p++;
@@ -169,7 +174,7 @@ static char *convert_universal_chars(char *p, int len) {
     }
 
     *cur = '\0';
-    return result;
+    return buf;
 }
 
 // Read an identifier and returns the length of it.
@@ -177,11 +182,8 @@ static char *convert_universal_chars(char *p, int len) {
 static int read_ident(char *start) {
     char *p = start;
     uint32_t c;
-    if (start_with(p, "\\u")) {
-        c = read_universal_char(&p, p + 2, 'u');
-        if (c <= 0x9F) fatal("universal character %.*s is not valid in an identifier", (int)(p - start), start);
-    } else if (start_with(p, "\\U")) {
-        c = read_universal_char(&p, p + 2, 'U');
+    if (*p == '\\' && (p[1] == 'u' || p[1] == 'U')) {
+        c = read_universal_char(&p, p + 2, p[1]);
         if (c <= 0x9F) fatal("universal character %.*s is not valid in an identifier", (int)(p - start), start);
     } else {
         bool success = false;
@@ -195,12 +197,8 @@ static int read_ident(char *start) {
 
     while (1) {
         char *uc_start = p;
-        if (start_with(p, "\\u")) {
-            c = read_universal_char(&p, p + 2, 'u');
-            if (c <= 0x9F)
-                fatal("universal character %.*s is not valid in an identifier", (int)(p - uc_start), uc_start);
-        } else if (start_with(p, "\\U")) {
-            c = read_universal_char(&p, p + 2, 'U');
+        if (*p == '\\' && (p[1] == 'u' || p[1] == 'U')) {
+            c = read_universal_char(&p, p + 2, p[1]);
             if (c <= 0x9F)
                 fatal("universal character %.*s is not valid in an identifier", (int)(p - uc_start), uc_start);
         } else {
@@ -216,30 +214,25 @@ static int read_ident(char *start) {
 }
 
 static uint64_t read_escaped_char(char **new_pos, char *p, char *end) {
-    static struct {
-        char ch;
-        uint8_t val;
-    } simple[] = {
-        {'a', '\a'}, {'b', '\b'}, {'e', 27},    {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
-        {'t', '\t'}, {'v', '\v'}, {'\'', '\''}, {'"', '"'},  {'?', '?'},  {'\\', '\\'},
+    uint8_t c = *p;
+    static const uint32_t sim[256] = {
+        ['a'] = '\a', ['b'] = '\b', ['e'] = 27,    ['f'] = '\f', ['n'] = '\n', ['r'] = '\r',
+        ['t'] = '\t', ['v'] = '\v', ['\''] = '\'', ['"'] = '"',  ['?'] = '?',  ['\\'] = '\\',
     };
-    char c = *p;
-    for (uint32_t i = 0; i < sizeof(simple) / sizeof(simple[0]); i++) {
-        if (c == simple[i].ch) {
-            *new_pos = p + 1;
-            return simple[i].val;
-        }
+    if (sim[c]) {
+        *new_pos = p + 1;
+        return sim[c];
     }
 
     if ('0' <= c && c <= '7') {
         // Read an octal number.
-        int c = *p++ - '0';
+        uint32_t val = *p++ - '0';
         if ('0' <= *p && *p <= '7') {
-            c = (c << 3) + (*p++ - '0');
-            if ('0' <= *p && *p <= '7') c = (c << 3) + (*p++ - '0');
+            val = (val << 3) + (*p++ - '0');
+            if ('0' <= *p && *p <= '7') val = (val << 3) + (*p++ - '0');
         }
         *new_pos = p;
-        return c;
+        return val;
     }
 
     if (c == 'o') {
@@ -249,11 +242,9 @@ static uint64_t read_escaped_char(char **new_pos, char *p, char *end) {
         if (*p == '}') goto empty_error;
         uint64_t val = 0;
         while (p < end) {
-            int c = *p;
-            if (c == '}') break;
-            if (c < '0' || c > '7') goto digit_error;
-            val = (val << 3) + c - '0';
-            p++;
+            if (*p == '}') break;
+            if (*p < '0' || *p > '7') goto digit_error;
+            val = (val << 3) + *p++ - '0';
         }
         if (*p != '}') goto miss_error;
         *new_pos = p + 1;
@@ -271,17 +262,17 @@ static uint64_t read_escaped_char(char **new_pos, char *p, char *end) {
         }
         if (!isxdigit(*p)) error_at(cur_file, p, "invalid hex escape sequence");
 
-        uint64_t c = 0;
-        for (; p < end && isxdigit(*p); p++) c = (c << 4) + from_hex(*p);
+        uint64_t val = 0;
+        for (; p < end && isxdigit(*p); p++) val = (val << 4) + from_hex(*p);
         if (has_brace && *p++ != '}') goto miss_error;
         *new_pos = p;
-        return c;
+        return val;
     }
 
     if (c == 'u' || c == 'U') return read_universal_char(new_pos, p + 1, c);
 
     *new_pos = p + 1;
-    return (unsigned char)*p;
+    return c;
 
 empty_error:
     error_at(cur_file, p, "empty delimited escape sequence");
@@ -292,11 +283,16 @@ digit_error:
     return 0;
 }
 
-static void convert_utf8_str_literal(Token *tok, char *str, Type *ty) {
+static void convert_utf8_str_literal(Token *tok, char *str) {
     char *p = str;
+    // char*start
     while (*p++ != '"');
-    char *end = str + strlen(str) - 1;
-    char *buf = emalloc(end - p);
+    char *start = p;
+    while (*p++);
+    char *end = p - 2;
+    p = start;
+    // char *end = str + strlen(str) - 1;
+    char *buf = emalloc(end - start);
     int len = 0;
 
     while (p < end) {
@@ -307,7 +303,6 @@ static void convert_utf8_str_literal(Token *tok, char *str, Type *ty) {
         }
     }
 
-    tok->ty = array_of(ty, len + 1);
     tok->id = intern(buf, len);
 }
 
@@ -318,7 +313,7 @@ static void convert_utf8_str_literal(Token *tok, char *str, Type *ty) {
 // equal to or larger than that are encoded in 4 bytes. Each 2 bytes
 // in the 4 byte sequence is called "surrogate", and a 4 byte sequence
 // is called a "surrogate pair".
-static void convert_utf16_str_literal(Token *tok, char *str, Type *ty) {
+static void convert_utf16_str_literal(Token *tok, char *str) {
     char *p = str;
     while (*p++ != '"');
     char *end = str + strlen(str) - 1;
@@ -345,7 +340,6 @@ static void convert_utf16_str_literal(Token *tok, char *str, Type *ty) {
         }
     }
 
-    tok->ty = array_of(ty, len + 1);
     tok->id = intern((char *)buf, len * 2);
 }
 
@@ -353,7 +347,7 @@ static void convert_utf16_str_literal(Token *tok, char *str, Type *ty) {
 //
 // UTF-32 is a fixed-width encoding for Unicode. Each code point is
 // encoded in 4 bytes.
-static void convert_utf32_str_literal(Token *tok, char *str, Type *ty) {
+static void convert_utf32_str_literal(Token *tok, char *str) {
     char *p = str;
     while (*p++ != '"');
     char *end = str + strlen(str) - 1;
@@ -368,7 +362,6 @@ static void convert_utf32_str_literal(Token *tok, char *str, Type *ty) {
             buf[len++] = decode_utf8(&p, p, &ignored);
     }
 
-    tok->ty = array_of(ty, len + 1);
     tok->id = intern((char *)buf, len * 4);
 }
 
@@ -377,19 +370,17 @@ void convert_str_literal(Token *tok) {
     uint32_t prefix = tok->enc_prefix;
     switch (prefix) {
         case PREFIX_NONE:
-            convert_utf8_str_literal(tok, str, ty_char);
-            break;
         case PREFIX_u8:
-            convert_utf8_str_literal(tok, str, ty_uchar);
+            convert_utf8_str_literal(tok, str);
             break;
         case PREFIX_u:
-            convert_utf16_str_literal(tok, str, ty_ushort);
+            convert_utf16_str_literal(tok, str);
             break;
         case PREFIX_U:
-            convert_utf32_str_literal(tok, str, ty_uint);
+            convert_utf32_str_literal(tok, str);
             break;
         case PREFIX_L:
-            convert_utf32_str_literal(tok, str, ty_int);
+            convert_utf32_str_literal(tok, str);
             break;
         default:
             break;
@@ -441,15 +432,7 @@ static void convert_char_literal(Token *tok) {
             val = (val << 8) + ch;
         }
     }
-    tok->kind = TK_NUM;
     tok->val = val;
-
-    uint32_t prefix = tok->enc_prefix;
-    tok->ty = prefix == PREFIX_NONE ? ty_int
-              : prefix == PREFIX_L  ? ty_int
-              : prefix == PREFIX_U  ? ty_uint
-              : prefix == PREFIX_u  ? ty_ushort
-                                    : ty_uchar;
 }
 
 static Token *read_char_literal(char *start, char *quote, uint32_t prefix) {
@@ -526,68 +509,6 @@ static int is_valid_digit(int c, int base) {
         return '0' <= c && c <= '9';
     else
         return ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F');
-}
-
-enum {
-    SUF_UNSIGNED = 0x001,
-    SUF_LONG = 0x002,
-    SUF_LLONG = 0x004,
-    SUF_FLOAT = 0x08,
-    SUF_LDOUBLE = 0x010,
-    SUF_BITINT = 0x020,
-};
-
-static Type *infer_type(uint64_t val, int flags, int base) {
-    Type *ty;
-    if (base == 10) {
-        switch (flags) {
-            case SUF_UNSIGNED | SUF_LLONG:
-                ty = ty_ullong;
-                break;
-            case SUF_LLONG:
-                ty = ty_llong;
-                break;
-            case SUF_UNSIGNED | SUF_LONG:
-                ty = val <= ULONG_MAX ? ty_ulong : ty_ullong;
-                break;
-            case SUF_LONG:
-                ty = val <= LONG_MAX ? ty_long : val <= LLONG_MAX ? ty_llong : ty_ullong;
-                break;
-            case SUF_UNSIGNED:
-                ty = val <= UINT_MAX ? ty_uint : val <= ULONG_MAX ? ty_ulong : ty_ullong;
-                break;
-            default:
-                ty = val <= INT_MAX ? ty_int : val <= LONG_MAX ? ty_long : val <= LLONG_MAX ? ty_llong : ty_ullong;
-                break;
-        }
-    } else {
-        switch (flags) {
-            case SUF_UNSIGNED | SUF_LLONG:
-                ty = ty_ullong;
-                break;
-            case SUF_LLONG:
-                ty = val <= LLONG_MAX ? ty_llong : ty_ullong;
-                break;
-            case SUF_UNSIGNED | SUF_LONG:
-                ty = val <= ULONG_MAX ? ty_ulong : ty_ullong;
-                break;
-            case SUF_LONG:
-                ty = val <= LONG_MAX ? ty_long : val <= ULONG_MAX ? ty_ulong : val <= LLONG_MAX ? ty_llong : ty_ullong;
-                break;
-            case SUF_UNSIGNED:
-                ty = val <= UINT_MAX ? ty_uint : val <= ULONG_MAX ? ty_ulong : ty_ullong;
-                break;
-            default:
-                ty = val <= INT_MAX     ? ty_int
-                     : val <= UINT_MAX  ? ty_uint
-                     : val <= LONG_MAX  ? ty_long
-                     : val <= ULONG_MAX ? ty_ulong
-                     : val <= LLONG_MAX ? ty_llong
-                                        : ty_ullong;
-                break;
-        }
-    }
-    return ty;
 }
 
 static void convert_pp_num(Token *t) {
@@ -758,6 +679,8 @@ extract_end:
     }
     if (base == 16 && is_float) error(t, "hexadecimal floating constant requires an exponent");
     base = pos_p ? 16 : base;  // Restore base to hexadecimal
+    t->lit_suffix = flags;
+    if (base != 10) t->lit_suffix |= SUF_NONDEC;
 
     // Stage 3: Evaluate literals
     uint32_t pos = 0;
@@ -772,13 +695,10 @@ extract_end:
 
     if (!is_float) {
         t->val = int_part;
-        t->ty = infer_type(int_part, flags, base);
         return;
     }
 
-    t->ty = flags == SUF_LDOUBLE ? ty_ldouble : ty_double;
-    t->ty = flags == SUF_FLOAT ? ty_float : ty_double;
-
+    if (flags == 0) t->lit_suffix |= SUF_DOUBLE;
     limit = pos_exp ? pos_exp : ci;
 
     double divisor = base;
@@ -795,9 +715,6 @@ extract_end:
         exp *= sign;
         t->fval = base == 16 ? fast_ldexp(t->fval, exp) : t->fval * fast_pow10(exp);
     }
-
-    // Demote literal value from double to float
-    if (t->ty->kind == TY_FLOAT) t->fval = (float)t->fval;
 
     return;
 error:

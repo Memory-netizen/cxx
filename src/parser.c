@@ -510,7 +510,8 @@ static Initializer *new_initializer(Type *ty, bool is_flexible) {
 }
 
 static void string_initializer(Token **rest, Token *tok, Initializer *init) {
-    int arrlen = tok->ty->len;
+    Type *ty = infer_strtype(tok);
+    int arrlen = ty->len;
     if (init->is_flexible) *init = *new_initializer(array_of(init->ty->base, arrlen), false);
 
     char *string = str(tok->id);
@@ -768,7 +769,8 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
         if (tok->kind == TK_STRLIT ||
             (tok->kind == TK_LBRACE && tok->next->kind == TK_STRLIT && tok->next->next->kind == TK_RBRACE)) {
             bool has_brace = match(&tok, tok, TK_LBRACE);
-            if (!(is_char(init->ty->base) && is_char(tok->ty->base)) && !is_compatible(tok->ty, init->ty))
+            Type *ty = infer_strtype(tok);
+            if (!(is_char(init->ty->base) && is_char(ty->base)) && !is_compatible(ty, init->ty))
                 error(tok, "array of inappropriate type initialized from string constant");
             string_initializer(&tok, tok, init);
             if (has_brace) tok = skip(tok, TK_RBRACE);
@@ -1198,12 +1200,19 @@ static Node *primary(Token **rest, Token *tok) {
     }
     if (tok->kind == TK_NUM) {
         node = new_num(tok->val, tok);
-        node->ty = tok->ty;
+        node->ty = infer_numtype(tok);
+        if (node->ty->kind == TY_FLOAT) node->fval = (float)node->fval;
+        *rest = tok->next;
+        return node;
+    }
+    if (tok->kind == TK_CHARLIT) {
+        node = new_num(tok->val, tok);
+        node->ty = infer_chartype(tok);
         *rest = tok->next;
         return node;
     }
     if (tok->kind == TK_STRLIT) {
-        Sym *var = new_string_literal(tok->id, tok->ty);
+        Sym *var = new_string_literal(tok->id, infer_strtype(tok));
         *rest = tok->next;
         return new_var_node(var, tok);
     }

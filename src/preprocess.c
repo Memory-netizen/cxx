@@ -348,7 +348,8 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
 
     convert_ppnumber(expr);
     for (Token *t = expr; t->kind != TK_EOF; t = t->next)
-        if (t->kind == TK_NUM && is_flonum(t->ty)) error(t, "floating point literal in preprocessor expression");
+        if (t->kind == TK_NUM && t->lit_suffix & (SUF_FLOAT | SUF_DOUBLE | SUF_LDOUBLE))
+            error(t, "floating point literal in preprocessor expression");
 
     Token *rest2;
     int64_t val = const_expr(&rest2, expr);
@@ -1550,21 +1551,18 @@ void join_adjacent_string_literals(Token *tok) {
         Token *after = tok1->next;
         while (after->kind == TK_STRLIT) after = after->next;
 
-        int len = tok1->ty->len;
-        for (Token *t = tok1->next; t != after; t = t->next) len += t->ty->len - 1;
+        int len = str_len(tok1->id);
+        for (Token *t = tok1->next; t != after; t = t->next) len += str_len(t->id);
 
-        int base_size = tok1->ty->base->size;
-        char *buf = emalloc(base_size * len);
-
+        char *buf = emalloc(len);
         int i = 0;
         for (Token *t = tok1; t != after; t = t->next) {
-            int valid_size = t->ty->size - base_size;
+            int valid_size = str_len(t->id);
             memcpy(buf + i, str(t->id), valid_size);
             i += valid_size;
         }
 
-        tok1->ty = array_of(tok1->ty->base, len);
-        tok1->id = intern(buf, base_size * (len - 1));
+        tok1->id = intern(buf, len);
         tok1->next = after;
         tok1 = after;
     }
