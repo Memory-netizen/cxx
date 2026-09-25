@@ -1,10 +1,58 @@
 #include "cxx.h"
 
-Target T_arm64 = {
-    .name = "aarch64-unknown-linux-gnu",
-    .triple = "aarch64-linux-gnu",
-    .datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32",
+#define TYPE(a, b, c, d)  \
+    {                     \
+        .kind = a,        \
+        .size = b,        \
+        .align = c,       \
+        .is_unsigned = d, \
+    }
+
+static Type ty_none_ = TYPE(TY_NONE, -1, 1, false);
+static Type ty_void_ = TYPE(TY_VOID, 1, 1, false);
+static Type ty_nullptr_ = TYPE(TY_NULLPTR, 8, 8, true);
+static Type ty_bool_ = TYPE(TY_BOOL, 1, 1, true);
+static Type ty_char_ = TYPE(TY_CHAR, 1, 1, true);
+static Type ty_schar_ = TYPE(TY_CHAR, 1, 1, false);
+static Type ty_uchar_ = TYPE(TY_CHAR, 1, 1, true);
+static Type ty_short_ = TYPE(TY_SHORT, 2, 2, false);
+static Type ty_ushort_ = TYPE(TY_SHORT, 2, 2, true);
+static Type ty_int_ = TYPE(TY_INT, 4, 4, false);
+static Type ty_uint_ = TYPE(TY_INT, 4, 4, true);
+static Type ty_long_ = TYPE(TY_LONG, 8, 8, false);
+static Type ty_ulong_ = TYPE(TY_LONG, 8, 8, true);
+static Type ty_llong_ = TYPE(TY_LLONG, 8, 8, false);
+static Type ty_ullong_ = TYPE(TY_LLONG, 8, 8, true);
+static Type ty_float_ = TYPE(TY_FLOAT, 4, 4, false);
+static Type ty_double_ = TYPE(TY_DOUBLE, 8, 8, false);
+static Type ty_ldouble_ = TYPE(TY_LDOUBLE, 16, 16, false);
+
+#undef TYPE
+
+Target T_rv64 = {
+    .name = "rv64",
+    .triple = "riscv64-linux-gnu",
+    .datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128",
     .sysroot = NULL,
+    .ty_none = &ty_none_,
+    .ty_void = &ty_void_,
+    .ty_nullptr = &ty_nullptr_,
+    .ty_bool = &ty_bool_,
+    .ty_char = &ty_char_,
+    .ty_schar = &ty_schar_,
+    .ty_uchar = &ty_uchar_,
+    .ty_short = &ty_short_,
+    .ty_ushort = &ty_ushort_,
+    .ty_int = &ty_int_,
+    .ty_uint = &ty_uint_,
+    .ty_long = &ty_long_,
+    .ty_ulong = &ty_ulong_,
+    .ty_llong = &ty_llong_,
+    .ty_ullong = &ty_ullong_,
+    .ty_float = &ty_float_,
+    .ty_double = &ty_double_,
+    .ty_ldouble = &ty_ldouble_,
+    .ty_wchar = &ty_int_,
     .int_max = 2147483647,
     .uint_max = 4294967295U,
     .long_max = 9223372036854775807L,
@@ -12,19 +60,6 @@ Target T_arm64 = {
     .llong_max = 9223372036854775807LL,
     .predef =
         "#define _LP64 1\n"
-        "#define __AARCH64EL__ 1\n"
-        "#define __AARCH64_CMODEL_SMALL__ 1\n"
-        "#define __ARM_64BIT_STATE 1\n"
-
-        "#define __ARM_ALIGN_MAX_STACK_PWR 4\n"
-        "#define __ARM_ARCH 8\n"
-        "#define __ARM_ARCH_ISA_A64 1\n"
-        "#define __ARM_ARCH_PROFILE 'A'\n"
-
-        "#define __ARM_PCS_AAPCS64 1\n"
-        "#define __ARM_SIZEOF_MINIMAL_ENUM 4\n"
-        "#define __ARM_SIZEOF_WCHAR_T 4\n"
-
         "#define __ATOMIC_ACQUIRE 2\n"
         "#define __ATOMIC_ACQ_REL 4\n"
         "#define __ATOMIC_CONSUME 1\n"
@@ -39,7 +74,6 @@ Target T_arm64 = {
         "#define __CHAR32_TYPE__ unsigned int\n"
         "#define __CHAR_BIT__ 8\n"
         "#define __CHAR_UNSIGNED__ 1\n"
-
         "#define __DBL_DECIMAL_DIG__ 17\n"
         "#define __DBL_DENORM_MIN__ 4.9406564584124654e-324\n"
         "#define __DBL_DIG__ 15\n"
@@ -99,7 +133,6 @@ Target T_arm64 = {
         "#define __FPCLASS_POSZERO 0x0040\n"
         "#define __FPCLASS_QNAN 0x0002\n"
         "#define __FPCLASS_SNAN 0x0001\n"
-
         "#define __INT16_C(c) c\n"
         "#define __INT16_C_SUFFIX__ \n"
         "#define __INT16_FMTd__ \"hd\"\n"
@@ -206,6 +239,7 @@ Target T_arm64 = {
         "#define __PIC__ 2\n"
         "#define __PIE__ 2\n"
         "#define __POINTER_WIDTH__ 64\n"
+
         "#define __PTRDIFF_FMTd__ \"ld\"\n"
         "#define __PTRDIFF_FMTi__ \"li\"\n"
         "#define __PTRDIFF_MAX__ 9223372036854775807L\n"
@@ -240,8 +274,6 @@ Target T_arm64 = {
         "#define __STDC_EMBED_FOUND__ 1\n"
         "#define __STDC_EMBED_NOT_FOUND__ 0\n"
         "#define __STDC_HOSTED__ 1\n"
-        "#define __STDC_NO_ATOMICS__ 1\n"
-        "#define __STDC_NO_COMPLEX__ 1\n"
         "#define __STDC_UTF_16__ 1\n"
         "#define __STDC_UTF_32__ 1\n"
         "#define __STDC_VERSION__ 201710L\n"
@@ -343,26 +375,96 @@ Target T_arm64 = {
         "#define __UINT_LEAST8_MAX__ 255\n"
         "#define __UINT_LEAST8_TYPE__ unsigned char\n"
         "#define __USER_LABEL_PREFIX__ \n"
-        "#define __WCHAR_MAX__ 4294967295U\n"
-        "#define __WCHAR_TYPE__ unsigned int\n"
-        "#define __WCHAR_UNSIGNED__ 1\n"
+        "#define __WCHAR_MAX__ 2147483647\n"
+        "#define __WCHAR_TYPE__ int\n"
         "#define __WCHAR_WIDTH__ 32\n"
         "#define __WINT_MAX__ 4294967295U\n"
         "#define __WINT_TYPE__ unsigned int\n"
         "#define __WINT_UNSIGNED__ 1\n"
         "#define __WINT_WIDTH__ 32\n"
-        "#define __aarch64__ 1\n"
-
-        "#define __cxx__ 1\n"
         "#define __gnu_linux__ 1\n"
         "#define __linux 1\n"
         "#define __linux__ 1\n"
         "#define __pic__ 2\n"
         "#define __pie__ 2\n"
+        "#define __riscv 1\n"
+        "#define __riscv_a 2001000\n"
+        "#define __riscv_arch_test 1\n"
+        "#define __riscv_atomic 1\n"
+        "#define __riscv_b 1000000\n"
+        "#define __riscv_c 2000000\n"
+        "#define __riscv_cmodel_medlow 1\n"
+        "#define __riscv_compressed 1\n"
+        "#define __riscv_d 2002000\n"
+        "#define __riscv_div 1\n"
+        "#define __riscv_f 2002000\n"
+        "#define __riscv_fdiv 1\n"
+        "#define __riscv_flen 64\n"
+        "#define __riscv_float_abi_double 1\n"
+        "#define __riscv_fsqrt 1\n"
+        "#define __riscv_i 2001000\n"
+        "#define __riscv_m 2000000\n"
+        "#define __riscv_misaligned_avoid 1\n"
+        "#define __riscv_mul 1\n"
+        "#define __riscv_muldiv 1\n"
+        "#define __riscv_supm 1000000\n"
+        "#define __riscv_v 1000000\n"
+        "#define __riscv_v_elen 64\n"
+        "#define __riscv_v_elen_fp 64\n"
+        "#define __riscv_v_intrinsic 1000000\n"
+        "#define __riscv_v_min_vlen 128\n"
+        "#define __riscv_vector 1\n"
+        "#define __riscv_xlen 64\n"
+        "#define __riscv_za64rs 1000000\n"
+        "#define __riscv_zaamo 1000000\n"
+        "#define __riscv_zalrsc 1000000\n"
+        "#define __riscv_zawrs 1000000\n"
+        "#define __riscv_zba 1000000\n"
+        "#define __riscv_zbb 1000000\n"
+        "#define __riscv_zbs 1000000\n"
+        "#define __riscv_zca 1000000\n"
+        "#define __riscv_zcb 1000000\n"
+        "#define __riscv_zcd 1000000\n"
+        "#define __riscv_zcmop 1000000\n"
+        "#define __riscv_zfa 1000000\n"
+        "#define __riscv_zfhmin 1000000\n"
+        "#define __riscv_zic64b 1000000\n"
+        "#define __riscv_zicbom 1000000\n"
+        "#define __riscv_zicbop 1000000\n"
+        "#define __riscv_zicboz 1000000\n"
+        "#define __riscv_ziccamoa 1000000\n"
+        "#define __riscv_ziccif 1000000\n"
+        "#define __riscv_zicclsm 1000000\n"
+        "#define __riscv_ziccrse 1000000\n"
+        "#define __riscv_zicntr 2000000\n"
+        "#define __riscv_zicond 1000000\n"
+        "#define __riscv_zicsr 2000000\n"
+        "#define __riscv_zifencei 2000000\n"
+        "#define __riscv_zihintntl 1000000\n"
+        "#define __riscv_zihintpause 2000000\n"
+        "#define __riscv_zihpm 2000000\n"
+        "#define __riscv_zimop 1000000\n"
+        "#define __riscv_zkt 1000000\n"
+        "#define __riscv_zmmul 1000000\n"
+        "#define __riscv_zvbb 1000000\n"
+        "#define __riscv_zve32f 1000000\n"
+        "#define __riscv_zve32x 1000000\n"
+        "#define __riscv_zve64d 1000000\n"
+        "#define __riscv_zve64f 1000000\n"
+        "#define __riscv_zve64x 1000000\n"
+        "#define __riscv_zvfhmin 1000000\n"
+        "#define __riscv_zvkb 1000000\n"
+        "#define __riscv_zvkt 1000000\n"
+        "#define __riscv_zvl128b 1000000\n"
+        "#define __riscv_zvl32b 1000000\n"
+        "#define __riscv_zvl64b 1000000\n"
         "#define __unix 1\n"
         "#define __unix__ 1\n"
         "#define linux 1\n"
         "#define unix 1\n"
+        "#define __STDC_NO_ATOMICS__ 1\n"
+        "#define __STDC_NO_COMPLEX__ 1\n"
+        "#define __cxx__ 1\n"
         "#define __alignof__ _Alignof\n"
         "#define __const__ const\n"
         "#define __has_include __has_include\n"

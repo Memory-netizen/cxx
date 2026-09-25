@@ -61,6 +61,25 @@ struct Target {
     char *triple;
     char *datalayout;
     char *sysroot;
+    Type *ty_none;
+    Type *ty_void;
+    Type *ty_nullptr;
+    Type *ty_bool;
+    Type *ty_char;
+    Type *ty_schar;
+    Type *ty_uchar;
+    Type *ty_short;
+    Type *ty_ushort;
+    Type *ty_int;
+    Type *ty_uint;
+    Type *ty_long;
+    Type *ty_ulong;
+    Type *ty_llong;
+    Type *ty_ullong;
+    Type *ty_float;
+    Type *ty_double;
+    Type *ty_ldouble;
+    Type *ty_wchar;
     uint64_t int_max, uint_max;
     uint64_t long_max, ulong_max;
     uint64_t llong_max;
@@ -285,7 +304,6 @@ struct Token {
         double fval;   // Uesd if kind == TK_NUM;
         char *msg;     // Used if token is broken;
     };
-    Type *ty;       // Used if TK_NUM or TK_STR
     SrcFile *file;  // Source location
     char *loc;
     uint32_t filename;  // Diagnostic filename
@@ -844,6 +862,12 @@ enum {
     ({                             \
         Ref tmp = getcon(x, curm); \
         tmp.ty = ty_double;        \
+        tmp;                       \
+    })
+#define LDOUBLE(x)                 \
+    ({                             \
+        Ref tmp = getcon(x, curm); \
+        tmp.ty = ty_ldouble;       \
         tmp;                       \
     })
 #define NULLPTR                                        \

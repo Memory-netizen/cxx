@@ -284,15 +284,11 @@ digit_error:
 }
 
 static void convert_utf8_str_literal(Token *tok, char *str) {
+    while (*str++ != '"');
     char *p = str;
-    // char*start
-    while (*p++ != '"');
-    char *start = p;
-    while (*p++);
-    char *end = p - 2;
-    p = start;
-    // char *end = str + strlen(str) - 1;
-    char *buf = emalloc(end - start);
+    while (*str++);
+    char *end = str - 2;
+    char *buf = emalloc(end - p);
     int len = 0;
 
     while (p < end) {
@@ -314,9 +310,10 @@ static void convert_utf8_str_literal(Token *tok, char *str) {
 // in the 4 byte sequence is called "surrogate", and a 4 byte sequence
 // is called a "surrogate pair".
 static void convert_utf16_str_literal(Token *tok, char *str) {
+    while (*str++ != '"');
     char *p = str;
-    while (*p++ != '"');
-    char *end = str + strlen(str) - 1;
+    while (*str++);
+    char *end = str - 2;
     uint16_t *buf = emalloc(4 * (end - p));
     int len = 0;
 
@@ -348,9 +345,10 @@ static void convert_utf16_str_literal(Token *tok, char *str) {
 // UTF-32 is a fixed-width encoding for Unicode. Each code point is
 // encoded in 4 bytes.
 static void convert_utf32_str_literal(Token *tok, char *str) {
+    while (*str++ != '"');
     char *p = str;
-    while (*p++ != '"');
-    char *end = str + strlen(str) - 1;
+    while (*str++);
+    char *end = str - 2;
     uint32_t *buf = emalloc(4 * (end - p));
     int len = 0;
     bool ignored = false;
@@ -367,8 +365,7 @@ static void convert_utf32_str_literal(Token *tok, char *str) {
 
 void convert_str_literal(Token *tok) {
     char *str = convert_universal_chars(tok->loc, tok->len);
-    uint32_t prefix = tok->enc_prefix;
-    switch (prefix) {
+    switch (tok->enc_prefix) {
         case PREFIX_NONE:
         case PREFIX_u8:
             convert_utf8_str_literal(tok, str);
@@ -500,15 +497,17 @@ static double fast_ldexp(double x, int exp) {
     return x * pow2_table[exp + 1074];
 }
 
-static int is_valid_digit(int c, int base) {
-    if (base == 2)
-        return c == '0' || c == '1';
+static bool is_valid_digit(int c, int base) {
+    if (base == 10)
+        return '0' <= c && c <= '9';
+    else if (base == 16)
+        return ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F');
     else if (base == 8)
         return '0' <= c && c <= '7';
-    else if (base == 10)
-        return '0' <= c && c <= '9';
+    else if (base == 2)
+        return c == '0' || c == '1';
     else
-        return ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F');
+        return false;
 }
 
 static void convert_pp_num(Token *t) {
@@ -679,6 +678,7 @@ extract_end:
     }
     if (base == 16 && is_float) error(t, "hexadecimal floating constant requires an exponent");
     base = pos_p ? 16 : base;  // Restore base to hexadecimal
+
     t->lit_suffix = flags;
     if (base != 10) t->lit_suffix |= SUF_NONDEC;
 
@@ -828,7 +828,7 @@ Token *tokenize(SrcFile *file) {
 
     while (*p) {
         // Read line comments.
-        if (start_with(p, "//")) {
+        if (*p == '/' && p[1] == '/') {
             char *q = p + 2;
             while (*q != '\n') q++;
             tok = new_token(TK_COMMENT, p, q);
@@ -839,7 +839,7 @@ Token *tokenize(SrcFile *file) {
         }
 
         // Read block comments.
-        if (start_with(p, "/*")) {
+        if (*p == '/' && p[1] == '*') {
             char *q = strstr(p + 2, "*/");
             if (!q) {
                 tok = new_token(TK_ERR, p, p + 1);
@@ -892,7 +892,7 @@ Token *tokenize(SrcFile *file) {
         }
 
         // Character literal
-        if (start_with(p, "u8\"")) {
+        if (*p == 'u' && p[1] == '8' && p[2] == '"') {
             tok = read_string_literal(p, p + 2, PREFIX_u8);
             cur = cur->next = tok;
             p += tok->len;
@@ -900,7 +900,7 @@ Token *tokenize(SrcFile *file) {
         }
 
         // UTF-16 string literal
-        if (start_with(p, "u\"")) {
+        if (*p == 'u' && p[1] == '"') {
             tok = read_string_literal(p, p + 1, PREFIX_u);
             cur = cur->next = tok;
             p += tok->len;
@@ -908,7 +908,7 @@ Token *tokenize(SrcFile *file) {
         }
 
         // UTF-32 string literal
-        if (start_with(p, "U\"")) {
+        if (*p == 'U' && p[1] == '"') {
             tok = read_string_literal(p, p + 1, PREFIX_U);
             cur = cur->next = tok;
             p += tok->len;
@@ -916,7 +916,7 @@ Token *tokenize(SrcFile *file) {
         }
 
         // Wide string literal
-        if (start_with(p, "L\"")) {
+        if (*p == 'L' && p[1] == '"') {
             tok = read_string_literal(p, p + 1, PREFIX_L);
             cur = cur->next = tok;
             p += tok->len;
@@ -932,7 +932,7 @@ Token *tokenize(SrcFile *file) {
         }
 
         // UTF-8 character literal
-        if (start_with(p, "u8'")) {
+        if (*p == 'u' && p[1] == '8' && p[2] == '\'') {
             tok = read_char_literal(p, p + 2, PREFIX_u8);
             cur = cur->next = tok;
             p += tok->len;
@@ -940,7 +940,7 @@ Token *tokenize(SrcFile *file) {
         }
 
         // UTF-16 character literal
-        if (start_with(p, "u'")) {
+        if (*p == 'u' && p[1] == '\'') {
             tok = read_char_literal(p, p + 1, PREFIX_u);
             cur = cur->next = tok;
             p += tok->len;
@@ -948,7 +948,7 @@ Token *tokenize(SrcFile *file) {
         }
 
         // UTF-32 character literal
-        if (start_with(p, "U'")) {
+        if (*p == 'U' && p[1] == '\'') {
             tok = read_char_literal(p, p + 1, PREFIX_U);
             cur = cur->next = tok;
             p += tok->len;
@@ -956,7 +956,7 @@ Token *tokenize(SrcFile *file) {
         }
 
         // Wide character literal
-        if (start_with(p, "L'")) {
+        if (*p == 'L' && p[1] == '\'') {
             tok = read_char_literal(p, p + 1, PREFIX_L);
             cur = cur->next = tok;
             p += tok->len;
@@ -970,7 +970,7 @@ Token *tokenize(SrcFile *file) {
             char *buf = convert_universal_chars(p, ident_len);
             tok->id = intern(buf, strlen(buf));
             cur = cur->next = tok;
-            p += cur->len;
+            p += tok->len;
             continue;
         }
 
@@ -999,7 +999,7 @@ end:
 static char *read_file(char *path) {
     FILE *fp;
 
-    if (strcmp(path, "-") == 0) {
+    if (*path == '-' && path[1] == '\0') {
         // By convention, read from stdin if a given filename is "-".
         fp = stdin;
     } else {
@@ -1007,26 +1007,21 @@ static char *read_file(char *path) {
         if (!fp) return NULL;
     }
 
-    char *buf;
-    size_t buflen;
-    FILE *out = open_memstream(&buf, &buflen);
-
     // Read the entire file.
+    char *buf = vnew(4096, 1);
+    size_t buflen = 0;
     while (1) {
         char buf2[4096];
         int n = fread(buf2, 1, sizeof(buf2), fp);
         if (n == 0) break;
-        fwrite(buf2, 1, n, out);
+        buf = vgrow(buf, buflen + n + 2);
+        memcpy(buf + buflen, buf2, n);
+        buflen += n;
     }
-
-    if (fp != stdin) fclose(fp);
-    fflush(out);
 
     // Make sure that the last line is properly terminated with '\n'.
     if (buflen > 0 && buf[buflen - 1] == '\\') fatal("stray ‘\\’ at end of file");
-    if (buflen == 0 || buf[buflen - 1] != '\n') fputc('\n', out);
-    fputc('\0', out);
-    fclose(out);
+    if (buflen == 0 || buf[buflen - 1] != '\n') buf[buflen] = '\n';
 
     return buf;
 }
@@ -1057,13 +1052,13 @@ static void remove_backslash_newline(char *p) {
             n++;
         } else if (p[i] == '\n') {
             p[j++] = p[i++];
-            for (; n > 0; n--) p[j++] = '\n';
+            while (n-- > 0) p[j++] = '\n';
         } else {
             p[j++] = p[i++];
         }
     }
 
-    for (; n > 0; n--) p[j++] = '\n';
+    while (n-- > 0) p[j++] = '\n';
     p[j] = '\0';
 }
 

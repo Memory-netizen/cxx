@@ -58,14 +58,14 @@ static Node *new_num(int64_t val, Token *tok) {
 static Node *new_long(int64_t val, Token *tok) {
     Node *node = new_node(ND_NUM, tok);
     node->val = val;
-    node->ty = ty_long;
+    node->ty = T.ty_long;
     return node;
 }
 
 static Node *new_ulong(int64_t val, Token *tok) {
     Node *node = new_node(ND_NUM, tok);
     node->val = val;
-    node->ty = ty_ulong;
+    node->ty = T.ty_ulong;
     return node;
 }
 
@@ -158,7 +158,7 @@ static Node *leave_scope(Token *tok) {
         add_type(node);
         lvalue_convert(&node);
         node = new_unary(ND_SP_RESTORE, node, tok);
-        node->ty = ty_void;
+        node->ty = T.ty_void;
     }
     scope = scope->next;
     return node;
@@ -356,8 +356,8 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
     size_t size = lhs->ty->base->size;
     lvalue_convert(&lhs);
     lvalue_convert(&rhs);
-    new_imcast(&lhs, ty_long);
-    new_imcast(&rhs, ty_long);
+    new_imcast(&lhs, T.ty_long);
+    new_imcast(&rhs, T.ty_long);
     Node *node = new_binary(ND_SUB, lhs, rhs, tok);
 
     if (size == 1) return node;
@@ -1182,19 +1182,19 @@ static Node *primary(Token **rest, Token *tok) {
     }
     if (tok->kind == TK_TRUE) {
         node = new_num(1, tok);
-        node->ty = ty_bool;
+        node->ty = T.ty_bool;
         *rest = tok->next;
         return node;
     }
     if (tok->kind == TK_FALSE) {
         node = new_num(0, tok);
-        node->ty = ty_bool;
+        node->ty = T.ty_bool;
         *rest = tok->next;
         return node;
     }
     if (tok->kind == TK_NULLPTR) {
         node = new_node(ND_NULLPTR, tok);
-        node->ty = ty_nullptr;
+        node->ty = T.ty_nullptr;
         *rest = tok->next;
         return node;
     }
@@ -1317,7 +1317,7 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
             // "char", "unsinged char" and "signed char" are promoted to "int" or "unsigned int"
             // float arguments are promoted to double.
             if (is_integer(arg->ty)) integer_promotion(&arg);
-            if (arg->ty->kind == TY_FLOAT) new_imcast(&arg, ty_double);
+            if (arg->ty->kind == TY_FLOAT) new_imcast(&arg, T.ty_double);
             lvalue_convert(&arg);
         } else {
             error(tok, "too many arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ty->nparam);
@@ -1981,7 +1981,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
                 Node *save = new_node(ND_SP_SAVE, tok);
                 save->ty = sp->ty;
                 Node *save_expr = new_binary(ND_AS, sp, save, tok);
-                save_expr->ty = pointer_to(ty_void, 0);
+                save_expr->ty = pointer_to(T.ty_void, 0);
                 cur = cur->next = save_expr;
             }
             Node *size = scope->vla_expr[0];
@@ -2738,11 +2738,12 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
     ty->members = dummy.next;
 }
 
+// Fix it
 static Type *get_unit_ty(int bytes, bool is_unsigned) {
-    if (bytes == 1) return is_unsigned ? ty_uchar : ty_schar;
-    if (bytes == 2) return is_unsigned ? ty_ushort : ty_short;
-    if (bytes == 4) return is_unsigned ? ty_uint : ty_int;
-    return is_unsigned ? ty_ulong : ty_long;
+    if (bytes == 1) return is_unsigned ? T.ty_uchar : T.ty_schar;
+    if (bytes == 2) return is_unsigned ? T.ty_ushort : T.ty_short;
+    if (bytes == 4) return is_unsigned ? T.ty_uint : T.ty_int;
+    return is_unsigned ? T.ty_ulong : T.ty_long;
 }
 
 static int min_bytes_for_bits(int bits) {
@@ -3085,67 +3086,67 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
     check_type:
         switch (typespec_cnt) {
             case VOID:
-                ty = ty_void;
+                ty = T.ty_void;
                 break;
             case BOOL:
-                ty = ty_bool;
+                ty = T.ty_bool;
                 break;
             case CHAR:
-                ty = ty_char;
+                ty = T.ty_char;
                 break;
             case SIGNED + CHAR:
-                ty = ty_schar;
+                ty = T.ty_schar;
                 break;
             case UNSIGNED + CHAR:
-                ty = ty_uchar;
+                ty = T.ty_uchar;
                 break;
             case SHORT:
             case SHORT + INT:
             case SIGNED + SHORT:
             case SIGNED + SHORT + INT:
-                ty = ty_short;
+                ty = T.ty_short;
                 break;
             case UNSIGNED + SHORT:
             case UNSIGNED + SHORT + INT:
-                ty = ty_ushort;
+                ty = T.ty_ushort;
                 break;
             case INT:
             case SIGNED:
             case SIGNED + INT:
-                ty = ty_int;
+                ty = T.ty_int;
                 break;
             case UNSIGNED:
             case UNSIGNED + INT:
-                ty = ty_uint;
+                ty = T.ty_uint;
                 break;
             case LONG:
             case LONG + INT:
             case SIGNED + LONG:
             case SIGNED + LONG + INT:
-                ty = ty_long;
+                ty = T.ty_long;
                 break;
             case UNSIGNED + LONG:
             case UNSIGNED + LONG + INT:
-                ty = ty_ulong;
+                ty = T.ty_ulong;
                 break;
             case LONG + LONG:
             case LONG + LONG + INT:
             case SIGNED + LONG + LONG:
             case SIGNED + LONG + LONG + INT:
-                ty = ty_llong;
+                ty = T.ty_llong;
                 break;
             case UNSIGNED + LONG + LONG:
             case UNSIGNED + LONG + LONG + INT:
-                ty = ty_ullong;
+                ty = T.ty_ullong;
                 break;
             case FLOAT:
-                ty = ty_float;
+                ty = T.ty_float;
                 break;
             case DOUBLE:
-                ty = ty_double;
+                ty = T.ty_double;
                 break;
             case LONG + DOUBLE:
-                ty = ty_ldouble;
+                ty = T.ty_ldouble;
                 break;
             case NONE:
             case OTHER:
@@ -3165,7 +3166,7 @@ loop_end:
 
     if (!typespec_cnt) {
         if (!seen_auto) error(tok, "a type specifier is required for all declarations");
-        ty = ty_none;
+        ty = T.ty_none;
         seen_auto = false;
     }
 
@@ -3299,8 +3300,8 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
         ty = array_of(ty, -1);
     } else if (ty->kind == TY_VLA || !is_const_expr(len)) {
         ty = vla_of(ty, len);
-        if (!scope->stack_top) scope->stack_top = new_lvar(intern("", 0), pointer_to(ty_void, 0));
-        ty->vla_cnt = new_lvar(intern("", 0), ty_ulong);
+        if (!scope->stack_top) scope->stack_top = new_lvar(intern("", 0), pointer_to(T.ty_void, 0));
+        ty->vla_cnt = new_lvar(intern("", 0), T.ty_ulong);
         ty->vla_len = len;
         Node *expr = new_binary(ND_AS, new_var_node(ty->vla_cnt, tok), len, tok);
         scope->vla_expr = vgrow(scope->vla_expr, scope->vla_num + 1);
@@ -3467,7 +3468,7 @@ static Token *external_declaration(Token *tok) {
             if (fn_id == 0) fn_id = intern("__func__", 8);
             if (fn_id2 == 0) fn_id2 = intern("__FUNCTION__", 12);
 
-            Type *fn_name = array_of(ty_char, str_len(var->id) + 1);
+            Type *fn_name = array_of(T.ty_char, str_len(var->id) + 1);
 
             NameSpace *tmp = push_namespace(fn_id, SYM_VAR, fn_name, var_name);
             NameSpace *tmp2 = push_namespace(fn_id2, SYM_VAR, fn_name, var_name);
@@ -3573,14 +3574,14 @@ static Sym *declare_builtin_function(uint32_t id, Type *ty) {
 }
 
 static void declare_builtin_functions(void) {
-    Type *ty = func_type(pointer_to(ty_void, 0));
-    ty->params = copy_type(ty_ulong);
+    Type *ty = func_type(pointer_to(T.ty_void, 0));
+    ty->params = copy_type(T.ty_ulong);
     uint32_t id = intern("__builtin_alloca", 16);
     declare_builtin_function(id, ty);
 
-    ty = func_type(pointer_to(ty_void, 0));
-    ty->params = copy_type(ty_ulong);
-    ty->params->next = copy_type(ty_ulong);
+    ty = func_type(pointer_to(T.ty_void, 0));
+    ty->params = copy_type(T.ty_ulong);
+    ty->params->next = copy_type(T.ty_ulong);
     id = intern("__builtin_alloca_with_align", 27);
     builtin_alloca_with_align = declare_builtin_function(id, ty);
 }

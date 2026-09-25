@@ -8,10 +8,6 @@ extern Target T_rv64;
 extern Target T_rv32;
 extern Target T_rv32b;
 
-static Target *tlist[] = {
-    &T_amd64, &T_arm64, &T_rv64, &T_rv32, &T_rv32b, 0,
-};
-
 typedef enum {
     FILE_NONE,
     FILE_C,
@@ -195,6 +191,39 @@ char *quote_makefile(const char *s) {
         }
     }
     return buf;
+}
+
+static struct {
+    char *alias;
+    Target *target;
+} target_aliases[] = {
+    {"amd64", &T_amd64},
+    {"x86_64", &T_amd64},
+    {"x86-64", &T_amd64},
+    {"x86_64-unknown-linux-gnu", &T_amd64},
+    {"x86_64-linux-gnu", &T_amd64},
+
+    {"arm64", &T_arm64},
+    {"aarch64", &T_arm64},
+    {"aarch64-unknown-linux-gnu", &T_arm64},
+    {"aarch64-linux-gnu", &T_arm64},
+
+    {"rv64", &T_rv64},
+    {"riscv64", &T_rv64},
+    {"riscv64-unknown-linux-gnu", &T_rv64},
+
+    {"rv32", &T_rv32},
+    {"riscv32", &T_rv32},
+    {"rv32bare", &T_rv32b},
+    {"riscv32-none-elf", &T_rv32b},
+
+    {NULL, NULL},
+};
+
+static Target *lookup_target(char *s) {
+    for (int i = 0; target_aliases[i].alias; i++)
+        if (!strcmp(s, target_aliases[i].alias)) return target_aliases[i].target;
+    return NULL;
 }
 
 static void parse_args(int argc, char **argv) {
@@ -414,16 +443,12 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-target")) {
             char *t_name = argv[++i];
-            for (Target **t = tlist;; t++) {
-                if (!*t) {
-                    fprintf(stderr, "unknown target '%s'\n", t_name);
-                    exit(1);
-                }
-                if (strcmp(t_name, (*t)->name) == 0) {
-                    T = **t;
-                    break;
-                }
+            Target *t = lookup_target(t_name);
+            if (!t) {
+                fprintf(stderr, "unknown target '%s'\n", t_name);
+                exit(1);
             }
+            T = *t;
             continue;
         }
 
@@ -699,8 +724,8 @@ static void cc1(void) {
 
 // Stage 2: .ll → .s  (via clang)
 static void compile(char *input, char *output) {
-    char *cmd[] = {"clang", "-target", T.name, "-S", "-fno-addrsig", "-Wno-override-module",
-                   "-x",    "ir",      input,  "-o", output,         NULL};
+    char *cmd[] = {"clang", "-target", T.triple, "-S", "-fno-addrsig", "-Wno-override-module",
+                   "-x",    "ir",      input,    "-o", output,         NULL};
     run_subprocess(cmd);
 }
 

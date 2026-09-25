@@ -1,10 +1,58 @@
 #include "cxx.h"
 
+#define TYPE(a, b, c, d)  \
+    {                     \
+        .kind = a,        \
+        .size = b,        \
+        .align = c,       \
+        .is_unsigned = d, \
+    }
+
+static Type ty_none_ = TYPE(TY_NONE, -1, 1, false);
+static Type ty_void_ = TYPE(TY_VOID, 1, 1, false);
+static Type ty_nullptr_ = TYPE(TY_NULLPTR, 8, 8, true);
+static Type ty_bool_ = TYPE(TY_BOOL, 1, 1, true);
+static Type ty_char_ = TYPE(TY_CHAR, 1, 1, false);
+static Type ty_schar_ = TYPE(TY_CHAR, 1, 1, false);
+static Type ty_uchar_ = TYPE(TY_CHAR, 1, 1, true);
+static Type ty_short_ = TYPE(TY_SHORT, 2, 2, false);
+static Type ty_ushort_ = TYPE(TY_SHORT, 2, 2, true);
+static Type ty_int_ = TYPE(TY_INT, 4, 4, false);
+static Type ty_uint_ = TYPE(TY_INT, 4, 4, true);
+static Type ty_long_ = TYPE(TY_LONG, 8, 8, false);
+static Type ty_ulong_ = TYPE(TY_LONG, 8, 8, true);
+static Type ty_llong_ = TYPE(TY_LLONG, 8, 8, false);
+static Type ty_ullong_ = TYPE(TY_LLONG, 8, 8, true);
+static Type ty_float_ = TYPE(TY_FLOAT, 4, 4, false);
+static Type ty_double_ = TYPE(TY_DOUBLE, 8, 8, false);
+static Type ty_ldouble_ = TYPE(TY_LDOUBLE, 16, 16, false);
+
+#undef TYPE
+
 Target T_amd64 = {
-    .name = "x86_64-unknown-linux-gnu",
+    .name = "amd64",
     .triple = "x86_64-linux-gnu",
     .datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
     .sysroot = NULL,
+    .ty_none = &ty_none_,
+    .ty_void = &ty_void_,
+    .ty_nullptr = &ty_nullptr_,
+    .ty_bool = &ty_bool_,
+    .ty_char = &ty_char_,
+    .ty_schar = &ty_schar_,
+    .ty_uchar = &ty_uchar_,
+    .ty_short = &ty_short_,
+    .ty_ushort = &ty_ushort_,
+    .ty_int = &ty_int_,
+    .ty_uint = &ty_uint_,
+    .ty_long = &ty_long_,
+    .ty_ulong = &ty_ulong_,
+    .ty_llong = &ty_llong_,
+    .ty_ullong = &ty_ullong_,
+    .ty_float = &ty_float_,
+    .ty_double = &ty_double_,
+    .ty_ldouble = &ty_ldouble_,
+    .ty_wchar = &ty_int_,
     .int_max = 2147483647,
     .uint_max = 4294967295U,
     .long_max = 9223372036854775807L,

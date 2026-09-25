@@ -29,10 +29,10 @@ static const char *op_str[][3] = {
 };
 
 static const char *ty_str[] = {
-    [TY_VOID] = "void",      [TY_I1] = "i1",    [TY_I32] = "i32",     [TY_I64] = "i64",     [TY_BOOL] = "i8",
-    [TY_CHAR] = "i8",        [TY_SCHAR] = "i8", [TY_UCHAR] = "i8",    [TY_SHORT] = "i16",   [TY_INT] = "i32",
-    [TY_ENUM] = "i32",       [TY_LONG] = "i64", [TY_LLONG] = "i64",   [TY_FLOAT] = "float", [TY_DOUBLE] = "double",
-    [TY_LDOUBLE] = "double", [TY_PTR] = "ptr",  [TY_NULLPTR] = "ptr",
+    [TY_VOID] = "void",     [TY_I1] = "i1",    [TY_I32] = "i32",     [TY_I64] = "i64",     [TY_BOOL] = "i8",
+    [TY_CHAR] = "i8",       [TY_SCHAR] = "i8", [TY_UCHAR] = "i8",    [TY_SHORT] = "i16",   [TY_INT] = "i32",
+    [TY_ENUM] = "i32",      [TY_LONG] = "i64", [TY_LLONG] = "i64",   [TY_FLOAT] = "float", [TY_DOUBLE] = "double",
+    [TY_LDOUBLE] = "fp128", [TY_PTR] = "ptr",  [TY_NULLPTR] = "ptr",
 };
 
 static void print_ident(uint32_t id) {
@@ -106,10 +106,15 @@ static void print_label(Con *c, char *sym, char *dot) {
 
 static void printcon(Con *c, Type *ty) {
     if (c->type == CBits) {
-        if (is_flonum(ty))
-            fprintf(out_file, "0x%016" PRIx64, c->bits.i);
-        else
+        if (is_flonum(ty)) {
+            if (ty->kind == TY_LDOUBLE) {
+                fprintf(out_file, "0xL%032" PRIx64, c->bits.i);
+            } else {
+                fprintf(out_file, "0x%016" PRIx64, c->bits.i);
+            }
+        } else {
             fprintf(out_file, "%" PRIi64, c->bits.i);
+        }
     } else if (c->type == CAddr) {
         if (c->sym) {
             char *sym = strdup(str(c->sym));
@@ -635,7 +640,7 @@ void dump_module(Module *md, FILE *out) {
     fprintf(out_file, "; ModuleID = '%s'\n", files[0]->name);
     fprintf(out_file, "source_filename = \"%s\"\n", files[0]->name);
     fprintf(out_file, "target datalayout = \"%s\"\n", T.datalayout);
-    fprintf(out_file, "target triple = \"%s\"\n\n", T.name);
+    fprintf(out_file, "target triple = \"%s\"\n\n", T.triple);
     fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
     fprintf(out_file, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n");
     fprintf(out_file, "declare ptr @llvm.threadlocal.address.p0(ptr)\n");

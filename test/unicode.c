@@ -5,7 +5,11 @@
 typedef unsigned char char8_t;
 typedef unsigned short char16_t;
 typedef unsigned int char32_t;
+#ifdef __aarch64__
+typedef unsigned int wchar_t;
+#else
 typedef int wchar_t;
+#endif
 
 int 世界 = 42;
 

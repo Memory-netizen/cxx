@@ -202,7 +202,6 @@ static Token *new_str_token(char *str, Token *tmpl) {
     int len = strlen(str);
     new->kind = TK_STRLIT;
     new->id = intern(str, len);
-    new->ty = array_of(ty_char, len + 1);
     char *q_str = quote_string(str);
     write_scratch_space(new, q_str);
     new->origin = tmpl;
@@ -213,7 +212,6 @@ static Token *ident_to_num(Token *tok, int64_t val) {
     Token *new = emalloc(sizeof(Token));
     new->kind = TK_NUM;
     new->val = val;
-    new->ty = ty_long;
     char *fmt = format("%ld", val);
     write_scratch_space(new, fmt);
     new->origin = tok;
@@ -1445,7 +1443,7 @@ static Token *builtin_fn_macro(Token **rest, Token *tmpl) {
 
 SrcFile *scratch;
 static void init_scratch_space(void) {
-    char *scratch_space = vnew(128 * 1024, sizeof(char));
+    char *scratch_space = vnew(128 * 1024, 1);
     scratch_space[0] = '\n';
     scratch = new_file("<scratch space>", 1, scratch_space);
 }
