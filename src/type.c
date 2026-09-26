@@ -179,11 +179,16 @@ bool is_flonum(Type *ty) {
            ty->kind == TY_F32 || ty->kind == TY_F64 || ty->kind == TY_F128;
 }
 
-// The new IEC 60559 interchange types (_Float16/32/64/128), excluding the
-// classic float/double/long double.
-bool is_new_flonum(Type *ty) {
+// The IEC 60559 interchange types (_Float16/32/64/128) — distinct,
+// incompatible types (C23 6.2.5). Excludes long double.
+bool is_interchange(Type *ty) {
     return ty->kind == TY_F16 || ty->kind == TY_F32 || ty->kind == TY_F64 || ty->kind == TY_F128;
 }
+
+// Types whose constants are stored in node->fpval / CBits128: the
+// interchange types plus long double (whose format is target-dependent:
+// x87 80-bit on amd64, binary128 elsewhere).
+bool is_fpval(Type *ty) { return is_interchange(ty) || ty->kind == TY_LDOUBLE; }
 
 FpFormat fmt_of(Type *ty) {
     switch (ty->kind) {
@@ -195,6 +200,8 @@ FpFormat fmt_of(Type *ty) {
         case TY_F64:
         case TY_DOUBLE:
             return FP64;
+        case TY_LDOUBLE:
+            return T.ldouble_is_fp80 ? FP80 : FP128;
         default:
             return FP128;
     }
@@ -634,7 +641,7 @@ void new_imcast(Node **expr, Type *ty) {
 
 // Format rank of the value set, per C23 H.4.3: binary16 ⊂ binary32 ⊂
 // binary64 ⊂ binary128 (the compiler models long double as binary128).
-static int float_rank(Type *ty) {
+int float_rank(Type *ty) {
     switch (ty->kind) {
         case TY_F16:
             return 0;
@@ -644,9 +651,11 @@ static int float_rank(Type *ty) {
         case TY_F64:
         case TY_DOUBLE:
             return 2;
-        case TY_F128:
         case TY_LDOUBLE:
-            return 3;
+            // x87 80-bit sits between binary64 and binary128
+            return T.ldouble_is_fp80 ? 3 : 4;
+        case TY_F128:
+            return 4;
         default:
             return -1;
     }
@@ -672,9 +681,10 @@ static Type *get_common_type(Type *ty1, Type *ty2) {
         if (r1 != r2) return r1 < r2 ? ty2 : ty1;
         // Equivalent value sets (e.g. float and _Float32, both binary32):
         // an interchange floating type wins the tie (C23 H.4.3).
-        if (is_new_flonum(ty1)) return ty1;
-        if (is_new_flonum(ty2)) return ty2;
+        if (is_interchange(ty1)) return ty1;
+        if (is_interchange(ty2)) return ty2;
         switch (r1) {
+            case 4:
             case 3:
                 return T.ty_ldouble;
             case 2:

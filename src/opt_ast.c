@@ -7,11 +7,11 @@ static bool is_int_const(Node *node) {
 
 // Returns true if node is a float/double/long double constant.
 static bool is_float_const(Node *node) {
-    return node && node->kind == ND_NUM && is_flonum(node->ty) && !is_new_flonum(node->ty);
+    return node && node->kind == ND_NUM && is_flonum(node->ty) && !is_fpval(node->ty);
 }
 
 // Returns true if node is an _Float16/32/64/128 constant (fpval storage).
-static bool is_fp128_const(Node *node) { return node && node->kind == ND_NUM && is_new_flonum(node->ty); }
+static bool is_fp128_const(Node *node) { return node && node->kind == ND_NUM && is_fpval(node->ty); }
 
 // Returns true if node is a _BitInt(65..128) constant (ival storage).
 static bool is_i128_const(Node *node) { return node && node->kind == ND_NUM && is_bitint128(node->ty); }
@@ -372,7 +372,7 @@ static Node *fold_cast(Node *node) {
     // int64 / _BitInt(<=64) → _BitInt(65..128) / _FloatN
     if (is_int_const(lhs)) {
         if (is_bitint128(node->ty)) return folded_i128(i128_of_node(lhs), node->ty, node);
-        if (is_new_flonum(node->ty)) {
+        if (is_fpval(node->ty)) {
             Fp128 v = lhs->ty->is_unsigned ? fp128_from_int128(int128_set_ui((uint64_t)lhs->val), UNSIGNED)
                                            : fp128_from_int128(int128_set_i(lhs->val), SIGNED);
             return folded_fp128(v, node->ty, node);
@@ -381,7 +381,7 @@ static Node *fold_cast(Node *node) {
 
     // _FloatN / _BitInt(>64) sources
     if (is_fp128_const(lhs)) {
-        if (is_new_flonum(node->ty)) return folded_fp128(lhs->fpval, node->ty, node);
+        if (is_fpval(node->ty)) return folded_fp128(lhs->fpval, node->ty, node);
         if (is_flonum(node->ty)) {
             uint64_t b = fp128_to_fp64_bits(lhs->fpval);
             double d;
@@ -400,7 +400,7 @@ static Node *fold_cast(Node *node) {
         if (is_bitint128(node->ty)) return folded_i128(lhs->ival, node->ty, node);
         if (is_integer(node->ty) && !is_bitint128(node->ty))
             return folded_int((int64_t)lhs->ival.limb[0] | ((int64_t)lhs->ival.limb[1] << 32), node->ty, node);
-        if (is_new_flonum(node->ty)) {
+        if (is_fpval(node->ty)) {
             Fp128 v = fp128_from_int128(lhs->ival, lhs->ty->is_unsigned ? UNSIGNED : SIGNED);
             return folded_fp128(v, node->ty, node);
         }
@@ -434,11 +434,11 @@ static Node *fold_cast(Node *node) {
     }
 
     // classic float ↔ classic float cast
-    if (is_float_const(lhs) && is_flonum(node->ty) && !is_new_flonum(node->ty))
+    if (is_float_const(lhs) && is_flonum(node->ty) && !is_fpval(node->ty))
         return folded_float(lhs->fval, node->ty, node);
 
     // classic float → _FloatN cast
-    if (is_float_const(lhs) && is_new_flonum(node->ty)) {
+    if (is_float_const(lhs) && is_fpval(node->ty)) {
         uint64_t b;
         memcpy(&b, &lhs->fval, 8);
         return folded_fp128(fp128_from_fp64(b), node->ty, node);

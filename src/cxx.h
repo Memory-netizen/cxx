@@ -85,11 +85,13 @@ struct Target {
     uint64_t int_max, uint_max;
     uint64_t long_max, ulong_max;
     uint64_t llong_max;
+    bool ldouble_is_fp80;  // x87 80-bit (amd64) vs binary128 (others)
     char *predef;
 };
 
 extern Target T;
 extern Type *ty_i1;
+int float_rank(Type *ty);
 extern Type *bitint[129][2];
 extern Type *f16;
 extern Type *f32;
@@ -696,6 +698,8 @@ bool is_bool(Type *ty);
 bool is_char(Type *ty);
 bool is_integer(Type *ty);
 bool is_flonum(Type *ty);
+bool is_interchange(Type *ty);
+bool is_fpval(Type *ty);
 bool is_arith(Type *ty);
 bool is_pointer(Type *ty);
 bool is_nullptr(Type *ty);

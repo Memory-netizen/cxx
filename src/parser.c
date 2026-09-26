@@ -91,7 +91,7 @@ static Node *new_num_node(Token *tok) {
     Node *node = new_num(tok->val, tok);
     node->ty = infer_numtype(tok);
 
-    if (is_new_flonum(node->ty)) {
+    if (is_fpval(node->ty)) {
         char *text = clean_num_text(tok);
         Fp128 v;
         bool ok = (text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) ? fp128_set_hex_str(&v, text, fmt_of(node->ty))
@@ -1100,12 +1100,24 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
             double fval;
         } u;
 
-        if (is_new_flonum(ty)) {
+        if (is_fpval(ty)) {
             Fp128 v = eval_fp128(init->expr);
             Con c = {.type = CBits128};
             switch (ty->kind) {
                 case TY_F16:
                     c.bits.i128.limb[0] = fp128_to_fp16_bits(v);
+                    break;
+                case TY_LDOUBLE:
+                    if (T.ldouble_is_fp80) {
+                        uint64_t m;
+                        uint16_t se;
+                        fp128_to_fp80_bits(v, &m, &se);
+                        c.bits.i128.limb[0] = (uint32_t)m;
+                        c.bits.i128.limb[1] = (uint32_t)(m >> 32);
+                        c.bits.i128.limb[2] = se;
+                    } else {
+                        c.bits.f128 = v;
+                    }
                     break;
                 default: {
                     uint64_t b = fp128_to_fp64_bits(v);
@@ -1853,7 +1865,7 @@ static Fp128 eval_fp128(Node *node) {
     add_type(node);
     switch (node->kind) {
         case ND_NUM:
-            if (is_new_flonum(node->ty)) return node->fpval;
+            if (is_fpval(node->ty)) return node->fpval;
             break;
         case ND_ADD:
             return fp128_add(eval_fp128(node->lhs), eval_fp128(node->rhs));
@@ -1877,7 +1889,7 @@ static Fp128 eval_fp128(Node *node) {
         case ND_EXCAST: {
             // Source may be an integer (or a float of another format).
             if (is_flonum(node->lhs->ty)) {
-                if (is_new_flonum(node->lhs->ty)) return fp128_round_to(eval_fp128(node->lhs), fmt_of(node->ty));
+                if (is_fpval(node->lhs->ty)) return fp128_round_to(eval_fp128(node->lhs), fmt_of(node->ty));
                 uint64_t b;
                 memcpy(&b, &(double){eval_double(node->lhs)}, 8);
                 return fp128_round_to(fp128_from_fp64(b), fmt_of(node->ty));
@@ -1976,7 +1988,7 @@ static int64_t eval(Node *node) { return eval2(node, NULL); }
 
 static int64_t eval2(Node *node, uint32_t *sym) {
     add_type(node);
-    if (is_new_flonum(node->ty)) {
+    if (is_fpval(node->ty)) {
         Fp128 v = eval_fp128(node);
         // Return the low 64 bits; full-precision contexts use eval_fp128
         // directly.
@@ -2035,7 +2047,7 @@ static int64_t eval2(Node *node, uint32_t *sym) {
         case ND_NE:
         case ND_LT:
         case ND_LE: {
-            if (is_new_flonum(node->lhs->ty)) {
+            if (is_fpval(node->lhs->ty)) {
                 int c = fp128_cmp(eval_fp128(node->lhs), eval_fp128(node->rhs));
                 switch (node->kind) {
                     case ND_EQ:
@@ -2080,7 +2092,7 @@ static int64_t eval2(Node *node, uint32_t *sym) {
             return eval2(node->lhs, sym) + eval(node->rhs) * node->ty->base->size;
         case ND_IMCAST:
         case ND_EXCAST: {
-            if (is_new_flonum(node->lhs->ty)) {
+            if (is_fpval(node->lhs->ty)) {
                 bool ok;
                 Int128 v = fp128_to_int128(eval_fp128(node->lhs), node->ty->is_unsigned ? UNSIGNED : SIGNED, &ok);
                 if (!ok) error(node->tok, "floating constant out of range");

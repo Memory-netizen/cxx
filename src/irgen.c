@@ -134,6 +134,16 @@ static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
         return val;
     }
     if (target_ty->size == src_ty->size) {
+        if (is_flonum(src_ty) && is_flonum(target_ty)) {
+            int rs = float_rank(src_ty), rt = float_rank(target_ty);
+            if (rs != rt) {
+                // Same storage size but different IR types, e.g.
+                // x86_fp80 <-> fp128 on amd64.
+                Ref dst = TMP(tmp_id++, target_ty);
+                new_ins(rt > rs ? IR_EXT : IR_TRUNC, dst, (Ref[]){val}, 1);
+                return dst;
+            }
+        }
         val.ty = target_ty;
         return val;
     }
@@ -288,11 +298,23 @@ static Ref gen_expr(Node *node) {
         case ND_NULLPTR:
             return NULLPTR;
         case ND_NUM:
-            if (is_new_flonum(node->ty)) {
+            if (is_fpval(node->ty)) {
                 Con c = {.type = CBits128};
                 switch (node->ty->kind) {
                     case TY_F16:
                         c.bits.i128.limb[0] = fp128_to_fp16_bits(node->fpval);
+                        break;
+                    case TY_LDOUBLE:
+                        if (T.ldouble_is_fp80) {
+                            uint64_t m;
+                            uint16_t se;
+                            fp128_to_fp80_bits(node->fpval, &m, &se);
+                            c.bits.i128.limb[0] = (uint32_t)m;
+                            c.bits.i128.limb[1] = (uint32_t)(m >> 32);
+                            c.bits.i128.limb[2] = se;
+                        } else {
+                            c.bits.f128 = node->fpval;
+                        }
                         break;
                     default: {
                         // F32/F64/F128. The legacy LLVM literal for float
@@ -321,7 +343,6 @@ static Ref gen_expr(Node *node) {
             }
             if (node->ty->kind == TY_FLOAT) return FLOAT(node->val);
             if (node->ty->kind == TY_DOUBLE) return DOUBLE(node->val);
-            if (node->ty->kind == TY_LDOUBLE) return LDOUBLE(node->val);
             if (node->ty->size == 1)
                 dst = BOOL(node->val);
             else if (node->ty->size == 4)
@@ -399,7 +420,7 @@ static Ref gen_expr(Node *node) {
                 uint64_t bits;
             } u = {addend};
             Ref rr;
-            if (is_new_flonum(node->ty)) {
+            if (is_fpval(node->ty)) {
                 Con c = {.type = CBits128};
                 switch (node->ty->kind) {
                     case TY_F16:
@@ -410,6 +431,15 @@ static Ref gen_expr(Node *node) {
                         // binary64 bit pattern of ±1.0 (an f32 ±1.0 widens
                         // exactly to f64, matching the constant encoding)
                         c.bits.i128.limb[1] = addend > 0 ? 0x3FF00000u : 0xBFF00000u;
+                        break;
+                    case TY_LDOUBLE:
+                        if (T.ldouble_is_fp80) {
+                            // x87 ±1.0: se = 0x3FFF, mantissa = 1.0 (int bit)
+                            c.bits.i128.limb[2] = addend > 0 ? 0x3FFF : 0xBFFF;
+                            c.bits.i128.limb[1] = 0x80000000u;
+                        } else {
+                            c.bits.f128 = addend > 0 ? FP128_ONE : fp128_neg(FP128_ONE);
+                        }
                         break;
                     default:
                         c.bits.f128 = addend > 0 ? FP128_ONE : fp128_neg(FP128_ONE);
