@@ -18,12 +18,12 @@ if command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then
 elif command -v gcc >/dev/null 2>&1 && [ "$(uname -m)" = "riscv64" ]; then
   TOOL=gcc
 else
-  echo "no riscv64 cross gcc found; cannot run rv32 tests"
-  exit 1
+  echo "== rv32 bare-metal SKIPPED (no riscv64 cross gcc) =="
+  exit 0
 fi
 if ! command -v qemu-system-riscv32 >/dev/null 2>&1; then
-  echo "qemu-system-riscv32 not found"
-  exit 1
+  echo "== rv32 bare-metal SKIPPED (no qemu-system-riscv32) =="
+  exit 0
 fi
 
 march=rv32imafdc
