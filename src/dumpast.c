@@ -90,15 +90,6 @@ static void print_type(Type *ty) {
         case TY_VOID:
             fprintf(stdout, "void");
             break;
-        case TY_I1:
-            fprintf(stdout, "i1");
-            break;
-        case TY_I32:
-            fprintf(stdout, "i32");
-            break;
-        case TY_I64:
-            fprintf(stdout, "i64");
-            break;
         case TY_CHAR:
             fprintf(stdout, "char");
             break;
@@ -135,6 +126,18 @@ static void print_type(Type *ty) {
             break;
         case TY_LDOUBLE:
             fprintf(stdout, "long double");
+            break;
+        case TY_F16:
+            fprintf(stdout, "_Float16");
+            break;
+        case TY_F32:
+            fprintf(stdout, "_Float32");
+            break;
+        case TY_F64:
+            fprintf(stdout, "_Float64");
+            break;
+        case TY_F128:
+            fprintf(stdout, "_Float128");
             break;
         case TY_ENUM:
             fprintf(stdout, "enum");
@@ -183,6 +186,12 @@ static void print_type(Type *ty) {
             fprintf(stdout, "union %s", str(ty->uid));
             break;
         case TY_NONE:
+            break;
+        default:
+            if (ty->kind & TY_BITINT) {
+                if (ty->is_unsigned) fprintf(stdout, "unsigned ");
+                fprintf(stdout, "_BitInt(%d)", ty->kind & 0xFFF);
+            }
             break;
     }
 }

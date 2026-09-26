@@ -81,14 +81,14 @@ static void insert_phi(Blk *blk, Phi *phi) {
 static Ref gen_builtin_fn(Node *node) {
     if (node->func->lhs->var->id == intern("__builtin_alloca", 16)) {
         Ref size = gen_expr(node->args);
-        Ref dst = TMP(tmp_id++, pointer_to(ty_char, 0));
+        Ref dst = TMP(tmp_id++, pointer_to(T.ty_char, 0));
         new_ins(IR_ALLOCA, dst, (Ref[]){size, INT(16)}, 2);
         return dst;
     }
     if (node->func->lhs->var->id == intern("__builtin_alloca_with_align", 27)) {
         Ref size = gen_expr(node->args);
         int align = node->args->next->val;
-        Type *base_ty = node->base_ty ?: ty_char;
+        Type *base_ty = node->base_ty ?: T.ty_char;
         Ref dst = TMP(tmp_id++, pointer_to(base_ty, 0));
         new_ins(IR_ALLOCA, dst, (Ref[]){size, INT(align / 8)}, 2);
         return dst;
@@ -98,7 +98,7 @@ static Ref gen_builtin_fn(Node *node) {
 
 static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
     if (target_ty->kind == TY_BOOL) {
-        Ref tmp = TMP(tmp_id++, ty_i1);
+        Ref tmp = TMP(tmp_id++, bitint[1][1]);
         Ref zr = INT(0);
         zr.ty = src_ty;
         new_ins(IR_CMP_NE, tmp, (Ref[]){val, zr}, 2);
@@ -288,6 +288,37 @@ static Ref gen_expr(Node *node) {
         case ND_NULLPTR:
             return NULLPTR;
         case ND_NUM:
+            if (is_new_flonum(node->ty)) {
+                Con c = {.type = CBits128};
+                switch (node->ty->kind) {
+                    case TY_F16:
+                        c.bits.i128.limb[0] = fp128_to_fp16_bits(node->fpval);
+                        break;
+                    default: {
+                        // F32/F64/F128. The legacy LLVM literal for float
+                        // and double is the double bit pattern (16 hex
+                        // digits); a binary32 value widened to binary64 is
+                        // exact, so F32 can share the F64 path.
+                        uint64_t b = fp128_to_fp64_bits(node->fpval);
+                        if (node->ty->kind == TY_F128) {
+                            c.bits.f128 = node->fpval;
+                        } else {
+                            c.bits.i128.limb[0] = (uint32_t)b;
+                            c.bits.i128.limb[1] = (uint32_t)(b >> 32);
+                        }
+                        break;
+                    }
+                }
+                dst = newcon(&c, curm);
+                dst.ty = node->ty;
+                return dst;
+            }
+            if (is_bitint128(node->ty)) {
+                Con c = {.type = CBits128, .bits.i128 = node->ival};
+                dst = newcon(&c, curm);
+                dst.ty = node->ty;
+                return dst;
+            }
             if (node->ty->kind == TY_FLOAT) return FLOAT(node->val);
             if (node->ty->kind == TY_DOUBLE) return DOUBLE(node->val);
             if (node->ty->kind == TY_LDOUBLE) return LDOUBLE(node->val);
@@ -367,7 +398,35 @@ static Ref gen_expr(Node *node) {
                 double f64;
                 uint64_t bits;
             } u = {addend};
-            Ref rr = is_flonum(node->ty) ? DOUBLE(u.bits) : INT(addend);
+            Ref rr;
+            if (is_new_flonum(node->ty)) {
+                Con c = {.type = CBits128};
+                switch (node->ty->kind) {
+                    case TY_F16:
+                        c.bits.i128.limb[0] = addend > 0 ? 0x3C00 : 0xBC00;  // half ±1.0
+                        break;
+                    case TY_F32:
+                    case TY_F64:
+                        // binary64 bit pattern of ±1.0 (an f32 ±1.0 widens
+                        // exactly to f64, matching the constant encoding)
+                        c.bits.i128.limb[1] = addend > 0 ? 0x3FF00000u : 0xBFF00000u;
+                        break;
+                    default:
+                        c.bits.f128 = addend > 0 ? FP128_ONE : fp128_neg(FP128_ONE);
+                        break;
+                }
+                rr = newcon(&c, curm);
+                rr.ty = node->ty;
+            } else if (is_flonum(node->ty)) {
+                rr = DOUBLE(u.bits);
+                rr.ty = node->ty;
+            } else if (is_pointer(node->ty)) {
+                // GEP index stays an i64 constant
+                rr = LONG(addend);
+            } else {
+                rr = INT(addend);
+                rr.ty = node->ty;
+            }
             dst = TMP(tmp_id++, node->ty);
             new_ins(ir_op, dst, (Ref[]){lr, rr}, 2);
             store(dst, addr, align, node->lhs->member);
@@ -460,7 +519,7 @@ static Ref gen_expr(Node *node) {
             new_ins(IR_XOR, dst, (Ref[]){lr, INT(-1)}, 2);
             return dst;
         case ND_NOT: {
-            Ref tmp = TMP(tmp_id++, ty_i1);
+            Ref tmp = TMP(tmp_id++, bitint[1][1]);
             Ref zr = INT(0);
             zr.ty = node->lhs->ty;
             new_ins(IR_CMP_EQ, tmp, (Ref[]){lr, zr}, 2);
@@ -521,7 +580,7 @@ static Ref gen_expr(Node *node) {
                 [ND_LT] = IR_CMP_LT,
                 [ND_LE] = IR_CMP_LE,
             };
-            Ref tmp = TMP(tmp_id++, ty_i1);
+            Ref tmp = TMP(tmp_id++, bitint[1][1]);
             new_ins(cmp_op[node->kind], tmp, (Ref[]){lr, rr}, 2);
 
             dst = TMP(tmp_id++, node->ty);
@@ -541,7 +600,7 @@ static Ref gen_cond(Node *node) {
 
     // cond
     Ref tmp = gen_expr(node->cond);
-    Ref cond = TMP(tmp_id++, ty_i1);
+    Ref cond = TMP(tmp_id++, bitint[1][1]);
     Ref zr = INT(0);
     zr.ty = tmp.ty;
     new_ins(IR_CMP_NE, cond, (Ref[]){tmp, zr}, 2);
@@ -588,7 +647,7 @@ static Ref gen_logor(Node *node) {
 
     // lhs
     Ref lr = gen_expr(node->lhs);
-    Ref cond = TMP(tmp_id++, ty_i1);
+    Ref cond = TMP(tmp_id++, bitint[1][1]);
     Ref zr = INT(0);
     zr.ty = lr.ty;
     new_ins(IR_CMP_NE, cond, (Ref[]){lr, zr}, 2);
@@ -604,10 +663,10 @@ static Ref gen_logor(Node *node) {
     curb = f_blk;
     insert_blk(curb);
     Ref rr = gen_expr(node->rhs);
-    Ref res_r = TMP(tmp_id++, ty_i1);
+    Ref res_r = TMP(tmp_id++, bitint[1][1]);
     zr.ty = rr.ty;
     new_ins(IR_CMP_NE, res_r, (Ref[]){rr, zr}, 2);
-    Ref r_ext = TMP(tmp_id++, ty_int);
+    Ref r_ext = TMP(tmp_id++, T.ty_int);
     new_ins(IR_EXT, r_ext, (Ref[]){res_r}, 1);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
@@ -616,7 +675,7 @@ static Ref gen_logor(Node *node) {
     curb = m_blk;
     insert_blk(curb);
 
-    Ref result = TMP(tmp_id++, ty_int);
+    Ref result = TMP(tmp_id++, T.ty_int);
     Phi *phi = new_phi(result);
     add_phi_arg(phi, sel, INT(1));
     add_phi_arg(phi, f_blk, r_ext);
@@ -629,7 +688,7 @@ static Ref gen_logand(Node *node) {
     Blk *m_blk = new_blk();
     // lhs
     Ref lr = gen_expr(node->lhs);
-    Ref cond = TMP(tmp_id++, ty_i1);
+    Ref cond = TMP(tmp_id++, bitint[1][1]);
     Ref zr = INT(0);
     zr.ty = lr.ty;
     new_ins(IR_CMP_NE, cond, (Ref[]){lr, zr}, 2);
@@ -646,10 +705,10 @@ static Ref gen_logand(Node *node) {
     curb = t_blk;
     insert_blk(curb);
     Ref rr = gen_expr(node->rhs);
-    Ref res_r = TMP(tmp_id++, ty_i1);
+    Ref res_r = TMP(tmp_id++, bitint[1][1]);
     zr.ty = rr.ty;
     new_ins(IR_CMP_NE, res_r, (Ref[]){rr, zr}, 2);
-    Ref r_ext = TMP(tmp_id++, ty_int);
+    Ref r_ext = TMP(tmp_id++, T.ty_int);
     new_ins(IR_EXT, r_ext, (Ref[]){res_r}, 1);
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
@@ -657,7 +716,7 @@ static Ref gen_logand(Node *node) {
 
     curb = m_blk;
     insert_blk(curb);
-    Ref result = TMP(tmp_id++, ty_int);
+    Ref result = TMP(tmp_id++, T.ty_int);
     Phi *phi = new_phi(result);
     add_phi_arg(phi, t_blk, r_ext);
     add_phi_arg(phi, sel, INT(0));
@@ -672,7 +731,7 @@ static void gen_if(Node *node) {
 
     // cond
     Ref tmp = gen_stmt(node->cond);
-    Ref cond = TMP(tmp_id++, ty_i1);
+    Ref cond = TMP(tmp_id++, bitint[1][1]);
     Ref zr = INT(0);
     zr.ty = tmp.ty;
     new_ins(IR_CMP_NE, cond, (Ref[]){tmp, zr}, 2);
@@ -728,7 +787,7 @@ static void gen_for(Node *node) {
     insert_blk(curb);
     if (node->cond) {
         Ref tmp = gen_expr(node->cond);
-        Ref cond = TMP(tmp_id++, ty_i1);
+        Ref cond = TMP(tmp_id++, bitint[1][1]);
         Ref zr = INT(0);
         zr.ty = tmp.ty;
         new_ins(IR_CMP_NE, cond, (Ref[]){tmp, zr}, 2);
@@ -786,7 +845,7 @@ static void gen_while(Node *node) {
     curb = cond_blk;
     insert_blk(curb);
     Ref tmp = gen_expr(node->cond);
-    Ref cond = TMP(tmp_id++, ty_i1);
+    Ref cond = TMP(tmp_id++, bitint[1][1]);
     Ref zr = INT(0);
     zr.ty = tmp.ty;
     new_ins(IR_CMP_NE, cond, (Ref[]){tmp, zr}, 2);
@@ -840,7 +899,7 @@ static void gen_do(Node *node) {
     curb = cond_blk;
     insert_blk(curb);
     Ref tmp = gen_expr(node->cond);
-    Ref cond = TMP(tmp_id++, ty_i1);
+    Ref cond = TMP(tmp_id++, bitint[1][1]);
     zr.ty = tmp.ty;
     new_ins(IR_CMP_NE, cond, (Ref[]){tmp, zr}, 2);
 

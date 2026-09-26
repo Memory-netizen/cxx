@@ -8,6 +8,10 @@ Type *infer_numtype(Token *tok) {
     if (flags & SUF_FLOAT) return T.ty_float;
     if (flags & SUF_DOUBLE) return T.ty_double;
     if (flags & SUF_LDOUBLE) return T.ty_ldouble;
+    if (flags & SUF_F16) return f16;
+    if (flags & SUF_F32) return f32;
+    if (flags & SUF_F64) return f64;
+    if (flags & SUF_F128) return f128;
 
     if (!nondec) {
         switch (flags) {

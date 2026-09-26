@@ -38,6 +38,8 @@ static int64_t eval(Node *node);
 static int64_t eval2(Node *node, uint32_t *sym);
 static int64_t eval_rval(Node *node, uint32_t *sym);
 static double eval_double(Node *node);
+static Fp128 eval_fp128(Node *node);
+static Int128 eval_int128(Node *node);
 static void array_initializer2(Token **rest, Token *tok, Initializer *init, int i);
 static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Member *mem);
 static Member *get_struct_member(Member *mem, Token *tok);
@@ -52,6 +54,94 @@ static Node *new_node(NodeKind kind, Token *tok) {
 static Node *new_num(int64_t val, Token *tok) {
     Node *node = new_node(ND_NUM, tok);
     node->val = val;
+    return node;
+}
+
+// Copy the literal text without digit separators and without the suffix
+// (the token text includes it; suffix lengths follow from the lexer's
+// grammar: f16/f32/f64 = 3, f128 = 4, wb = 2, uwb = 3, l/f/u = 1, ll = 2).
+static int num_suffix_len(Token *tok) {
+    uint32_t f = tok->lit_suffix;
+    if (f & (SUF_F16 | SUF_F32 | SUF_F64)) return 3;
+    if (f & SUF_F128) return 4;
+    if (f & SUF_BITINT) return (f & SUF_UNSIGNED) ? 3 : 2;
+    if (f & SUF_LDOUBLE) return 1;
+    if (f & (SUF_FLOAT | SUF_DOUBLE)) return 1;
+    if (f & SUF_LLONG) return 2;
+    if (f & SUF_LONG) return 1;
+    if (f & SUF_UNSIGNED) return 1;
+    return 0;
+}
+
+static char *clean_num_text(Token *tok) {
+    int len = tok->len - num_suffix_len(tok);
+    char *buf = emalloc(len + 1);
+    int n = 0;
+    for (int i = 0; i < len; i++)
+        if (tok->loc[i] != '\'') buf[n++] = tok->loc[i];
+    buf[n] = '\0';
+    return buf;
+}
+
+// Build an ND_NUM node for TK_NUM, evaluating the raw literal text with the
+// quadmath library for the new types (single rounding to the target
+// format). F16/F32/F64/F128 constants live in node->fpval; _BitInt of
+// width > 64 lives in node->ival.
+static Node *new_num_node(Token *tok) {
+    Node *node = new_num(tok->val, tok);
+    node->ty = infer_numtype(tok);
+
+    if (is_new_flonum(node->ty)) {
+        char *text = clean_num_text(tok);
+        Fp128 v;
+        bool ok = (text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) ? fp128_set_hex_str(&v, text, fmt_of(node->ty))
+                                                                         : fp128_set_str(&v, text, fmt_of(node->ty));
+        if (!ok) error(tok, "invalid floating constant");
+        node->fpval = v;
+        return node;
+    }
+
+    if (tok->lit_suffix & SUF_BITINT) {
+        bool uns = (tok->lit_suffix & SUF_UNSIGNED) != 0;
+        char *text = clean_num_text(tok);
+        int base = 10;
+        char *p = text;
+        if (text[0] == '0') {
+            switch (text[1]) {
+                case 'x':
+                case 'X':
+                    base = 16, p = text + 2;
+                    break;
+                case 'b':
+                case 'B':
+                    base = 2, p = text + 2;
+                    break;
+                case 'o':
+                case 'O':
+                    base = 8, p = text + 2;
+                    break;
+                default:
+                    base = 8, p = text + 1;  // 0ddd octal
+                    break;
+            }
+        }
+        Int128 v;
+        if (!int128_set_str(&v, p, base)) error(tok, "integer constant out of range");
+        // Width per C23: signed wb needs a sign bit on top of the value
+        // bits (minimum 2); unsigned uwb is just the value width (min 1).
+        int w = uns ? int128_bit_width(v, UNSIGNED) : MAX(2, int128_bit_width(v, UNSIGNED) + 1);
+        if (w > 128) error(tok, "width of _BitInt literal exceeds __BITINT_MAXWIDTH__");
+        node->ty = bitint[w][uns];
+        if (!node->ty) error(tok, "invalid _BitInt width %d", w);
+        if (w <= 64) {
+            node->val = norm_bits((int64_t)v.limb[0] | ((int64_t)v.limb[1] << 32), w, uns);
+        } else {
+            node->ival = v;
+        }
+        return node;
+    }
+
+    if (node->ty->kind == TY_FLOAT) node->fval = (float)node->fval;
     return node;
 }
 
@@ -1010,6 +1100,39 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
             double fval;
         } u;
 
+        if (is_new_flonum(ty)) {
+            Fp128 v = eval_fp128(init->expr);
+            Con c = {.type = CBits128};
+            switch (ty->kind) {
+                case TY_F16:
+                    c.bits.i128.limb[0] = fp128_to_fp16_bits(v);
+                    break;
+                default: {
+                    uint64_t b = fp128_to_fp64_bits(v);
+                    if (ty->kind == TY_F128) {
+                        c.bits.f128 = v;
+                    } else {
+                        c.bits.i128.limb[0] = (uint32_t)b;
+                        c.bits.i128.limb[1] = (uint32_t)(b >> 32);
+                    }
+                    break;
+                }
+            }
+            Ref r = newcon(&c, curm);
+            init->val = &curm->con[r.val];
+            init->is_inited = true;
+            return;
+        }
+
+        if (is_bitint128(ty)) {
+            Int128 v = eval_int128(init->expr);
+            Con c = {.type = CBits128, .bits.i128 = v};
+            Ref r = newcon(&c, curm);
+            init->val = &curm->con[r.val];
+            init->is_inited = true;
+            return;
+        }
+
         if (is_flonum(ty))
             u.fval = eval_double(init->expr);
         else
@@ -1199,9 +1322,7 @@ static Node *primary(Token **rest, Token *tok) {
         return node;
     }
     if (tok->kind == TK_NUM) {
-        node = new_num(tok->val, tok);
-        node->ty = infer_numtype(tok);
-        if (node->ty->kind == TY_FLOAT) node->fval = (float)node->fval;
+        node = new_num_node(tok);
         *rest = tok->next;
         return node;
     }
@@ -1727,8 +1848,118 @@ static double eval_double(Node *node) {
     return 0;
 }
 
+// Compile-time evaluation in the fp128 domain for _Float16/32/64/128.
+static Fp128 eval_fp128(Node *node) {
+    add_type(node);
+    switch (node->kind) {
+        case ND_NUM:
+            if (is_new_flonum(node->ty)) return node->fpval;
+            break;
+        case ND_ADD:
+            return fp128_add(eval_fp128(node->lhs), eval_fp128(node->rhs));
+        case ND_SUB:
+            return fp128_sub(eval_fp128(node->lhs), eval_fp128(node->rhs));
+        case ND_MUL:
+            return fp128_mul(eval_fp128(node->lhs), eval_fp128(node->rhs));
+        case ND_DIV: {
+            Fp128 r = eval_fp128(node->rhs);
+            if (fp128_is_zero(r)) error(node->tok, "division by zero");
+            return fp128_div(eval_fp128(node->lhs), r);
+        }
+        case ND_NEG:
+            return fp128_neg(eval_fp128(node->lhs));
+        case ND_COND:
+            return fp128_is_zero(eval_fp128(node->cond)) ? eval_fp128(node->els) : eval_fp128(node->then);
+        case ND_COMMA:
+            eval_fp128(node->lhs);
+            return eval_fp128(node->rhs);
+        case ND_IMCAST:
+        case ND_EXCAST: {
+            // Source may be an integer (or a float of another format).
+            if (is_flonum(node->lhs->ty)) {
+                if (is_new_flonum(node->lhs->ty)) return fp128_round_to(eval_fp128(node->lhs), fmt_of(node->ty));
+                uint64_t b;
+                memcpy(&b, &(double){eval_double(node->lhs)}, 8);
+                return fp128_round_to(fp128_from_fp64(b), fmt_of(node->ty));
+            }
+            Int128 iv = is_bitint128(node->lhs->ty)  ? eval_int128(node->lhs)
+                        : node->lhs->ty->is_unsigned ? int128_set_ui((uint64_t)eval(node->lhs))
+                                                     : int128_set_i(eval(node->lhs));
+            return fp128_from_int128(iv, node->lhs->ty->is_unsigned ? UNSIGNED : SIGNED);
+        }
+        default:
+            break;
+    }
+    error(node->tok, "not a compile-time constant");
+    return (Fp128){{0, 0, 0, 0}};
+}
+
+// Compile-time evaluation for _BitInt(65..128).
+static Int128 eval_int128(Node *node) {
+    add_type(node);
+    switch (node->kind) {
+        case ND_NUM:
+            if (is_bitint128(node->ty)) return node->ival;
+            return node->ty->is_unsigned ? int128_set_ui((uint64_t)node->val) : int128_set_i(node->val);
+        case ND_ADD:
+            return int128_add(eval_int128(node->lhs), eval_int128(node->rhs));
+        case ND_SUB:
+            return int128_sub(eval_int128(node->lhs), eval_int128(node->rhs));
+        case ND_MUL:
+            return int128_mul(eval_int128(node->lhs), eval_int128(node->rhs));
+        case ND_DIV: {
+            Int128 r = eval_int128(node->rhs);
+            if (int128_is_zero(r)) error(node->tok, "division by zero");
+            return node->ty->is_unsigned ? int128_div_unsigned(eval_int128(node->lhs), r)
+                                         : int128_div_signed(eval_int128(node->lhs), r);
+        }
+        case ND_MOD: {
+            Int128 r = eval_int128(node->rhs);
+            if (int128_is_zero(r)) error(node->tok, "division by zero");
+            return node->ty->is_unsigned ? int128_mod_unsigned(eval_int128(node->lhs), r)
+                                         : int128_mod_signed(eval_int128(node->lhs), r);
+        }
+        case ND_NEG:
+            return int128_neg(eval_int128(node->lhs));
+        case ND_INVERT:
+            return int128_not(eval_int128(node->lhs));
+        case ND_BAND:
+            return int128_and(eval_int128(node->lhs), eval_int128(node->rhs));
+        case ND_BOR:
+            return int128_or(eval_int128(node->lhs), eval_int128(node->rhs));
+        case ND_XOR:
+            return int128_xor(eval_int128(node->lhs), eval_int128(node->rhs));
+        case ND_LEFT:
+            return int128_shl(eval_int128(node->lhs), (int)eval(node->rhs));
+        case ND_RIGHT:
+            return int128_shr(eval_int128(node->lhs), (int)eval(node->rhs), node->ty->is_unsigned ? UNSIGNED : SIGNED);
+        case ND_COND:
+            return int128_is_zero(eval_int128(node->cond)) ? eval_int128(node->els) : eval_int128(node->then);
+        case ND_COMMA:
+            eval_int128(node->lhs);
+            return eval_int128(node->rhs);
+        case ND_IMCAST:
+        case ND_EXCAST: {
+            if (is_flonum(node->lhs->ty)) {
+                bool ok;
+                Int128 v = fp128_to_int128(eval_fp128(node->lhs), node->ty->is_unsigned ? UNSIGNED : SIGNED, &ok);
+                if (!ok) error(node->tok, "floating constant out of range");
+                return v;
+            }
+            if (is_bitint128(node->lhs->ty)) return eval_int128(node->lhs);
+            return node->lhs->ty->is_unsigned ? int128_set_ui((uint64_t)eval(node->lhs))
+                                              : int128_set_i(eval(node->lhs));
+        }
+        default:
+            break;
+    }
+    error(node->tok, "not a compile-time constant");
+    return (Int128){{0, 0, 0, 0}};
+}
+
 static int64_t eval_ty(int64_t val, Type *ty) {
     if (is_integer(ty)) {
+        if (ty->kind & TY_BITINT) return norm_bits(val, bitint_width(ty), ty->is_unsigned);
         switch (ty->size) {
             case 1:
                 return ty->is_unsigned ? (int64_t)(uint8_t)val : (int8_t)val;
@@ -1745,6 +1976,16 @@ static int64_t eval(Node *node) { return eval2(node, NULL); }
 
 static int64_t eval2(Node *node, uint32_t *sym) {
     add_type(node);
+    if (is_new_flonum(node->ty)) {
+        Fp128 v = eval_fp128(node);
+        // Return the low 64 bits; full-precision contexts use eval_fp128
+        // directly.
+        return (int64_t)v.limb[0] | ((int64_t)v.limb[1] << 32);
+    }
+    if (is_bitint128(node->ty)) {
+        Int128 v = eval_int128(node);
+        return (int64_t)v.limb[0] | ((int64_t)v.limb[1] << 32);
+    }
     if (is_flonum(node->ty)) return eval_double(node);
 
     switch (node->kind) {
@@ -1791,15 +2032,44 @@ static int64_t eval2(Node *node, uint32_t *sym) {
             if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) >> eval(node->rhs);
             return eval(node->lhs) >> eval(node->rhs);
         case ND_EQ:
-            return eval(node->lhs) == eval(node->rhs);
         case ND_NE:
-            return eval(node->lhs) != eval(node->rhs);
         case ND_LT:
-            if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) < (uint64_t)eval(node->rhs);
-            return eval(node->lhs) < eval(node->rhs);
-        case ND_LE:
-            if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) <= (uint64_t)eval(node->rhs);
-            return eval(node->lhs) <= eval(node->rhs);
+        case ND_LE: {
+            if (is_new_flonum(node->lhs->ty)) {
+                int c = fp128_cmp(eval_fp128(node->lhs), eval_fp128(node->rhs));
+                switch (node->kind) {
+                    case ND_EQ:
+                        return c == 0;
+                    case ND_NE:
+                        return c != 0;
+                    case ND_LT:
+                        return c < 0;
+                    default:
+                        return c <= 0;
+                }
+            }
+            if (is_bitint128(node->lhs->ty)) {
+                Int128 l = eval_int128(node->lhs), r = eval_int128(node->rhs);
+                bool uns = node->lhs->ty->is_unsigned;
+                int c = uns ? int128_cmp_unsigned(l, r) : int128_cmp_signed(l, r);
+                switch (node->kind) {
+                    case ND_EQ:
+                        return c == 0;
+                    case ND_NE:
+                        return c != 0;
+                    case ND_LT:
+                        return c < 0;
+                    default:
+                        return c <= 0;
+                }
+            }
+            if (node->kind == ND_EQ) return eval(node->lhs) == eval(node->rhs);
+            if (node->kind == ND_NE) return eval(node->lhs) != eval(node->rhs);
+            if (node->ty->is_unsigned)
+                return node->kind == ND_LT ? (uint64_t)eval(node->lhs) < (uint64_t)eval(node->rhs)
+                                           : (uint64_t)eval(node->lhs) <= (uint64_t)eval(node->rhs);
+            return node->kind == ND_LT ? eval(node->lhs) < eval(node->rhs) : eval(node->lhs) <= eval(node->rhs);
+        }
         case ND_LOGAND:
             return eval(node->lhs) && eval(node->rhs);
         case ND_LOGOR:
@@ -1810,6 +2080,16 @@ static int64_t eval2(Node *node, uint32_t *sym) {
             return eval2(node->lhs, sym) + eval(node->rhs) * node->ty->base->size;
         case ND_IMCAST:
         case ND_EXCAST: {
+            if (is_new_flonum(node->lhs->ty)) {
+                bool ok;
+                Int128 v = fp128_to_int128(eval_fp128(node->lhs), node->ty->is_unsigned ? UNSIGNED : SIGNED, &ok);
+                if (!ok) error(node->tok, "floating constant out of range");
+                return (int64_t)v.limb[0] | ((int64_t)v.limb[1] << 32);
+            }
+            if (is_bitint128(node->lhs->ty)) {
+                Int128 v = eval_int128(node->lhs);
+                return (int64_t)v.limb[0] | ((int64_t)v.limb[1] << 32);
+            }
             int64_t val = eval2(node->lhs, sym);
             return eval_ty(val, node->ty);
         }
@@ -2951,6 +3231,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
     bool is_thread = false;
     int typespec_cnt = 0;
     int qual = 0;
+    int bitint_w = -1;  // width parsed from _BitInt(N)
     enum {
         NONE,
         VOID = 1 << 0,
@@ -2964,6 +3245,11 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
         OTHER = 1 << 16,
         SIGNED = 1 << 17,
         UNSIGNED = 1 << 18,
+        F16 = 1 << 19,
+        F32 = 1 << 20,
+        F64 = 1 << 21,
+        F128 = 1 << 22,
+        BITINT = 1 << 23,
     };
 
     while (is_typename(tok, true)) {
@@ -3073,6 +3359,27 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
             case TK_DOUBLE:
                 typespec_cnt += DOUBLE;
                 break;
+            case TK_F16:
+                typespec_cnt += F16;
+                break;
+            case TK_F32:
+                typespec_cnt += F32;
+                break;
+            case TK_F64:
+                typespec_cnt += F64;
+                break;
+            case TK_F128:
+                typespec_cnt += F128;
+                break;
+            case TK_BITINT: {
+                if (bitint_w >= 0) error(tok, "duplicate ‘_BitInt’");
+                tok = skip(tok->next, TK_LPAREN);
+                bitint_w = (int)const_expr(&tok, tok);
+                tok = skip(tok, TK_RPAREN);
+                if (bitint_w < 1 || bitint_w > 128) error(tok, "width of ‘_BitInt’ must be between 1 and %d", 128);
+                typespec_cnt += BITINT;
+                goto check_type;
+            }
             case TK_SIGNED:
                 typespec_cnt |= SIGNED;
                 break;
@@ -3147,6 +3454,27 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 break;
             case LONG + DOUBLE:
                 ty = T.ty_ldouble;
+                break;
+            case F16:
+                ty = f16;
+                break;
+            case F32:
+                ty = f32;
+                break;
+            case F64:
+                ty = f64;
+                break;
+            case F128:
+                ty = f128;
+                break;
+            case BITINT:
+            case SIGNED + BITINT:
+                ty = bitint[bitint_w][0];
+                if (!ty) error(ty_tok, "signed ‘_BitInt’ must have a bit size of at least 2");
+                break;
+            case UNSIGNED + BITINT:
+                ty = bitint[bitint_w][1];
+                if (!ty) error(ty_tok, "invalid ‘_BitInt’ width");
                 break;
             case NONE:
             case OTHER:

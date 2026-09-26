@@ -3,27 +3,144 @@
 #define TYPE(kind, size, align, is_unsigned) \
     &(Type) { kind, 0, size, align, is_unsigned, 0, 0, NULL, NULL, NULL, NULL, {0} }
 
-Type *ty_none = TYPE(TY_NONE, -1, 1, false);
-Type *ty_void = TYPE(TY_VOID, 1, 1, false);
-Type *ty_nullptr = TYPE(TY_NULLPTR, 8, 8, true);
-Type *ty_bool = TYPE(TY_BOOL, 1, 1, true);
-Type *ty_char = TYPE(TY_CHAR, 1, 1, CHAR_MIN == 0);
-Type *ty_schar = TYPE(TY_SCHAR, 1, 1, false);
-Type *ty_uchar = TYPE(TY_UCHAR, 1, 1, true);
-Type *ty_short = TYPE(TY_SHORT, 2, 2, false);
-Type *ty_ushort = TYPE(TY_SHORT, 2, 2, true);
-Type *ty_int = TYPE(TY_INT, 4, 4, false);
-Type *ty_uint = TYPE(TY_INT, 4, 4, true);
-Type *ty_long = TYPE(TY_LONG, 8, 8, false);
-Type *ty_ulong = TYPE(TY_LONG, 8, 8, true);
-Type *ty_llong = TYPE(TY_LLONG, 8, 8, false);
-Type *ty_ullong = TYPE(TY_LLONG, 8, 8, true);
-Type *ty_float = TYPE(TY_FLOAT, 4, 4, false);
-Type *ty_double = TYPE(TY_DOUBLE, 8, 8, false);
-Type *ty_ldouble = TYPE(TY_LDOUBLE, 8, 8, false);
-Type *ty_i1 = TYPE(TY_I1, 1, 1, true);
-Type *ty_i32 = TYPE(TY_I32, 4, 4, false);
-Type *ty_i64 = TYPE(TY_I64, 8, 8, false);
+Type *bitint[129][2] = {
+    {NULL, NULL},
+    // Signed _BitInt needs width >= 2, but unsigned _BitInt(1) is valid
+    // (used by the uwb suffix for values 0..1).
+    {NULL, TYPE(TY_BITINT | 1, 1, 1, true)},
+    {TYPE(TY_BITINT | 2, 1, 1, false), TYPE(TY_BITINT | 2, 1, 1, true)},
+    {TYPE(TY_BITINT | 3, 1, 1, false), TYPE(TY_BITINT | 3, 1, 1, true)},
+    {TYPE(TY_BITINT | 4, 1, 1, false), TYPE(TY_BITINT | 4, 1, 1, true)},
+    {TYPE(TY_BITINT | 5, 1, 1, false), TYPE(TY_BITINT | 5, 1, 1, true)},
+    {TYPE(TY_BITINT | 6, 1, 1, false), TYPE(TY_BITINT | 6, 1, 1, true)},
+    {TYPE(TY_BITINT | 7, 1, 1, false), TYPE(TY_BITINT | 7, 1, 1, true)},
+    {TYPE(TY_BITINT | 8, 1, 1, false), TYPE(TY_BITINT | 8, 1, 1, true)},
+    {TYPE(TY_BITINT | 9, 2, 2, false), TYPE(TY_BITINT | 9, 2, 2, true)},
+    {TYPE(TY_BITINT | 10, 2, 2, false), TYPE(TY_BITINT | 10, 2, 2, true)},
+    {TYPE(TY_BITINT | 11, 2, 2, false), TYPE(TY_BITINT | 11, 2, 2, true)},
+    {TYPE(TY_BITINT | 12, 2, 2, false), TYPE(TY_BITINT | 12, 2, 2, true)},
+    {TYPE(TY_BITINT | 13, 2, 2, false), TYPE(TY_BITINT | 13, 2, 2, true)},
+    {TYPE(TY_BITINT | 14, 2, 2, false), TYPE(TY_BITINT | 14, 2, 2, true)},
+    {TYPE(TY_BITINT | 15, 2, 2, false), TYPE(TY_BITINT | 15, 2, 2, true)},
+    {TYPE(TY_BITINT | 16, 2, 2, false), TYPE(TY_BITINT | 16, 2, 2, true)},
+    {TYPE(TY_BITINT | 17, 4, 4, false), TYPE(TY_BITINT | 17, 4, 4, true)},
+    {TYPE(TY_BITINT | 18, 4, 4, false), TYPE(TY_BITINT | 18, 4, 4, true)},
+    {TYPE(TY_BITINT | 19, 4, 4, false), TYPE(TY_BITINT | 19, 4, 4, true)},
+    {TYPE(TY_BITINT | 20, 4, 4, false), TYPE(TY_BITINT | 20, 4, 4, true)},
+    {TYPE(TY_BITINT | 21, 4, 4, false), TYPE(TY_BITINT | 21, 4, 4, true)},
+    {TYPE(TY_BITINT | 22, 4, 4, false), TYPE(TY_BITINT | 22, 4, 4, true)},
+    {TYPE(TY_BITINT | 23, 4, 4, false), TYPE(TY_BITINT | 23, 4, 4, true)},
+    {TYPE(TY_BITINT | 24, 4, 4, false), TYPE(TY_BITINT | 24, 4, 4, true)},
+    {TYPE(TY_BITINT | 25, 4, 4, false), TYPE(TY_BITINT | 25, 4, 4, true)},
+    {TYPE(TY_BITINT | 26, 4, 4, false), TYPE(TY_BITINT | 26, 4, 4, true)},
+    {TYPE(TY_BITINT | 27, 4, 4, false), TYPE(TY_BITINT | 27, 4, 4, true)},
+    {TYPE(TY_BITINT | 28, 4, 4, false), TYPE(TY_BITINT | 28, 4, 4, true)},
+    {TYPE(TY_BITINT | 29, 4, 4, false), TYPE(TY_BITINT | 29, 4, 4, true)},
+    {TYPE(TY_BITINT | 30, 4, 4, false), TYPE(TY_BITINT | 30, 4, 4, true)},
+    {TYPE(TY_BITINT | 31, 4, 4, false), TYPE(TY_BITINT | 31, 4, 4, true)},
+    {TYPE(TY_BITINT | 32, 4, 4, false), TYPE(TY_BITINT | 32, 4, 4, true)},
+    {TYPE(TY_BITINT | 33, 8, 8, false), TYPE(TY_BITINT | 33, 8, 8, true)},
+    {TYPE(TY_BITINT | 34, 8, 8, false), TYPE(TY_BITINT | 34, 8, 8, true)},
+    {TYPE(TY_BITINT | 35, 8, 8, false), TYPE(TY_BITINT | 35, 8, 8, true)},
+    {TYPE(TY_BITINT | 36, 8, 8, false), TYPE(TY_BITINT | 36, 8, 8, true)},
+    {TYPE(TY_BITINT | 37, 8, 8, false), TYPE(TY_BITINT | 37, 8, 8, true)},
+    {TYPE(TY_BITINT | 38, 8, 8, false), TYPE(TY_BITINT | 38, 8, 8, true)},
+    {TYPE(TY_BITINT | 39, 8, 8, false), TYPE(TY_BITINT | 39, 8, 8, true)},
+    {TYPE(TY_BITINT | 40, 8, 8, false), TYPE(TY_BITINT | 40, 8, 8, true)},
+    {TYPE(TY_BITINT | 41, 8, 8, false), TYPE(TY_BITINT | 41, 8, 8, true)},
+    {TYPE(TY_BITINT | 42, 8, 8, false), TYPE(TY_BITINT | 42, 8, 8, true)},
+    {TYPE(TY_BITINT | 43, 8, 8, false), TYPE(TY_BITINT | 43, 8, 8, true)},
+    {TYPE(TY_BITINT | 44, 8, 8, false), TYPE(TY_BITINT | 44, 8, 8, true)},
+    {TYPE(TY_BITINT | 45, 8, 8, false), TYPE(TY_BITINT | 45, 8, 8, true)},
+    {TYPE(TY_BITINT | 46, 8, 8, false), TYPE(TY_BITINT | 46, 8, 8, true)},
+    {TYPE(TY_BITINT | 47, 8, 8, false), TYPE(TY_BITINT | 47, 8, 8, true)},
+    {TYPE(TY_BITINT | 48, 8, 8, false), TYPE(TY_BITINT | 48, 8, 8, true)},
+    {TYPE(TY_BITINT | 49, 8, 8, false), TYPE(TY_BITINT | 49, 8, 8, true)},
+    {TYPE(TY_BITINT | 50, 8, 8, false), TYPE(TY_BITINT | 50, 8, 8, true)},
+    {TYPE(TY_BITINT | 51, 8, 8, false), TYPE(TY_BITINT | 51, 8, 8, true)},
+    {TYPE(TY_BITINT | 52, 8, 8, false), TYPE(TY_BITINT | 52, 8, 8, true)},
+    {TYPE(TY_BITINT | 53, 8, 8, false), TYPE(TY_BITINT | 53, 8, 8, true)},
+    {TYPE(TY_BITINT | 54, 8, 8, false), TYPE(TY_BITINT | 54, 8, 8, true)},
+    {TYPE(TY_BITINT | 55, 8, 8, false), TYPE(TY_BITINT | 55, 8, 8, true)},
+    {TYPE(TY_BITINT | 56, 8, 8, false), TYPE(TY_BITINT | 56, 8, 8, true)},
+    {TYPE(TY_BITINT | 57, 8, 8, false), TYPE(TY_BITINT | 57, 8, 8, true)},
+    {TYPE(TY_BITINT | 58, 8, 8, false), TYPE(TY_BITINT | 58, 8, 8, true)},
+    {TYPE(TY_BITINT | 59, 8, 8, false), TYPE(TY_BITINT | 59, 8, 8, true)},
+    {TYPE(TY_BITINT | 60, 8, 8, false), TYPE(TY_BITINT | 60, 8, 8, true)},
+    {TYPE(TY_BITINT | 61, 8, 8, false), TYPE(TY_BITINT | 61, 8, 8, true)},
+    {TYPE(TY_BITINT | 62, 8, 8, false), TYPE(TY_BITINT | 62, 8, 8, true)},
+    {TYPE(TY_BITINT | 63, 8, 8, false), TYPE(TY_BITINT | 63, 8, 8, true)},
+    {TYPE(TY_BITINT | 64, 8, 8, false), TYPE(TY_BITINT | 64, 8, 8, true)},
+    {TYPE(TY_BITINT | 65, 16, 16, false), TYPE(TY_BITINT | 65, 16, 16, true)},
+    {TYPE(TY_BITINT | 66, 16, 16, false), TYPE(TY_BITINT | 66, 16, 16, true)},
+    {TYPE(TY_BITINT | 67, 16, 16, false), TYPE(TY_BITINT | 67, 16, 16, true)},
+    {TYPE(TY_BITINT | 68, 16, 16, false), TYPE(TY_BITINT | 68, 16, 16, true)},
+    {TYPE(TY_BITINT | 69, 16, 16, false), TYPE(TY_BITINT | 69, 16, 16, true)},
+    {TYPE(TY_BITINT | 70, 16, 16, false), TYPE(TY_BITINT | 70, 16, 16, true)},
+    {TYPE(TY_BITINT | 71, 16, 16, false), TYPE(TY_BITINT | 71, 16, 16, true)},
+    {TYPE(TY_BITINT | 72, 16, 16, false), TYPE(TY_BITINT | 72, 16, 16, true)},
+    {TYPE(TY_BITINT | 73, 16, 16, false), TYPE(TY_BITINT | 73, 16, 16, true)},
+    {TYPE(TY_BITINT | 74, 16, 16, false), TYPE(TY_BITINT | 74, 16, 16, true)},
+    {TYPE(TY_BITINT | 75, 16, 16, false), TYPE(TY_BITINT | 75, 16, 16, true)},
+    {TYPE(TY_BITINT | 76, 16, 16, false), TYPE(TY_BITINT | 76, 16, 16, true)},
+    {TYPE(TY_BITINT | 77, 16, 16, false), TYPE(TY_BITINT | 77, 16, 16, true)},
+    {TYPE(TY_BITINT | 78, 16, 16, false), TYPE(TY_BITINT | 78, 16, 16, true)},
+    {TYPE(TY_BITINT | 79, 16, 16, false), TYPE(TY_BITINT | 79, 16, 16, true)},
+    {TYPE(TY_BITINT | 80, 16, 16, false), TYPE(TY_BITINT | 80, 16, 16, true)},
+    {TYPE(TY_BITINT | 81, 16, 16, false), TYPE(TY_BITINT | 81, 16, 16, true)},
+    {TYPE(TY_BITINT | 82, 16, 16, false), TYPE(TY_BITINT | 82, 16, 16, true)},
+    {TYPE(TY_BITINT | 83, 16, 16, false), TYPE(TY_BITINT | 83, 16, 16, true)},
+    {TYPE(TY_BITINT | 84, 16, 16, false), TYPE(TY_BITINT | 84, 16, 16, true)},
+    {TYPE(TY_BITINT | 85, 16, 16, false), TYPE(TY_BITINT | 85, 16, 16, true)},
+    {TYPE(TY_BITINT | 86, 16, 16, false), TYPE(TY_BITINT | 86, 16, 16, true)},
+    {TYPE(TY_BITINT | 87, 16, 16, false), TYPE(TY_BITINT | 87, 16, 16, true)},
+    {TYPE(TY_BITINT | 88, 16, 16, false), TYPE(TY_BITINT | 88, 16, 16, true)},
+    {TYPE(TY_BITINT | 89, 16, 16, false), TYPE(TY_BITINT | 89, 16, 16, true)},
+    {TYPE(TY_BITINT | 90, 16, 16, false), TYPE(TY_BITINT | 90, 16, 16, true)},
+    {TYPE(TY_BITINT | 91, 16, 16, false), TYPE(TY_BITINT | 91, 16, 16, true)},
+    {TYPE(TY_BITINT | 92, 16, 16, false), TYPE(TY_BITINT | 92, 16, 16, true)},
+    {TYPE(TY_BITINT | 93, 16, 16, false), TYPE(TY_BITINT | 93, 16, 16, true)},
+    {TYPE(TY_BITINT | 94, 16, 16, false), TYPE(TY_BITINT | 94, 16, 16, true)},
+    {TYPE(TY_BITINT | 95, 16, 16, false), TYPE(TY_BITINT | 95, 16, 16, true)},
+    {TYPE(TY_BITINT | 96, 16, 16, false), TYPE(TY_BITINT | 96, 16, 16, true)},
+    {TYPE(TY_BITINT | 97, 16, 16, false), TYPE(TY_BITINT | 97, 16, 16, true)},
+    {TYPE(TY_BITINT | 98, 16, 16, false), TYPE(TY_BITINT | 98, 16, 16, true)},
+    {TYPE(TY_BITINT | 99, 16, 16, false), TYPE(TY_BITINT | 99, 16, 16, true)},
+    {TYPE(TY_BITINT | 100, 16, 16, false), TYPE(TY_BITINT | 100, 16, 16, true)},
+    {TYPE(TY_BITINT | 101, 16, 16, false), TYPE(TY_BITINT | 101, 16, 16, true)},
+    {TYPE(TY_BITINT | 102, 16, 16, false), TYPE(TY_BITINT | 102, 16, 16, true)},
+    {TYPE(TY_BITINT | 103, 16, 16, false), TYPE(TY_BITINT | 103, 16, 16, true)},
+    {TYPE(TY_BITINT | 104, 16, 16, false), TYPE(TY_BITINT | 104, 16, 16, true)},
+    {TYPE(TY_BITINT | 105, 16, 16, false), TYPE(TY_BITINT | 105, 16, 16, true)},
+    {TYPE(TY_BITINT | 106, 16, 16, false), TYPE(TY_BITINT | 106, 16, 16, true)},
+    {TYPE(TY_BITINT | 107, 16, 16, false), TYPE(TY_BITINT | 107, 16, 16, true)},
+    {TYPE(TY_BITINT | 108, 16, 16, false), TYPE(TY_BITINT | 108, 16, 16, true)},
+    {TYPE(TY_BITINT | 109, 16, 16, false), TYPE(TY_BITINT | 109, 16, 16, true)},
+    {TYPE(TY_BITINT | 110, 16, 16, false), TYPE(TY_BITINT | 110, 16, 16, true)},
+    {TYPE(TY_BITINT | 111, 16, 16, false), TYPE(TY_BITINT | 111, 16, 16, true)},
+    {TYPE(TY_BITINT | 112, 16, 16, false), TYPE(TY_BITINT | 112, 16, 16, true)},
+    {TYPE(TY_BITINT | 113, 16, 16, false), TYPE(TY_BITINT | 113, 16, 16, true)},
+    {TYPE(TY_BITINT | 114, 16, 16, false), TYPE(TY_BITINT | 114, 16, 16, true)},
+    {TYPE(TY_BITINT | 115, 16, 16, false), TYPE(TY_BITINT | 115, 16, 16, true)},
+    {TYPE(TY_BITINT | 116, 16, 16, false), TYPE(TY_BITINT | 116, 16, 16, true)},
+    {TYPE(TY_BITINT | 117, 16, 16, false), TYPE(TY_BITINT | 117, 16, 16, true)},
+    {TYPE(TY_BITINT | 118, 16, 16, false), TYPE(TY_BITINT | 118, 16, 16, true)},
+    {TYPE(TY_BITINT | 119, 16, 16, false), TYPE(TY_BITINT | 119, 16, 16, true)},
+    {TYPE(TY_BITINT | 120, 16, 16, false), TYPE(TY_BITINT | 120, 16, 16, true)},
+    {TYPE(TY_BITINT | 121, 16, 16, false), TYPE(TY_BITINT | 121, 16, 16, true)},
+    {TYPE(TY_BITINT | 122, 16, 16, false), TYPE(TY_BITINT | 122, 16, 16, true)},
+    {TYPE(TY_BITINT | 123, 16, 16, false), TYPE(TY_BITINT | 123, 16, 16, true)},
+    {TYPE(TY_BITINT | 124, 16, 16, false), TYPE(TY_BITINT | 124, 16, 16, true)},
+    {TYPE(TY_BITINT | 125, 16, 16, false), TYPE(TY_BITINT | 125, 16, 16, true)},
+    {TYPE(TY_BITINT | 126, 16, 16, false), TYPE(TY_BITINT | 126, 16, 16, true)},
+    {TYPE(TY_BITINT | 127, 16, 16, false), TYPE(TY_BITINT | 127, 16, 16, true)},
+    {TYPE(TY_BITINT | 128, 16, 16, false), TYPE(TY_BITINT | 128, 16, 16, true)},
+};
+
+Type *f16 = TYPE(TY_F16, 2, 2, false);
+Type *f32 = TYPE(TY_F32, 4, 4, false);
+Type *f64 = TYPE(TY_F64, 8, 8, false);
+Type *f128 = TYPE(TY_F128, 16, 16, false);
 
 #undef TYPE
 
@@ -54,10 +171,47 @@ bool is_funcptr(Type *ty) {
 bool is_integer(Type *ty) {
     return ty->kind == TY_BOOL || ty->kind == TY_CHAR || ty->kind == TY_SCHAR || ty->kind == TY_UCHAR ||
            ty->kind == TY_SHORT || ty->kind == TY_INT || ty->kind == TY_LONG || ty->kind == TY_LLONG ||
-           ty->kind == TY_ENUM || ty->kind == TY_I1 || ty->kind == TY_I32 || ty->kind == TY_I64;
+           ty->kind == TY_ENUM || ty->kind & TY_BITINT;
 }
 
-bool is_flonum(Type *ty) { return ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE || ty->kind == TY_LDOUBLE; }
+bool is_flonum(Type *ty) {
+    return ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE || ty->kind == TY_LDOUBLE || ty->kind == TY_F16 ||
+           ty->kind == TY_F32 || ty->kind == TY_F64 || ty->kind == TY_F128;
+}
+
+// The new IEC 60559 interchange types (_Float16/32/64/128), excluding the
+// classic float/double/long double.
+bool is_new_flonum(Type *ty) {
+    return ty->kind == TY_F16 || ty->kind == TY_F32 || ty->kind == TY_F64 || ty->kind == TY_F128;
+}
+
+FpFormat fmt_of(Type *ty) {
+    switch (ty->kind) {
+        case TY_F16:
+            return FP16;
+        case TY_F32:
+        case TY_FLOAT:
+            return FP32;
+        case TY_F64:
+        case TY_DOUBLE:
+            return FP64;
+        default:
+            return FP128;
+    }
+}
+
+int bitint_width(Type *ty) { return ty->kind & 0xFFF; }
+
+bool is_bitint128(Type *ty) { return (ty->kind & TY_BITINT) && bitint_width(ty) > 64; }
+
+// Truncate or sign-extend a 64-bit value to the given width.
+int64_t norm_bits(int64_t v, int width, bool is_unsigned) {
+    if (width >= 64) return v;
+    uint64_t mask = (1ULL << width) - 1;
+    uint64_t u = (uint64_t)v & mask;
+    if (!is_unsigned && (u >> (width - 1))) u |= ~mask;
+    return (int64_t)u;
+}
 
 bool is_arith(Type *ty) { return is_integer(ty) || is_flonum(ty); }
 
@@ -101,8 +255,8 @@ Type *pointer_to(Type *base, uint32_t qual) {
     Type *ty = emalloc(sizeof(Type));
     ty->kind = TY_PTR;
     ty->qual = qual;
-    ty->size = 8;
-    ty->align = 8;
+    ty->size = T.ty_nullptr->size;
+    ty->align = T.ty_nullptr->align;
     ty->is_unsigned = true;
     ty->base = base;
     return ty;
@@ -193,6 +347,9 @@ static bool check_set(Type *t1, Type *t2) {
 bool is_compatible(Type *t1, Type *t2) {
     if (t1 == t2) return true;
 
+    // C23 6.2.5: each interchange floating type (_FloatN) is not
+    // compatible with any other type, even one with the same format;
+    // _BitInt(N) is likewise distinct from the standard integer types.
     if (t1->kind != t2->kind) {
         if (t1->kind != TY_VLA && t1->kind != TY_ARRAY) return false;
         if (t2->kind != TY_VLA && t2->kind != TY_ARRAY) return false;
@@ -206,15 +363,16 @@ bool is_compatible(Type *t1, Type *t2) {
 
     if (check_set(t1, t2)) return true;
 
+    // _BitInt widths are encoded in the kind, so equal kinds already imply
+    // equal widths; only signedness remains.
+    if (t1->kind & TY_BITINT) return t1->is_unsigned == t2->is_unsigned;
+
     switch (t1->kind) {
         case TY_SHORT:
         case TY_INT:
         case TY_LONG:
         case TY_LLONG:
             return t1->is_unsigned == t2->is_unsigned;
-        case TY_I1:
-        case TY_I32:
-        case TY_I64:
         case TY_NULLPTR:
         case TY_VOID:
         case TY_BOOL:
@@ -224,6 +382,11 @@ bool is_compatible(Type *t1, Type *t2) {
         case TY_FLOAT:
         case TY_DOUBLE:
         case TY_LDOUBLE:
+        case TY_BITINT:
+        case TY_F16:
+        case TY_F32:
+        case TY_F64:
+        case TY_F128:
             return true;
         case TY_PTR:
             return is_compatible(t1->base, t2->base);
@@ -469,26 +632,84 @@ void new_imcast(Node **expr, Type *ty) {
     *expr = node;
 }
 
+// Format rank of the value set, per C23 H.4.3: binary16 ⊂ binary32 ⊂
+// binary64 ⊂ binary128 (the compiler models long double as binary128).
+static int float_rank(Type *ty) {
+    switch (ty->kind) {
+        case TY_F16:
+            return 0;
+        case TY_F32:
+        case TY_FLOAT:
+            return 1;
+        case TY_F64:
+        case TY_DOUBLE:
+            return 2;
+        case TY_F128:
+        case TY_LDOUBLE:
+            return 3;
+        default:
+            return -1;
+    }
+}
+
+// Integer promotions for _BitInt per C23 6.3.1.1.
+static Type *promote_bitint(Type *ty) {
+    int w = bitint_width(ty);
+    if (ty->is_unsigned) {
+        if (w <= 31) return T.ty_int;
+        if (w == 32) return T.ty_uint;
+    } else {
+        if (w <= 32) return T.ty_int;
+    }
+    return ty;
+}
+
 static Type *get_common_type(Type *ty1, Type *ty2) {
     if (ty1->base) return pointer_to(ty1->base, 0);
 
-    if (ty1->kind == TY_LDOUBLE || ty2->kind == TY_LDOUBLE) return ty_ldouble;
-    if (ty1->kind == TY_DOUBLE || ty2->kind == TY_DOUBLE) return ty_double;
-    if (ty1->kind == TY_FLOAT || ty2->kind == TY_FLOAT) return ty_float;
+    if (is_flonum(ty1) || is_flonum(ty2)) {
+        int r1 = float_rank(ty1), r2 = float_rank(ty2);
+        if (r1 != r2) return r1 < r2 ? ty2 : ty1;
+        // Equivalent value sets (e.g. float and _Float32, both binary32):
+        // an interchange floating type wins the tie (C23 H.4.3).
+        if (is_new_flonum(ty1)) return ty1;
+        if (is_new_flonum(ty2)) return ty2;
+        switch (r1) {
+            case 3:
+                return T.ty_ldouble;
+            case 2:
+                return T.ty_double;
+            default:
+                return T.ty_float;
+        }
+    }
 
-    if (ty1->size < 4) ty1 = ty_int;
-    if (ty2->size < 4) ty2 = ty_int;
+    if (ty1->kind & TY_BITINT) ty1 = promote_bitint(ty1);
+    if (ty2->kind & TY_BITINT) ty2 = promote_bitint(ty2);
+
+    if (ty1->kind & TY_BITINT || ty2->kind & TY_BITINT) {
+        // A wide _BitInt wins over standard integers; the standard side
+        // converts to the _BitInt type.
+        if (ty1->kind & TY_BITINT && ty2->kind & TY_BITINT) {
+            if (ty1->size != ty2->size) return ty1->size < ty2->size ? ty2 : ty1;
+            return ty2->is_unsigned ? ty2 : ty1;
+        }
+        return (ty1->kind & TY_BITINT) ? ty1 : ty2;
+    }
+
+    if (ty1->size < 4) ty1 = T.ty_int;
+    if (ty2->size < 4) ty2 = T.ty_int;
 
     if (ty1->size != ty2->size) return (ty1->size < ty2->size) ? ty2 : ty1;
 
-    if (ty1->kind != ty2->kind) return ty_llong;
+    if (ty1->kind != ty2->kind) return T.ty_llong;
 
     if (ty2->is_unsigned) return ty2;
     return ty1;
 }
 
 void integer_promotion(Node **expr) {
-    Type *ty = get_common_type((*expr)->ty, ty_int);
+    Type *ty = get_common_type((*expr)->ty, T.ty_int);
     new_imcast(expr, ty);
 }
 
@@ -502,7 +723,7 @@ void add_type(Node *node) {
     if (!node || node->ty) return;
     switch (node->kind) {
         case ND_NUM:
-            node->ty = ty_int;
+            node->ty = T.ty_int;
             break;
         case ND_NULLPTR:
             break;
@@ -524,14 +745,14 @@ void add_type(Node *node) {
         case ND_NOT:
             check_unop(node);
             lvalue_convert(&node->lhs);
-            node->ty = ty_int;
+            node->ty = T.ty_int;
             break;
         case ND_LOGOR:
         case ND_LOGAND:
             check_binop(node);
             lvalue_convert(&node->lhs);
             lvalue_convert(&node->rhs);
-            node->ty = ty_int;
+            node->ty = T.ty_int;
             break;
         case ND_ADDR:
             add_type(node->lhs);
@@ -573,7 +794,7 @@ void add_type(Node *node) {
             check_binop(node);
             lvalue_convert(&node->lhs);
             lvalue_convert(&node->rhs);
-            new_imcast(&node->rhs, ty_long);
+            new_imcast(&node->rhs, T.ty_long);
             node->ty = node->lhs->ty;
             break;
         case ND_LEFT:
@@ -593,7 +814,7 @@ void add_type(Node *node) {
             lvalue_convert(&node->lhs);
             lvalue_convert(&node->rhs);
             usual_arith_conv(&node->lhs, &node->rhs);
-            node->ty = ty_int;
+            node->ty = T.ty_int;
             break;
         case ND_AS:
             modifiable_lvalue(node);
@@ -629,7 +850,7 @@ void add_type(Node *node) {
             modifiable_lvalue(node);
             lvalue_convert(&node->rhs);
             Type *ty = get_common_type(node->lhs->ty, node->rhs->ty);
-            new_imcast(&node->rhs, is_ptr ? ty_long : ty);
+            new_imcast(&node->rhs, is_ptr ? T.ty_long : ty);
             node->compute_ty = ty;
             node->ty = node->lhs->ty;
             break;
@@ -655,7 +876,7 @@ void add_type(Node *node) {
             modifiable_lvalue(node);
             lvalue_convert(&node->rhs);
             integer_promotion(&node->rhs);
-            node->compute_ty = get_common_type(node->lhs->ty, ty_int);
+            node->compute_ty = get_common_type(node->lhs->ty, T.ty_int);
             node->ty = node->lhs->ty;
             break;
         case ND_COMMA:
@@ -671,7 +892,7 @@ void add_type(Node *node) {
             lvalue_convert(&node->then);
             lvalue_convert(&node->els);
             if (is_void(node->then->ty) || is_void(node->els->ty)) {
-                node->ty = ty_void;
+                node->ty = T.ty_void;
             } else {
                 usual_arith_conv(&node->then, &node->els);
                 node->ty = node->then->ty;
@@ -729,7 +950,7 @@ void add_type(Node *node) {
             break;
         }
         case ND_LABEL_VAL:
-            node->ty = pointer_to(ty_void, 0);
+            node->ty = pointer_to(T.ty_void, 0);
             break;
         // other
         case ND_NOP:

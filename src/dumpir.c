@@ -29,10 +29,10 @@ static const char *op_str[][3] = {
 };
 
 static const char *ty_str[] = {
-    [TY_VOID] = "void",     [TY_I1] = "i1",    [TY_I32] = "i32",     [TY_I64] = "i64",     [TY_BOOL] = "i8",
-    [TY_CHAR] = "i8",       [TY_SCHAR] = "i8", [TY_UCHAR] = "i8",    [TY_SHORT] = "i16",   [TY_INT] = "i32",
-    [TY_ENUM] = "i32",      [TY_LONG] = "i64", [TY_LLONG] = "i64",   [TY_FLOAT] = "float", [TY_DOUBLE] = "double",
-    [TY_LDOUBLE] = "fp128", [TY_PTR] = "ptr",  [TY_NULLPTR] = "ptr",
+    [TY_VOID] = "void",   [TY_BOOL] = "i8",       [TY_CHAR] = "i8",       [TY_SCHAR] = "i8",    [TY_UCHAR] = "i8",
+    [TY_SHORT] = "i16",   [TY_INT] = "i32",       [TY_ENUM] = "i32",      [TY_LONG] = "i64",    [TY_LLONG] = "i64",
+    [TY_FLOAT] = "float", [TY_DOUBLE] = "double", [TY_LDOUBLE] = "fp128", [TY_F16] = "half",    [TY_F32] = "float",
+    [TY_F64] = "double",  [TY_F128] = "fp128",    [TY_PTR] = "ptr",       [TY_NULLPTR] = "ptr",
 };
 
 static void print_ident(uint32_t id) {
@@ -80,6 +80,10 @@ static void print_type(Type *ty) {
         print_ident(ty->uid);
         return;
     }
+    if (ty->kind & TY_BITINT) {
+        fprintf(out_file, "i%d", ty->kind & 0xFFF);
+        return;
+    }
     fprintf(out_file, "%s", ty_str[ty->kind]);
 }
 
@@ -104,16 +108,85 @@ static void print_label(Con *c, char *sym, char *dot) {
     if (c->bits.i) fprintf(out_file, ", i64 %" PRIi64 ")", c->bits.i);
 }
 
+/* Expand a binary64 bit pattern (as stored in Con for TY_DOUBLE/float) into
+ * the equivalent binary128 bit pattern for `fp128` emission. The compiler
+ * models long double as fp128 but carries only 64 bits in Con. */
+static void print_fp128_from_double(uint64_t d) {
+    uint64_t sign = d >> 63;
+    uint64_t exp = (d >> 52) & 0x7FF;
+    uint64_t frac = d & 0xFFFFFFFFFFFFFULL;
+
+    if (exp == 0x7FF) {
+        if (frac) {
+            fprintf(out_file, "0xL%016x%016x", 0x7FFF8000u | (uint32_t)(sign << 15), (uint32_t)(frac << 16 >> 16));
+        } else {
+            fprintf(out_file, "0xL%016x0000000000000000", 0x7FFF0000u | (uint32_t)(sign << 15));
+        }
+        return;
+    }
+
+    uint64_t hi, lo;
+    if (exp == 0) {
+        if (frac == 0) {
+            fprintf(out_file, "0xL%016x0000000000000000", (uint32_t)(sign << 15));
+            return;
+        }
+        /* subnormal: normalize so the top bit of frac lands at bit 112 */
+        int sh = 1;
+        while (!(frac & (1ULL << 51))) {
+            frac <<= 1;
+            sh++;
+        }
+        int e128 = -1022 - sh + 16383;
+        frac &= ~(1ULL << 51); /* drop the implicit bit */
+        hi = ((uint64_t)e128 << 48) | (uint64_t)(sign << 63) | (frac >> 4);
+        lo = frac << 60;
+    } else {
+        int e128 = (int)exp - 1023 + 16383;
+        hi = ((uint64_t)e128 << 48) | (uint64_t)(sign << 63) | (frac >> 4);
+        lo = frac << 60;
+    }
+    /* LLVM legacy fp128 literal: low 64 bits first, then high 64 bits */
+    fprintf(out_file, "0xL%016" PRIx64 "%016" PRIx64, lo, hi);
+}
+
 static void printcon(Con *c, Type *ty) {
     if (c->type == CBits) {
         if (is_flonum(ty)) {
             if (ty->kind == TY_LDOUBLE) {
-                fprintf(out_file, "0xL%032" PRIx64, c->bits.i);
+                print_fp128_from_double((uint64_t)c->bits.i);
             } else {
                 fprintf(out_file, "0x%016" PRIx64, c->bits.i);
             }
         } else {
             fprintf(out_file, "%" PRIi64, c->bits.i);
+        }
+    } else if (c->type == CBits128) {
+        if (is_new_flonum(ty)) {
+            // The type name is prepended by the caller. Legacy LLVM
+            // literals: half = 0xH + 4 digits; float/double = the double
+            // bit pattern in 16 digits (F32 constants are stored as their
+            // exact binary64 widening); fp128 = 0xL + low 64 bits first.
+            switch (ty->kind) {
+                case TY_F16:
+                    fprintf(out_file, "0xH%04x", (unsigned)c->bits.i128.limb[0]);
+                    break;
+                case TY_F32:
+                case TY_F64:
+                    fprintf(out_file, "0x%08x%08x", (unsigned)c->bits.i128.limb[1], (unsigned)c->bits.i128.limb[0]);
+                    break;
+                default:
+                    // LLVM legacy fp128 literal: low 64 bits first
+                    fprintf(out_file, "0xL%08x%08x%08x%08x", (unsigned)c->bits.f128.limb[1],
+                            (unsigned)c->bits.f128.limb[0], (unsigned)c->bits.f128.limb[3],
+                            (unsigned)c->bits.f128.limb[2]);
+                    break;
+            }
+        } else {
+            // iN constants: LLVM rejects hex i128, so print decimal
+            char buf[48];
+            int128_to_str(c->bits.i128, ty->is_unsigned ? UNSIGNED : SIGNED, 10, buf, sizeof(buf));
+            fprintf(out_file, "%s", buf);
         }
     } else if (c->type == CAddr) {
         if (c->sym) {

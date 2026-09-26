@@ -57,9 +57,9 @@ Token *skip(Token *tok, uint32_t kind) {
 
 // Compare if the pending matching string matches the target string
 static inline bool start_with(char *p, char *q) {
-    while (*q) {
+    while (*q)
         if (*p++ != *q++) return false;
-    }
+
     return true;
 }
 
@@ -107,9 +107,11 @@ static void check_escape_range(Token *tok, uint64_t val) {
         case PREFIX_U:
             if (val > 0xFFFFFFFF) error(tok, "escape value out of range for char32_t (max 0xFFFFFFFF)");
             break;
-        case PREFIX_L:
-            if (val > 0xFFFFFFFF) error(tok, "escape value out of range for wchar_t");
+        case PREFIX_L: {
+            uint64_t wmax = (1ULL << (T.ty_wchar->size * 8)) - 1;
+            if (val > wmax) error(tok, "escape value out of range for wchar_t");
             break;
+        }
     }
 }
 
@@ -126,7 +128,10 @@ static void check_char_range(Token *tok, uint64_t code) {
             break;
         case PREFIX_NONE:
         case PREFIX_U:
+            break;
         case PREFIX_L:
+            if (T.ty_wchar->size == 2 && code > 0xFFFF)
+                error(tok, "wide character literal requires more than one wchar_t code unit");
             break;
     }
 }
@@ -377,7 +382,10 @@ void convert_str_literal(Token *tok) {
             convert_utf32_str_literal(tok, str);
             break;
         case PREFIX_L:
-            convert_utf32_str_literal(tok, str);
+            if (T.ty_wchar->size == 4)
+                convert_utf32_str_literal(tok, str);
+            else if (T.ty_wchar->size == 2)
+                convert_utf16_str_literal(tok, str);
             break;
         default:
             break;
@@ -605,10 +613,34 @@ static void convert_pp_num(Token *t) {
                     break;  // f is an ordinary number
                 } else if (!is_float) {
                     goto error;
-                } else {
-                    if (text < end) goto error;
+                } else if (text == end) {
                     flags = SUF_FLOAT;
                     goto extract_end;
+                } else {
+                    int suf = 0;
+                    if (*text == '0') goto error;
+                    while (text < end) {
+                        if (isdigit(*text))
+                            suf = suf * 10 + *text++ - '0';
+                        else
+                            goto error;
+                    }
+                    switch (suf) {
+                        case 16:
+                            flags = SUF_F16;
+                            goto extract_end;
+                        case 32:
+                            flags = SUF_F32;
+                            goto extract_end;
+                        case 64:
+                            flags = SUF_F64;
+                            goto extract_end;
+                        case 128:
+                            flags = SUF_F128;
+                            goto extract_end;
+                        default:
+                            goto error;
+                    }
                 }
             case 'u':
             case 'U':
@@ -743,6 +775,10 @@ void convert_keywords(Token *tok) {
         {"_BitInt", 0, TK_BITINT},
         {"_Bool", 0, TK_BOOL},
         {"_Countof", 0, TK_COUNTOF},
+        {"_Float16", 0, TK_F16},
+        {"_Float32", 0, TK_F32},
+        {"_Float64", 0, TK_F64},
+        {"_Float128", 0, TK_F128},
         {"_Generic", 0, TK_GENERIC},
         {"_Noreturn", 0, TK_NORETURN},
         {"_Static_assert", 0, TK_STATIC_ASSERT},

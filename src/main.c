@@ -83,7 +83,7 @@ static bool take_arg(char *arg) {
 static char *get_clang_resource_dir(void) {
     FILE *fp = popen("clang -print-resource-dir 2>/dev/null", "r");
     if (!fp) return NULL;
-    char buf[PATH_MAX];
+    char buf[4096];
     char *result = NULL;
     if (fgets(buf, sizeof(buf), fp)) {
         buf[strcspn(buf, "\n")] = '\0';
@@ -95,7 +95,7 @@ static char *get_clang_resource_dir(void) {
 
 #include <glob.h>
 static void add_gcc_include_paths(char *triple) {
-    char pattern[PATH_MAX];
+    char pattern[4096];
     snprintf(pattern, sizeof(pattern), "/usr/lib/gcc/%s/*/include", triple);
 
     glob_t g;

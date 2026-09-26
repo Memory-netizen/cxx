@@ -39,6 +39,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "support/fp128.h"
+
 typedef struct SrcFile SrcFile;
 typedef struct Token Token;
 typedef struct Node Node;
@@ -87,28 +89,19 @@ struct Target {
 };
 
 extern Target T;
-
-extern Type *ty_none;
-extern Type *ty_void;
-extern Type *ty_nullptr;
-extern Type *ty_bool;
-extern Type *ty_char;
-extern Type *ty_schar;
-extern Type *ty_uchar;
-extern Type *ty_short;
-extern Type *ty_ushort;
-extern Type *ty_int;
-extern Type *ty_uint;
-extern Type *ty_long;
-extern Type *ty_ulong;
-extern Type *ty_llong;
-extern Type *ty_ullong;
-extern Type *ty_float;
-extern Type *ty_double;
-extern Type *ty_ldouble;
 extern Type *ty_i1;
-extern Type *ty_i32;
-extern Type *ty_i64;
+extern Type *bitint[129][2];
+extern Type *f16;
+extern Type *f32;
+extern Type *f64;
+extern Type *f128;
+
+// Helpers for the new arithmetic types (type.c)
+FpFormat fmt_of(Type *ty);
+bool is_new_flonum(Type *ty);
+int bitint_width(Type *ty);
+bool is_bitint128(Type *ty);
+int64_t norm_bits(int64_t v, int width, bool is_unsigned);
 
 struct SrcFile {
     char *name;
@@ -142,7 +135,11 @@ enum {
     SUF_DOUBLE = 0x010,
     SUF_LDOUBLE = 0x020,
     SUF_BITINT = 0x040,
-    SUF_NONDEC = 0x080,
+    SUF_F16 = 0x080,
+    SUF_F32 = 0x100,
+    SUF_F64 = 0x200,
+    SUF_F128 = 0x400,
+    SUF_NONDEC = 0x800,
 };
 
 enum {
@@ -253,6 +250,10 @@ enum {
     TK_SIGNED,
     TK_UNSIGNED,
     TK_BITINT,
+    TK_F16,
+    TK_F32,
+    TK_F64,
+    TK_F128,
     TK_BOOL,
     TK_ENUM,
     TK_STRUCT,
@@ -311,8 +312,9 @@ struct Token {
     uint16_t len;
     uint8_t kind;
     union {
-        uint8_t lit_suffix;  // Uesd if kind == TK_NUM
-        uint8_t enc_prefix;  // Used if kind == TK_CHARLIT or kind == TK_STRLIT
+        // SUF_NONDEC is 0x800: needs more than 8 bits
+        uint16_t lit_suffix;  // Uesd if kind == TK_NUM
+        uint8_t enc_prefix;   // Used if kind == TK_CHARLIT or kind == TK_STRLIT
     };
     bool is_sol;        // true if is starting of line
     bool is_leadingws;  // true if is leading space
@@ -537,6 +539,8 @@ struct Node {
         };
         int64_t val;  // Used if kind == ND_NUM
         double fval;  // Used if kind == ND_NUM
+        Fp128 fpval;  // TY_F16/F32/F64/F128 constants
+        Int128 ival;  // _BitInt(65..128) constants
     };
     Node *label_ring;
     Node *label_body;
@@ -585,9 +589,7 @@ typedef enum {
     TY_NONE,
     TY_VOID,
     TY_NULLPTR,
-    TY_I1,
-    TY_I32,
-    TY_I64,
+    // TY_I1,
     TY_CHAR,
     TY_UCHAR,
     TY_SCHAR,
@@ -606,6 +608,11 @@ typedef enum {
     TY_ARRAY,
     TY_STRUCT,
     TY_UNION,
+    TY_F16,
+    TY_F32,
+    TY_F64,
+    TY_F128,
+    TY_BITINT = 0x1000,
 } TypeKind;
 
 struct Type {
@@ -805,12 +812,15 @@ struct Con {
     enum {
         CUndef,
         CBits,
+        CBits128,
         CAddr,
     } type;
     uint32_t sym;
     union {
         int64_t i;
         double d;
+        Int128 i128;  // _BitInt(65..128)
+        Fp128 f128;   // fp128 / f16 / f32 / f64 bit patterns
     } bits;
 };
 
@@ -837,43 +847,43 @@ enum {
 #define BOOL(x)                    \
     ({                             \
         Ref tmp = getcon(x, curm); \
-        tmp.ty = ty_bool;          \
+        tmp.ty = T.ty_bool;        \
         tmp;                       \
     })
 #define INT(x)                     \
     ({                             \
         Ref tmp = getcon(x, curm); \
-        tmp.ty = ty_int;           \
+        tmp.ty = T.ty_int;         \
         tmp;                       \
     })
 #define LONG(x)                    \
     ({                             \
         Ref tmp = getcon(x, curm); \
-        tmp.ty = ty_long;          \
+        tmp.ty = T.ty_long;        \
         tmp;                       \
     })
 #define FLOAT(x)                   \
     ({                             \
         Ref tmp = getcon(x, curm); \
-        tmp.ty = ty_float;         \
+        tmp.ty = T.ty_float;       \
         tmp;                       \
     })
 #define DOUBLE(x)                  \
     ({                             \
         Ref tmp = getcon(x, curm); \
-        tmp.ty = ty_double;        \
+        tmp.ty = T.ty_double;      \
         tmp;                       \
     })
 #define LDOUBLE(x)                 \
     ({                             \
         Ref tmp = getcon(x, curm); \
-        tmp.ty = ty_ldouble;       \
+        tmp.ty = T.ty_ldouble;     \
         tmp;                       \
     })
 #define NULLPTR                                        \
     ({                                                 \
         Ref tmp = newcon(&(Con){CAddr, 0, {0}}, curm); \
-        tmp.ty = ty_nullptr;                           \
+        tmp.ty = T.ty_nullptr;                         \
         tmp;                                           \
     })
 

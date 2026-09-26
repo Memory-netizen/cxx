@@ -274,7 +274,12 @@ Ref newcon(Con *c0, Module *md) {
 
     for (i = 0; i < md->ncon; i++) {
         c1 = &md->con[i];
-        if (c0->type == c1->type && c0->sym == c1->sym && c0->bits.i == c1->bits.i) return CON(i, NULL);
+        if (c0->type != c1->type || c0->sym != c1->sym) continue;
+        if (c0->type == CBits128) {
+            if (memcmp(&c0->bits.i128, &c1->bits.i128, sizeof(Int128)) == 0) return CON(i, NULL);
+        } else if (c0->bits.i == c1->bits.i) {
+            return CON(i, NULL);
+        }
     }
     md->con = vgrow(md->con, ++md->ncon);
     md->con[i] = *c0;
