@@ -11,7 +11,7 @@ int main() {
     ASSERT(1, _Alignof(char));
     ASSERT(2, _Alignof(short));
     ASSERT(4, _Alignof(int));
-    ASSERT(8, _Alignof(long));
+    ASSERT(__SIZEOF_LONG__, _Alignof(long));
     ASSERT(8, _Alignof(long long));
     ASSERT(1, _Alignof(char[3]));
     ASSERT(4, _Alignof(int[3]));
@@ -19,7 +19,7 @@ int main() {
                char a;
                char b;
            }[2]));
-    ASSERT(8, _Alignof(struct {
+    ASSERT(__SIZEOF_LONG__, _Alignof(struct {
                char a;
                long b;
            }[2]));
@@ -28,7 +28,7 @@ int main() {
                _Alignas(char) char x, y;
                &x - &y;
            }));
-    ASSERT(8, ({
+    ASSERT(__SIZEOF_LONG__, ({
                _Alignas(long) char x, y;
                &x - &y;
            }));
@@ -56,7 +56,7 @@ int main() {
     ASSERT(0, (long)(char *)&g1 % 512);
     ASSERT(0, (long)(char *)&g2 % 512);
     ASSERT(0, (long)(char *)&g4 % 4);
-    ASSERT(0, (long)(char *)&g5 % 8);
+    ASSERT(0, (long)(char *)&g5 % __SIZEOF_LONG__);
 
     ASSERT(1, ({
                char x;
@@ -76,15 +76,15 @@ int main() {
            }));
 
     ASSERT(1, _Alignof(char) << 31 >> 31);
-    ASSERT(1, _Alignof(char) << 63 >> 63);
+    ASSERT(1, _Alignof(char) << (__SIZE_WIDTH__ - 1) >> (__SIZE_WIDTH__ - 1));
     ASSERT(1, ({
                char x;
-               _Alignof(x) << 63 >> 63;
+               _Alignof(x) << (__SIZE_WIDTH__ - 1) >> (__SIZE_WIDTH__ - 1);
            }));
 
     ASSERT(1, _Alignof(true));
     ASSERT(1, _Alignof(false));
-    ASSERT(8, _Alignof(nullptr));
+    ASSERT(__SIZEOF_POINTER__, _Alignof(nullptr));
 
     ASSERT(4, _Alignof(main));
 

@@ -52,7 +52,7 @@ int main() {
                int x;
                sizeof x;
            }));
-    ASSERT(8, ({
+    ASSERT(__SIZEOF_POINTER__, ({
                int *x;
                sizeof(x);
            }));
@@ -194,7 +194,7 @@ int main() {
                a - b;
            }));
 
-    ASSERT(8, ({
+    ASSERT(__SIZEOF_LONG__, ({
                long x;
                sizeof(x);
            }));
@@ -203,11 +203,11 @@ int main() {
                sizeof(x);
            }));
 
-    ASSERT(24, ({
+    ASSERT(__SIZEOF_POINTER__ * 3, ({
                char *x[3];
                sizeof(x);
            }));
-    ASSERT(8, ({
+    ASSERT(__SIZEOF_POINTER__, ({
                char (*x)[3];
                sizeof(x);
            }));

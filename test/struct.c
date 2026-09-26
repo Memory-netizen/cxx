@@ -331,7 +331,7 @@ int main() {
                sizeof(y);
            }));
 
-    ASSERT(16, ({
+    ASSERT(__SIZEOF_LONG__ * 2, ({
                struct {
                    char a;
                    long b;
@@ -346,7 +346,7 @@ int main() {
                sizeof(x);
            }));
 
-    ASSERT(8, ({
+    ASSERT(__SIZEOF_POINTER__, ({
                struct foo *bar;
                sizeof(bar);
            }));

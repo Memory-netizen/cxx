@@ -5,7 +5,7 @@
 typedef unsigned char char8_t;
 typedef unsigned short char16_t;
 typedef unsigned int char32_t;
-#ifdef __aarch64__
+#ifdef __WCHAR_UNSIGNED__
 typedef unsigned int wchar_t;
 #else
 typedef int wchar_t;
@@ -44,7 +44,12 @@ int main() {
     ASSERT(86, '\U00000056');
     ASSERT(20320, L'你');
 
+#ifdef __WCHAR_UNSIGNED__
+    // aarch64 AAPCS64: wchar_t is unsigned int
+    ASSERT(1, L'\xffffffff' >> 31);
+#else
     ASSERT(-1, L'\xffffffff' >> 31);
+#endif
     ASSERT(946, L'β');
     ASSERT(12354, L'あ');
     ASSERT(127843, L'🍣');
@@ -107,7 +112,11 @@ int main() {
     ASSERT(u'β', L"βb"[0]);
     ASSERT(u'b', L"βb"[1]);
     ASSERT(0, L"βb"[2]);
+#ifdef __WCHAR_UNSIGNED__
+    ASSERT(1, L"\xffffffff"[0] >> 31);
+#else
     ASSERT(-1, L"\xffffffff"[0] >> 31);
+#endif
 
     ASSERT(0, strcmp(STR(L"a"), "L\"a\""));
 

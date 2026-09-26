@@ -661,6 +661,22 @@ int float_rank(Type *ty) {
     }
 }
 
+// Integer conversion rank by kind (not size).
+static int int_rank(Type *ty) {
+    switch (ty->kind) {
+        case TY_LLONG:
+            return 4;
+        case TY_LONG:
+            return 3;
+        case TY_INT:
+            return 2;
+        case TY_SHORT:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 // Integer promotions for _BitInt per C23 6.3.1.1.
 static Type *promote_bitint(Type *ty) {
     int w = bitint_width(ty);
@@ -712,7 +728,13 @@ static Type *get_common_type(Type *ty1, Type *ty2) {
 
     if (ty1->size != ty2->size) return (ty1->size < ty2->size) ? ty2 : ty1;
 
-    if (ty1->kind != ty2->kind) return T.ty_llong;
+    if (ty1->kind != ty2->kind) {
+        // Same size, different kinds (possible on ILP32: long vs int).
+        // Pick the higher rank; a tie goes to the unsigned type.
+        int k1 = int_rank(ty1), k2 = int_rank(ty2);
+        if (k1 != k2) return k1 < k2 ? ty2 : ty1;
+        return ty2->is_unsigned ? ty2 : ty1;
+    }
 
     if (ty2->is_unsigned) return ty2;
     return ty1;

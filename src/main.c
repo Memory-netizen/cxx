@@ -724,8 +724,22 @@ static void cc1(void) {
 
 // Stage 2: .ll → .s  (via clang)
 static void compile(char *input, char *output) {
-    char *cmd[] = {"clang", "-target", T.triple, "-S", "-fno-addrsig", "-Wno-override-module",
-                   "-x",    "ir",      input,    "-o", output,         NULL};
+    // Bare-metal triples default to a soft-float ABI, which clashes with
+    // the "target-abi" module flag; pass the matching driver flags.
+    char mabi[64] = "-mabi=";
+    char march[64] = "-march=";
+    char *cmd[14] = {"clang", "-target", T.triple, "-S", "-fno-addrsig", "-Wno-override-module",
+                     "-x",    "ir",      input,    "-o", output};
+    int n = 11;
+    if (T.clang_mabi) {
+        strncat(mabi, T.clang_mabi, 56);
+        cmd[n++] = mabi;
+    }
+    if (T.clang_march) {
+        strncat(march, T.clang_march, 56);
+        cmd[n++] = march;
+    }
+    cmd[n] = NULL;
     run_subprocess(cmd);
 }
 

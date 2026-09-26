@@ -18,16 +18,16 @@ int main() {
     ASSERT(47, 0B101111);
 
     ASSERT(4, sizeof(0));
-    ASSERT(8, sizeof(0L));
-    ASSERT(8, sizeof(0LU));
-    ASSERT(8, sizeof(0UL));
+    ASSERT(__SIZEOF_LONG__, sizeof(0L));
+    ASSERT(__SIZEOF_LONG__, sizeof(0LU));
+    ASSERT(__SIZEOF_LONG__, sizeof(0UL));
     ASSERT(8, sizeof(0LL));
     ASSERT(8, sizeof(0LLU));
     ASSERT(8, sizeof(0Ull));
-    ASSERT(8, sizeof(0l));
+    ASSERT(__SIZEOF_LONG__, sizeof(0l));
     ASSERT(8, sizeof(0ll));
-    ASSERT(8, sizeof(0x0L));
-    ASSERT(8, sizeof(0b0L));
+    ASSERT(__SIZEOF_LONG__, sizeof(0x0L));
+    ASSERT(__SIZEOF_LONG__, sizeof(0b0L));
     ASSERT(4, sizeof(2147483647));
     ASSERT(8, sizeof(2147483648));
     ASSERT(-1, 0xffffffffffffffff);
@@ -36,7 +36,7 @@ int main() {
     ASSERT(8, sizeof(4294967296U));
 
     ASSERT(3, -1U >> 30);
-    ASSERT(3, -1Ul >> 62);
+    ASSERT(3, -1Ul >> (__SIZEOF_LONG__ * 8 - 2));
     ASSERT(3, -1ull >> 62);
 
     ASSERT(1, 0xffffffffffffffffl >> 63);

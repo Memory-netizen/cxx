@@ -17,11 +17,11 @@ int main() {
                int x;
                sizeof(x);
            }));
-    ASSERT(8, ({
+    ASSERT(__SIZEOF_LONG__, ({
                long int x;
                sizeof(x);
            }));
-    ASSERT(8, ({
+    ASSERT(__SIZEOF_LONG__, ({
                int long x;
                sizeof(x);
            }));

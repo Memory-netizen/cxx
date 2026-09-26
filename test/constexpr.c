@@ -162,11 +162,11 @@ int main() {
                sizeof(x);
            }));
     ASSERT(1, ({
-               char x[(long)-1 / ((long)1 << 62) + 1];
+               char x[(long)-1 / ((long)1 << (__SIZEOF_LONG__ * 8 - 2)) + 1];
                sizeof(x);
            }));
     ASSERT(4, ({
-               char x[(unsigned long)-1 / ((long)1 << 62) + 1];
+               char x[(unsigned long)-1 / ((long)1 << (__SIZEOF_LONG__ * 8 - 2)) + 1];
                sizeof(x);
            }));
     ASSERT(1, ({

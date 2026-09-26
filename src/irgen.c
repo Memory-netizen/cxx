@@ -542,6 +542,7 @@ static Ref gen_expr(Node *node) {
                 return dst;
             }
             Ref zr = node->ty->size == 8 ? LONG(0) : INT(0);
+            zr.ty = node->ty;  // rv32: T.ty_long is 32-bit; match the node
             new_ins(IR_SUB, dst, (Ref[]){zr, lr}, 2);
             return dst;
         case ND_INVERT:

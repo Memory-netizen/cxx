@@ -14,7 +14,7 @@ int main() {
                typeof(x) y;
                sizeof(y);
            }));
-    ASSERT(8, ({
+    ASSERT(__SIZEOF_POINTER__, ({
                int x;
                typeof(&x) y;
                sizeof(y);

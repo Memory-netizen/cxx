@@ -12,7 +12,7 @@ int main() {
                sizeof(x);
            }));
 
-    ASSERT(8, ({
+    ASSERT(__SIZEOF_POINTER__, ({
                char n = 10;
                int (*x)[n][n + 2];
                sizeof(x);

@@ -118,7 +118,7 @@ int main() {
                x[0] = 3;
                param_decay(x);
            }));
-    ASSERT(8, ({
+    ASSERT(__SIZEOF_POINTER__, ({
                int x[2];
                param_decay2(x);
            }));

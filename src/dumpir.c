@@ -88,6 +88,11 @@ static void print_type(Type *ty) {
         fprintf(out_file, "x86_fp80");
         return;
     }
+    if (ty->kind == TY_LONG) {
+        // 64-bit on LP64 targets, 32-bit on ILP32 (rv32)
+        fprintf(out_file, "i%d", T.ty_long->size * 8);
+        return;
+    }
     fprintf(out_file, "%s", ty_str[ty->kind]);
 }
 
@@ -303,6 +308,23 @@ void dump_blk(Blk *b) {
                 else
                     print_type(ir->dst.ty);
                 fprintf(out_file, " ");
+                // The explicit callee type is required only for variadic
+                // calls (LangRef: the fnty "is only required if the
+                // signature specifies a varargs type"); it drives
+                // variadic ABI lowering, e.g. rv64 passes variadic FP
+                // arguments in integer registers only when the type is
+                // spelled out.
+                Type *fty = ir->args[0].ty;
+                if (fty->kind == TY_PTR) fty = fty->base;
+                if (fty->is_variadic) {
+                    fprintf(out_file, "(");
+                    for (Type *p = fty->params; p; p = p->next) {
+                        print_type(p);
+                        if (p->next) fprintf(out_file, ", ");
+                    }
+                    if (fty->params) fprintf(out_file, ", ");
+                    fprintf(out_file, "...) ");
+                }
                 print_operand(ir->args[0]);
                 fprintf(out_file, "(");
                 for (uint32_t i = 1; i < ir->narg; i++) {
@@ -557,7 +579,7 @@ static void dump_init(Initializer *init, Type *ty) {
         return;
     }
     if (init->ty->kind == TY_PTR && init->val->type == CBits) {
-        fprintf(out_file, "inttoptr (i64 ");
+        fprintf(out_file, "inttoptr (i%d ", T.ty_nullptr->size * 8);
         printcon(init->val, init->ty);
         fprintf(out_file, " to ptr)");
         return;
@@ -565,7 +587,7 @@ static void dump_init(Initializer *init, Type *ty) {
     if (init->ty->kind != TY_PTR && init->val->type == CAddr) {
         fprintf(out_file, "ptrtoint (ptr ");
         printcon(init->val, init->ty);
-        fprintf(out_file, " to i64)");
+        fprintf(out_file, " to i%d)", T.ty_nullptr->size * 8);
         return;
     }
     printcon(init->val, init->ty);
@@ -665,6 +687,7 @@ void dump_fn(Sym *fn) {
         fprintf(out_file, "\n\n");
         return;
     }
+    if (T.llvm_features) fprintf(out_file, " #0");
     fprintf(out_file, " {\n");
     Blk *curb = fn->start;
     while (curb) {
@@ -683,6 +706,9 @@ void dump_module(Module *md, FILE *out) {
     fprintf(out_file, "source_filename = \"%s\"\n", files[0]->name);
     fprintf(out_file, "target datalayout = \"%s\"\n", T.datalayout);
     fprintf(out_file, "target triple = \"%s\"\n\n", T.triple);
+    if (T.llvm_features) fprintf(out_file, "attributes #0 = { \"target-features\"=%s }\n\n", T.llvm_features);
+    if (T.llvm_abi)
+        fprintf(out_file, "!llvm.module.flags = !{!0}\n!0 = !{i32 1, !\"target-abi\", !%s}\n\n", T.llvm_abi);
     fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
     fprintf(out_file, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n");
     fprintf(out_file, "declare ptr @llvm.threadlocal.address.p0(ptr)\n");

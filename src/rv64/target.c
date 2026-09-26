@@ -30,6 +30,10 @@ static Type ty_ldouble_ = TYPE(TY_LDOUBLE, 16, 16, false);
 #undef TYPE
 
 Target T_rv64 = {
+    .llvm_features = "\"+m,+a,+f,+d,+c\"",
+    .llvm_abi = "\"lp64d\"",
+    .clang_mabi = "lp64d",
+    .clang_march = "rv64gc",
     .ldouble_is_fp80 = false,
     .name = "rv64",
     .triple = "riscv64-linux-gnu",

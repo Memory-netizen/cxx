@@ -30,6 +30,10 @@ static Type ty_ldouble_ = TYPE(TY_LDOUBLE, 16, 16, false);
 #undef TYPE
 
 Target T_rv32 = {
+    .llvm_features = "\"+m,+a,+f,+d,+c\"",
+    .llvm_abi = "\"ilp32d\"",
+    .clang_mabi = "ilp32d",
+    .clang_march = "rv32imafdc",
     .ldouble_is_fp80 = false,
     .name = "rv32",
     .triple = "riscv32-linux-gnu",
@@ -478,6 +482,10 @@ Target T_rv32 = {
 };
 
 Target T_rv32b = {
+    .llvm_features = "\"+m,+a,+f,+d,+c\"",
+    .llvm_abi = "\"ilp32d\"",
+    .clang_mabi = "ilp32d",
+    .clang_march = "rv32imafdc",
     .ldouble_is_fp80 = false,
     .name = "rv32b",
     .triple = "riscv32-none-elf",
@@ -687,6 +695,51 @@ Target T_rv32b = {
         "#define __ORDER_BIG_ENDIAN__ 4321\n"
         "#define __ORDER_LITTLE_ENDIAN__ 1234\n"
         "#define __ORDER_PDP_ENDIAN__ 3412\n"
+        "#define __FLT32_DECIMAL_DIG__ 9\n"
+        "#define __FLT32_DENORM_MIN__ 0x1p-149f32\n"
+        "#define __FLT32_DIG__ 6\n"
+        "#define __FLT32_EPSILON__ 0x1p-23f32\n"
+        "#define __FLT32_HAS_DENORM__ 1\n"
+        "#define __FLT32_HAS_INFINITY__ 1\n"
+        "#define __FLT32_HAS_QUIET_NAN__ 1\n"
+        "#define __FLT32_MANT_DIG__ 24\n"
+        "#define __FLT32_MAX_10_EXP__ 38\n"
+        "#define __FLT32_MAX_EXP__ 128\n"
+        "#define __FLT32_MAX__ 0x1.fffffep+127f32\n"
+        "#define __FLT32_MIN_10_EXP__ (-37)\n"
+        "#define __FLT32_MIN_EXP__ (-125)\n"
+        "#define __FLT32_MIN__ 0x1p-126f32\n"
+        "#define __FLT32_NORM_MAX__ 0x1.fffffep+127f32\n"
+        "#define __FLT64_DECIMAL_DIG__ 17\n"
+        "#define __FLT64_DENORM_MIN__ 0x0.0000000000001p-1022f64\n"
+        "#define __FLT64_DIG__ 15\n"
+        "#define __FLT64_EPSILON__ 0x1p-52f64\n"
+        "#define __FLT64_HAS_DENORM__ 1\n"
+        "#define __FLT64_HAS_INFINITY__ 1\n"
+        "#define __FLT64_HAS_QUIET_NAN__ 1\n"
+        "#define __FLT64_MANT_DIG__ 53\n"
+        "#define __FLT64_MAX_10_EXP__ 308\n"
+        "#define __FLT64_MAX_EXP__ 1024\n"
+        "#define __FLT64_MAX__ 0x1.fffffffffffffp+1023f64\n"
+        "#define __FLT64_MIN_10_EXP__ (-307)\n"
+        "#define __FLT64_MIN_EXP__ (-1021)\n"
+        "#define __FLT64_MIN__ 0x1p-1022f64\n"
+        "#define __FLT64_NORM_MAX__ 0x1.fffffffffffffp+1023f64\n"
+        "#define __FLT128_DECIMAL_DIG__ 36\n"
+        "#define __FLT128_DENORM_MIN__ 0x1p-16494f128\n"
+        "#define __FLT128_DIG__ 33\n"
+        "#define __FLT128_EPSILON__ 0x1p-112f128\n"
+        "#define __FLT128_HAS_DENORM__ 1\n"
+        "#define __FLT128_HAS_INFINITY__ 1\n"
+        "#define __FLT128_HAS_QUIET_NAN__ 1\n"
+        "#define __FLT128_MANT_DIG__ 113\n"
+        "#define __FLT128_MAX_10_EXP__ 4932\n"
+        "#define __FLT128_MAX_EXP__ 16384\n"
+        "#define __FLT128_MAX__ 0x1.ffffffffffffffffffffffffffffp+16383f128\n"
+        "#define __FLT128_MIN_10_EXP__ (-4931)\n"
+        "#define __FLT128_MIN_EXP__ (-16381)\n"
+        "#define __FLT128_MIN__ 0x1p-16382f128\n"
+        "#define __FLT128_NORM_MAX__ 0x1.ffffffffffffffffffffffffffffp+16383f128\n"
         "#define __POINTER_WIDTH__ 32\n"
         "#define __PTRDIFF_FMTd__ \"d\"\n"
         "#define __PTRDIFF_FMTi__ \"i\"\n"

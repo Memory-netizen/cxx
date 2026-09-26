@@ -31,7 +31,7 @@ GENERATED_HDRS := src/width_property.h src/xid_property.h src/pow_table.h
 # All headers (existing + generated)
 HDRS := $(wildcard $(SRC_DIR)/*.h)
 
-TEST_SRCS := $(wildcard test/*.c)
+TEST_SRCS := $(filter-out test/rv32_common.c test/rv32_tf3.c,$(wildcard test/*.c))
 TESTS := $(TEST_SRCS:.c=.out)
 
 ALL_SRCS := $(SRCS) $(HDRS)

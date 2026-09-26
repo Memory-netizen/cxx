@@ -30,6 +30,10 @@ static Type ty_ldouble_ = TYPE(TY_LDOUBLE, 16, 16, false);
 #undef TYPE
 
 Target T_arm64 = {
+    .llvm_features = NULL,
+    .llvm_abi = NULL,
+    .clang_mabi = NULL,
+    .clang_march = NULL,
     .ldouble_is_fp80 = false,
     .name = "arm64",
     .triple = "aarch64-linux-gnu",

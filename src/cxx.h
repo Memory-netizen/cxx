@@ -86,6 +86,10 @@ struct Target {
     uint64_t long_max, ulong_max;
     uint64_t llong_max;
     bool ldouble_is_fp80;  // x87 80-bit (amd64) vs binary128 (others)
+    char *llvm_features;   // target-features attribute for LLVM codegen
+    char *llvm_abi;        // "target-abi" module flag (e.g. "lp64d")
+    char *clang_mabi;      // -mabi driver flag matching llvm_abi (bare metal)
+    char *clang_march;     // -march driver flag matching llvm_features
     char *predef;
 };
 

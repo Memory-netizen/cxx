@@ -30,6 +30,8 @@ static Type ty_ldouble_ = TYPE(TY_LDOUBLE, 16, 16, false);
 #undef TYPE
 
 Target T_amd64 = {
+    .llvm_features = NULL,
+    .llvm_abi = NULL,
     .ldouble_is_fp80 = true,
     .name = "amd64",
     .triple = "x86_64-linux-gnu",
