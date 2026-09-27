@@ -349,3 +349,24 @@ __asm__(".section .text.start\n"
         "  li a1, 0x100000\n"
         "  sw a0, 0(a1)\n"
         "  j .\n");
+
+/* Reads the first variadic argument as double: verifies the caller's
+ * default argument promotions (float/_Float32 -> double) at the ABI
+ * level. */
+double read_first_double(int n, ...) {
+  va_list ap;
+  va_start(ap, n);
+  double d = va_arg(ap, double);
+  va_end(ap);
+  return d;
+}
+
+/* Reads the first variadic argument as int: verifies the integer
+ * promotions of trailing arguments at the ABI level. */
+int read_first_int(int n, ...) {
+  va_list ap;
+  va_start(ap, n);
+  int d = va_arg(ap, int);
+  va_end(ap);
+  return d;
+}

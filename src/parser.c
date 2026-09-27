@@ -1516,11 +1516,13 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
             new_imcast(&arg, param_ty);
             param_ty = param_ty->next;
         } else if (ty->is_variadic) {
-            // If parameter type is omitted (e.g. in "..."),
-            // "char", "unsinged char" and "signed char" are promoted to "int" or "unsigned int"
-            // float arguments are promoted to double.
+            // Default argument promotions (6.5.2.2p7): the integer
+            // promotions apply to the standard integer types but never
+            // to _BitInt; float and _Float32 promote to double;
+            // _Float16 and _Float64 stay as they are (gcc/clang both
+            // keep _Float16; clang promotes _Float32).
             if (is_integer(arg->ty)) integer_promotion(&arg);
-            if (arg->ty->kind == TY_FLOAT) new_imcast(&arg, T.ty_double);
+            if (arg->ty->kind == TY_FLOAT || arg->ty->kind == TY_F32) new_imcast(&arg, T.ty_double);
             lvalue_convert(&arg);
         } else {
             error(tok, "too many arguments to function ‘%.*s’; expected %d", ty->name->len, tok_text(ty->name),
@@ -3366,14 +3368,14 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
         LONG = 1 << 10,
         FLOAT = 1 << 12,
         DOUBLE = 1 << 14,
-        OTHER = 1 << 16,
-        SIGNED = 1 << 17,
-        UNSIGNED = 1 << 18,
-        F16 = 1 << 19,
-        F32 = 1 << 20,
-        F64 = 1 << 21,
+        F16 = 1 << 16,
+        F32 = 1 << 18,
+        F64 = 1 << 20,
         F128 = 1 << 22,
-        BITINT = 1 << 23,
+        BITINT = 1 << 24,
+        OTHER = 1 << 26,
+        SIGNED = 1 << 28,
+        UNSIGNED = 1 << 29,
     };
 
     while (is_typename(tok, true)) {

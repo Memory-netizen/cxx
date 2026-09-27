@@ -40,6 +40,20 @@ int main() {
     // Mixed _Float32/float uses the standard type (float)
     ASSERT(1, _Generic(0.5f32 + 0.25f, _Float32: 1, default: 0));
 
+    // === default argument promotions in variadic calls ===
+    // float and _Float32 both promote to double (clang-verified); the
+    // reader lives in test/common and uses the host va_arg.
+    extern double read_first_double(int n, ...);
+    extern int read_first_int(int n, ...);
+    ASSERT(1, read_first_double(0, 1.5f) == 1.5);
+    ASSERT(1, read_first_double(0, 1.5f32) == 1.5);
+    // integer promotions: char/short/_Bool -> int (GPR slot, int reader)
+    ASSERT(3, read_first_int(0, (char)3));
+    ASSERT(4, read_first_int(0, (short)4));
+    ASSERT(1, read_first_int(0, (_Bool)1));
+    // _BitInt(3) is NOT promoted: it occupies the slot as-is
+    ASSERT(5, read_first_int(0, (_BitInt(3))5));
+
     printf("OK\n");
     return 0;
 }
