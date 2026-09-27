@@ -1,7 +1,6 @@
 #include "cxx.h"
 
 Type *infer_numtype(Token *tok) {
-    uint64_t val = tok->val;
     uint32_t flags = tok->lit_suffix & ~SUF_NONDEC;
     bool nondec = tok->lit_suffix & SUF_NONDEC;
     Type *ty;
@@ -12,6 +11,13 @@ Type *infer_numtype(Token *tok) {
     if (flags & SUF_F32) return f32;
     if (flags & SUF_F64) return f64;
     if (flags & SUF_F128) return f128;
+    // The _BitInt width follows the value (tok->ival); the parser
+    // overrides this stub.
+    if (flags & SUF_BITINT) return T.ty_int;
+
+    // The literal magnitude is non-negative (the sign is a separate
+    // unary minus token), so unsigned comparisons pick the type.
+    Int128 val = tok->ival;
 
     if (!nondec) {
         switch (flags) {
@@ -22,19 +28,23 @@ Type *infer_numtype(Token *tok) {
                 ty = T.ty_llong;
                 break;
             case SUF_UNSIGNED | SUF_LONG:
-                ty = val <= T.ulong_max ? T.ty_ulong : T.ty_ullong;
+                ty = int128_cmp_unsigned(val, int128_set_ui(T.ulong_max)) <= 0 ? T.ty_ulong : T.ty_ullong;
                 break;
             case SUF_LONG:
-                ty = val <= T.long_max ? T.ty_long : val <= T.llong_max ? T.ty_llong : T.ty_ullong;
+                ty = int128_cmp_unsigned(val, int128_set_ui(T.long_max)) <= 0    ? T.ty_long
+                     : int128_cmp_unsigned(val, int128_set_ui(T.llong_max)) <= 0 ? T.ty_llong
+                                                                                 : T.ty_ullong;
                 break;
             case SUF_UNSIGNED:
-                ty = val <= T.uint_max ? T.ty_uint : val <= T.ulong_max ? T.ty_ulong : T.ty_ullong;
+                ty = int128_cmp_unsigned(val, int128_set_ui(T.uint_max)) <= 0    ? T.ty_uint
+                     : int128_cmp_unsigned(val, int128_set_ui(T.ulong_max)) <= 0 ? T.ty_ulong
+                                                                                 : T.ty_ullong;
                 break;
             default:
-                ty = val <= T.int_max     ? T.ty_int
-                     : val <= T.long_max  ? T.ty_long
-                     : val <= T.llong_max ? T.ty_llong
-                                          : T.ty_ullong;
+                ty = int128_cmp_unsigned(val, int128_set_ui(T.int_max)) <= 0     ? T.ty_int
+                     : int128_cmp_unsigned(val, int128_set_ui(T.long_max)) <= 0  ? T.ty_long
+                     : int128_cmp_unsigned(val, int128_set_ui(T.llong_max)) <= 0 ? T.ty_llong
+                                                                                 : T.ty_ullong;
                 break;
         }
     } else {
@@ -43,27 +53,29 @@ Type *infer_numtype(Token *tok) {
                 ty = T.ty_ullong;
                 break;
             case SUF_LLONG:
-                ty = val <= T.llong_max ? T.ty_llong : T.ty_ullong;
+                ty = int128_cmp_unsigned(val, int128_set_ui(T.llong_max)) <= 0 ? T.ty_llong : T.ty_ullong;
                 break;
             case SUF_UNSIGNED | SUF_LONG:
-                ty = val <= T.ulong_max ? T.ty_ulong : T.ty_ullong;
+                ty = int128_cmp_unsigned(val, int128_set_ui(T.ulong_max)) <= 0 ? T.ty_ulong : T.ty_ullong;
                 break;
             case SUF_LONG:
-                ty = val <= T.long_max    ? T.ty_long
-                     : val <= T.ulong_max ? T.ty_ulong
-                     : val <= T.llong_max ? T.ty_llong
-                                          : T.ty_ullong;
+                ty = int128_cmp_unsigned(val, int128_set_ui(T.long_max)) <= 0    ? T.ty_long
+                     : int128_cmp_unsigned(val, int128_set_ui(T.ulong_max)) <= 0 ? T.ty_ulong
+                     : int128_cmp_unsigned(val, int128_set_ui(T.llong_max)) <= 0 ? T.ty_llong
+                                                                                 : T.ty_ullong;
                 break;
             case SUF_UNSIGNED:
-                ty = val <= T.uint_max ? T.ty_uint : val <= T.ulong_max ? T.ty_ulong : T.ty_ullong;
+                ty = int128_cmp_unsigned(val, int128_set_ui(T.uint_max)) <= 0    ? T.ty_uint
+                     : int128_cmp_unsigned(val, int128_set_ui(T.ulong_max)) <= 0 ? T.ty_ulong
+                                                                                 : T.ty_ullong;
                 break;
             default:
-                ty = val <= T.int_max     ? T.ty_int
-                     : val <= T.uint_max  ? T.ty_uint
-                     : val <= T.long_max  ? T.ty_long
-                     : val <= T.ulong_max ? T.ty_ulong
-                     : val <= T.llong_max ? T.ty_llong
-                                          : T.ty_ullong;
+                ty = int128_cmp_unsigned(val, int128_set_ui(T.int_max)) <= 0     ? T.ty_int
+                     : int128_cmp_unsigned(val, int128_set_ui(T.uint_max)) <= 0  ? T.ty_uint
+                     : int128_cmp_unsigned(val, int128_set_ui(T.long_max)) <= 0  ? T.ty_long
+                     : int128_cmp_unsigned(val, int128_set_ui(T.ulong_max)) <= 0 ? T.ty_ulong
+                     : int128_cmp_unsigned(val, int128_set_ui(T.llong_max)) <= 0 ? T.ty_llong
+                                                                                 : T.ty_ullong;
                 break;
         }
     }

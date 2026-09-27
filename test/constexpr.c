@@ -203,6 +203,26 @@ int main() {
     ASSERT(42, g42);
     ASSERT(43, g43);
 
+    // === constexpr with wide _BitInt ===
+    ASSERT(16, ({
+               _BitInt(77) x = 1234567890123456789012wb;
+               sizeof(x);
+           }));
+    ASSERT(1, ({
+               _BitInt(77) e77 = (_BitInt(77))1 + 1;  // mixed with int stays _BitInt(77)
+               e77 == 2;
+           }));
+    ASSERT(5, ({
+               int x[(unsigned _BitInt(77))5];
+               sizeof(x) / sizeof(int);
+           }));
+    ASSERT(7, ({
+               int a[8];
+               _BitInt(77) i = 2;
+               a[i + 5] = 7;
+               a[7];
+           }));
+
     printf("OK\n");
     return 0;
 }

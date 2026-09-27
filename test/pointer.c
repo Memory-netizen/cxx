@@ -198,6 +198,18 @@ int main() {
                x[1][2];
            }));
 
+    // === pointer <-> wide _BitInt casts ===
+    int x = 42;
+    _BitInt(70) addr = (_BitInt(70))(long)(int *)&x;
+    ASSERT(1, (int *)(long)addr == &x);
+    int *nullp = 0;
+    ASSERT(1, (_BitInt(70))nullp == 0);
+    ASSERT(1, (int *)(_BitInt(70))0 == 0);
+    // pointer arithmetic unaffected by wide ints elsewhere
+    int arr[5];
+    ASSERT(3, &arr[3] - &arr[0]);
+    ASSERT(1, sizeof(_BitInt(70) *) == __SIZEOF_POINTER__);
+
     printf("OK\n");
     return 0;
 }

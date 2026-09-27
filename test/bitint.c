@@ -9,7 +9,7 @@ int main() {
     ASSERT(16, sizeof(_BitInt(65)));
     ASSERT(16, sizeof(_BitInt(128)));
     ASSERT(1, sizeof(unsigned _BitInt(1)));
-    ASSERT(16, _Alignof(_BitInt(70)));
+    ASSERT(8, _Alignof(_BitInt(70)));  // clang: align = min(size, 8)
 
     // wb / uwb literal suffixes
     ASSERT(1, 1wb == (_BitInt(2))1);
@@ -64,6 +64,40 @@ int main() {
     _BitInt(70) a[2] = {5, 6};
     ASSERT(6, a[1]);
     ASSERT(1, &a[1] - &a[0] == 1);
+
+    // === wrap boundaries (unsigned defined; signed LLVM wrap) ===
+    _BitInt(77) smax = (((_BitInt(77))1) << 76) - 1;  // 2^76-1
+    ASSERT(1, smax > 0);
+    ASSERT(1, smax + 1 < 0);  // wraps to the sign bit
+    unsigned _BitInt(77) umax = (unsigned _BitInt(77)) - 1;
+    ASSERT(0, umax + 1);
+    ASSERT(1, umax - 1 < umax);
+    unsigned _BitInt(128) u128 = (unsigned _BitInt(128)) - 1;
+    ASSERT(0, u128 + 1);
+    ASSERT(1, u128 % 2);
+    unsigned _BitInt(128) h128 = ((unsigned _BitInt(128))1) << 127;
+    ASSERT(0, h128 * 2);  // 2^128 wraps to 0
+    ASSERT(1, u128 / 2 == h128 - 1);
+    // bitwise ops across the 64-bit boundary
+    unsigned _BitInt(77) bm = ((unsigned _BitInt(77))0xF) << 64;
+    ASSERT(1, (bm | 1) == (bm + 1));
+    ASSERT(1, (bm & 0xF) == 0);
+    ASSERT(1, (bm >> 64) == 0xF);
+    ASSERT(1, ~bm == umax - bm);
+    ASSERT(1, (bm ^ bm) == 0);
+    // signed arithmetic shift preserves sign
+    _BitInt(77) neg = -8;
+    ASSERT(-2, neg >> 2);
+    // division truncates toward zero
+    _BitInt(77) sd = -7;
+    ASSERT(-3, sd / 2);
+    ASSERT(-1, sd % 2);
+    // small width wrap boundaries
+    _BitInt(2) s2 = 1;
+    ASSERT(-2, s2 + (_BitInt(2))1);  // 2 -> -2 in i2 (same-type stays _BitInt)
+    ASSERT(2, s2 + 1);               // mixed with int: promoted, no wrap
+    unsigned _BitInt(1) u1 = 1;
+    ASSERT(0, u1 + u1);
 
     printf("OK\n");
     return 0;

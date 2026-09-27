@@ -406,6 +406,10 @@ int int128_bit_width(Int128 v, SignKind sign) {
     return sign == SIGNED ? bits + 1 : bits;
 }
 
+uint64_t int128_to_u64(Int128 v) { return (uint64_t)v.limb[0] | ((uint64_t)v.limb[1] << 32); }
+
+int64_t int128_to_i64(Int128 v) { return (int64_t)int128_to_u64(v); }
+
 bool int128_fits(Int128 v, int width, SignKind sign) {
     if (width >= 128) return true;
 

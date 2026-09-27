@@ -858,6 +858,28 @@ int main() {
                memcmp(x[2], "b\0\0\0\0", 5);
            }));
 
+    // === initializers with wide _BitInt / fp128 / fp16 ===
+    _BitInt(77) bi = 1234567890123456789012wb;
+    ASSERT(1, bi == 1234567890123456789012wb);
+    unsigned _BitInt(71) bu = 1180591620717411303424uwb;  // 2^70 (needs 71 bits)
+    ASSERT(1, bu == (((unsigned _BitInt(71))1) << 70));   // 2^70 needs 71 bits
+    _BitInt(3) bs = 5;                                    // truncates to -3
+    ASSERT(-3, bs);
+    _Float128 bq = 1.5f128;
+    ASSERT(1, bq == 1.5f128);
+    _Float16 bh = 0.5f16;
+    ASSERT(1, bh == 0.5f16);
+    _BitInt(77) arr[3] = {1wb, 2wb, 3wb};
+    ASSERT(6, arr[0] + arr[1] + arr[2]);
+    _Float16 har[3] = {0.5f16, 1.5f16, 2.5f16};
+    ASSERT(4.5f16, har[0] + har[1] + har[2]);
+    struct {
+        _BitInt(77) x;
+        _Float16 h;
+    } s77 = {1234567890123456789012wb, 1.5f16};
+    ASSERT(1, s77.x == 1234567890123456789012wb);
+    ASSERT(1, s77.h == 1.5f16);
+
     printf("OK\n");
     return 0;
 }

@@ -26,7 +26,7 @@ OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 OBJS_DIRS := $(sort $(dir $(OBJS)))
 
 # Generated headers (from tools scripts or the host machine)
-GENERATED_HDRS := src/width_property.h src/xid_property.h src/pow_table.h src/config.h
+GENERATED_HDRS := src/width_property.h src/xid_property.h src/config.h
 
 # All headers (existing + generated)
 HDRS := $(wildcard $(SRC_DIR)/*.h)
@@ -43,7 +43,6 @@ CPPFLAGS := -MMD -MP
 $(TARGET): $(OBJS)
 	$(CC) $^ $(LDFLAGS) -o $@
 
-$(BUILD_DIR)/lexer.o: | src/pow_table.h
 $(BUILD_DIR)/unicode.o: | src/width_property.h src/xid_property.h
 $(BUILD_DIR)/main.o: | src/config.h
 
@@ -60,9 +59,6 @@ src/width_property.h: tools/extract_width.py
 	python3 $< > $@
 
 src/xid_property.h: tools/extract_xid.py
-	python3 $< > $@
-
-src/pow_table.h: tools/gen_pow_table.py
 	python3 $< > $@
 
 # config.h is generated from the host machine's triple so a native

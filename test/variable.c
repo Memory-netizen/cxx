@@ -245,6 +245,19 @@ int main() {
     }
     ASSERT(3, g3);
 
+    // === wide/small variables ===
+    _BitInt(77) vb = 999999999999999999wb;
+    _BitInt(77) vb2 = 1wb;
+    ASSERT(1000000000000000000wb, vb + vb2);
+    unsigned _BitInt(77) vub = (unsigned _BitInt(77)) - 1;
+    ASSERT(0, vub + 1);
+    _BitInt(3) vs = 3;
+    ASSERT(4, vs + 1);  // mixed with int: promoted, no wrap
+    _Float128 vq = 0.25f128;
+    ASSERT(1, vq * 4.0f128 == 1.0f128);
+    _Float16 vh = 0.5f16;
+    ASSERT(1, vh + vh == 1.0f16);
+
     printf("OK\n");
     return 0;
 }

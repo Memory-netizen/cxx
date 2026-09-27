@@ -63,6 +63,11 @@ Int128 int128_normalize(Int128 v, int width, SignKind sign);
 int int128_bit_width(Int128 v, SignKind sign);
 bool int128_fits(Int128 v, int width, SignKind sign);
 
+/* The low 64 bits. to_u64 zero-extends; to_i64 reinterprets the bits.
+ * Layout knowledge (limb order) stays confined to these accessors. */
+uint64_t int128_to_u64(Int128 v);
+int64_t int128_to_i64(Int128 v);
+
 bool int128_is_zero(Int128 v);
 bool int128_is_negative(Int128 v);
 

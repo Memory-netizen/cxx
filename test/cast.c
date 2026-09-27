@@ -75,6 +75,35 @@ int main() {
     ASSERT(3, (float)3.);
     ASSERT(3, (double)3.f);
 
+    // === Wide/small _BitInt casts: truncation and sign extension ===
+    ASSERT(-1, (long long)(_BitInt(77)) - 1);
+    ASSERT(0, (long long)((_BitInt(77))1 << 64));  // low 64 bits
+    ASSERT(65535, (unsigned long long)(unsigned _BitInt(77))65535);
+    ASSERT(-1, (long long)(_BitInt(3))7);  // 7 -> -1 in i3
+    ASSERT(7, (unsigned _BitInt(3))7);
+    ASSERT(-8, (_BitInt(4))8);  // 8 = 0b1000 -> -8
+    ASSERT(0, (_BitInt(3))8);   // 8 mod 8 = 0
+    // widening sign-extends
+    ASSERT(1, (long long)(_BitInt(3))1);
+    ASSERT(-1, (long long)(_BitInt(3)) - 1);
+    // narrowing _BitInt(77) -> _BitInt(3)
+    _BitInt(77) w = (1LL << 62) + 1;
+    ASSERT(1, (_BitInt(3))w);
+    ASSERT(-2, (_BitInt(3))6);
+    // _BitInt <-> floating
+    ASSERT(3, (int)(_Float128)3.5f128);
+    ASSERT(-3, (int)(_Float128)-3.5f128);
+    ASSERT(1, (_Float128)(_BitInt(80))1000000000000000000wb == 1e18f128);
+    ASSERT(1, (_BitInt(80))(_Float128)1000000000000000000wb == 1000000000000000000wb);
+    ASSERT(1, (_BitInt(80))(_Float128)0.5f128 == 0);
+    ASSERT(1, (_BitInt(80))(_Float128)-0.5f128 == 0);  // truncates toward zero
+    // fp16 <-> fp128
+    ASSERT(1, (_Float128)0.5f16 == 0.5f128);
+    ASSERT(1, (_Float16)0.5f128 == 0.5f16);
+    ASSERT(1, (_Float16)65536.0f128 > 0);       // overflows f16 -> inf
+    ASSERT(1, (_Float16)1e-300f128 == 0.0f16);  // underflows to zero
+    ASSERT(1, (double)1.5f16 == 1.5);
+
     printf("OK\n");
     return 0;
 }

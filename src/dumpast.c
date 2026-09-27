@@ -217,12 +217,17 @@ static void dump_node(Node *node) {
     }
 
     switch (node->kind) {
-        case ND_NUM:
-            if (is_flonum(node->ty))
-                fprintf(stdout, "  val=%f\n", node->fval);
-            else
-                fprintf(stdout, "  val=%ld\n", node->val);
+        case ND_NUM: {
+            if (is_flonum(node->ty)) {
+                uint64_t b = fp128_to_fp64_bits(node->fpval);
+                double d;
+                memcpy(&d, &b, 8);
+                fprintf(stdout, "  val=%f\n", d);
+            } else {
+                fprintf(stdout, "  val=%ld\n", (long)int128_to_i64(node->ival));
+            }
             break;
+        }
 
         case ND_NULLPTR:
             fprintf(stdout, "  nullptr\n");
@@ -434,7 +439,7 @@ static void dump_node(Node *node) {
             break;
 
         case ND_CASE:
-            fprintf(stdout, "  val=%ld\n", node->val);
+            fprintf(stdout, "  val=%ld\n", (long)int128_to_i64(node->ival));
             depth++;
             dump_node(node->label_body);
             depth--;

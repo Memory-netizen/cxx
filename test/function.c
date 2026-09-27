@@ -194,6 +194,17 @@ int main() {
     ASSERT(1, to_ldouble(5.0) == 5.0);
     ASSERT(0, to_ldouble(5.0) == 5.2);
 
+    // === functions with wide _BitInt / fp128 params and returns ===
+    _BitInt(77) wsum = 0;
+    for (int i = 1; i <= 5; i++) wsum = wsum + 1000000000000000000wb;
+    ASSERT(5000000000000000000wb, wsum);
+    _Float128 qprod = 1.0f128;
+    for (int i = 0; i < 4; i++) qprod = qprod * 2.0f128;
+    ASSERT(16.0f128, qprod);
+    _Float16 hacc = 0.0f16;
+    for (int i = 0; i < 4; i++) hacc = hacc + 0.25f16;
+    ASSERT(1.0f16, hacc);
+
     printf("OK\n");
     return 0;
 }

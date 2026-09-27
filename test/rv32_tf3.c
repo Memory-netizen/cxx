@@ -67,3 +67,40 @@ int64_t __moddi3(int64_t a, int64_t b) {
                          b < 0 ? -(uint64_t)b : (uint64_t)b);
   return a < 0 ? -(int64_t)r : (int64_t)r;
 }
+
+/* half <-> float conversions: LLVM passes and returns the half bit
+ * pattern as f32 bits (low 16 bits), which is exact in binary32. */
+float __extendhfsf2(float a) {
+  union {
+    float f;
+    uint32_t u;
+  } u;
+  u.f = a;
+  u.u = fp128_to_fp32_bits(fp128_from_fp16((uint16_t)u.u));
+  return u.f;
+}
+
+float __truncsfhf2(float a) {
+  union {
+    float f;
+    uint32_t u;
+  } u;
+  u.f = a;
+  Fp128 v = fp128_round_to(fp128_from_fp32(u.u), FP16);
+  u.u = fp128_to_fp16_bits(v);
+  return u.f;
+}
+
+void __multf3(Fp128 *ret, Fp128 *a, Fp128 *b) { *ret = fp128_mul(*a, *b); }
+
+int __fixtfsi(Fp128 *a) {
+  bool ok;
+  Int128 v = fp128_to_int128(*a, SIGNED, &ok);
+  if (!ok)
+    return 0;
+  return (int)int128_to_i64(v);
+}
+
+int __gttf2(Fp128 *a, Fp128 *b) { return fp128_cmp(*a, *b) == 1 ? 1 : 0; }
+
+int __lttf2(Fp128 *a, Fp128 *b) { return fp128_cmp(*a, *b) == -1 ? -1 : 0; }

@@ -45,6 +45,26 @@ int main() {
     ASSERT(1, arr[0] + arr[1] == arr[2]);
     ASSERT(1, &arr[1] - &arr[0] == 1);
 
+    // === f128 boundaries ===
+    ASSERT(1, 0x1p+16383f128 > 0);  // max exponent
+    ASSERT(1, 0x1p-16494f128 > 0);  // min subnormal
+    ASSERT(1, 0x1p-16494f128 + 0x1p-16494f128 == 0x1p-16493f128);
+    ASSERT(1, 1.0f128 + 0x1p-112f128 > 1.0f128);   // one ULP above 1
+    ASSERT(1, 1.0f128 + 0x1p-113f128 == 1.0f128);  // half-ULP ties to even
+    ASSERT(1, 1.0f128 / 3.0f128 > 0.33333333333333333333333333333333333333333333333333333333333333333333f128);
+    _Float128 q = 1e30f128;
+    q = q * 1e10f128;
+    ASSERT(1, q == 1e40f128);
+    ASSERT(1, (double)1.5f128 == 1.5);
+    ASSERT(1, (long double)1.5f128 == 1.5L);
+    ASSERT(1, (_Float128)0.5 == 0.5f128);
+    ASSERT(1, (_Float128)1 == 1.0f128);
+    ASSERT(2, (int)2.5f128);
+    ASSERT(1, 0.0f128 == 0.0f128);
+    ASSERT(1, -0.0f128 == 0.0f128);
+    ASSERT(1, 1.0f128 / 0.0f128 > 0);     // inf
+    ASSERT(1, -(1.0f128 / 0.0f128) < 0);  // -inf
+
     printf("OK\n");
     return 0;
 }

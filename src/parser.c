@@ -53,108 +53,52 @@ static Node *new_node(NodeKind kind, Token *tok) {
 
 static Node *new_num(int64_t val, Token *tok) {
     Node *node = new_node(ND_NUM, tok);
-    node->val = val;
+    node->ival = int128_set_i(val);
     return node;
 }
 
-// Copy the literal text without digit separators and without the suffix
-// (the token text includes it; suffix lengths follow from the lexer's
-// grammar: f16/f32/f64 = 3, f128 = 4, wb = 2, uwb = 3, l/f/u = 1, ll = 2).
-static int num_suffix_len(Token *tok) {
-    uint32_t f = tok->lit_suffix;
-    if (f & (SUF_F16 | SUF_F32 | SUF_F64)) return 3;
-    if (f & SUF_F128) return 4;
-    if (f & SUF_BITINT) return (f & SUF_UNSIGNED) ? 3 : 2;
-    if (f & SUF_LDOUBLE) return 1;
-    if (f & (SUF_FLOAT | SUF_DOUBLE)) return 1;
-    if (f & SUF_LLONG) return 2;
-    if (f & SUF_LONG) return 1;
-    if (f & SUF_UNSIGNED) return 1;
-    return 0;
-}
-
-static char *clean_num_text(Token *tok) {
-    int len = tok->len - num_suffix_len(tok);
-    char *buf = emalloc(len + 1);
-    int n = 0;
-    for (int i = 0; i < len; i++)
-        if (tok->loc[i] != '\'') buf[n++] = tok->loc[i];
-    buf[n] = '\0';
-    return buf;
-}
-
-// Build an ND_NUM node for TK_NUM, evaluating the raw literal text with the
-// quadmath library for the new types (single rounding to the target
-// format). F16/F32/F64/F128 constants live in node->fpval; _BitInt of
-// width > 64 lives in node->ival.
+// Build an ND_NUM node for TK_NUM. The lexer has already parsed the
+// literal: integer constants live in tok->ival, floating constants in
+// tok->fpval (single-rounded to the target format); there is no
+// re-parsing here.
 static Node *new_num_node(Token *tok) {
-    Node *node = new_num(tok->val, tok);
+    Node *node = new_node(ND_NUM, tok);
     node->ty = infer_numtype(tok);
 
-    if (is_fpval(node->ty)) {
-        char *text = clean_num_text(tok);
-        Fp128 v;
-        bool ok = (text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) ? fp128_set_hex_str(&v, text, fmt_of(node->ty))
-                                                                         : fp128_set_str(&v, text, fmt_of(node->ty));
-        if (!ok) error(tok, "invalid floating constant");
-        node->fpval = v;
+    if (is_fpval(node->ty) || is_flonum(node->ty)) {
+        node->fpval = tok->fpval;
         return node;
     }
 
     if (tok->lit_suffix & SUF_BITINT) {
+        // The lexer already parsed the full value into tok->ival (and
+        // rejected literals beyond 128 bits).
         bool uns = (tok->lit_suffix & SUF_UNSIGNED) != 0;
-        char *text = clean_num_text(tok);
-        int base = 10;
-        char *p = text;
-        if (text[0] == '0') {
-            switch (text[1]) {
-                case 'x':
-                case 'X':
-                    base = 16, p = text + 2;
-                    break;
-                case 'b':
-                case 'B':
-                    base = 2, p = text + 2;
-                    break;
-                case 'o':
-                case 'O':
-                    base = 8, p = text + 2;
-                    break;
-                default:
-                    base = 8, p = text + 1;  // 0ddd octal
-                    break;
-            }
-        }
-        Int128 v;
-        if (!int128_set_str(&v, p, base)) error(tok, "integer constant out of range");
+        Int128 v = tok->ival;
         // Width per C23: signed wb needs a sign bit on top of the value
         // bits (minimum 2); unsigned uwb is just the value width (min 1).
         int w = uns ? int128_bit_width(v, UNSIGNED) : MAX(2, int128_bit_width(v, UNSIGNED) + 1);
         if (w > 128) error(tok, "width of _BitInt literal exceeds __BITINT_MAXWIDTH__");
         node->ty = bitint[w][uns];
         if (!node->ty) error(tok, "invalid _BitInt width %d", w);
-        if (w <= 64) {
-            node->val = norm_bits((int64_t)v.limb[0] | ((int64_t)v.limb[1] << 32), w, uns);
-        } else {
-            node->ival = v;
-        }
+        node->ival = v;
         return node;
     }
 
-    if (node->ty->kind == TY_FLOAT) node->fval = (float)node->fval;
+    node->ival = tok->ival;
     return node;
 }
 
 static Node *new_long(int64_t val, Token *tok) {
     Node *node = new_node(ND_NUM, tok);
-    node->val = val;
+    node->ival = int128_set_i(val);
     node->ty = T.ty_long;
     return node;
 }
 
 static Node *new_ulong(int64_t val, Token *tok) {
     Node *node = new_node(ND_NUM, tok);
-    node->val = val;
+    node->ival = int128_set_i(val);
     node->ty = T.ty_ulong;
     return node;
 }
@@ -1339,7 +1283,7 @@ static Node *primary(Token **rest, Token *tok) {
         return node;
     }
     if (tok->kind == TK_CHARLIT) {
-        node = new_num(tok->val, tok);
+        node = new_num(int128_to_i64(tok->ival), tok);
         node->ty = infer_chartype(tok);
         *rest = tok->next;
         return node;
@@ -1851,8 +1795,12 @@ static double eval_double(Node *node) {
         case ND_EXCAST:
             if (is_flonum(node->lhs->ty)) return eval_double(node->lhs);
             return eval(node->lhs);
-        case ND_NUM:
-            return node->fval;
+        case ND_NUM: {
+            uint64_t b = fp128_to_fp64_bits(node->fpval);
+            double d;
+            memcpy(&d, &b, 8);
+            return d;
+        }
         default:
             break;
     }
@@ -1912,7 +1860,7 @@ static Int128 eval_int128(Node *node) {
     switch (node->kind) {
         case ND_NUM:
             if (is_bitint128(node->ty)) return node->ival;
-            return node->ty->is_unsigned ? int128_set_ui((uint64_t)node->val) : int128_set_i(node->val);
+            return node->ival;
         case ND_ADD:
             return int128_add(eval_int128(node->lhs), eval_int128(node->rhs));
         case ND_SUB:
@@ -1995,14 +1943,15 @@ static int64_t eval2(Node *node, uint32_t *sym) {
         return (int64_t)v.limb[0] | ((int64_t)v.limb[1] << 32);
     }
     if (is_bitint128(node->ty)) {
-        Int128 v = eval_int128(node);
-        return (int64_t)v.limb[0] | ((int64_t)v.limb[1] << 32);
+        // #if (and other int64 const-expr contexts) takes the value
+        // truncated to 64 bits.
+        return int128_to_i64(int128_normalize(eval_int128(node), 64, UNSIGNED));
     }
     if (is_flonum(node->ty)) return eval_double(node);
 
     switch (node->kind) {
         case ND_NUM:
-            return node->val;
+            return int128_to_i64(node->ival);
         case ND_PLUS:
             return eval(node->lhs);
         case ND_NEG:
@@ -2096,11 +2045,10 @@ static int64_t eval2(Node *node, uint32_t *sym) {
                 bool ok;
                 Int128 v = fp128_to_int128(eval_fp128(node->lhs), node->ty->is_unsigned ? UNSIGNED : SIGNED, &ok);
                 if (!ok) error(node->tok, "floating constant out of range");
-                return (int64_t)v.limb[0] | ((int64_t)v.limb[1] << 32);
+                return int128_to_i64(v);
             }
             if (is_bitint128(node->lhs->ty)) {
-                Int128 v = eval_int128(node->lhs);
-                return (int64_t)v.limb[0] | ((int64_t)v.limb[1] << 32);
+                return int128_to_i64(eval_int128(node->lhs));
             }
             int64_t val = eval2(node->lhs, sym);
             return eval_ty(val, node->ty);
@@ -2585,7 +2533,7 @@ static void check_label(uint32_t label, Token *tok) {
 static void check_case(int64_t val, Token *tok) {
     Node *cur = cur_sw->case_next;
     while (cur) {
-        if (cur->val == val) {
+        if (int128_to_i64(cur->ival) == val) {
             diag("error", tok, "duplicate case value ‘%ld’", val);
             diag_exit("note", cur->tok, "previous case defined here");
         }
@@ -2633,7 +2581,7 @@ static Node *label(Token **rest, Token *tok) {
             if (tok->kind == TK_COLON) {
                 check_case(val1, tk_case);
                 Node *node = new_node(ND_CASE, tk_case);
-                node->val = val1;
+                node->ival = int128_set_i(val1);
 
                 node->case_next = cur_sw->case_next;
                 cur_sw->case_next = node;
@@ -2649,7 +2597,7 @@ static Node *label(Token **rest, Token *tok) {
             for (int64_t i = val1; i <= val2; i++) {
                 check_case(i, tk_case);
                 Node *node = new_node(ND_CASE, tk_case);
-                node->val = i;
+                node->ival = int128_set_i(i);
                 node->case_next = cur_sw->case_next;
                 cur_sw->case_next = node;
                 cur = cur->label_ring = node;
@@ -3035,7 +2983,8 @@ static Type *get_unit_ty(int bytes, bool is_unsigned) {
     if (bytes == 1) return is_unsigned ? T.ty_uchar : T.ty_schar;
     if (bytes == 2) return is_unsigned ? T.ty_ushort : T.ty_short;
     if (bytes == 4) return is_unsigned ? T.ty_uint : T.ty_int;
-    return is_unsigned ? T.ty_ulong : T.ty_long;
+    // 8 bytes on every target: long is only 4 bytes on ILP32.
+    return is_unsigned ? T.ty_ullong : T.ty_llong;
 }
 
 static int min_bytes_for_bits(int bits) {

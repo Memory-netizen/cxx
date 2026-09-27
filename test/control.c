@@ -552,6 +552,29 @@ int main() {
                i;
            }));
 
+    // === loops with wide _BitInt counters ===
+    ASSERT(10, ({
+               _BitInt(77) i = 0;
+               int j = 0;
+               for (i = 0; i <= 9; i = i + 1) j = j + 1;
+               j;
+           }));
+    ASSERT(60, ({
+               unsigned _BitInt(70) i = 1000000000000000000uwb;
+               int n = 0;
+               while (i > 0) {
+                   i = i >> 1;
+                   n++;
+               }
+               n;  // 60 halvings
+           }));
+    ASSERT(1, ({
+               _BitInt(3) i = 0;
+               do i = i + 1;
+               while (i < 3);
+               i == 3;
+           }));
+
     printf("OK\n");
     return 0;
 }

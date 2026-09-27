@@ -388,6 +388,31 @@ int main() {
                s1.x;
            }));
 
+    // === structs with wide _BitInt and interchange float members ===
+    ASSERT(16, sizeof(struct { _BitInt(77) x; }));
+    ASSERT(24, sizeof(struct {
+               _BitInt(77) x;
+               char y;
+           }));
+    ASSERT(16, sizeof(struct { unsigned _BitInt(65) x; }));
+    ASSERT(16, sizeof(struct {
+               _BitInt(33) x;
+               int y;
+           }));
+    ASSERT(16, sizeof(struct { _Float128 q; }));
+    ASSERT(32, sizeof(struct {
+               _Float128 q;
+               char c;
+           }));
+    ASSERT(4, sizeof(struct {
+               _Float16 h;
+               char c;
+           }));
+    ASSERT(2, _Alignof(struct { _Float16 h; }));
+    ASSERT(1, _Alignof(struct { _BitInt(3) b; }));
+    ASSERT(2, _Alignof(struct { _BitInt(9) b; }));
+    ASSERT(8, _Alignof(struct { _BitInt(77) b; }));
+
     printf("OK\n");
     return 0;
 }

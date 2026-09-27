@@ -86,6 +86,23 @@ int main() {
     ASSERT(5, 0.0 ? 3 : 5);
     ASSERT(3, 1.2 ? 3 : 5);
 
+    // === interactions with _Float16/_Float128 ===
+    ASSERT(1, 1.5f + 0.5f16 == 2.0f);  // f16 converts to float
+    ASSERT(1, 0.5 + 0.5f16 == 1.0);
+    ASSERT(1, 1.5f128 + 2.25 == 3.75f128);   // double converts to f128
+    ASSERT(1, 1.5f + 2.25f128 == 3.75f128);  // float converts to f128
+    ASSERT(1, (double)1.5f128 == 1.5);
+    ASSERT(1, (float)0.5f16 == 0.5f);
+    ASSERT(1, 3.0f128 / 2.0f128 == 1.5f128);
+    ASSERT(1, (int)2.5f16 == 2);
+    ASSERT(1, (long long)1e18f128 == 1000000000000000000LL);
+    _Float128 q = 0.0f128;
+    q = q + 1.0f128 / 3.0f128;
+    ASSERT(1, q > 0.3 && q < 0.34);
+    _Float16 h = 1.0f16;
+    h = h / 3.0f16;
+    ASSERT(1, h > 0.3f16 && h < 0.34f16);
+
     printf("OK\n");
     return 0;
 }

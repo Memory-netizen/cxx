@@ -87,7 +87,7 @@ static Ref gen_builtin_fn(Node *node) {
     }
     if (node->func->lhs->var->id == intern("__builtin_alloca_with_align", 27)) {
         Ref size = gen_expr(node->args);
-        int align = node->args->next->val;
+        int align = (int)int128_to_i64(node->args->next->ival);
         Type *base_ty = node->base_ty ?: T.ty_char;
         Ref dst = TMP(tmp_id++, pointer_to(base_ty, 0));
         new_ins(IR_ALLOCA, dst, (Ref[]){size, INT(align / 8)}, 2);
@@ -143,6 +143,15 @@ static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
                 new_ins(rt > rs ? IR_EXT : IR_TRUNC, dst, (Ref[]){val}, 1);
                 return dst;
             }
+        }
+        // _BitInt types of different widths share the same byte size but
+        // are different IR types (i3 vs i4, ...): convert by bit width.
+        int ws = (src_ty->kind & TY_BITINT) ? bitint_width(src_ty) : src_ty->size * 8;
+        int wt = (target_ty->kind & TY_BITINT) ? bitint_width(target_ty) : target_ty->size * 8;
+        if (ws != wt) {
+            Ref dst = TMP(tmp_id++, target_ty);
+            new_ins(wt > ws ? IR_EXT : IR_TRUNC, dst, (Ref[]){val}, 1);
+            return dst;
         }
         val.ty = target_ty;
         return val;
@@ -341,14 +350,14 @@ static Ref gen_expr(Node *node) {
                 dst.ty = node->ty;
                 return dst;
             }
-            if (node->ty->kind == TY_FLOAT) return FLOAT(node->val);
-            if (node->ty->kind == TY_DOUBLE) return DOUBLE(node->val);
+            if (node->ty->kind == TY_FLOAT) return FLOAT((int64_t)fp128_to_fp64_bits(node->fpval));
+            if (node->ty->kind == TY_DOUBLE) return DOUBLE((int64_t)fp128_to_fp64_bits(node->fpval));
             if (node->ty->size == 1)
-                dst = BOOL(node->val);
+                dst = BOOL(int128_to_i64(node->ival));
             else if (node->ty->size == 4)
-                dst = INT(node->val);
+                dst = INT(int128_to_i64(node->ival));
             else
-                dst = LONG(node->val);
+                dst = LONG(int128_to_i64(node->ival));
             dst.ty = node->ty;
             return dst;
         case ND_STMT_EXPR:
@@ -981,7 +990,7 @@ static void gen_switch(Node *n) {
 
     Node *y = n->case_next;
     for (int j = 0; j < i; ++j) {
-        curb->jmp.args[j] = cond.ty->size == 8 ? LONG(y->val) : INT(y->val);
+        curb->jmp.args[j] = cond.ty->size == 8 ? LONG(int128_to_i64(y->ival)) : INT(int128_to_i64(y->ival));
         curb->succ[j] = y->blk;
         add_pred(curb, curb->succ[j]);
         y = y->case_next;

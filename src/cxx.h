@@ -306,22 +306,22 @@ struct Token {
     Token *next;
     Token *origin;  // If this is expanded from a macro, the original token
     union {
-        uint32_t id;   // Uesd if kind == TK_IDENT;
-        uint64_t val;  // Uesd if kind == TK_NUM;
-        double fval;   // Uesd if kind == TK_NUM;
-        char *msg;     // Used if token is broken;
+        uint32_t id;  // Uesd if kind == TK_IDENT (also TK_LINE line numbers);
+        char *msg;    // Used if token is broken;
+        Fp128 fpval;  // TK_NUM floating constants
+        Int128 ival;  // TK_NUM integer constants and TK_CHARLIT values
     };
     SrcFile *file;  // Source location
     char *loc;
     uint32_t filename;  // Diagnostic filename
     int32_t line_delta;
     uint16_t len;
-    uint8_t kind;
     union {
         // SUF_NONDEC is 0x800: needs more than 8 bits
         uint16_t lit_suffix;  // Uesd if kind == TK_NUM
         uint8_t enc_prefix;   // Used if kind == TK_CHARLIT or kind == TK_STRLIT
     };
+    uint8_t kind;
     bool is_sol;        // true if is starting of line
     bool is_leadingws;  // true if is leading space
     bool noexpand;      // true if this token shall not be macro-expanded
@@ -543,10 +543,8 @@ struct Node {
             Sym *var;  // Used if kind == ND_VAR
             Node *var_init;
         };
-        int64_t val;  // Used if kind == ND_NUM
-        double fval;  // Used if kind == ND_NUM
-        Fp128 fpval;  // TY_F16/F32/F64/F128 constants
-        Int128 ival;  // _BitInt(65..128) constants
+        Fp128 fpval;  // ND_NUM floating constants
+        Int128 ival;  // ND_NUM integer constants
     };
     Node *label_ring;
     Node *label_body;

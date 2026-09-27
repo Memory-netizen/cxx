@@ -211,7 +211,7 @@ static Token *new_str_token(char *str, Token *tmpl) {
 static Token *ident_to_num(Token *tok, int64_t val) {
     Token *new = emalloc(sizeof(Token));
     new->kind = TK_NUM;
-    new->val = val;
+    new->ival = int128_set_i(val);
     char *fmt = format("%ld", val);
     write_scratch_space(new, fmt);
     new->origin = tok;
@@ -345,8 +345,12 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
     expr = dummy2.next;
 
     convert_ppnumber(expr);
+    // No floating constant of any kind is allowed in #if (gcc/clang
+    // reject them all: float/double/long double and the interchange
+    // _Float16/32/64/128).
     for (Token *t = expr; t->kind != TK_EOF; t = t->next)
-        if (t->kind == TK_NUM && t->lit_suffix & (SUF_FLOAT | SUF_DOUBLE | SUF_LDOUBLE))
+        if (t->kind == TK_NUM &&
+            t->lit_suffix & (SUF_FLOAT | SUF_DOUBLE | SUF_LDOUBLE | SUF_F16 | SUF_F32 | SUF_F64 | SUF_F128))
             error(t, "floating point literal in preprocessor expression");
 
     Token *rest2;
@@ -958,7 +962,7 @@ static bool find_pragma(uint32_t file_id) {
 static Token *new_linemarker(Token *tmpl, int line, uint32_t filename) {
     Token *linemarker = copy_token(tmpl);
     linemarker->kind = TK_LINE;
-    linemarker->val = line;
+    linemarker->id = line;
     linemarker->filename = filename;
     linemarker->is_sol = true;
     return linemarker;

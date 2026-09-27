@@ -88,6 +88,18 @@ int main() {
 
     ASSERT(4, _Alignof(main));
 
+    ASSERT(1, _Alignof(_BitInt(3)));
+    ASSERT(2, _Alignof(_BitInt(9)));
+    ASSERT(4, _Alignof(_BitInt(17)));
+    ASSERT(8, _Alignof(_BitInt(33)));
+    ASSERT(8, _Alignof(_BitInt(65)));  // align = min(size, 8)
+    ASSERT(8, _Alignof(_BitInt(77)));
+    ASSERT(8, _Alignof(_BitInt(128)));
+    ASSERT(2, _Alignof(_Float16));
+    ASSERT(4, _Alignof(_Float32));
+    ASSERT(8, _Alignof(_Float64));
+    ASSERT(16, _Alignof(_Float128));
+
     printf("OK\n");
     return 0;
 }

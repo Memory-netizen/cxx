@@ -619,9 +619,9 @@ static void print_tokens(Token *tok) {
             cur_line++;
         }
         if (tok->kind == TK_LINE) {
-            cur_line = tok->val;
+            cur_line = tok->id;
             if (opt_P) continue;
-            fprintf(out, "# %lu \"%s\"", tok->val, str(tok->filename));
+            fprintf(out, "# %lu \"%s\"", (unsigned long)tok->id, str(tok->filename));
             continue;
         }
         if (tok->is_leadingws) fprintf(out, " ");

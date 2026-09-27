@@ -140,6 +140,30 @@ int main() {
                x.c;
            }));
 
+    // === unions with wide _BitInt members ===
+    ASSERT(16, sizeof(union {
+               _BitInt(77) b;
+               char c;
+           }));
+    ASSERT(16, sizeof(union {
+               _Float128 q;
+               long l;
+           }));
+    ASSERT(4, sizeof(union {
+               _Float16 h;
+               int i;
+           }));
+    union {
+        _BitInt(77) b;
+        char c[16];
+    } ub = {1234567890123456789012wb};
+    ASSERT(1, ub.b == 1234567890123456789012wb);
+    union {
+        _Float16 h;
+        unsigned short u;
+    } uf = {0.5f16};
+    ASSERT(0x3800, uf.u);  // f16 0.5 bit pattern
+
     printf("OK\n");
     return 0;
 }

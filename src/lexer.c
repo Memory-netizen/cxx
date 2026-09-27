@@ -1,5 +1,4 @@
 #include "cxx.h"
-#include "pow_table.h"
 
 // Input file
 static SrcFile *cur_file;
@@ -147,17 +146,17 @@ uint32_t read_universal_char(char **new_pos, char *p, int ch) {
     if (*p == '{') {
         char *q = ++p;
         while (isxdigit(*q)) q++;
-        if (*q != '}') fatal("‘\\%c{’ not terminated with ‘}’", ch);
+        if (*q != '}') error_at(cur_file, p - 1, "‘\\%c{’ not terminated with ‘}’", ch);
         len = q - p;
-        if (len == 0) fatal("empty delimited universal character name");
+        if (len == 0) error_at(cur_file, p - 1, "empty delimited universal character name");
     }
     uint32_t c = 0;
     for (int i = 0; i < len; i++) {
-        if (!isxdigit(p[i])) fatal("invalid digit ‘%c’ in universal character name", p[i]);
+        if (!isxdigit(p[i])) error_at(cur_file, p + i, "invalid digit ‘%c’ in universal character name", p[i]);
         c = (c << 4) | from_hex(p[i]);
     }
-    if (0xD800 <= c && c <= 0xDFFF) fatal("invalid universal character");
-    if (c > 0x10FFFF) fatal("invalid universal character");
+    if (0xD800 <= c && c <= 0xDFFF) error_at(cur_file, p - 1, "invalid universal character");
+    if (c > 0x10FFFF) error_at(cur_file, p - 1, "invalid universal character");
     if (*(p - 1) == '{') len++;
     *new_pos = p + len;
     return c;
@@ -189,14 +188,16 @@ static int read_ident(char *start) {
     uint32_t c;
     if (*p == '\\' && (p[1] == 'u' || p[1] == 'U')) {
         c = read_universal_char(&p, p + 2, p[1]);
-        if (c <= 0x9F) fatal("universal character %.*s is not valid in an identifier", (int)(p - start), start);
+        if (c <= 0x9F)
+            error_at(cur_file, start, "universal character %.*s is not valid in an identifier", (int)(p - start),
+                     start);
     } else {
         bool success = false;
         c = decode_utf8(&p, p, &success);
-        if (!success) fatal("invalid UTF-8 in identifier");
+        if (!success) error_at(cur_file, start, "invalid UTF-8 in identifier");
     }
     if (!is_ident1(c)) {
-        if (c > 0x7F) fatal("invalid character %.*s in identifier", (int)(p - start), start);
+        if (c > 0x7F) error_at(cur_file, start, "invalid character %.*s in identifier", (int)(p - start), start);
         return 0;
     }
 
@@ -205,14 +206,16 @@ static int read_ident(char *start) {
         if (*p == '\\' && (p[1] == 'u' || p[1] == 'U')) {
             c = read_universal_char(&p, p + 2, p[1]);
             if (c <= 0x9F)
-                fatal("universal character %.*s is not valid in an identifier", (int)(p - uc_start), uc_start);
+                error_at(cur_file, uc_start, "universal character %.*s is not valid in an identifier",
+                         (int)(p - uc_start), uc_start);
         } else {
             bool success = false;
             c = decode_utf8(&p, p, &success);
-            if (!success) fatal("invalid UTF-8 in identifier");
+            if (!success) error_at(cur_file, uc_start, "invalid UTF-8 in identifier");
         }
         if (!is_ident2(c)) {
-            if (c > 0x7F) fatal("invalid character %.*s in identifier", (int)(p - uc_start), uc_start);
+            if (c > 0x7F)
+                error_at(cur_file, uc_start, "invalid character %.*s in identifier", (int)(p - uc_start), uc_start);
             return p - start - 1;
         }
     }
@@ -437,7 +440,7 @@ static void convert_char_literal(Token *tok) {
             val = (val << 8) + ch;
         }
     }
-    tok->val = val;
+    tok->ival = int128_set_ui(val);
 }
 
 static Token *read_char_literal(char *start, char *quote, uint32_t prefix) {
@@ -493,18 +496,6 @@ static Token *read_int_literal(char *start) {
     return tok;
 }
 
-static double fast_pow10(int exp) {
-    if (exp < -323) return 0.0;
-    if (exp > 308) return HUGE_VAL;
-    return pow10_table[exp + 323];
-}
-
-static double fast_ldexp(double x, int exp) {
-    if (exp < -1074) return 0.0;
-    if (exp > 1023) return HUGE_VAL * x;
-    return x * pow2_table[exp + 1074];
-}
-
 static bool is_valid_digit(int c, int base) {
     if (base == 10)
         return '0' <= c && c <= '9';
@@ -527,6 +518,7 @@ static void convert_pp_num(Token *t) {
     int base = 10;
     char *clean = emalloc((t->len + 1) * sizeof(char));
     uint32_t ci = 0;
+    bool has_pre = false;
 
     // Stage 1: Process literal prefixes
     if (first_ch == '0') {
@@ -546,6 +538,9 @@ static void convert_pp_num(Token *t) {
                     base = 16;
                     break;
             }
+            has_pre = true;
+            clean[ci++] = '0';
+            clean[ci++] = pre;
             text += 2;
             if (!is_valid_digit(*text, base))
                 error(t, "invalid suffix ‘%.*s’ on integer constant", (int)(end - text), text);
@@ -554,13 +549,13 @@ static void convert_pp_num(Token *t) {
         clean[ci++] = '0';  // canonicalize
     }
 
-    // Stage 2: Skip numeric separators ', filter out invalid characters
-    // Record positions of e, E and .
+    // Stage 2: Skip numeric separators ', filter out invalid characters.
+    // The cleaned text keeps the e/p exponent markers (with their sign)
+    // so it can be handed to the library parsers as-is.
     char c = *text++;
-    int pos_e = 0;
-    int pos_p = 0;
-    int pos_dot = 0;
-    int sign = 1;
+    int had_dot = 0;
+    int had_e = 0;
+    int had_p = 0;
     int is_float = 0;
     int prev_is_digit = 0;
     int flags = 0;
@@ -569,8 +564,9 @@ static void convert_pp_num(Token *t) {
     while (text <= end) {
         switch (c) {
             case '.':
-                if (pos_dot || pos_e || pos_p || base == 2 || base == 8) goto error;
-                pos_dot = ci;
+                if (had_dot || had_e || had_p || base == 2 || base == 8) goto error;
+                had_dot = 1;
+                clean[ci++] = '.';
                 is_float = 1;
                 prev_is_digit = 0;
                 c = *text++;
@@ -578,17 +574,16 @@ static void convert_pp_num(Token *t) {
             case 'e':
             case 'E':
                 if (base == 10) {
-                    if (pos_e || pos_p) goto error;
-                    pos_e = ci;
+                    if (had_e || had_p) goto error;
+                    had_e = 1;
+                    clean[ci++] = 'e';
                 } else {
-                    if (base == 16)
-                        break;  // e is an ordinary number
-                    else
-                        goto error;
+                    if (base == 16) break;  // e is an ordinary hex digit
+                    goto error;
                 }
                 c = *text++;
                 if (c == '+' || c == '-') {
-                    sign = c == '+' ? 1 : -1;
+                    clean[ci++] = c;  // keep the exponent sign for the parser
                     c = *text++;
                 }
                 if (!is_valid_digit(c, base)) error(t, "exponent has no digits");
@@ -596,12 +591,13 @@ static void convert_pp_num(Token *t) {
                 break;
             case 'p':
             case 'P':
-                if (base != 16 || pos_p) goto error;
-                pos_p = ci;
+                if (base != 16 || had_p) goto error;
+                had_p = 1;
+                clean[ci++] = 'p';
                 base = 10;
                 c = *text++;
                 if (c == '+' || c == '-') {
-                    sign = c == '+' ? 1 : -1;
+                    clean[ci++] = c;
                     c = *text++;
                 }
                 if (!is_valid_digit(c, base)) error(t, "exponent has no digits");
@@ -709,45 +705,42 @@ extract_end:
             if (clean[i] == '8' || clean[i] == '9') error(t, "invalid digit %c in octal constant", clean[i]);
     }
     if (base == 16 && is_float) error(t, "hexadecimal floating constant requires an exponent");
-    base = pos_p ? 16 : base;  // Restore base to hexadecimal
+    base = had_p ? 16 : base;  // Restore base to hexadecimal
 
     t->lit_suffix = flags;
     if (base != 10) t->lit_suffix |= SUF_NONDEC;
 
-    // Stage 3: Evaluate literals
-    uint32_t pos = 0;
-    uint64_t int_part = 0;
-    double frac_part = 0.0;
-    int exp = 0;
-    int pos_exp = base == 10 ? pos_e : pos_p;
-
-    uint32_t limit = is_float ? pos_dot ? pos_dot : pos_exp : ci;
-
-    while (pos < limit) int_part = int_part * base + from_hex(clean[pos++]);
-
+    // Stage 3: Evaluate with the arbitrary-precision library parsers so
+    // that large literals cannot overflow 64-bit intermediates.
     if (!is_float) {
-        t->val = int_part;
+        char *num = has_pre ? clean + 2 : clean;
+        bool success = int128_set_str(&t->ival, num, base);
+        if (!success) error(t, "integer literal is too large to be represented in any integer type");
+
+        if (flags & SUF_BITINT) return;
+        if (int128_bit_width(t->ival, UNSIGNED) > 64)
+            error(t, "integer literal is too large to be represented in any integer type");
         return;
     }
 
     if (flags == 0) t->lit_suffix |= SUF_DOUBLE;
-    limit = pos_exp ? pos_exp : ci;
 
-    double divisor = base;
-    while (pos < limit) {
-        frac_part += from_hex(clean[pos++]) / divisor;
-        divisor *= base;
-    }
+    FpFormat target = FP64;
+    if (flags & SUF_FLOAT)
+        target = FP32;
+    else if (flags & SUF_F16)
+        target = FP16;
+    else if (flags & SUF_F32)
+        target = FP32;
+    else if (flags & SUF_F64)
+        target = FP64;
+    else if (flags & SUF_F128)
+        target = FP128;
+    else if (flags & SUF_LDOUBLE)
+        target = T.ldouble_is_fp80 ? FP80 : FP128;
 
-    t->fval = int_part + frac_part;
-
-    if (pos_exp) {
-        while (pos < ci) exp = exp * 10 + clean[pos++] - '0';
-
-        exp *= sign;
-        t->fval = base == 16 ? fast_ldexp(t->fval, exp) : t->fval * fast_pow10(exp);
-    }
-
+    bool ok = had_p ? fp128_set_hex_str(&t->fpval, clean, target) : fp128_set_str(&t->fpval, clean, target);
+    if (!ok) error(t, "invalid floating constant");
     return;
 error:
     text--;
@@ -877,12 +870,7 @@ Token *tokenize(SrcFile *file) {
         // Read block comments.
         if (*p == '/' && p[1] == '*') {
             char *q = strstr(p + 2, "*/");
-            if (!q) {
-                tok = new_token(TK_ERR, p, p + 1);
-                tok->msg = "unterminated /* comment";
-                cur = cur->next = tok;
-                goto end;
-            }
+            if (!q) error_at(cur_file, p, "unterminated /* comment");
             tok = new_token(TK_COMMENT, p, q + 2);
             is_leadingws = true;
             cur = cur->next = tok;
@@ -1025,7 +1013,7 @@ Token *tokenize(SrcFile *file) {
         p += tok->len;
         continue;
     }
-end:
+
     Token *eof = new_token(TK_EOF, p, p);
     cur->next = eof;
     return dummy.next;

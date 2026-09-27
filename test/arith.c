@@ -339,6 +339,44 @@ int main() {
     ASSERT(6, (long double)3 * 2);
     ASSERT(5, (long double)3 + 2.0);
 
+    // === Wide _BitInt(77) runtime arithmetic (wraps modulo 2^77) ===
+    _BitInt(77) w1 = 1000000000000000000wb;  // 10^18, exact in 77 bits
+    ASSERT(1, w1 * 2 > w1);
+    ASSERT(1, w1 + 1 > w1);
+    ASSERT(0, w1 - w1);
+    ASSERT(0, w1 * 0);
+    ASSERT(1, -w1 < 0);
+    ASSERT(1, w1 / 2 == 500000000000000000wb);
+    ASSERT(0, w1 % 2);
+    unsigned _BitInt(77) wu = (unsigned _BitInt(77)) - 1;  // 2^77-1
+    ASSERT(0, wu + 1);                                     // wraps to 0
+    ASSERT(1, wu % 10 == 1);                               // 2^77 mod 10 = 2, so 2^77-1 mod 10 = 1
+    ASSERT(1, wu / 2 == (((unsigned _BitInt(77))1 << 76) - 1));
+    // shifts across the 64-bit boundary
+    unsigned _BitInt(77) ws = 1;
+    ws = ws << 70;
+    ASSERT(1, ws > 0);
+    ws = ws >> 69;
+    ASSERT(2, ws);
+    // mixed 77-bit and small int: the small side converts to _BitInt(77)
+    ASSERT(1, w1 + 5 > w1);
+    ASSERT(1, (unsigned _BitInt(77)) - 1 + 1 == 0);
+    // comparisons across widths
+    ASSERT(1, w1 > 999999999999999999LL);
+    ASSERT(1, w1 != 0);
+
+    // === Small _BitInt wrap (< 8 bits): same-type ops stay in _BitInt ===
+    _BitInt(3) s3 = 3;
+    ASSERT(-2, s3 + s3);  // 6 = 0b110 -> -2 in i3
+    _BitInt(3) m3 = -4;
+    ASSERT(-1, m3 + 3);
+    ASSERT(-4, -m3);  // -(-4) = 4 wraps to -4 in i3
+    unsigned _BitInt(4) u4 = 15;
+    ASSERT(14, u4 + u4);  // 30 wraps to 14 in u4
+    ASSERT(7, u4 / 2);
+    u4 = u4 + 1;  // assignment truncates the promoted int result
+    ASSERT(0, u4);
+
     printf("OK\n");
     return 0;
 }

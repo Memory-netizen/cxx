@@ -111,6 +111,26 @@ int main() {
 
     ASSERT(1, sizeof(main));
 
+    // === wide/small _BitInt and interchange type sizes ===
+    ASSERT(1, sizeof(_BitInt(2)));
+    ASSERT(1, sizeof(_BitInt(3)));
+    ASSERT(1, sizeof(unsigned _BitInt(1)));
+    ASSERT(2, sizeof(_BitInt(9)));
+    ASSERT(4, sizeof(_BitInt(17)));
+    ASSERT(4, sizeof(_BitInt(32)));
+    ASSERT(8, sizeof(_BitInt(33)));
+    ASSERT(8, sizeof(_BitInt(64)));
+    ASSERT(16, sizeof(_BitInt(65)));
+    ASSERT(16, sizeof(_BitInt(77)));
+    ASSERT(16, sizeof(_BitInt(128)));
+    ASSERT(2, sizeof(_Float16));
+    ASSERT(4, sizeof(_Float32));
+    ASSERT(8, sizeof(_Float64));
+    ASSERT(16, sizeof(_Float128));
+    ASSERT(__SIZEOF_LONG_DOUBLE__, sizeof(long double));
+    ASSERT(32, sizeof(_BitInt(77)[2]));
+    ASSERT(16, sizeof((_BitInt(77))1 + 1));
+
     printf("OK\n");
     return 0;
 }

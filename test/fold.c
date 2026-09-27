@@ -199,6 +199,36 @@ int main() {
     CHECK_EQ("sizeof(char[3])*2", sizeof(char[3]) * 2, 6);
     CHECK_EQ("sizeof(int)==4?1:0", sizeof(int) == 4 ? 1 : 0, 1);
 
+    // === 15. Wide _BitInt folding (compile time, wraps modulo 2^N) ===
+    CHECK_EQ("b77 mul", (_BitInt(77))1000000000000000000wb * 2, 2000000000000000000LL);
+    CHECK_TRUE("ubig gt", 123456789012345678901234567890uwb > 12345678901234567890uwb);
+    CHECK_TRUE("ubig fold mul/div",
+               ((_BitInt(100))123456789012345678901234567890uwb * 2) / 2 == 123456789012345678901234567890uwb);
+    CHECK_TRUE("ubig mul wraps",
+               (123456789012345678901234567890uwb * 2) == 88457252996162682615381235108uwb);  // mod 2^97
+    CHECK_EQ("u77 max+1", (unsigned _BitInt(77)) - 1 + 1, 0);
+    CHECK_EQ("u77 mul wrap", (unsigned _BitInt(77))((unsigned _BitInt(77)) - 1) * 2, -2);  // 2^77-2
+    CHECK_EQ("s3 wrap", (_BitInt(3))3 + (_BitInt(3))3, -2);
+    CHECK_EQ("s3 shl wrap", (_BitInt(3))1 << 2, -4);  // 1<<2 = 4 = 0b100 -> -4 in i3
+    CHECK_EQ("u4 wrap sub", (unsigned _BitInt(4))0 - (unsigned _BitInt(4))1, 15);
+    CHECK_EQ("s77 low64", (long long)((_BitInt(77))1 << 64), 0);          // 2^64: low 64 bits are 0
+    CHECK_EQ("s77 sext", (long long)(((_BitInt(77))1 << 76) >> 76), -1);  // arithmetic shift
+
+    // === 16. fp128 / fp16 folding (exact values) ===
+    CHECK_FLT("f128 add", 1.5f128 + 2.25f128, 3.75);
+    CHECK_FLT("f128 mul", 2.0f128 * 3.0f128, 6.0);
+    CHECK_FLT("f128 div", 1.0f128 / 4.0f128, 0.25);
+    CHECK_FLT("f128 sub", 1.0f128 - 0.5f128, 0.5);
+    CHECK_FLT("f16 add", 1.5f16 + 2.25f16, 3.75);
+    CHECK_FLT("f16 mul", 2.0f16 * 3.0f16, 6.0);
+    CHECK_FLT("f16 div", 1.0f16 / 4.0f16, 0.25);
+    CHECK_FLT("f16 cast dbl", (double)0.5f16, 0.5);
+    CHECK_TRUE("f16 fold inf", 65504.0f16 * 2.0f16 > 65504.0f16);
+    CHECK_TRUE("f16 fold zero", 0.000000000000000000000000000000000000000000001f16 == 0.0f16);
+    CHECK_TRUE("big double fold", 12345678901234567890123.0 == 1.2345678901234568e22);
+    CHECK_TRUE("f128 wide", 1e4000f128 > 1e300f128);
+    CHECK_TRUE("f128 subnormal", 1e-4000f128 > 0);
+
     // === 14. Special values ===
     CHECK_EQ("0+0", 0 + 0, 0);
     CHECK_EQ("0*99999", 0 * 99999, 0);

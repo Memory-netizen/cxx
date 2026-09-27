@@ -38,7 +38,9 @@ static Node *folded_int(int64_t val, Type *ty, Node *tmpl) {
     node->tok = tmpl->tok;
 
     if (is_integer(ty)) {
-        int bits = ty->size * 8;
+        // _BitInt uses its declared width, not its storage size (an
+        // _BitInt(3) wraps at 3 bits even though it occupies 1 byte).
+        int bits = (ty->kind & TY_BITINT) ? bitint_width(ty) : ty->size * 8;
         if (bits > 0 && bits < 64) {
             uint64_t mask = ((uint64_t)1u << bits) - 1;
             uint64_t u = (uint64_t)val & mask;
@@ -50,20 +52,30 @@ static Node *folded_int(int64_t val, Type *ty, Node *tmpl) {
         // bits == 64: int64_t
     }
 
-    node->val = val;
+    node->ival = int128_set_i(val);
     return node;
 }
 
-// Create a folded floating-point constant node.
-// Truncates to float precision when the target type is float
-// (FLT_EVAL_METHOD=0 semantics: result must fit the declared type).
+// The double value of a classic float/double constant node (fpval holds
+// the exactly-rounded target-format value, so widening to double is exact).
+static double f64_of_node(Node *node) {
+    uint64_t b = fp128_to_fp64_bits(node->fpval);
+    double d;
+    memcpy(&d, &b, 8);
+    return d;
+}
+
+// Create a folded floating-point constant node: round once to the
+// target format (FLT_EVAL_METHOD=0 semantics: the result must fit the
+// declared type) and store it as fpval.
 static Node *folded_float(double val, Type *ty, Node *tmpl) {
     Node *node = emalloc(sizeof(Node));
     node->kind = ND_NUM;
     node->ty = ty;
     node->tok = tmpl->tok;
-    if (ty->kind == TY_FLOAT) val = (float)val;
-    node->fval = val;
+    uint64_t b;
+    memcpy(&b, &val, 8);
+    node->fpval = fp128_round_to(fp128_from_fp64(b), fmt_of(ty));
     return node;
 }
 
@@ -75,8 +87,8 @@ static Node *fold_binary(Node *node) {
 
     if (!is_int_const(lhs) || !is_int_const(rhs)) return NULL;
 
-    int64_t l = lhs->val;
-    int64_t r = rhs->val;
+    int64_t l = int128_to_i64(lhs->ival);
+    int64_t r = int128_to_i64(rhs->ival);
 
     // Use unsigned arithmetic when the type is unsigned, so that
     // shifts and division behave correctly for the full bit width.
@@ -138,8 +150,8 @@ static Node *fold_binary_float(Node *node) {
 
     if (!is_float_const(lhs) || !is_float_const(rhs)) return NULL;
 
-    double l = lhs->fval;
-    double r = rhs->fval;
+    double l = f64_of_node(lhs);
+    double r = f64_of_node(rhs);
     double result;
 
     switch (node->kind) {
@@ -185,12 +197,6 @@ static Node *folded_i128(Int128 v, Type *ty, Node *tmpl) {
     node->tok = tmpl->tok;
     node->ival = int128_normalize(v, bitint_width(ty), ty->is_unsigned ? UNSIGNED : SIGNED);
     return node;
-}
-
-static Int128 i128_of_node(Node *node) {
-    if (is_i128_const(node)) return node->ival;
-    if (node->ty->is_unsigned) return int128_set_ui((uint64_t)node->val);
-    return int128_set_i(node->val);
 }
 
 // Fold a binary node with _Float16/32/64/128 constant operands. The
@@ -307,7 +313,7 @@ static Node *fold_unary_float(Node *node) {
     Node *lhs = node->lhs;
     if (!is_float_const(lhs)) return NULL;
 
-    double v = lhs->fval;
+    double v = f64_of_node(lhs);
     switch (node->kind) {
         case ND_PLUS:
             return folded_float(v, lhs->ty, node);
@@ -323,7 +329,7 @@ static Node *fold_unary(Node *node) {
     Node *lhs = node->lhs;
     if (!is_int_const(lhs)) return NULL;
 
-    int64_t v = lhs->val;
+    int64_t v = int128_to_i64(lhs->ival);
     switch (node->kind) {
         case ND_PLUS:
             return folded_int(v, lhs->ty, node);
@@ -351,9 +357,9 @@ static Node *fold_cast(Node *node) {
 
     // int → int cast (width <= 64 targets)
     if (is_int_const(lhs) && is_integer(node->ty) && !is_bitint128(node->ty)) {
-        if (is_bool(node->ty)) return folded_int(lhs->val != 0, T.ty_bool, node);
+        if (is_bool(node->ty)) return folded_int(int128_to_i64(lhs->ival) != 0, T.ty_bool, node);
 
-        int64_t v = lhs->val;
+        int64_t v = int128_to_i64(lhs->ival);
         int bits = node->ty->size * 8;
         if (node->ty->kind & TY_BITINT) {
             return folded_int(norm_bits(v, bitint_width(node->ty), node->ty->is_unsigned), node->ty, node);
@@ -371,10 +377,11 @@ static Node *fold_cast(Node *node) {
 
     // int64 / _BitInt(<=64) → _BitInt(65..128) / _FloatN
     if (is_int_const(lhs)) {
-        if (is_bitint128(node->ty)) return folded_i128(i128_of_node(lhs), node->ty, node);
+        if (is_bitint128(node->ty)) return folded_i128(lhs->ival, node->ty, node);
         if (is_fpval(node->ty)) {
-            Fp128 v = lhs->ty->is_unsigned ? fp128_from_int128(int128_set_ui((uint64_t)lhs->val), UNSIGNED)
-                                           : fp128_from_int128(int128_set_i(lhs->val), SIGNED);
+            Fp128 v = lhs->ty->is_unsigned
+                          ? fp128_from_int128(int128_set_ui((uint64_t)int128_to_i64(lhs->ival)), UNSIGNED)
+                          : fp128_from_int128(int128_set_i(int128_to_i64(lhs->ival)), SIGNED);
             return folded_fp128(v, node->ty, node);
         }
     }
@@ -392,14 +399,14 @@ static Node *fold_cast(Node *node) {
             bool ok;
             Int128 v = fp128_to_int128(lhs->fpval, node->ty->is_unsigned ? UNSIGNED : SIGNED, &ok);
             if (!ok) return NULL;
-            return folded_int((int64_t)v.limb[0] | ((int64_t)v.limb[1] << 32), node->ty, node);
+            return folded_int(int128_to_i64(v), node->ty, node);
         }
         return NULL;
     }
     if (is_i128_const(lhs)) {
         if (is_bitint128(node->ty)) return folded_i128(lhs->ival, node->ty, node);
         if (is_integer(node->ty) && !is_bitint128(node->ty))
-            return folded_int((int64_t)lhs->ival.limb[0] | ((int64_t)lhs->ival.limb[1] << 32), node->ty, node);
+            return folded_int(int128_to_i64(lhs->ival), node->ty, node);
         if (is_fpval(node->ty)) {
             Fp128 v = fp128_from_int128(lhs->ival, lhs->ty->is_unsigned ? UNSIGNED : SIGNED);
             return folded_fp128(v, node->ty, node);
@@ -408,13 +415,13 @@ static Node *fold_cast(Node *node) {
     }
 
     // int → classic float cast: (double)3, (float)42
-    if (is_int_const(lhs) && is_flonum(node->ty)) return folded_float((double)lhs->val, node->ty, node);
+    if (is_int_const(lhs) && is_flonum(node->ty)) return folded_float((double)int128_to_i64(lhs->ival), node->ty, node);
 
     // float → int cast: (int)3.14
     if (is_float_const(lhs) && is_integer(node->ty) && !is_bitint128(node->ty)) {
-        if (is_bool(node->ty)) return folded_int(lhs->fval != 0.0, T.ty_bool, node);
+        if (is_bool(node->ty)) return folded_int(f64_of_node(lhs) != 0.0, T.ty_bool, node);
 
-        double v = lhs->fval;
+        double v = f64_of_node(lhs);
         int64_t iv;
         switch (node->ty->size) {
             case 1:
@@ -435,19 +442,17 @@ static Node *fold_cast(Node *node) {
 
     // classic float ↔ classic float cast
     if (is_float_const(lhs) && is_flonum(node->ty) && !is_fpval(node->ty))
-        return folded_float(lhs->fval, node->ty, node);
+        return folded_float(f64_of_node(lhs), node->ty, node);
 
     // classic float → _FloatN cast
     if (is_float_const(lhs) && is_fpval(node->ty)) {
-        uint64_t b;
-        memcpy(&b, &lhs->fval, 8);
-        return folded_fp128(fp128_from_fp64(b), node->ty, node);
+        return folded_fp128(fp128_from_fp64(fp128_to_fp64_bits(lhs->fpval)), node->ty, node);
     }
 
     if (is_integer(node->ty)) {
         if (lhs->kind == ND_EXCAST || lhs->kind == ND_IMCAST) {
             if (is_pointer(lhs->ty) && is_integer(lhs->lhs->ty)) {
-                if (is_int_const(lhs->lhs)) return folded_int(lhs->lhs->val, node->ty, node);
+                if (is_int_const(lhs->lhs)) return folded_int(int128_to_i64(lhs->lhs->ival), node->ty, node);
             }
         }
     }
@@ -457,18 +462,23 @@ static Node *fold_cast(Node *node) {
 // Fold a conditional (?:) node where the condition is a constant.
 static Node *fold_cond(Node *node) {
     if (!is_int_const(node->cond)) return NULL;
-    return node->cond->val ? node->then : node->els;
+    return int128_to_i64(node->cond->ival) != 0 ? node->then : node->els;
 }
 
 // Fold a logical AND/OR where one side is a constant.
 // 0 && x → 0,  1 && x → x,  0 || x → x,  1 || x → 1
+static bool const_truthy(Node *n) {
+    if (is_int_const(n)) return int128_to_i64(n->ival) != 0;
+    return f64_of_node(n) != 0.0;  // float const: ±0.0 is false
+}
+
 static Node *fold_logical(Node *node) {
     Node *lhs = node->lhs;
     if (!is_int_const(lhs) && !is_float_const(lhs)) return NULL;
     Node *rhs = node->rhs;
     if (is_int_const(rhs) || is_float_const(rhs)) {
-        int64_t lv = lhs->val;
-        int64_t rv = rhs->val;
+        bool lv = const_truthy(lhs);
+        bool rv = const_truthy(rhs);
         if (node->kind == ND_LOGAND)
             return folded_int(lv && rv, T.ty_int, node);
         else
@@ -476,9 +486,9 @@ static Node *fold_logical(Node *node) {
     }
 
     if (node->kind == ND_LOGAND)
-        return lhs->val ? new_lognot(node->rhs) : folded_int(0, T.ty_int, node);
+        return const_truthy(lhs) ? new_lognot(node->rhs) : folded_int(0, T.ty_int, node);
     else  // ND_LOGOR
-        return lhs->val ? folded_int(1, T.ty_int, node) : new_lognot(node->rhs);
+        return const_truthy(lhs) ? folded_int(1, T.ty_int, node) : new_lognot(node->rhs);
 }
 
 // Fold a boolean conversion to an integer constant when possible.
@@ -487,7 +497,7 @@ static Node *fold_bool(Node *node) {
     Node *lhs = node->lhs;
     if (!is_int_const(lhs)) return NULL;
     if (node->ty->kind != TY_BOOL) return NULL;
-    return folded_int(lhs->val != 0, T.ty_bool, node);
+    return folded_int(int128_to_i64(lhs->ival) != 0, T.ty_bool, node);
 }
 
 static Node *fold_ptradd(Node *node) {
@@ -495,7 +505,7 @@ static Node *fold_ptradd(Node *node) {
     if (!is_ptr_const(lhs)) return NULL;
     Node *rhs = node->rhs;
     if (!is_int_const(rhs)) return NULL;
-    lhs->lhs->val += rhs->val * node->ty->base->size;
+    lhs->lhs->ival = int128_set_i(int128_to_i64(lhs->lhs->ival) + int128_to_i64(rhs->ival) * node->ty->base->size);
     return lhs->lhs;
 }
 

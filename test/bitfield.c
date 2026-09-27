@@ -144,6 +144,27 @@ int main() {
     ASSERT(1, g47.a);
     ASSERT(2, g47.c);
 
+    // === _BitInt bitfields ===
+    struct {
+        _BitInt(3) a : 3;
+        _BitInt(5) b : 5;
+    } bs = {3, 10};
+    ASSERT(3, bs.a);
+    ASSERT(10, bs.b);
+    bs.a = -4;
+    ASSERT(-4, bs.a);
+    struct {
+        unsigned _BitInt(4) u : 4;
+    } bu = {15};
+    ASSERT(15, bu.u);
+    ASSERT(1, sizeof(bu));
+    struct {
+        _BitInt(33) w : 33;
+    } bw = {1234567890wb};
+    ASSERT(1, bw.w == 1234567890wb);
+    bw.w = -1;
+    ASSERT(-1, bw.w);
+
     printf("OK\n");
     return 0;
 }
