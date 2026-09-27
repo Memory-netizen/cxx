@@ -26,15 +26,16 @@ void fatal(char *fmt, ...) {
     exit(1);
 }
 
-static void emit_diag(char *level, uint32_t filename, int line_delta, SrcFile *diagfile, char *loc, const char *msg,
+static void emit_diag(char *level, uint32_t filename, int line_delta, SrcFile *diagfile, uint32_t loc, const char *msg,
                       va_list ap) {
-    // Find a start containing `loc`.
+    // Find the line containing `loc`.
     int line, col;
     get_location(diagfile, loc, &line, &col);
 
     char *p = diagfile->contents;
     char *start = p + diagfile->line_offsets[line - 1];
     char *end = p + diagfile->line_offsets[line] - 1;
+    char *at = p + loc;
 
     bool use_color = isatty(fileno(stderr));
     if (use_color)
@@ -61,8 +62,8 @@ static void emit_diag(char *level, uint32_t filename, int line_delta, SrcFile *d
 
     fprintf(stderr, "%*s", indent, "| ");  // print pos spaces.
 
-    int width = display_width(start, loc - start);
-    while (start < loc)
+    int width = display_width(start, at - start);
+    while (start < at)
         if (*start++ == '\t') fprintf(stderr, "\t");
     fprintf(stderr, "%*s", width, "");
 
@@ -114,7 +115,7 @@ void warning(Token *tok, const char *msg, ...) {
     if (opt_werror) exit(1);
 }
 
-void error_at(SrcFile *file, char *loc, const char *msg, ...) {
+void error_at(SrcFile *file, uint32_t loc, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
     emit_diag("error", file->id, 0, file, loc, msg, ap);
@@ -270,10 +271,8 @@ char *escape_char_to_string(char c) {
 
 static uint32_t con_hash(Con *c0) {
     if (c0->type == CBits128)
-        return c0->bits.i128.limb[0] ^ c0->bits.i128.limb[1] ^
-               c0->bits.i128.limb[2] ^ c0->bits.i128.limb[3];
-    return (uint32_t)(c0->type * 0x9E3779B9u) ^ c0->sym ^ (uint32_t)c0->bits.i ^
-           (uint32_t)(c0->bits.i >> 32);
+        return c0->bits.i128.limb[0] ^ c0->bits.i128.limb[1] ^ c0->bits.i128.limb[2] ^ c0->bits.i128.limb[3];
+    return (uint32_t)(c0->type * 0x9E3779B9u) ^ c0->sym ^ (uint32_t)c0->bits.i ^ (uint32_t)(c0->bits.i >> 32);
 }
 
 static void con_rehash(Module *md, int cap) {
@@ -291,8 +290,7 @@ static void con_rehash(Module *md, int cap) {
 
 static bool con_eq(Con *a, Con *b) {
     if (a->type != b->type || a->sym != b->sym) return false;
-    if (a->type == CBits128)
-        return memcmp(&a->bits.i128, &b->bits.i128, sizeof(Int128)) == 0;
+    if (a->type == CBits128) return memcmp(&a->bits.i128, &b->bits.i128, sizeof(Int128)) == 0;
     return a->bits.i == b->bits.i;
 }
 

@@ -295,7 +295,7 @@ static Token *eval_has_include(Token *tok) {
 
             bool exists = false;
             if (tok->kind == TK_STRLIT && tok->enc_prefix == PREFIX_NONE) {
-                char *path = strndup(tok->loc + 1, tok->len - 2);
+                char *path = strndup(tok_text(tok) + 1, tok->len - 2);
                 exists = exist_include(start, path, true);
             } else if (tok->kind == TK_LT) {
                 Token *lt = tok;
@@ -360,7 +360,8 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
 
     Token *rest2;
     int64_t val = const_expr(&rest2, expr);
-    if (rest2->kind != TK_EOF) error(rest2, "missing binary operator before token \"%.*s\"", rest2->len, rest2->loc);
+    if (rest2->kind != TK_EOF)
+        error(rest2, "missing binary operator before token \"%.*s\"", rest2->len, tok_text(rest2));
     return val;
 }
 
@@ -627,7 +628,7 @@ static char *join_tokens(Token *tok) {
     int pos = 0;
     for (Token *t = tok; t && t->kind != TK_EOF; t = t->next) {
         if (t != tok && t->is_leadingws) buf[pos++] = ' ';
-        strncpy(buf + pos, t->loc, t->len);
+        strncpy(buf + pos, tok_text(t), t->len);
         pos += t->len;
     }
     buf[pos] = '\0';
@@ -647,7 +648,7 @@ static Token *stringize(Token *arg) {
 // Concatenate two tokens to create a new token.
 static Token *paste(Token *lhs, Token *rhs) {
     // Paste the two tokens.
-    char *buf = format("%.*s%.*s", lhs->len, lhs->loc, rhs->len, rhs->loc);
+    char *buf = format("%.*s%.*s", lhs->len, tok_text(lhs), rhs->len, tok_text(rhs));
 
     // Tokenize the resulting string.
     SrcFile *file = new_file(lhs->file->name, lhs->file->file_no, buf);
@@ -909,7 +910,7 @@ static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
     if (tok->kind == TK_STRLIT && tok->enc_prefix == PREFIX_NONE) {
         *is_dquote = true;
         *rest = skip_line(tok->next);
-        return strndup(tok->loc + 1, tok->len - 2);
+        return strndup(tok_text(tok) + 1, tok->len - 2);
     }
 
     // Pattern 2: #include <foo.h>
@@ -1042,14 +1043,14 @@ static Token *read_line_marker(Token **rest, Token *tok) {
 
     int line_no = 0;
     for (uint32_t i = 0; i < tok->len; i++) {
-        char c = tok->loc[i];
+        char c = tok_text(tok)[i];
         if (isdigit(c))
             line_no = line_no * 10 + c - '0';
         else
             error(start, "line marker directive requires a simple digit sequence");
     }
     if (line_no == 0) error(start, "#line directive requires a positive integer argument");
-    if (*tok->loc == '0') error(start, "line marker directive interprets number as decimal, not octal");
+    if (*tok_text(tok) == '0') error(start, "line marker directive interprets number as decimal, not octal");
 
     int line, col;
     get_location(start->file, start->loc, &line, &col);
@@ -1503,7 +1504,7 @@ static void write_scratch_space(Token *tok, char *str) {
     sprintf(scratch->contents + space_pos, "%s\n", str);
     tok->file = scratch;
     tok->filename = scratch->id;
-    tok->loc = scratch->contents + space_pos;
+    tok->loc = space_pos;
     tok->len = len;
     space_pos += len + 1;
 }

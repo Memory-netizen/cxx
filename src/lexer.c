@@ -12,7 +12,7 @@ static bool is_leadingws;
 static Token *new_token(uint32_t kind, char *start, char *end) {
     Token *tok = emalloc(sizeof(Token));
     tok->kind = kind;
-    tok->loc = start;
+    tok->loc = (uint32_t)(start - cur_file->contents);
     tok->len = end - start;
     tok->file = cur_file;
     tok->filename = cur_file->id;
@@ -50,7 +50,7 @@ static char *expect[] = {
 
 // Ensure that the current token is `kind`.
 Token *skip(Token *tok, uint32_t kind) {
-    if (tok->kind != kind) error(tok, "expected ‘%s’ before ‘%.*s’", expect[kind], tok->len, tok->loc);
+    if (tok->kind != kind) error(tok, "expected ‘%s’ before ‘%.*s’", expect[kind], tok->len, tok_text(tok));
     return tok->next;
 }
 
@@ -146,17 +146,22 @@ uint32_t read_universal_char(char **new_pos, char *p, int ch) {
     if (*p == '{') {
         char *q = ++p;
         while (isxdigit(*q)) q++;
-        if (*q != '}') error_at(cur_file, p - 1, "‘\\%c{’ not terminated with ‘}’", ch);
+        if (*q != '}')
+            error_at(cur_file, (uint32_t)(p - 1 - cur_file->contents), "‘\\%c{’ not terminated with ‘}’", ch);
         len = q - p;
-        if (len == 0) error_at(cur_file, p - 1, "empty delimited universal character name");
+        if (len == 0)
+            error_at(cur_file, (uint32_t)(p - 1 - cur_file->contents), "empty delimited universal character name");
     }
     uint32_t c = 0;
     for (int i = 0; i < len; i++) {
-        if (!isxdigit(p[i])) error_at(cur_file, p + i, "invalid digit ‘%c’ in universal character name", p[i]);
+        if (!isxdigit(p[i]))
+            error_at(cur_file, (uint32_t)(p + i - cur_file->contents), "invalid digit ‘%c’ in universal character name",
+                     p[i]);
         c = (c << 4) | from_hex(p[i]);
     }
-    if (0xD800 <= c && c <= 0xDFFF) error_at(cur_file, p - 1, "invalid universal character");
-    if (c > 0x10FFFF) error_at(cur_file, p - 1, "invalid universal character");
+    if (0xD800 <= c && c <= 0xDFFF)
+        error_at(cur_file, (uint32_t)(p - 1 - cur_file->contents), "invalid universal character");
+    if (c > 0x10FFFF) error_at(cur_file, (uint32_t)(p - 1 - cur_file->contents), "invalid universal character");
     if (*(p - 1) == '{') len++;
     *new_pos = p + len;
     return c;
@@ -189,15 +194,17 @@ static int read_ident(char *start) {
     if (*p == '\\' && (p[1] == 'u' || p[1] == 'U')) {
         c = read_universal_char(&p, p + 2, p[1]);
         if (c <= 0x9F)
-            error_at(cur_file, start, "universal character %.*s is not valid in an identifier", (int)(p - start),
-                     start);
+            error_at(cur_file, (uint32_t)(start - cur_file->contents),
+                     "universal character %.*s is not valid in an identifier", (int)(p - start), start);
     } else {
         bool success = false;
         c = decode_utf8(&p, p, &success);
-        if (!success) error_at(cur_file, start, "invalid UTF-8 in identifier");
+        if (!success) error_at(cur_file, (uint32_t)(start - cur_file->contents), "invalid UTF-8 in identifier");
     }
     if (!is_ident1(c)) {
-        if (c > 0x7F) error_at(cur_file, start, "invalid character %.*s in identifier", (int)(p - start), start);
+        if (c > 0x7F)
+            error_at(cur_file, (uint32_t)(start - cur_file->contents), "invalid character %.*s in identifier",
+                     (int)(p - start), start);
         return 0;
     }
 
@@ -206,16 +213,17 @@ static int read_ident(char *start) {
         if (*p == '\\' && (p[1] == 'u' || p[1] == 'U')) {
             c = read_universal_char(&p, p + 2, p[1]);
             if (c <= 0x9F)
-                error_at(cur_file, uc_start, "universal character %.*s is not valid in an identifier",
-                         (int)(p - uc_start), uc_start);
+                error_at(cur_file, (uint32_t)(uc_start - cur_file->contents),
+                         "universal character %.*s is not valid in an identifier", (int)(p - uc_start), uc_start);
         } else {
             bool success = false;
             c = decode_utf8(&p, p, &success);
-            if (!success) error_at(cur_file, uc_start, "invalid UTF-8 in identifier");
+            if (!success) error_at(cur_file, (uint32_t)(uc_start - cur_file->contents), "invalid UTF-8 in identifier");
         }
         if (!is_ident2(c)) {
             if (c > 0x7F)
-                error_at(cur_file, uc_start, "invalid character %.*s in identifier", (int)(p - uc_start), uc_start);
+                error_at(cur_file, (uint32_t)(uc_start - cur_file->contents), "invalid character %.*s in identifier",
+                         (int)(p - uc_start), uc_start);
             return p - start - 1;
         }
     }
@@ -245,7 +253,7 @@ static uint64_t read_escaped_char(char **new_pos, char *p, char *end) {
 
     if (c == 'o') {
         // Read an octal number.
-        if (p[1] != '{') error_at(cur_file, p, "'\\o' not followed by '{'");
+        if (p[1] != '{') error_at(cur_file, (uint32_t)((p)-cur_file->contents), "'\\o' not followed by '{'");
         p += 2;
         if (*p == '}') goto empty_error;
         uint64_t val = 0;
@@ -268,7 +276,7 @@ static uint64_t read_escaped_char(char **new_pos, char *p, char *end) {
         } else {
             p++;
         }
-        if (!isxdigit(*p)) error_at(cur_file, p, "invalid hex escape sequence");
+        if (!isxdigit(*p)) error_at(cur_file, (uint32_t)((p)-cur_file->contents), "invalid hex escape sequence");
 
         uint64_t val = 0;
         for (; p < end && isxdigit(*p); p++) val = (val << 4) + from_hex(*p);
@@ -283,11 +291,11 @@ static uint64_t read_escaped_char(char **new_pos, char *p, char *end) {
     return c;
 
 empty_error:
-    error_at(cur_file, p, "empty delimited escape sequence");
+    error_at(cur_file, (uint32_t)((p)-cur_file->contents), "empty delimited escape sequence");
 miss_error:
-    error_at(cur_file, p, "‘\\%c{’ not terminated with ‘}’", c);
+    error_at(cur_file, (uint32_t)((p)-cur_file->contents), "‘\\%c{’ not terminated with ‘}’", c);
 digit_error:
-    error_at(cur_file, p, "invalid digit ‘%c’ in escape sequence", *p);
+    error_at(cur_file, (uint32_t)((p)-cur_file->contents), "invalid digit ‘%c’ in escape sequence", *p);
     return 0;
 }
 
@@ -372,7 +380,7 @@ static void convert_utf32_str_literal(Token *tok, char *str) {
 }
 
 void convert_str_literal(Token *tok) {
-    char *str = convert_universal_chars(tok->loc, tok->len);
+    char *str = convert_universal_chars(tok_text(tok), tok->len);
     switch (tok->enc_prefix) {
         case PREFIX_NONE:
         case PREFIX_u8:
@@ -421,9 +429,9 @@ error:
 }
 
 static void convert_char_literal(Token *tok) {
-    char *p = tok->loc;
+    char *p = tok_text(tok);
     while (*p++ != '\'');
-    char *end = tok->loc + tok->len - 1;
+    char *end = tok_text(tok) + tok->len - 1;
 
     uint32_t val = 0;
     while (p < end) {
@@ -511,8 +519,8 @@ static bool is_valid_digit(int c, int base) {
 
 static void convert_pp_num(Token *t) {
     t->kind = TK_NUM;
-    char *text = t->loc;
-    char *end = t->loc + t->len;
+    char *text = tok_text(t);
+    char *end = tok_text(t) + t->len;
     char first_ch = *text;
 
     int base = 10;
@@ -870,7 +878,7 @@ Token *tokenize(SrcFile *file) {
         // Read block comments.
         if (*p == '/' && p[1] == '*') {
             char *q = strstr(p + 2, "*/");
-            if (!q) error_at(cur_file, p, "unterminated /* comment");
+            if (!q) error_at(cur_file, (uint32_t)((p)-cur_file->contents), "unterminated /* comment");
             tok = new_token(TK_COMMENT, p, q + 2);
             is_leadingws = true;
             cur = cur->next = tok;
@@ -1125,8 +1133,8 @@ static void build_line_offsets(SrcFile *f) {
         if (*p++ == '\n') f->line_offsets[idx++] = p - f->contents;
 }
 
-void get_location(SrcFile *f, char *loc, int *out_line, int *out_col) {
-    if (!f || !loc) {
+void get_location(SrcFile *f, uint32_t offset, int *out_line, int *out_col) {
+    if (!f) {
         *out_line = 1;
         *out_col = 1;
         return;
@@ -1134,12 +1142,7 @@ void get_location(SrcFile *f, char *loc, int *out_line, int *out_col) {
 
     build_line_offsets(f);
 
-    uint32_t offset = (uint32_t)(loc - f->contents);
-
-    if (offset > f->size) {
-        offset = f->size;
-        loc = f->contents + f->size;
-    }
+    if (offset > f->size) offset = f->size;
 
     int lo = 0, hi = f->num_lines - 1;
     int idx = 0;
@@ -1156,8 +1159,7 @@ void get_location(SrcFile *f, char *loc, int *out_line, int *out_col) {
 
     *out_line = idx + 1;
 
-    char *line_start = f->contents + f->line_offsets[idx];
-    *out_col = (int)(loc - line_start) + 1;
+    *out_col = (int)(offset - f->line_offsets[idx]) + 1;
 }
 
 Token *tokenize_file(char *path) {

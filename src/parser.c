@@ -432,8 +432,7 @@ static Sym *new_string_literal(uint32_t id, Type *ty) {
         // element types are the canonical target singletons and the
         // length follows from the interned content id: the element
         // pointer alone distinguishes u8"x"/"x"/L"x"/U"x"/u"x".
-        if (v->init_data == id && v->ty->base == ty->base)
-            return v;
+        if (v->init_data == id && v->ty->base == ty->base) return v;
     uint32_t uid = new_unique_varname(intern(".str", 4));
     Sym *var = new_gvar(uid, ty);
     var->is_str = true;
@@ -1445,7 +1444,7 @@ static Node *primary(Token **rest, Token *tok) {
         *rest = tok->next;
         return node;
     }
-    error(tok, "expected expression before ‘%.*s’", tok->len, tok->loc);
+    error(tok, "expected expression before ‘%.*s’", tok->len, tok_text(tok));
     return NULL;
 }
 
@@ -1484,7 +1483,7 @@ static void check_builtin_fn(Node *node) {
 
 static Node *fncall(Token **rest, Token *tok, Node *fn) {
     if (fn->ty->kind != TY_FUNC && !is_funcptr(fn->ty))
-        error(tok, "called object ‘%.*s’ is not a function or function pointer", fn->tok->len, fn->tok->loc);
+        error(tok, "called object ‘%.*s’ is not a function or function pointer", fn->tok->len, tok_text(fn->tok));
 
     Node *node = new_node(ND_FUNCALL, tok);
     lvalue_convert(&fn);
@@ -1498,7 +1497,8 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
 
     if (tok->kind == TK_RPAREN) {
         if (param_ty)
-            error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ty->nparam);
+            error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, tok_text(ty->name),
+                  ty->nparam);
         *rest = tok->next;
         return node;
     }
@@ -1523,14 +1523,15 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
             if (arg->ty->kind == TY_FLOAT) new_imcast(&arg, T.ty_double);
             lvalue_convert(&arg);
         } else {
-            error(tok, "too many arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ty->nparam);
+            error(tok, "too many arguments to function ‘%.*s’; expected %d", ty->name->len, tok_text(ty->name),
+                  ty->nparam);
         }
         ++i;
         cur = cur->next = arg;
     } while (match(&tok, tok, TK_COMMA));
 
     if (param_ty)
-        error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, ty->name->loc, ty->nparam);
+        error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, tok_text(ty->name), ty->nparam);
 
     *rest = skip(tok, TK_RPAREN);
 
@@ -1715,7 +1716,7 @@ static Node *unary(Token **rest, Token *tok) {
                 ty = node->ty;
             }
             if (ty->size < 0 && (ty->kind != TY_ARRAY && ty->kind != TY_VLA)) {
-                error(start, "invalid application of ‘%*.s’ to incomplete type", start->len, start->loc);
+                error(start, "invalid application of ‘%*.s’ to incomplete type", start->len, tok_text(start));
             }
             if (start->kind == TK_ALIGNOF) return new_ulong(ty->align, start);
             Node *size = NULL;
@@ -3689,7 +3690,7 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
         }
 
         if (paramty->size < 0)
-            error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len, paramty->name->loc);
+            error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len, tok_text(paramty->name));
         if (paramty->name) {
             uint32_t id = get_ident(paramty->name);
             for (Type *p = dummy.next; p && p->name; p = p->next) {

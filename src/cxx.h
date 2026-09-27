@@ -302,8 +302,8 @@ struct Token {
         Fp128 fpval;  // TK_NUM floating constants
         Int128 ival;  // TK_NUM integer constants and TK_CHARLIT values
     };
-    SrcFile *file;  // Source location
-    char *loc;
+    SrcFile *file;      // Source location
+    uint32_t loc;       // byte offset into file->contents
     uint32_t filename;  // Diagnostic filename
     int32_t line_delta;
     uint16_t len;
@@ -318,6 +318,8 @@ struct Token {
     bool noexpand;      // true if this token shall not be macro-expanded
 };
 
+static inline char *tok_text(Token *tok) { return tok->file->contents + tok->loc; }
+
 bool match(Token **rest, Token *tok, uint32_t kind);
 Token *skip(Token *tok, uint32_t kind);
 Token *tokenize_file(char *filename);
@@ -327,7 +329,7 @@ void convert_ppnumber(Token *tok);
 void convert_keywords(Token *tok);
 void convert_str_literal(Token *tok);
 SrcFile **get_input_files(void);
-void get_location(SrcFile *f, char *loc, int *out_line, int *out_col);
+void get_location(SrcFile *f, uint32_t loc, int *out_line, int *out_col);
 
 //
 // preprocess.c
@@ -872,11 +874,11 @@ enum {
         tmp.ty = T.ty_ldouble;     \
         tmp;                       \
     })
-#define NULLPTR                                        \
-    ({                                                 \
+#define NULLPTR                                           \
+    ({                                                    \
         Ref tmp = newcon(&(Con){0, CAddr, 0, {0}}, curm); \
-        tmp.ty = T.ty_nullptr;                         \
-        tmp;                                           \
+        tmp.ty = T.ty_nullptr;                            \
+        tmp;                                              \
     })
 
 struct Ref {
@@ -967,7 +969,7 @@ int display_width(char *p, int len);
 //
 
 void fatal(char *fmt, ...) __attribute__((format(printf, 1, 2)));
-void error_at(SrcFile *file, char *loc, const char *msg, ...) __attribute__((format(printf, 3, 4)));
+void error_at(SrcFile *file, uint32_t loc, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 void error(Token *tok, const char *msg, ...) __attribute__((format(printf, 2, 3)));
 void warning(Token *tok, const char *msg, ...) __attribute__((format(printf, 2, 3)));
 void diag(char *level, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));

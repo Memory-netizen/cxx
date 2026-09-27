@@ -471,7 +471,7 @@ void check_unop(Node *node) {
         default:
             return;
     }
-    error(node->tok, "wrong type argument to unary ‘%.*s’", node->tok->len, node->tok->loc);
+    error(node->tok, "wrong type argument to unary ‘%.*s’", node->tok->len, tok_text(node->tok));
 }
 
 void check_binop(Node *node) {
@@ -551,7 +551,7 @@ void check_binop(Node *node) {
         default:
             return;
     }
-    error(node->tok, "invalid operands to binary ‘%.*s’", node->tok->len, node->tok->loc);
+    error(node->tok, "invalid operands to binary ‘%.*s’", node->tok->len, tok_text(node->tok));
 }
 
 void check_condop(Node *node) {
@@ -616,15 +616,16 @@ static void modifiable_lvalue(Node *node) {
     add_type(node->lhs);
     Node *lhs = node->lhs;
     if (!lhs->is_lvalue || lhs->ty->kind == TY_FUNC)
-        error(node->tok, "lvalue required as ‘%.*s’ operand", node->tok->len, node->tok->loc);
+        error(node->tok, "lvalue required as ‘%.*s’ operand", node->tok->len, tok_text(node->tok));
     if (lhs->ty->qual & Q_CONST || lhs->ty->qual & Q_MEMCONST) {
         if (lhs->kind == ND_VAR) {
             error(node->tok, "assignment of read-only variable ‘%s’", str(lhs->var->id));
         } else {
-            char *start = lhs->tok->loc;
+            uint32_t start = lhs->tok->loc;
             Token *cur = lhs->tok;
             while (cur->next != node->tok) cur = cur->next;
-            error(node->tok, "assignment of read-only location ‘%.*s’", (int)(cur->loc - start + cur->len), start);
+            error(node->tok, "assignment of read-only location ‘%.*s’", (int)(cur->loc - start + cur->len),
+                  tok_text(lhs->tok));
         }
     }
     if (is_void(lhs->ty)) error(node->tok, "incomplete type ‘void’ is not assignable");

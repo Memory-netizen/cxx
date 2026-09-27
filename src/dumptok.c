@@ -75,7 +75,7 @@ void dump_raw_tokens(Token *tok) {
         int line, col;
         get_location(tok->file, tok->loc, &line, &col);
 
-        fprintf(stdout, "%-18s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok->loc);
+        fprintf(stdout, "%-18s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok_text(tok));
         if (tok->is_sol) fprintf(stdout, " [StartOfLine]");
         fprintf(stdout, "  Loc=<%s:%d:%d>\n", str(tok->filename), line, col);
 
@@ -97,7 +97,7 @@ void dump_tokens(Token *tok) {
         while (orig->origin) orig = orig->origin;
         get_location(orig->file, orig->loc, &line, &col);
 
-        fprintf(stdout, "%-18s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok->loc);
+        fprintf(stdout, "%-18s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok_text(tok));
         if (tok->is_sol) fprintf(stdout, " [StartOfLine]");
         if (tok->is_leadingws) fprintf(stdout, " [LeadingSpace]");
 

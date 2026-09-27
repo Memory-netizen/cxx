@@ -630,7 +630,7 @@ static void print_tokens(Token *tok) {
             continue;
         }
         if (tok->is_leadingws) fprintf(out, " ");
-        fprintf(out, "%.*s", (int)tok->len, tok->loc);
+        fprintf(out, "%.*s", (int)tok->len, tok_text(tok));
     }
     fprintf(out, "\n");
 }
