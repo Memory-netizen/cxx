@@ -345,6 +345,11 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
     expr = dummy2.next;
 
     convert_ppnumber(expr);
+    // 6.10.1: in #if, all integer types act as intmax_t/uintmax_t
+    // (64 bits here); truncate _BitInt values as-if converted to
+    // uintmax_t before the parser's checked const_expr sees them.
+    for (Token *t = expr; t->kind != TK_EOF; t = t->next)
+        if (t->kind == TK_NUM && (t->lit_suffix & SUF_BITINT)) t->ival = int128_normalize(t->ival, 64, UNSIGNED);
     // No floating constant of any kind is allowed in #if (gcc/clang
     // reject them all: float/double/long double and the interchange
     // _Float16/32/64/128).

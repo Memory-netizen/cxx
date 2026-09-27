@@ -613,15 +613,23 @@ static Ref gen_expr(Node *node) {
         case ND_EQ:
         case ND_NE:
         case ND_LT:
-        case ND_LE: {
+        case ND_LE:
+        case ND_GT:
+        case ND_GE: {
             static int cmp_op[] = {
                 [ND_EQ] = IR_CMP_EQ,
                 [ND_NE] = IR_CMP_NE,
                 [ND_LT] = IR_CMP_LT,
                 [ND_LE] = IR_CMP_LE,
             };
+            // Canonicalize GT/GE to the swapped LT/LE forms (a > b ==
+            // b < a) so CSE and later IR passes only see the 4 basic
+            // comparisons.
             Ref tmp = TMP(tmp_id++, bitint[1][1]);
-            new_ins(cmp_op[node->kind], tmp, (Ref[]){lr, rr}, 2);
+            if (node->kind == ND_GT || node->kind == ND_GE)
+                new_ins(node->kind == ND_GT ? IR_CMP_LT : IR_CMP_LE, tmp, (Ref[]){rr, lr}, 2);
+            else
+                new_ins(cmp_op[node->kind], tmp, (Ref[]){lr, rr}, 2);
 
             dst = TMP(tmp_id++, node->ty);
             new_ins(IR_EXT, dst, (Ref[]){tmp}, 1);

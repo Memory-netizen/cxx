@@ -1702,7 +1702,7 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
     static int op_table[][2] = {
         [TK_OR] = {20, ND_LOGOR},    [TK_AND] = {30, ND_LOGAND}, [TK_BOR] = {40, ND_BOR},    [TK_XOR] = {50, ND_XOR},
         [TK_BAND] = {60, ND_BAND},   [TK_EQ] = {70, ND_EQ},      [TK_NE] = {70, ND_NE},      [TK_LT] = {80, ND_LT},
-        [TK_GT] = {80, ND_LT},       [TK_LE] = {80, ND_LE},      [TK_GE] = {80, ND_LE},      [TK_LEFT] = {90, ND_LEFT},
+        [TK_GT] = {80, ND_GT},       [TK_LE] = {80, ND_LE},      [TK_GE] = {80, ND_GE},      [TK_LEFT] = {90, ND_LEFT},
         [TK_RIGHT] = {90, ND_RIGHT}, [TK_PLUS] = {100, ND_ADD},  [TK_MINUS] = {100, ND_SUB}, [TK_STAR] = {110, ND_MUL},
         [TK_SLASH] = {110, ND_DIV},  [TK_MOD] = {110, ND_MOD},
     };
@@ -1718,8 +1718,6 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
 
         Node *rhs = binexpr(&tok, tok->next, cur_prec);
         add_type(rhs);
-
-        if (op_tok->kind == TK_GT || op_tok->kind == TK_GE) swap(&lhs, &rhs);
 
         if (expr_op == ND_ADD)
             lhs = new_add(lhs, rhs, op_tok);
@@ -1808,7 +1806,8 @@ static double eval_double(Node *node) {
     return 0;
 }
 
-// Compile-time evaluation in the fp128 domain for _Float16/32/64/128.
+// Compile-time evaluation in the fp128 domain for the interchange
+// types and long double (is_fpval).
 static Fp128 eval_fp128(Node *node) {
     add_type(node);
     switch (node->kind) {
@@ -1854,12 +1853,12 @@ static Fp128 eval_fp128(Node *node) {
     return (Fp128){{0, 0, 0, 0}};
 }
 
-// Compile-time evaluation for _BitInt(65..128).
+// Compile-time evaluation in the Int128 domain for _BitInt constants
+// (all widths; node->ival holds the value).
 static Int128 eval_int128(Node *node) {
     add_type(node);
     switch (node->kind) {
         case ND_NUM:
-            if (is_bitint128(node->ty)) return node->ival;
             return node->ival;
         case ND_ADD:
             return int128_add(eval_int128(node->lhs), eval_int128(node->rhs));
@@ -1995,7 +1994,9 @@ static int64_t eval2(Node *node, uint32_t *sym) {
         case ND_EQ:
         case ND_NE:
         case ND_LT:
-        case ND_LE: {
+        case ND_LE:
+        case ND_GT:
+        case ND_GE: {
             if (is_fpval(node->lhs->ty)) {
                 int c = fp128_cmp(eval_fp128(node->lhs), eval_fp128(node->rhs));
                 switch (node->kind) {
@@ -2005,11 +2006,17 @@ static int64_t eval2(Node *node, uint32_t *sym) {
                         return c != 0;
                     case ND_LT:
                         return c < 0;
-                    default:
+                    case ND_LE:
                         return c <= 0;
+                    case ND_GT:
+                        return c > 0;
+                    default:
+                        return c >= 0;
                 }
             }
-            if (is_bitint128(node->lhs->ty)) {
+            if ((node->lhs->ty->kind & TY_BITINT) || (node->rhs->ty->kind & TY_BITINT)) {
+                // Any _BitInt width: the int64 path would sign-interpret
+                // values >= 2^63 and use the result type's signedness.
                 Int128 l = eval_int128(node->lhs), r = eval_int128(node->rhs);
                 bool uns = node->lhs->ty->is_unsigned;
                 int c = uns ? int128_cmp_unsigned(l, r) : int128_cmp_signed(l, r);
@@ -2020,16 +2027,30 @@ static int64_t eval2(Node *node, uint32_t *sym) {
                         return c != 0;
                     case ND_LT:
                         return c < 0;
-                    default:
+                    case ND_LE:
                         return c <= 0;
+                    case ND_GT:
+                        return c > 0;
+                    default:
+                        return c >= 0;
                 }
             }
             if (node->kind == ND_EQ) return eval(node->lhs) == eval(node->rhs);
             if (node->kind == ND_NE) return eval(node->lhs) != eval(node->rhs);
-            if (node->ty->is_unsigned)
-                return node->kind == ND_LT ? (uint64_t)eval(node->lhs) < (uint64_t)eval(node->rhs)
-                                           : (uint64_t)eval(node->lhs) <= (uint64_t)eval(node->rhs);
-            return node->kind == ND_LT ? eval(node->lhs) < eval(node->rhs) : eval(node->lhs) <= eval(node->rhs);
+            switch (node->kind) {
+                case ND_LT:
+                    return node->ty->is_unsigned ? (uint64_t)eval(node->lhs) < (uint64_t)eval(node->rhs)
+                                                 : eval(node->lhs) < eval(node->rhs);
+                case ND_LE:
+                    return node->ty->is_unsigned ? (uint64_t)eval(node->lhs) <= (uint64_t)eval(node->rhs)
+                                                 : eval(node->lhs) <= eval(node->rhs);
+                case ND_GT:
+                    return node->ty->is_unsigned ? (uint64_t)eval(node->lhs) > (uint64_t)eval(node->rhs)
+                                                 : eval(node->lhs) > eval(node->rhs);
+                default:
+                    return node->ty->is_unsigned ? (uint64_t)eval(node->lhs) >= (uint64_t)eval(node->rhs)
+                                                 : eval(node->lhs) >= eval(node->rhs);
+            }
         }
         case ND_LOGAND:
             return eval(node->lhs) && eval(node->rhs);
@@ -2093,9 +2114,24 @@ static int64_t eval_rval(Node *node, uint32_t *sym) {
 }
 
 // ConstExp ::= CondExp
+// Evaluate a full integer constant expression. Values wider than 64 bits
+// are constraint violations in their contexts (array sizes must fit
+// size_t, case values the switch type, enumerators the underlying type);
+// #if is the exception and pre-truncates its operands to uintmax_t.
+static int64_t eval_ice(Node *node) {
+    add_type(node);
+    if (is_bitint128(node->ty)) {
+        Int128 v = eval_int128(node);
+        if (!int128_fits(v, 64, node->ty->is_unsigned ? UNSIGNED : SIGNED))
+            error(node->tok, "integer constant expression does not fit in 64 bits");
+        return int128_to_i64(v);
+    }
+    return eval(node);
+}
+
 int64_t const_expr(Token **rest, Token *tok) {
     Node *node = conditional(rest, tok);
-    return eval(node);
+    return eval_ice(node);
 }
 
 // AsOP  ::= "=" | "*=" | "/=" | "%=" | "+=" | "-="
@@ -3596,7 +3632,7 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
         scope->vla_expr = vgrow(scope->vla_expr, scope->vla_num + 1);
         scope->vla_expr[scope->vla_num++] = expr;
     } else {
-        ty = array_of(ty, eval(len));
+        ty = array_of(ty, eval_ice(len));
     }
 
     ty->qual = qual;

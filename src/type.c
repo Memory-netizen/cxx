@@ -185,9 +185,12 @@ bool is_interchange(Type *ty) {
     return ty->kind == TY_F16 || ty->kind == TY_F32 || ty->kind == TY_F64 || ty->kind == TY_F128;
 }
 
-// Types whose constants are stored in node->fpval / CBits128: the
-// interchange types plus long double (whose format is target-dependent:
-// x87 80-bit on amd64, binary128 elsewhere).
+// The interchange types plus long double (whose format is
+// target-dependent: x87 80-bit on amd64, binary128 elsewhere). These
+// take the fp128 library paths (CBits128 codegen, Fp128 folding);
+// classic float/double also store constants in node->fpval but are
+// emitted as 16-digit double bit patterns and folded in the double
+// domain.
 bool is_fpval(Type *ty) { return is_interchange(ty) || ty->kind == TY_LDOUBLE; }
 
 FpFormat fmt_of(Type *ty) {
@@ -503,6 +506,8 @@ void check_binop(Node *node) {
             break;
         case ND_LT:
         case ND_LE:
+        case ND_GT:
+        case ND_GE:
             if (is_arith(lhs) && is_arith(rhs)) return;
             if (is_pointer(lhs) && is_pointer(rhs))
                 if (is_compatible(type_unqual(lhs->base), type_unqual(rhs->base))) return;
@@ -852,6 +857,8 @@ void add_type(Node *node) {
         case ND_NE:
         case ND_LT:
         case ND_LE:
+        case ND_GT:
+        case ND_GE:
             check_binop(node);
             lvalue_convert(&node->lhs);
             lvalue_convert(&node->rhs);

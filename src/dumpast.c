@@ -28,6 +28,8 @@ static const char *node_kind_name[] = {
     [ND_NE] = "NE",
     [ND_LT] = "LT",
     [ND_LE] = "LE",
+    [ND_GT] = "GT",
+    [ND_GE] = "GE",
     [ND_LEFT] = "LEFT",
     [ND_RIGHT] = "RIGHT",
     [ND_ADD] = "ADD",
@@ -296,6 +298,8 @@ static void dump_node(Node *node) {
         case ND_NE:
         case ND_LT:
         case ND_LE:
+        case ND_GT:
+        case ND_GE:
         case ND_LEFT:
         case ND_RIGHT:
         case ND_ADD:

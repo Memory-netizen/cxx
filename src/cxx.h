@@ -5,13 +5,7 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-#define BIT_HAS(bits, n) (((bits) & (n)) != 0)
-#define BIT_SET(bits, n) ((bits) |= (n))
-#define BIT_INTER(a, b) ((a) & (b))
-#define BIT_UNION(a, b) ((a) | (b))
-#define BIT_DIFF(a, b) ((a) & ~(b))
 #define BIT_SUPERSET(a, b) (((a) & (b)) == (b))
-#define BIT_SUBSET(a, b) (((a) & (b)) == (a))
 
 #ifndef __GNUC__
 #define __attribute__(x)
@@ -94,8 +88,6 @@ struct Target {
 };
 
 extern Target T;
-extern Type *ty_i1;
-int float_rank(Type *ty);
 extern Type *bitint[129][2];
 extern Type *f16;
 extern Type *f32;
@@ -104,7 +96,6 @@ extern Type *f128;
 
 // Helpers for the new arithmetic types (type.c)
 FpFormat fmt_of(Type *ty);
-bool is_new_flonum(Type *ty);
 int bitint_width(Type *ty);
 bool is_bitint128(Type *ty);
 int64_t norm_bits(int64_t v, int width, bool is_unsigned);
@@ -306,7 +297,7 @@ struct Token {
     Token *next;
     Token *origin;  // If this is expanded from a macro, the original token
     union {
-        uint32_t id;  // Uesd if kind == TK_IDENT (also TK_LINE line numbers);
+        uint32_t id;  // Used if kind == TK_IDENT (also TK_LINE line numbers);
         char *msg;    // Used if token is broken;
         Fp128 fpval;  // TK_NUM floating constants
         Int128 ival;  // TK_NUM integer constants and TK_CHARLIT values
@@ -318,7 +309,7 @@ struct Token {
     uint16_t len;
     union {
         // SUF_NONDEC is 0x800: needs more than 8 bits
-        uint16_t lit_suffix;  // Uesd if kind == TK_NUM
+        uint16_t lit_suffix;  // Used if kind == TK_NUM
         uint8_t enc_prefix;   // Used if kind == TK_CHARLIT or kind == TK_STRLIT
     };
     uint8_t kind;
@@ -428,6 +419,8 @@ typedef enum {
     ND_NE,       // !=
     ND_LT,       // <
     ND_LE,       // <=
+    ND_GT,       // >
+    ND_GE,       // >=
     ND_LEFT,     // <<
     ND_RIGHT,    // >>
     ND_ADD,      // +
@@ -528,16 +521,14 @@ struct Node {
         };
         struct {
             uint32_t label;
-            union {
-                Node *target;
-            };
+            Node *target;
             Node *goto_next;
             Node *loop_next;
+            Blk *blk;
             bool is_loop;
             bool is_switch;
             bool is_ref;
             bool is_addr;
-            Blk *blk;
         };
         struct {
             Sym *var;  // Used if kind == ND_VAR
@@ -593,7 +584,6 @@ typedef enum {
     TY_NONE,
     TY_VOID,
     TY_NULLPTR,
-    // TY_I1,
     TY_CHAR,
     TY_UCHAR,
     TY_SCHAR,
@@ -711,6 +701,7 @@ bool is_record(Type *ty);
 bool is_array(Type *ty);
 bool is_funcptr(Type *ty);
 bool is_compatible(Type *t1, Type *t2);
+int float_rank(Type *ty);
 void check_asop(Type *dst, Node *src, int ctx);
 Type *pointer_to(Type *base, uint32_t qual);
 Type *func_type(Type *return_ty);
@@ -824,7 +815,6 @@ struct Con {
     uint32_t sym;
     union {
         int64_t i;
-        double d;
         Int128 i128;  // _BitInt(65..128)
         Fp128 f128;   // fp128 / f16 / f32 / f64 bit patterns
     } bits;
