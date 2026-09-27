@@ -268,30 +268,69 @@ char *escape_char_to_string(char c) {
     return buffer;
 }
 
-Ref newcon(Con *c0, Module *md) {
-    Con *c1;
-    int i;
+static uint32_t con_hash(Con *c0) {
+    if (c0->type == CBits128)
+        return c0->bits.i128.limb[0] ^ c0->bits.i128.limb[1] ^
+               c0->bits.i128.limb[2] ^ c0->bits.i128.limb[3];
+    return (uint32_t)(c0->type * 0x9E3779B9u) ^ c0->sym ^ (uint32_t)c0->bits.i ^
+           (uint32_t)(c0->bits.i >> 32);
+}
 
-    for (i = 0; i < md->ncon; i++) {
-        c1 = &md->con[i];
-        if (c0->type != c1->type || c0->sym != c1->sym) continue;
-        if (c0->type == CBits128) {
-            if (memcmp(&c0->bits.i128, &c1->bits.i128, sizeof(Int128)) == 0) return CON(i, NULL);
-        } else if (c0->bits.i == c1->bits.i) {
-            return CON(i, NULL);
-        }
+static void con_rehash(Module *md, int cap) {
+    int *ht = vnew(cap, sizeof(int));
+    for (int i = 0; i < cap; i++) ht[i] = -1;
+    for (int i = 0; i < md->ncon; i++) {
+        Con *c = &md->con[i];
+        int h = con_hash(c) & (cap - 1);
+        c->hnext = ht[h];
+        ht[h] = i;
     }
+    md->con_ht = ht;
+    md->con_cap = cap;
+}
+
+static bool con_eq(Con *a, Con *b) {
+    if (a->type != b->type || a->sym != b->sym) return false;
+    if (a->type == CBits128)
+        return memcmp(&a->bits.i128, &b->bits.i128, sizeof(Int128)) == 0;
+    return a->bits.i == b->bits.i;
+}
+
+Ref newcon(Con *c0, Module *md) {
+    if (!md->con_ht)
+        con_rehash(md, 64);
+    else if (md->con_n >= md->con_cap * 2)
+        con_rehash(md, md->con_cap * 2);
+
+    int h = con_hash(c0) & (md->con_cap - 1);
+    for (int ci = md->con_ht[h]; ci >= 0; ci = md->con[ci].hnext)
+        if (con_eq(c0, &md->con[ci])) return CON(ci, NULL);
+
     md->con = vgrow(md->con, ++md->ncon);
+    int i = md->ncon - 1;
     md->con[i] = *c0;
+    md->con[i].hnext = md->con_ht[h];
+    md->con_ht[h] = i;
+    md->con_n++;
     return CON(i, NULL);
 }
 
 Ref getcon(int64_t val, Module *md) {
-    int c;
+    Con c0 = {.type = CBits, .bits.i = val};
+    if (!md->con_ht)
+        con_rehash(md, 64);
+    else if (md->con_n >= md->con_cap * 2)
+        con_rehash(md, md->con_cap * 2);
 
-    for (c = 0; c < md->ncon; c++)
-        if (md->con[c].type == CBits && md->con[c].bits.i == val) return CON(c, NULL);
+    int h = con_hash(&c0) & (md->con_cap - 1);
+    for (int ci = md->con_ht[h]; ci >= 0; ci = md->con[ci].hnext)
+        if (md->con[ci].type == CBits && md->con[ci].bits.i == val) return CON(ci, NULL);
+
     md->con = vgrow(md->con, ++md->ncon);
-    md->con[c] = (Con){.type = CBits, .bits.i = val};
-    return CON(c, NULL);
+    int i = md->ncon - 1;
+    md->con[i] = c0;
+    md->con[i].hnext = md->con_ht[h];
+    md->con_ht[h] = i;
+    md->con_n++;
+    return CON(i, NULL);
 }

@@ -553,7 +553,7 @@ static void dump_init(Initializer *init, Type *ty) {
                 }
                 print_type(mem->unit_ty);
                 fprintf(out_file, " ");
-                printcon(&(Con){CBits, 0, {val}}, mem->unit_ty);
+                printcon(&(Con){0, CBits, 0, {val}}, mem->unit_ty);
                 pos += mem->unit_ty->size;
                 mem = after;
             } else {

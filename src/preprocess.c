@@ -390,6 +390,7 @@ struct MacroArg {
 typedef Token *macro_handler_fn(Token **, Token *);
 struct Macro {
     Macro *next;
+    Macro *hnext;  // hash chain link
     uint32_t id;
     bool deleted;
     bool is_builtin;
@@ -426,14 +427,21 @@ static void push_disabled(uint32_t id) {
 
 static void pop_disabled() { hideset = hideset->next; }
 
+// Hash over macros (chain addressing): lookup stays O(1) even for
+// headers that define thousands of macros.
+static Macro **macro_ht;
+static int macro_cap;
+static int macro_n;
+
 static Macro *find_macro(Token *tok) {
     if (tok->kind != TK_IDENT) {
         tok->line_delta = line_delta;
         tok->filename = display_name;
         error(tok, "macro name must be an identifier");
     }
-    for (Macro *m = macros; m; m = m->next)
-        if (m->id == tok->id) return m->deleted ? NULL : m;
+    if (macro_ht)
+        for (Macro *m = macro_ht[tok->id & (macro_cap - 1)]; m; m = m->hnext)
+            if (m->id == tok->id) return m->deleted ? NULL : m;
     return NULL;
 }
 
@@ -445,6 +453,36 @@ static Macro *add_macro(uint32_t id, bool is_objlike, Token *body) {
 
     m->next = macros;
     macros = m;
+
+    if (!macro_ht) {
+        macro_cap = 256;
+        macro_ht = vnew(macro_cap, sizeof(Macro *));
+    } else if (macro_n >= macro_cap * 2) {
+        int cap = macro_cap * 2;
+        Macro **ht = vnew(cap, sizeof(Macro *));
+        Macro **tail = vnew(cap, sizeof(Macro *));
+        for (int i = 0; i < cap; i++) ht[i] = tail[i] = NULL;
+        for (int i = 0; i < macro_cap; i++)
+            for (Macro *x = macro_ht[i]; x;) {
+                Macro *next = x->hnext;  // saved before the link is rewired
+                int h = x->id & (cap - 1);
+                // tail-insert keeps the chain order: redefinitions must
+                // keep winning over their predecessors
+                x->hnext = NULL;
+                if (tail[h])
+                    tail[h]->hnext = x;
+                else
+                    ht[h] = x;
+                tail[h] = x;
+                x = next;
+            }
+        macro_ht = ht;
+        macro_cap = cap;
+    }
+    int h = id & (macro_cap - 1);
+    m->hnext = macro_ht[h];
+    macro_ht[h] = m;
+    macro_n++;
     return m;
 }
 

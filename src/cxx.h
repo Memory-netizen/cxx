@@ -807,6 +807,7 @@ enum {
 };
 
 struct Con {
+    int hnext;  // constant-pool hash chain (index into Module.con)
     enum {
         CUndef,
         CBits,
@@ -873,7 +874,7 @@ enum {
     })
 #define NULLPTR                                        \
     ({                                                 \
-        Ref tmp = newcon(&(Con){CAddr, 0, {0}}, curm); \
+        Ref tmp = newcon(&(Con){0, CAddr, 0, {0}}, curm); \
         tmp.ty = T.ty_nullptr;                         \
         tmp;                                           \
     })
@@ -930,6 +931,12 @@ struct Module {
     Type *tys;
     Con *con;
     int ncon;
+    // Hash over con (chain addressing, stored as indices so vgrow may
+    // relocate the array) so constant-pool dedup stays O(1) for
+    // modules with many globals/64-bit constants.
+    int *con_ht;
+    int con_cap;
+    int con_n;
     bool has_vla;
 };
 

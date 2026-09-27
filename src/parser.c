@@ -152,8 +152,9 @@ struct NameSpace {
 // NameSpace for struct, union or enum tags
 typedef struct TagNameSpace TagNameSpace;
 struct TagNameSpace {
-    TagNameSpace *next;
-    TagNameSpace *prev;  // Link multiple tags using the same identifier
+    TagNameSpace *next;   // declaration list link
+    TagNameSpace *hnext;  // hash chain link
+    TagNameSpace *prev;   // Link multiple tags using the same identifier
     uint32_t id;
     Type *ty;
     Token *loc;
@@ -174,6 +175,10 @@ struct Scope {
     int ht_cap;
     int ht_n;
     TagNameSpace *tags;
+    // Hash table over tags, same scheme.
+    TagNameSpace **tht;
+    int tht_cap;
+    int tht_n;
     int vla_num;
     Node **vla_expr;
     Sym *stack_top;
@@ -253,7 +258,14 @@ static NameSpace *find_ident(Token *tok, bool search_par, bool is_extern) {
 static TagNameSpace *find_tag(Token *tok, bool search_par) {
     Scope *sc = scope;
     while (sc) {
-        for (TagNameSpace *ns = sc->tags; ns; ns = ns->next)
+        TagNameSpace *hit = NULL;
+        if (sc->tht)
+            for (TagNameSpace *ns = sc->tht[tok->id & (sc->tht_cap - 1)]; ns; ns = ns->hnext)
+                if (tok->id == ns->id) {
+                    hit = ns;
+                    break;
+                }
+        for (TagNameSpace *ns = hit ?: sc->tags; ns; ns = ns->next)
             if (tok->id == ns->id) return ns;
         if (!search_par) return NULL;
         sc = sc->next;
@@ -276,11 +288,21 @@ static NameSpace *push_namespace(uint32_t id, SymKind kind, Type *ty, Token *loc
     } else if (scope->ht_n >= scope->ht_cap * 2) {
         int cap = scope->ht_cap * 2;
         NameSpace **ht = vnew(cap, sizeof(NameSpace *));
+        NameSpace **tail = vnew(cap, sizeof(NameSpace *));
+        for (int i = 0; i < cap; i++) ht[i] = tail[i] = NULL;
         for (int i = 0; i < scope->ht_cap; i++)
-            for (NameSpace *x = scope->ht[i]; x; x = x->hnext) {
+            for (NameSpace *x = scope->ht[i]; x;) {
+                NameSpace *next = x->hnext;  // saved before the link is rewired
                 int h = x->id & (cap - 1);
-                x->hnext = ht[h];
-                ht[h] = x;
+                // tail-insert keeps the chain order (newest declaration
+                // first, as in the vars list)
+                x->hnext = NULL;
+                if (tail[h])
+                    tail[h]->hnext = x;
+                else
+                    ht[h] = x;
+                tail[h] = x;
+                x = next;
             }
         scope->ht = ht;
         scope->ht_cap = cap;
@@ -300,6 +322,35 @@ static void push_tag_namespace(uint32_t id, Type *ty, Token *loc) {
     ns->next = scope->tags;
     scope->tags = ns;
     ty->id = id;
+
+    if (!scope->tht) {
+        scope->tht_cap = 64;
+        scope->tht = vnew(scope->tht_cap, sizeof(TagNameSpace *));
+    } else if (scope->tht_n >= scope->tht_cap * 2) {
+        int cap = scope->tht_cap * 2;
+        TagNameSpace **tht = vnew(cap, sizeof(TagNameSpace *));
+        TagNameSpace **tail = vnew(cap, sizeof(TagNameSpace *));
+        for (int i = 0; i < cap; i++) tht[i] = tail[i] = NULL;
+        for (int i = 0; i < scope->tht_cap; i++)
+            for (TagNameSpace *x = scope->tht[i]; x;) {
+                TagNameSpace *next = x->hnext;  // saved before the link is rewired
+                int h = x->id & (cap - 1);
+                // tail-insert keeps the chain order (newest tag first)
+                x->hnext = NULL;
+                if (tail[h])
+                    tail[h]->hnext = x;
+                else
+                    tht[h] = x;
+                tail[h] = x;
+                x = next;
+            }
+        scope->tht = tht;
+        scope->tht_cap = cap;
+    }
+    int h = id & (scope->tht_cap - 1);
+    ns->hnext = scope->tht[h];
+    scope->tht[h] = ns;
+    scope->tht_n++;
 }
 
 static Sym *new_var(uint32_t id, Type *ty) {
@@ -358,11 +409,19 @@ static Sym *new_string_literal(uint32_t id, Type *ty) {
     } else if (strlit_n >= strlit_cap * 2) {
         int cap = strlit_cap * 2;
         Sym **ht = vnew(cap, sizeof(Sym *));
+        Sym **tail = vnew(cap, sizeof(Sym *));
+        for (int i = 0; i < cap; i++) ht[i] = tail[i] = NULL;
         for (int i = 0; i < strlit_cap; i++)
-            for (Sym *x = strlit_ht[i]; x; x = x->str_next) {
+            for (Sym *x = strlit_ht[i]; x;) {
+                Sym *next = x->str_next;  // saved before the link is rewired
                 int h = x->init_data & (cap - 1);
-                x->str_next = ht[h];
-                ht[h] = x;
+                x->str_next = NULL;
+                if (tail[h])
+                    tail[h]->str_next = x;
+                else
+                    ht[h] = x;
+                tail[h] = x;
+                x = next;
             }
         strlit_ht = ht;
         strlit_cap = cap;
@@ -1161,7 +1220,7 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
         else
             u.val = eval2(init->expr, &sym);
 
-        Con *con = &(Con){sym ? CAddr : CBits, sym, {u.val}};
+        Con *con = &(Con){0, sym ? CAddr : CBits, sym, {u.val}};
 
         Ref r = newcon(con, curm);
         r.ty = ty;
