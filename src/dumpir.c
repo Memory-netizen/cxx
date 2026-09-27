@@ -187,12 +187,23 @@ static void printcon(Con *c, Type *ty) {
 static void print_operand(Ref r) {
     if (r.type == RCon) {
         printcon(&curm->con[r.val], r.ty);
+    } else if (r.type == RInt) {
+        if (is_flonum(r.ty)) {
+            // an integer immediate used as a floating constant: print
+            // the double bit pattern (e.g. fcmp with 0)
+            uint64_t b;
+            double d = (double)r.val;
+            memcpy(&b, &d, 8);
+            fprintf(out_file, "0x%016" PRIx64, b);
+        } else {
+            fprintf(out_file, "%d", r.val);
+        }
     } else if (r.type == RGlb) {
         fprintf(out_file, "@");
-        print_ident(r.val);
+        print_ident((uint32_t)r.val);
     } else if (r.type == RLabel) {
         fprintf(out_file, "blockaddress(@");
-        print_ident(r.val);
+        print_ident((uint32_t)r.val);
         fprintf(out_file, ", %%%d)", r.blk->blk_id);
     } else {
         fprintf(out_file, "%%%d", r.val);

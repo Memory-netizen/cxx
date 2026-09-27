@@ -676,6 +676,7 @@ static int int_rank(Type *ty) {
         case TY_LONG:
             return 3;
         case TY_INT:
+        case TY_ENUM:
             return 2;
         case TY_SHORT:
             return 1;
@@ -694,6 +695,27 @@ static Type *promote_bitint(Type *ty) {
         if (w <= 32) return T.ty_int;
     }
     return ty;
+}
+
+// The integer-domain view of a type after the integer promotions:
+// (bit width, signedness, resulting type). Small standard types
+// promote to int; _BitInt promotes per 6.3.1.1 (signed N <= 32 -> int,
+// unsigned N <= 31 -> int, N = 32 -> unsigned int); a wider _BitInt
+// keeps its declared width.
+typedef struct {
+    int width;
+    bool is_unsigned;
+    Type *ty;
+} IntSpec;
+
+static IntSpec int_spec(Type *ty) {
+    if (ty->kind & TY_BITINT) {
+        Type *p = promote_bitint(ty);
+        if (p != ty) return (IntSpec){p->size * 8, p->is_unsigned, p};
+        return (IntSpec){bitint_width(ty), ty->is_unsigned, ty};
+    }
+    if (ty->size < 4) return (IntSpec){32, false, T.ty_int};
+    return (IntSpec){ty->size * 8, ty->is_unsigned, ty};
 }
 
 static Type *get_common_type(Type *ty1, Type *ty2) {
@@ -720,35 +742,65 @@ static Type *get_common_type(Type *ty1, Type *ty2) {
     // Two _BitInt operands stay in the _BitInt domain (C23 6.3.1.8):
     // the wider type wins, on equal width the unsigned one wins.
     // Same-type pairs therefore keep their wrapping arithmetic.
+    // Compare by bit width, not byte size: _BitInt(3) and _BitInt(4)
+    // both occupy 1 byte but are different types.
     if ((ty1->kind & TY_BITINT) && (ty2->kind & TY_BITINT)) {
-        if (ty1->size != ty2->size) return ty1->size < ty2->size ? ty2 : ty1;
+        int w1 = bitint_width(ty1), w2 = bitint_width(ty2);
+        if (w1 != w2) return w1 < w2 ? ty2 : ty1;
         return ty2->is_unsigned ? ty2 : ty1;
     }
 
-    if (ty1->kind & TY_BITINT) ty1 = promote_bitint(ty1);
-    if (ty2->kind & TY_BITINT) ty2 = promote_bitint(ty2);
+    // Integer domain (clang-verified): reduce both sides to
+    // (width, signedness) after the integer promotions and pick the
+    // wider width. Equal widths: a standard type beats a _BitInt
+    // (unsigned _BitInt(64) + long long -> unsigned long long);
+    // standard pairs: unsigned wins, same-sign different kinds go to
+    // the higher rank.
+    IntSpec s1 = int_spec(ty1), s2 = int_spec(ty2);
 
-    if (ty1->kind & TY_BITINT || ty2->kind & TY_BITINT) {
-        // A wide _BitInt wins over standard integers; the standard side
-        // converts to the _BitInt type.
-        return (ty1->kind & TY_BITINT) ? ty1 : ty2;
+    if (s1.width != s2.width) return s1.width < s2.width ? s2.ty : s1.ty;
+
+    if ((s1.ty->kind & TY_BITINT) || (s2.ty->kind & TY_BITINT)) {
+        Type *std = (s1.ty->kind & TY_BITINT) ? s2.ty : s1.ty;
+        Type *b = (s1.ty->kind & TY_BITINT) ? s1.ty : s2.ty;
+        if (b->is_unsigned && !std->is_unsigned)
+            return std->kind == TY_LONG ? T.ty_ulong : std->kind == TY_INT ? T.ty_uint : T.ty_ullong;
+        return std;
     }
 
-    if (ty1->size < 4) ty1 = T.ty_int;
-    if (ty2->size < 4) ty2 = T.ty_int;
-
-    if (ty1->size != ty2->size) return (ty1->size < ty2->size) ? ty2 : ty1;
-
-    if (ty1->kind != ty2->kind) {
-        // Same size, different kinds (possible on ILP32: long vs int).
-        // Pick the higher rank; a tie goes to the unsigned type.
-        int k1 = int_rank(ty1), k2 = int_rank(ty2);
-        if (k1 != k2) return k1 < k2 ? ty2 : ty1;
-        return ty2->is_unsigned ? ty2 : ty1;
+    if (s1.ty->kind != s2.ty->kind) {
+        // Same width, different kinds. An enum keeps its own type when
+        // it ties with its underlying rank (clang: enum E + int stays
+        // enum E). Otherwise 6.3.1.8: if the unsigned operand's rank is
+        // >= the signed one's, the unsigned type wins; if not, the
+        // signed type cannot represent all values of the unsigned one
+        // at the same width, so both convert to the signed type's
+        // unsigned counterpart (unsigned long + long long ->
+        // unsigned long long).
+        int k1 = int_rank(s1.ty), k2 = int_rank(s2.ty);
+        if (k1 == k2) {
+            // An enum acts as its unsigned-rank-2 underlying here
+            // (clang): int + enum E -> enum E; uint + enum E -> uint.
+            bool eu1 = s1.ty->is_unsigned || s1.ty->kind == TY_ENUM;
+            bool eu2 = s2.ty->is_unsigned || s2.ty->kind == TY_ENUM;
+            if (eu1 != eu2) return eu1 ? s1.ty : s2.ty;
+            return s1.ty;
+        }
+        bool u1 = s1.ty->is_unsigned || s1.ty->kind == TY_ENUM;
+        bool u2 = s2.ty->is_unsigned || s2.ty->kind == TY_ENUM;
+        if (u1 != u2) {
+            // An enum acts as its unsigned-rank-2 underlying here
+            // (clang: enum E + long on ILP32 -> unsigned long).
+            Type *u = u1 ? s1.ty : s2.ty;
+            Type *sg = u1 ? s2.ty : s1.ty;
+            if (int_rank(u) >= int_rank(sg)) return u;
+            return sg->kind == TY_LONG ? T.ty_ulong : T.ty_ullong;
+        }
+        return k1 < k2 ? s2.ty : s1.ty;
     }
 
-    if (ty2->is_unsigned) return ty2;
-    return ty1;
+    if (s2.ty->is_unsigned) return s2.ty;
+    return s1.ty;
 }
 
 void integer_promotion(Node **expr) {

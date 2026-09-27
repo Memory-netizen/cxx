@@ -37,7 +37,11 @@ int main() {
     ASSERT(-50, (-100) / 2);
     ASSERT(2147483598, ((unsigned)-100) / 2);
     ASSERT((unsigned long)-1 / 2 - 49, ((unsigned long)-100) / 2);
+#if __SIZEOF_LONG__ == 8
     ASSERT(0, ((long)-1) / (unsigned)100);
+#else
+    ASSERT(42949672, ((long)-1) / (unsigned)100);  // ILP32: unsigned division
+#endif
     ASSERT(-2, (-100) % 7);
     ASSERT(2, ((unsigned)-100) % 7);
     ASSERT((unsigned long)-1 % 9, ((unsigned long)-100) % 9);

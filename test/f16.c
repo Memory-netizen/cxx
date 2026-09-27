@@ -58,6 +58,30 @@ int main() {
     ASSERT(1, sizeof(0.5f16 + 0.5f16) == 2);
     ASSERT(1, 0.5f16 + 0.5f16 == 1.0f16);
 
+    // === f16 <-> integer interactions (verified against gcc/clang) ===
+    // Mixed arithmetic: the integer converts INTO _Float16 (6.3.1.8);
+    // only float/double pull the f16 up (H.4.3 subset rule).
+    ASSERT(2, sizeof(1.5f16 + 1));
+    ASSERT(2, sizeof(1.5f16 + 1u));
+    ASSERT(2, sizeof(1.5f16 + 1LL));
+    ASSERT(2, sizeof(1.5f16 + (unsigned _BitInt(70))1));
+    ASSERT(4, sizeof(1.5f16 + 1.0f));
+    ASSERT(8, sizeof(1.5f16 + 1.0));
+    ASSERT(1, _Generic(1.5f16 + 1, _Float16: 1, default: 0));
+    ASSERT(1, _Generic(1.5f16 + 1.0f, float: 1, default: 0));
+    ASSERT(1, _Generic(1.5f16 + 1.0, double: 1, default: 0));
+    // int -> f16: round to nearest, overflow -> inf
+    ASSERT(2048.0f16, (_Float16)2049);
+    ASSERT(1, (_Float16)65536 > 65504.0f16);
+    ASSERT(1, (_Float16)0x7fffffff > 65504.0f16);
+    ASSERT(1, (_Float16)70000 > 65504.0f16);  // folded at compile time
+    ASSERT(-1.0f16, (_Float16)-1);
+    // f16 -> int: truncates toward zero
+    ASSERT(32768, (int)32768.0f16);
+    ASSERT(1, (short)1.5f16);
+    // mixed comparisons: int converts to f16
+    ASSERT(1, 32768.0f16 == 32768);
+
     printf("OK\n");
     return 0;
 }

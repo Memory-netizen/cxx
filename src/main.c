@@ -308,6 +308,11 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
+        if (!strcmp(argv[i], "-I")) {
+            include_paths[num_include_paths++] = argv[++i];
+            continue;
+        }
+
         if (!strncmp(argv[i], "-I", 2)) {
             include_paths[num_include_paths++] = argv[i] + 2;
             continue;

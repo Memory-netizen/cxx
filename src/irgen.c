@@ -388,8 +388,10 @@ static Ref gen_expr(Node *node) {
         case ND_EXCAST:
             return convert(node->lhs, node->ty);
         case ND_MEMZERO: {
+            // node->lhs is the ND_VAR node of the variable being
+            // zero-initialized; its type carries the region size.
             Ref addr = gen_expr(node->lhs);
-            Ref ops[] = {addr, INT(0), INT(node->var->ty->size)};
+            Ref ops[] = {addr, INT(0), INT(node->lhs->ty->size)};
             new_ins(IR_MEMSET, R, ops, 3);
             return R;
         }

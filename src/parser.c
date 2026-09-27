@@ -133,8 +133,9 @@ typedef enum {
 // or enum constants
 typedef struct NameSpace NameSpace;
 struct NameSpace {
-    NameSpace *next;
-    NameSpace *prev;  // Link multiple declarations using the same identifier
+    NameSpace *next;   // declaration list link
+    NameSpace *hnext;  // hash chain link
+    NameSpace *prev;   // Link multiple declarations using the same identifier
     SymKind kind;
     enum {
         LK_NONE,
@@ -167,6 +168,11 @@ struct Scope {
     // one is for struct/union/enum tags.
     // the other is for variables/function/enumerator/typedefs
     NameSpace *vars;
+    // Hash table over vars (chain addressing) so identifier lookup
+    // stays O(1) in scopes with many declarations.
+    NameSpace **ht;
+    int ht_cap;
+    int ht_n;
     TagNameSpace *tags;
     int vla_num;
     Node **vla_expr;
@@ -220,7 +226,14 @@ static Node *cur_sw;
 static NameSpace *find_ident(Token *tok, bool search_par, bool is_extern) {
     Scope *sc = scope;
     while (sc) {
-        for (NameSpace *ns = sc->vars; ns; ns = ns->next)
+        NameSpace *hit = NULL;
+        if (sc->ht)
+            for (NameSpace *ns = sc->ht[tok->id & (sc->ht_cap - 1)]; ns; ns = ns->hnext)
+                if (tok->id == ns->id) {
+                    hit = ns;
+                    break;
+                }
+        for (NameSpace *ns = hit ?: sc->vars; ns; ns = ns->next)
             if (tok->id == ns->id) {
                 if (!is_extern) return ns;
                 if (ns->lnk == LK_EXTERN || ns->lnk == LK_INTERN) return ns;
@@ -256,6 +269,26 @@ static NameSpace *push_namespace(uint32_t id, SymKind kind, Type *ty, Token *loc
     ns->loc = loc;
     ns->next = scope->vars;
     scope->vars = ns;
+
+    if (!scope->ht) {
+        scope->ht_cap = 64;
+        scope->ht = vnew(scope->ht_cap, sizeof(NameSpace *));
+    } else if (scope->ht_n >= scope->ht_cap * 2) {
+        int cap = scope->ht_cap * 2;
+        NameSpace **ht = vnew(cap, sizeof(NameSpace *));
+        for (int i = 0; i < scope->ht_cap; i++)
+            for (NameSpace *x = scope->ht[i]; x; x = x->hnext) {
+                int h = x->id & (cap - 1);
+                x->hnext = ht[h];
+                ht[h] = x;
+            }
+        scope->ht = ht;
+        scope->ht_cap = cap;
+    }
+    int h = id & (scope->ht_cap - 1);
+    ns->hnext = scope->ht[h];
+    scope->ht[h] = ns;
+    scope->ht_n++;
     return ns;
 }
 
@@ -310,11 +343,45 @@ static uint32_t new_unique_varname(uint32_t id) {
     return id;
 }
 
+// Identical string literals share one global (content is interned, so
+// the id is the content hash); generated files can repeat a literal
+// thousands of times, and each distinct global would otherwise cost a
+// linear constant-pool scan.
+static Sym **strlit_ht;
+static int strlit_cap;
+static int strlit_n;
+
 static Sym *new_string_literal(uint32_t id, Type *ty) {
+    if (!strlit_cap) {
+        strlit_cap = 64;
+        strlit_ht = vnew(strlit_cap, sizeof(Sym *));
+    } else if (strlit_n >= strlit_cap * 2) {
+        int cap = strlit_cap * 2;
+        Sym **ht = vnew(cap, sizeof(Sym *));
+        for (int i = 0; i < strlit_cap; i++)
+            for (Sym *x = strlit_ht[i]; x; x = x->str_next) {
+                int h = x->init_data & (cap - 1);
+                x->str_next = ht[h];
+                ht[h] = x;
+            }
+        strlit_ht = ht;
+        strlit_cap = cap;
+    }
+    int h = id & (strlit_cap - 1);
+    for (Sym *v = strlit_ht[h]; v; v = v->str_next)
+        // infer_strtype builds a fresh array Type per literal, but the
+        // element types are the canonical target singletons and the
+        // length follows from the interned content id: the element
+        // pointer alone distinguishes u8"x"/"x"/L"x"/U"x"/u"x".
+        if (v->init_data == id && v->ty->base == ty->base)
+            return v;
     uint32_t uid = new_unique_varname(intern(".str", 4));
     Sym *var = new_gvar(uid, ty);
     var->is_str = true;
     var->init_data = id;
+    var->str_next = strlit_ht[h];
+    strlit_ht[h] = var;
+    strlit_n++;
     return var;
 }
 

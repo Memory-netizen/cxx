@@ -363,9 +363,10 @@ typedef enum {
 // Variable or function
 struct Sym {
     Sym *next;
-    uint32_t id;  // Variable name
-    Type *ty;     // Type
-    int align;    // alignment
+    Sym *str_next;  // string-literal dedup chain
+    uint32_t id;    // Variable name
+    Type *ty;       // Type
+    int align;      // alignment
     SClass sclass;
 
     // Local variable
@@ -824,6 +825,7 @@ enum {
     RUndef,
     RTmp,
     RCon,
+    RInt,  // int32 immediate, encoded directly in val (no pool)
     RSlot,
     RGlb,
     RLabel,
@@ -840,18 +842,11 @@ enum {
 #define CON(x, ty) \
     (Ref) { RCon, x, ty, NULL }
 
-#define BOOL(x)                    \
-    ({                             \
-        Ref tmp = getcon(x, curm); \
-        tmp.ty = T.ty_bool;        \
-        tmp;                       \
-    })
-#define INT(x)                     \
-    ({                             \
-        Ref tmp = getcon(x, curm); \
-        tmp.ty = T.ty_int;         \
-        tmp;                       \
-    })
+// Small integer immediates are encoded directly in the Ref (RInt) and
+// never touch the constant pool; only values outside the int32 range
+// go through getcon/newcon.
+#define BOOL(x) ((Ref){RInt, (int32_t)(x), T.ty_bool, NULL})
+#define INT(x) ((Ref){RInt, (int32_t)(x), T.ty_int, NULL})
 #define LONG(x)                    \
     ({                             \
         Ref tmp = getcon(x, curm); \
@@ -885,7 +880,7 @@ enum {
 
 struct Ref {
     uint32_t type;
-    uint32_t val;
+    int32_t val;  // RTmp/RSlot id, RCon/RGlb index/id, RInt immediate
     Type *ty;
     Blk *blk;
 };

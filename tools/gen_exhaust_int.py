@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""Generate test/exhaust_int.c: exhaustive checks of the usual arithmetic
+conversions over the integer domain.
+
+Every ordered pair from the type universe below is checked with
+_Generic against the expected common type, where the expectation is
+computed by this script from the clang-verified rules:
+
+1. Two _BitInt operands stay in the _BitInt domain: the wider type
+   wins, on equal width the unsigned one wins.
+2. Otherwise both operands undergo the integer promotions (small
+   standard types -> int; _BitInt per 6.3.1.1: signed N <= 32 -> int,
+   unsigned N <= 31 -> int, N = 32 -> unsigned int).
+3. The wider (post-promotion) width wins.
+4. Equal width: a standard type beats a _BitInt (unsigned wins the
+   signedness resolution); standard pairs: unsigned wins, then rank.
+
+Pairs whose expectation depends on the long width are emitted under
+__SIZEOF_LONG__ conditionals so one file serves LP64 and ILP32 targets.
+
+The generated file is then compiled by clang as the reference: any
+wrong rule in this script shows up as a failing check there.
+"""
+
+STD = [
+    "_Bool",
+    "char",
+    "signed char",
+    "unsigned char",
+    "short",
+    "unsigned short",
+    "int",
+    "unsigned int",
+    "long",
+    "unsigned long",
+    "long long",
+    "unsigned long long",
+    "enum E",
+]
+
+# (width, unsigned) for _BitInt: signed 2..128, unsigned 1..128
+BITINTS = [("s", w) for w in range(2, 129)] + [("u", w) for w in range(1, 129)]
+
+RANK = {"int": 1, "unsigned int": 1, "long": 2, "unsigned long": 2,
+        "long long": 3, "unsigned long long": 3, "enum E": 1}
+
+
+def std_width(name, long_bits):
+    if name in ("int", "unsigned int", "enum E"):
+        return 32
+    if name in ("long", "unsigned long"):
+        return long_bits
+    return 64  # long long / unsigned long long
+
+
+def promote_bitint(w, u):
+    if u:
+        if w <= 31:
+            return ("std", "int")
+        if w == 32:
+            return ("std", "unsigned int")
+        return ("bitint", w, True)
+    if w <= 32:
+        return ("std", "int")
+    return ("bitint", w, False)
+
+
+def spec(t, long_bits):
+    """(kind, width, is_unsigned, type_name) after promotions."""
+    if t[0] == "bitint":
+        p = promote_bitint(t[1], t[2])
+        if p[0] == "std":
+            return p[0], 32, p[1] == "unsigned int", p[1]
+        return "bitint", t[1], t[2], bitint_name(t[1], t[2])
+    name = t[1]
+    if name in ("_Bool", "char", "signed char", "unsigned char",
+                "short", "unsigned short"):
+        return "std", 32, False, "int"
+    if name == "enum E":
+        # clang's underlying type for { E1 = 1 } is unsigned int; the
+        # result keeps the enum type when it lands on the underlying
+        return "std", 32, True, "enum E"
+    return "std", std_width(name, long_bits), \
+        name in ("unsigned int", "unsigned long", "unsigned long long"), name
+
+
+def bitint_name(w, u):
+    return ("unsigned _BitInt(%d)" if u else "_BitInt(%d)") % w
+
+
+def unsigned_counterpart(name):
+    if name == "int":
+        return "unsigned int"
+    if name == "long":
+        return "unsigned long"
+    return "unsigned long long"
+
+
+def common(t1, t2, long_bits):
+    """Returns the common type name, or None if it cannot be named."""
+    if t1[0] == "bitint" and t2[0] == "bitint":
+        w1, u1 = t1[1], t1[2]
+        w2, u2 = t2[1], t2[2]
+        if w1 > w2:
+            return bitint_name(w1, u1)
+        if w2 > w1:
+            return bitint_name(w2, u2)
+        return bitint_name(w1, u1 or u2)
+
+    k1, w1, u1, n1 = spec(t1, long_bits)
+    k2, w2, u2, n2 = spec(t2, long_bits)
+
+    if w1 != w2:
+        return n2 if w1 < w2 else n1
+
+    if k1 == "bitint" or k2 == "bitint":
+        # equal width: the standard type wins
+        if k1 == "std":
+            std, b = n1, (w2, u2, n2)
+        else:
+            std, b = n2, (w1, u1, n1)
+        if b[1] and not (std in ("unsigned int", "unsigned long",
+                                 "unsigned long long")):
+            return unsigned_counterpart(std)
+        return std
+
+    if n1 == n2:
+        return n1
+    u1 = u1 or n1 == "enum E"
+    u2 = u2 or n2 == "enum E"
+    if u1 != u2:
+        # one unsigned: it wins if its rank >= the signed side's;
+        # otherwise both convert to the unsigned counterpart of the
+        # signed type (unsigned long + long long -> unsigned long long)
+        uns, sig = (n1, n2) if u1 else (n2, n1)
+        if RANK[uns] >= RANK[sig]:
+            return uns
+        return unsigned_counterpart(sig)
+    # same signedness, different kinds: higher rank (int vs long on
+    # ILP32, long vs long long on LP64); a rank tie keeps the enum
+    return n2 if RANK[n1] < RANK[n2] else n1
+
+
+def cast(name):
+    # the operand is included so the macro only parenthesizes once:
+    # ((_Bool))1 would be an ambiguous type-name cast
+    return "(%s)1" % name
+
+
+def emit(out):
+    out.write("/* Generated by tools/gen_exhaust_int.py — do not edit.\n")
+    out.write(" * Exhaustive usual-arithmetic-conversion checks over the\n")
+    out.write(" * integer domain (clang-verified expectations). */\n")
+    out.write('#include "test.h"\n')
+    out.write("enum E { E1 = 1 };\n\n")
+    out.write("static int fails;\n\n")
+    out.write('#define T(x, y, e)                                                      \\\n'
+              '    do {                                                               \\\n'
+              '        if (!_Generic((x) + (y), e: 1, default: 0)) {                 \\\n'
+              '            fails++;                                                  \\\n'
+              '            printf("FAIL %s + %s => %d\\n", #x, #y,                  \\\n'
+              '                   (int)sizeof((x) + (y)));                           \\\n'
+              '        }                                                              \\\n'
+              '    } while (0)\n\n')
+    out.write("int main() {\n")
+    n = 0
+    for a in STD:
+        for b in STD:
+            e64 = common(("std", a), ("std", b), 64)
+            e32 = common(("std", a), ("std", b), 32)
+            n += emit_check(out, cast(a), cast(b), e64, e32)
+    for a in STD:
+        for (s, w) in BITINTS:
+            t = ("bitint", w, s == "u")
+            bn = bitint_name(w, s == "u")
+            # (std, bitint) and (bitint, std): both orders
+            n += emit_check(out, cast(a), cast(bn),
+                            common(("std", a), t, 64), common(("std", a), t, 32))
+            n += emit_check(out, cast(bn), cast(a),
+                            common(t, ("std", a), 64), common(t, ("std", a), 32))
+    for (s1, w1) in BITINTS:
+        t1 = ("bitint", w1, s1 == "u")
+        for (s2, w2) in BITINTS:
+            t2 = ("bitint", w2, s2 == "u")
+            n += emit_check(out, cast(bitint_name(w1, s1 == "u")),
+                            cast(bitint_name(w2, s2 == "u")),
+                            common(t1, t2, 64), common(t1, t2, 64))
+    out.write("    if (fails) {\n")
+    out.write('        printf("%d FAILURES\\n", fails);\n')
+    out.write("        return 1;\n")
+    out.write("    }\n")
+    out.write('    printf("OK\\n");\n')
+    out.write("    return 0;\n")
+    out.write("}\n")
+    return n
+
+
+def emit_check(out, c1, c2, e64, e32):
+    if e64 == e32:
+        out.write("    T(%s, %s, %s);\n" % (c1, c2, e64))
+    else:
+        out.write("#if __SIZEOF_LONG__ == 8\n")
+        out.write("    T(%s, %s, %s);\n" % (c1, c2, e64))
+        out.write("#else\n")
+        out.write("    T(%s, %s, %s);\n" % (c1, c2, e32))
+        out.write("#endif\n")
+    return 1
+
+
+if __name__ == "__main__":
+    import sys
+    with open("test/exhaust_int.c", "w") as f:
+        total = emit(f)
+    print("generated test/exhaust_int.c with %d checks" % total, file=sys.stderr)
