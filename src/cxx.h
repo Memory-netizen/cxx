@@ -394,6 +394,10 @@ struct Sym {
     Blk *start;
     Blk *end;
 
+    int num_blk;
+    int num_lbl;  // label blocks occupy blks[0..num_lbl)
+    Blk *blks;
+
     int num_indirectbr;
     Blk **indirectbr;
 };
@@ -527,7 +531,7 @@ struct Node {
             Node *target;
             Node *goto_next;
             Node *loop_next;
-            Blk *blk;
+            int blk_idx;  // label block: index into the fn->blks array
             bool is_loop;
             bool is_switch;
             bool is_ref;
@@ -835,27 +839,27 @@ enum {
 };
 
 #define R \
-    (Ref) { RUndef, 0, NULL, NULL }
+    (Ref) { RUndef, 0, NULL }
 #define TMP(x, ty) \
-    (Ref) { RTmp, x, ty, NULL }
+    (Ref) { RTmp, x, ty }
 #define SLOT(x, ty) \
-    (Ref) { RSlot, x, ty, NULL }
+    (Ref) { RSlot, x, ty }
 #define GLB(x, ty) \
-    (Ref) { RGlb, x, ty, NULL }
+    (Ref) { RGlb, x, ty }
 #define CON(x, ty) \
-    (Ref) { RCon, x, ty, NULL }
+    (Ref) { RCon, x, ty }
 
 // Small integer immediates are encoded directly in the Ref (RInt) and
 // never touch the constant pool; only values outside the int32 range
 // go through getcon/newcon.
-#define BOOL(x) ((Ref){RInt, (int32_t)(x), T.ty_bool, NULL})
-#define INT(x) ((Ref){RInt, (int32_t)(x), T.ty_int, NULL})
-#define LONG(x)                                                                                                   \
-    ({                                                                                                            \
-        Ref tmp = (int64_t)(x) >= INT_MIN && (int64_t)(x) <= INT_MAX ? (Ref){RInt, (int32_t)(x), T.ty_long, NULL} \
-                                                                     : getcon(x, curm);                           \
-        tmp.ty = T.ty_long;                                                                                       \
-        tmp;                                                                                                      \
+#define BOOL(x) ((Ref){RInt, (int32_t)(x), T.ty_bool})
+#define INT(x) ((Ref){RInt, (int32_t)(x), T.ty_int})
+#define LONG(x)                                                                                             \
+    ({                                                                                                      \
+        Ref tmp = (int64_t)(x) >= INT_MIN && (int64_t)(x) <= INT_MAX ? (Ref){RInt, (int32_t)(x), T.ty_long} \
+                                                                     : getcon(x, curm);                     \
+        tmp.ty = T.ty_long;                                                                                 \
+        tmp;                                                                                                \
     })
 #define FLOAT(x)                   \
     ({                             \
@@ -882,11 +886,14 @@ enum {
         tmp;                                              \
     })
 
+// 16 bytes on 64-bit hosts: passed/returned in two registers, while a
+// 24-byte struct would go through a hidden sret pointer (memory traffic
+// on every Ref passed by value in irgen/dumpir).
 struct Ref {
     uint32_t type;
-    int32_t val;  // RTmp/RSlot id, RCon/RGlb index/id, RInt immediate
+    int32_t val;  // RTmp/RSlot id, RCon/RGlb index/id, RInt immediate,
+                  // RLabel intern id of "fnname..idx"
     Type *ty;
-    Blk *blk;
 };
 
 static inline int refeq(Ref a, Ref b) { return a.type == b.type && a.val == b.val && a.ty == b.ty; }
@@ -908,6 +915,7 @@ struct Phi {
 };
 
 struct Blk {
+    int blk_no;
     int blk_id;
     Blk *next;
     Phi *phi;

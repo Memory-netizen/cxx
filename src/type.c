@@ -1004,6 +1004,8 @@ void add_type(Node *node) {
             if (node->body) {
                 Node *stmt = node->body;
                 while (stmt->next && stmt->next->kind != ND_SP_RESTORE) stmt = stmt->next;
+                // a trailing label wraps the value expression
+                if (stmt->kind == ND_LABEL || stmt->kind == ND_CASE) stmt = stmt->label_body;
                 if (stmt->kind == ND_EXPR_STMT && stmt->lhs) node->ty = stmt->lhs->ty;
             }
             break;

@@ -100,10 +100,14 @@ static int get_blkid(uint32_t fn_id, uint32_t lbl_id) {
     for (Sym *fn = curm->fns; fn; fn = fn->next)
         if (fn->id == fn_id) {
             for (Node *y = fn->labels; y; y = y->goto_next)
-                if (y->label == lbl_id) return y->blk->blk_id;
+                if (y->label == lbl_id) return fn->blks[y->blk_idx].blk_id;
         }
     return 0;
 }
+
+// Function whose body is being printed; RLabel refs (labels are
+// function-scoped) resolve their blk id through it.
+static Sym *dump_curf;
 
 static void print_label(Con *c, char *sym, char *dot) {
     *dot = '\0';
@@ -203,8 +207,8 @@ static void print_operand(Ref r) {
         print_ident((uint32_t)r.val);
     } else if (r.type == RLabel) {
         fprintf(out_file, "blockaddress(@");
-        print_ident((uint32_t)r.val);
-        fprintf(out_file, ", %%%d)", r.blk->blk_id);
+        print_ident(dump_curf->id);
+        fprintf(out_file, ", %%%d)", dump_curf->blks[r.val].blk_id);
     } else {
         fprintf(out_file, "%%%d", r.val);
     }
@@ -586,7 +590,9 @@ static void dump_init(Initializer *init, Type *ty) {
         return;
     }
     if (!init || !init->is_inited) {
-        fprintf(out_file, "0");
+        // zeroinitializer works for any type; the bare "0" was rejected
+        // for pointer globals (tentative definitions)
+        fprintf(out_file, "zeroinitializer");
         return;
     }
     if (init->ty->kind == TY_PTR && init->val->type == CBits) {
@@ -670,6 +676,7 @@ void dump_data(Sym *data) {
 }
 
 void dump_fn(Sym *fn) {
+    dump_curf = fn;
     if (!fn->is_defined) {
         fprintf(out_file, "declare ");
     } else {

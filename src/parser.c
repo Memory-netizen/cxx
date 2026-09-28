@@ -219,6 +219,14 @@ static Type *types;
 // Points to the function object the parser is currently parsing.
 static Sym *cur_fn;
 
+// Block accounting: the parser mirrors irgen's per-construct block
+// allocation so all blocks live in one per-function array
+// (Sym.blks). Every construct that gen_* allocates blocks for must
+// count here; irgen asserts the totals match.
+static void cnt_blk(int n) {
+    if (cur_fn) cur_fn->num_blk += n;
+}
+
 // Lists of all goto statements and labels in the curent function.
 static Node *gotos;
 static Node *labels;
@@ -1332,6 +1340,10 @@ static Node *generic_selection(Token **rest, Token *tok) {
 
     Node *ret_expr, *default_expr;
     Token *ret_tok = NULL, *default_tok = NULL;
+    // Accounting state before the default association; rolled back if a
+    // type association is selected instead.
+    int def_blk = 0, def_lbl = 0;
+    Node *def_labels = NULL, *def_gotos = NULL;
 
     while (!match(rest, tok, TK_RPAREN)) {
         Token *as_tok = tok = skip(tok, TK_COMMA);
@@ -1343,12 +1355,24 @@ static Node *generic_selection(Token **rest, Token *tok) {
             }
             default_tok = tok;
             tok = skip(tok->next, TK_COLON);
+            def_blk = cur_fn ? cur_fn->num_blk : 0;
+            def_lbl = cur_fn ? cur_fn->num_lbl : 0;
+            def_labels = labels;
+            def_gotos = gotos;
             default_expr = assign(&tok, tok);
             continue;
         }
 
         Type *t2 = typename(&tok, tok);
         tok = skip(tok, TK_COLON);
+
+        // Unselected associations are discarded after parsing: their
+        // block/label accounting must not leak into the function.
+        int saved_blk = cur_fn ? cur_fn->num_blk : 0;
+        int saved_lbl = cur_fn ? cur_fn->num_lbl : 0;
+        Node *saved_labels = labels;
+        Node *saved_gotos = gotos;
+
         Node *node = assign(&tok, tok);
         push_generic(t2, as_tok, gen);
         if (is_compatible(t1, t2)) {
@@ -1358,10 +1382,28 @@ static Node *generic_selection(Token **rest, Token *tok) {
             }
             ret_tok = as_tok;
             ret_expr = node;
+        } else {
+            if (cur_fn) {
+                cur_fn->num_blk = saved_blk;
+                cur_fn->num_lbl = saved_lbl;
+            }
+            labels = saved_labels;
+            gotos = saved_gotos;
         }
     }
 
-    if (ret_tok) return ret_expr;
+    if (ret_tok) {
+        if (default_tok) {
+            // the default association is discarded
+            if (cur_fn) {
+                cur_fn->num_blk = def_blk;
+                cur_fn->num_lbl = def_lbl;
+            }
+            labels = def_labels;
+            gotos = def_gotos;
+        }
+        return ret_expr;
+    }
     if (default_tok) return default_expr;
     error(start, "‘_Generic’ selector is not compatible with any association");
     return NULL;
@@ -1855,6 +1897,7 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
             lhs = new_sub(lhs, rhs, op_tok);
         else
             lhs = new_binary(expr_op, lhs, rhs, op_tok);
+        if (expr_op == ND_LOGOR || expr_op == ND_LOGAND) cnt_blk(2);  // gen_logor/gen_logand
 
         add_type(lhs);
     }
@@ -1881,6 +1924,7 @@ static Node *conditional(Token **rest, Token *tok) {
         rhs->cond = new_var_node(var, tok);
         rhs->then = new_var_node(var, tok);
         rhs->els = conditional(rest, tok->next->next);
+        cnt_blk(3);  // gen_cond: then / else / merge
         return new_binary(ND_COMMA, lhs, rhs, tok);
     }
 
@@ -1889,6 +1933,7 @@ static Node *conditional(Token **rest, Token *tok) {
     node->then = expr(&tok, tok->next);
     tok = skip(tok, TK_COLON);
     node->els = conditional(rest, tok);
+    cnt_blk(3);  // gen_cond: then / else / merge
     return node;
 }
 
@@ -2457,6 +2502,7 @@ static Node *if_stmt(Token **rest, Token *tok) {
     node->then = stmt(&tok, tok);
     // Else
     if (tok->kind == TK_ELSE) node->els = stmt(&tok, tok->next);
+    cnt_blk(node->els ? 3 : 2);  // gen_if: then / (else) / merge
     *rest = tok;
 
     Node *restore = leave_scope(tok);
@@ -2480,6 +2526,7 @@ static Node *switch_stmt(Token **rest, Token *tok) {
 
     // body
     node->body = stmt(rest, tok);
+    cnt_blk(1);  // gen_switch: merge (case labels count in label())
 
     brk_depth--;
     cur_sw = sw;
@@ -2506,6 +2553,7 @@ static Node *while_stmt(Token **rest, Token *tok) {
     tok = skip(tok, TK_RPAREN);
     // Body
     node->then = stmt(rest, tok);
+    cnt_blk(3);  // gen_while: cond / body / merge
 
     cont_depth--;
     brk_depth--;
@@ -2529,6 +2577,7 @@ static Node *do_stmt(Token **rest, Token *tok) {
     node->cond = expr(&tok, tok);
     tok = skip(tok, TK_RPAREN);
     *rest = skip(tok, TK_SEMI);
+    cnt_blk(3);  // gen_do: body / cond / merge
 
     cont_depth--;
     brk_depth--;
@@ -2565,6 +2614,7 @@ static Node *for_stmt(Token **rest, Token *tok) {
 
     // Body
     node->body = stmt(rest, tok);
+    cnt_blk(4);  // gen_for: cond / body / incr / merge
 
     cont_depth--;
     brk_depth--;
@@ -2701,6 +2751,7 @@ static void check_case(int64_t val, Token *tok) {
 // ConstRangeExp ::= ConstExp "..." ConstExp
 static Node *label(Token **rest, Token *tok) {
     Node dummy = {}, *cur = &dummy;
+    int idx = -1;
     while (1) {
         if (tok->kind == TK_IDENT && tok->next->kind == TK_COLON) {
             Node *node = new_node(ND_LABEL, tok);
@@ -2708,6 +2759,11 @@ static Node *label(Token **rest, Token *tok) {
             check_label(node->label, tok);
             node->goto_next = labels;
             labels = node;
+            if (idx < 0 && cur_fn) {
+                idx = cur_fn->num_lbl++;
+                cnt_blk(1);
+            }
+            node->blk_idx = idx;
 
             cur = cur->label_ring = node;
             tok = tok->next->next;
@@ -2722,6 +2778,11 @@ static Node *label(Token **rest, Token *tok) {
             Node *node = new_node(ND_CASE, tok);
             tok = skip(tok->next, TK_COLON);
             cur_sw->default_case = node;
+            if (idx < 0 && cur_fn) {
+                idx = cur_fn->num_lbl++;
+                cnt_blk(1);
+            }
+            node->blk_idx = idx;
             cur = cur->label_ring = node;
             continue;
         }
@@ -2735,6 +2796,11 @@ static Node *label(Token **rest, Token *tok) {
                 check_case(val1, tk_case);
                 Node *node = new_node(ND_CASE, tk_case);
                 node->ival = int128_set_i(val1);
+                if (idx < 0 && cur_fn) {
+                    idx = cur_fn->num_lbl++;
+                    cnt_blk(1);
+                }
+                node->blk_idx = idx;
 
                 node->case_next = cur_sw->case_next;
                 cur_sw->case_next = node;
@@ -2751,6 +2817,11 @@ static Node *label(Token **rest, Token *tok) {
                 check_case(i, tk_case);
                 Node *node = new_node(ND_CASE, tk_case);
                 node->ival = int128_set_i(i);
+                if (idx < 0 && cur_fn) {
+                    idx = cur_fn->num_lbl++;
+                    cnt_blk(1);
+                }
+                node->blk_idx = idx;
                 node->case_next = cur_sw->case_next;
                 cur_sw->case_next = node;
                 cur = cur->label_ring = node;
@@ -3889,6 +3960,8 @@ static Token *external_declaration(Token *tok) {
             var->is_defined = true;
             var->funcspec |= funcspec;
             cur_fn = var;
+            cur_fn->num_blk = 2;  // fn->start + fn->end
+            cur_fn->num_lbl = 0;
             locals = NULL;
             enter_scope();
 

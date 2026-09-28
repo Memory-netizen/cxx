@@ -456,6 +456,48 @@ int main() {
                r + 2;
            }));
 
+    // named break/continue on a non-head member of a label run
+    // (label_body is attached to the run's head only)
+    ASSERT(1, ({
+               int i, r = 0;
+           L3:
+           L4:
+               for (i = 0; i < 3; i++) {
+                   if (i == 1) break L4;
+                   r++;
+               }
+               r;
+           }));
+    ASSERT(2, ({
+               int i, r = 0;
+           L5:
+           L6:
+               for (i = 0; i < 3; i++) {
+                   if (i == 1) continue L6;
+                   r++;
+               }
+               r;
+           }));
+
+    // Computed goto ([GNU] &&label): blockaddress + indirectbr, and a
+    // local static initialized with &&label (the Con CAddr path)
+    ASSERT(0, ({
+               int r = 1;
+               void *p = &&L1;
+               goto *p;
+               r = 2;
+           L1:
+               r = 0;
+               r;
+           }));
+    ASSERT(1, ({
+               static void *p = &&L2;
+               goto *p;
+               return 2;
+           L2:
+               1;
+           }));
+
     ASSERT(0, 0.0 && 0.0);
     ASSERT(0, 0.0 && 0.1);
     ASSERT(0, 0.3 && 0.0);

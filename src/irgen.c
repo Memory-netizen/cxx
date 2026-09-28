@@ -33,9 +33,18 @@ static Ir *new_ins(IrKind op, Ref dst, Ref *args, uint32_t narg) {
     return new;
 }
 
+// All blocks of the current function live in one array (curf->blks,
+// counted by the parser); label blocks occupy [0, num_lbl), everything
+// else takes the remaining slots in generation order.
+static int blk_used;
+
 static Blk *new_blk(void) {
-    Blk *b = emalloc(sizeof(Blk));
+    // The parser's count is an upper bound; exceeding it means a
+    // construct was added to irgen without updating the parser.
+    assert(blk_used < curf->num_blk);
+    Blk *b = &curf->blks[blk_used++];
     b->pred = vnew(2, sizeof(Blk *));
+    b->blk_no = blk_used - 1;
     return b;
 }
 
@@ -369,8 +378,10 @@ static Ref gen_expr(Node *node) {
         case ND_LABEL_VAL:
             dst.type = RLabel;
             dst.ty = node->ty;
-            dst.val = curf->id;
-            dst.blk = node->target->blk;
+            // Labels are function-scoped: the index into fn->blks
+            // suffices. Global/static &&label initializers take the
+            // Con CAddr path ("fn..label"), not Ref.
+            dst.val = node->target->blk_idx;
             return dst;
         case ND_LVTOR: {
             int align = node->ty->align;
@@ -971,18 +982,8 @@ static void gen_do(Node *node) {
 static void gen_switch(Node *n) {
     Blk *merge_blk = new_blk();
     int i = 0;
-    for (Node *y = n->case_next; y; y = y->case_next) {
-        if (!y->blk) y->blk = new_blk();
-        Node *tmp = y->label_ring;
-        while (tmp != y) {
-            tmp->blk = y->blk;
-            tmp = tmp->label_ring;
-        }
-        ++i;
-    }
+    for (Node *y = n->case_next; y; y = y->case_next) ++i;
     curb->narg = i;
-
-    if (n->default_case && !n->default_case->blk) n->default_case->blk = new_blk();
 
     Blk *brk = brk_blk;
     n->brk_blk = brk_blk = merge_blk;
@@ -994,7 +995,7 @@ static void gen_switch(Node *n) {
     curb->jmp.args = emalloc(i * sizeof(Ref));
     curb->succ = emalloc(i * sizeof(Blk *));
     if (n->default_case)
-        curb->succ1 = n->default_case->blk;
+        curb->succ1 = &curf->blks[n->default_case->blk_idx];
     else
         curb->succ1 = merge_blk;
     add_pred(curb, curb->succ1);
@@ -1007,7 +1008,7 @@ static void gen_switch(Node *n) {
         Ref c = cond.ty->size == 8 ? LONG(int128_to_i64(y->ival)) : INT(int128_to_i64(y->ival));
         c.ty = cond.ty;
         curb->jmp.args[j] = c;
-        curb->succ[j] = y->blk;
+        curb->succ[j] = &curf->blks[y->blk_idx];
         add_pred(curb, curb->succ[j]);
         y = y->case_next;
     }
@@ -1023,27 +1024,29 @@ static void gen_switch(Node *n) {
     brk_blk = brk;
 }
 
-static void gen_label(Node *n) {
+static Ref gen_label(Node *n) {
+    Blk *b = &curf->blks[n->blk_idx];
     curb->jmp.type = IR_JMP;
-    curb->succ1 = n->blk;
-    add_pred(curb, curb->succ1);
-    curb = n->blk;
+    curb->succ1 = b;
+    add_pred(curb, b);
+    curb = b;
     insert_blk(curb);
-    gen_stmt(n->label_body);
+    return gen_stmt(n->label_body);
 }
 
-static void gen_case(Node *n) {
+static Ref gen_case(Node *n) {
+    Blk *b = &curf->blks[n->blk_idx];
     curb->jmp.type = IR_JMP;
-    curb->succ1 = n->blk;
-    add_pred(curb, curb->succ1);
-    curb = n->blk;
+    curb->succ1 = b;
+    add_pred(curb, b);
+    curb = b;
     insert_blk(curb);
-    gen_stmt(n->label_body);
+    return gen_stmt(n->label_body);
 }
 
 static void gen_goto(Node *n) {
     curb->jmp.type = IR_JMP;
-    curb->succ1 = n->target->blk;
+    curb->succ1 = &curf->blks[n->target->blk_idx];
     add_pred(curb, curb->succ1);
     curb = unreach;
 }
@@ -1060,22 +1063,24 @@ static void gen_indirectgoto(Node *n) {
     curb = unreach;
 }
 
+// The statement a named break/continue targets: the label run before
+// the loop. label_body is attached to the run's head only, so ring
+// members resolve through label_ring to the head.
+static Node *named_loop_body(Node *target) {
+    while (!target->label_body) target = target->label_ring;
+    return target->label_body;
+}
+
 static void gen_break(Node *n) {
     curb->jmp.type = IR_JMP;
-    if (n->target) {
-        Node *target = n->target;
-        while (target->kind == ND_LABEL) target = target->label_body;
-        curb->succ1 = target->brk_blk;
-    } else {
-        curb->succ1 = brk_blk;
-    }
+    curb->succ1 = n->target ? named_loop_body(n->target)->brk_blk : brk_blk;
     add_pred(curb, curb->succ1);
     curb = unreach;
 }
 
 static void gen_continue(Node *n) {
     curb->jmp.type = IR_JMP;
-    curb->succ1 = n->target ? n->target->label_body->cont_blk : cont_blk;
+    curb->succ1 = n->target ? named_loop_body(n->target)->cont_blk : cont_blk;
     add_pred(curb, curb->succ1);
     curb = unreach;
 }
@@ -1113,8 +1118,7 @@ static Ref gen_stmt(Node *node) {
             gen_switch(node);
             break;
         case ND_CASE:
-            gen_case(node);
-            break;
+            return gen_case(node);
         case ND_GOTO:
             gen_goto(node);
             break;
@@ -1128,8 +1132,7 @@ static Ref gen_stmt(Node *node) {
             gen_continue(node);
             break;
         case ND_LABEL:
-            gen_label(node);
-            break;
+            return gen_label(node);
         case ND_DECL:
         case ND_COMP_STMT:
             for (Node *n = node->body; n; n = n->next) reg = gen_stmt(n);
@@ -1153,24 +1156,22 @@ Module *irgen(Module *md) {
         curf = fn;
         uint32_t nparam = tmp_id = fn->ty->nparam;
         tail = &dummy;
+        // The parser counted every block (labels at parse time, the
+        // rest per construct); allocate the array once and fill it in
+        // generation order. Label blocks take [0, num_lbl).
+        fn->blks = emalloc(fn->num_blk * sizeof(Blk));
+        for (int i = 0; i < fn->num_blk; i++) fn->blks[i].pred = vnew(2, sizeof(Blk *));
+        blk_used = fn->num_lbl;
         fn->start = new_blk();
         fn->end = new_blk();
         int num_indirectgoto = 0;
-        for (Node *y = fn->labels; y; y = y->goto_next) {
+        for (Node *y = fn->labels; y; y = y->goto_next)
             if (y->is_addr) num_indirectgoto++;
-            if (y->blk) continue;
-            y->blk = new_blk();
-            Node *tmp = y->label_ring;
-            while (tmp != y) {
-                tmp->blk = y->blk;
-                tmp = tmp->label_ring;
-            }
-        }
         fn->num_indirectbr = num_indirectgoto;
         fn->indirectbr = emalloc(num_indirectgoto * sizeof(Blk *));
         for (Node *y = fn->labels; num_indirectgoto && y; y = y->goto_next) {
             if (!y->is_addr) continue;
-            fn->indirectbr[--num_indirectgoto] = y->blk;
+            fn->indirectbr[--num_indirectgoto] = &fn->blks[y->blk_idx];
         }
         brk_blk = cont_blk = NULL;
 
@@ -1210,6 +1211,10 @@ Module *irgen(Module *md) {
         if (is_valid) ret_val = load(SLOT(nparam + 1, pointer_to(ty, 0)), ty, ty->align, NULL);
         curb->jmp.type = IR_RET;
         curb->jmp.arg = ret_val;
+
+        // The parser's count is an upper bound: folding, dead-code
+        // elimination and block merging only remove blocks.
+        assert(blk_used <= fn->num_blk);
     }
     return md;
 }
