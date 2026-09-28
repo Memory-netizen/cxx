@@ -373,6 +373,32 @@ int main() {
                i;
            }));
 
+    // 64-bit switch operands: the case values must match the operand
+    // type in the IR (rv32 caught i32 cases on an i64 switch)
+    ASSERT(2, ({
+               int i = 0;
+               long long x = 5;
+               switch (x) {
+                   case 3000000000LL:
+                       i = 1;
+                       break;
+                   case 5LL:
+                       i = 2;
+                       break;
+               }
+               i;
+           }));
+    ASSERT(1, ({
+               int i = 0;
+               unsigned long long x = 0xffffffffffffffffULL;
+               switch (x) {
+                   case 0xffffffffffffffffULL:
+                       i = 1;
+                       break;
+               }
+               i;
+           }));
+
     ASSERT(7, ({
                int i = 0;
                int j = 0;

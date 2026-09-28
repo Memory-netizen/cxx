@@ -65,6 +65,19 @@ int main() {
     ASSERT(1, 1.0f128 / 0.0f128 > 0);     // inf
     ASSERT(1, -(1.0f128 / 0.0f128) < 0);  // -inf
 
+    // === NaN comparison semantics (unordered compares false) ===
+    _Float128 nan = 0.0f128 / 0.0f128;
+    ASSERT(0, nan > 1.0f128);
+    ASSERT(0, nan >= 1.0f128);
+    ASSERT(0, nan < 1.0f128);
+    ASSERT(0, nan <= 1.0f128);
+    ASSERT(0, nan == 1.0f128);
+    ASSERT(1, nan != 1.0f128);
+    ASSERT(0, nan > nan);
+    ASSERT(0, nan >= nan);
+    ASSERT(1, nan != nan);
+    ASSERT(0, nan >= (1.0f128 / 0.0f128));  // NaN vs inf
+
     printf("OK\n");
     return 0;
 }

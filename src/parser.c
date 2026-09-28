@@ -37,7 +37,6 @@ static Node *cast(Token **rest, Token *tok);
 static int64_t eval(Node *node);
 static int64_t eval2(Node *node, uint32_t *sym);
 static int64_t eval_rval(Node *node, uint32_t *sym);
-static double eval_double(Node *node);
 static Fp128 eval_fp128(Node *node);
 static Int128 eval_int128(Node *node);
 static void array_initializer2(Token **rest, Token *tok, Initializer *init, int i);
@@ -1214,10 +1213,12 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
             return;
         }
 
-        if (is_flonum(ty))
-            u.fval = eval_double(init->expr);
-        else
+        if (is_flonum(ty)) {
+            uint64_t b = fp128_to_fp64_bits(eval_fp128(init->expr));
+            memcpy(&u.fval, &b, 8);
+        } else {
             u.val = eval2(init->expr, &sym);
+        }
 
         Con *con = &(Con){0, sym ? CAddr : CBits, sym, {u.val}};
 
@@ -1893,55 +1894,14 @@ static Node *conditional(Token **rest, Token *tok) {
 
 // Evaluate a given node as a constant expression.
 //
-// A constant expression is either just a number or ptr+n where ptr
-// is a pointer to a global variable and n is a postiive/negative
-// number. The latter form is accepted only as an initialization
-// expression for a global variable.
-static double eval_double(Node *node) {
-    add_type(node);
-    if (is_integer(node->ty)) {
-        if (node->ty->is_unsigned) return (unsigned long)eval(node);
-        return eval(node);
-    }
-    switch (node->kind) {
-        case ND_ADD:
-            return eval_double(node->lhs) + eval_double(node->rhs);
-        case ND_SUB:
-            return eval_double(node->lhs) - eval_double(node->rhs);
-        case ND_MUL:
-            return eval_double(node->lhs) * eval_double(node->rhs);
-        case ND_DIV:
-            return eval_double(node->lhs) / eval_double(node->rhs);
-        case ND_NEG:
-            return -eval_double(node->lhs);
-        case ND_COND:
-            return eval_double(node->cond) ? eval_double(node->then) : eval_double(node->els);
-        case ND_COMMA:
-            return eval_double(node->rhs);
-        case ND_IMCAST:
-        case ND_EXCAST:
-            if (is_flonum(node->lhs->ty)) return eval_double(node->lhs);
-            return eval(node->lhs);
-        case ND_NUM: {
-            uint64_t b = fp128_to_fp64_bits(node->fpval);
-            double d;
-            memcpy(&d, &b, 8);
-            return d;
-        }
-        default:
-            break;
-    }
-    error(node->tok, "not a compile-time constant");
-    return 0;
-}
-
-// Compile-time evaluation in the fp128 domain for the interchange
-// types and long double (is_fpval).
+// Compile-time evaluation in the Fp128 domain for every floating
+// format (all float constants live in node->fpval, already rounded to
+// their declared format).
 static Fp128 eval_fp128(Node *node) {
     add_type(node);
     switch (node->kind) {
         case ND_NUM:
-            if (is_fpval(node->ty)) return node->fpval;
+            if (is_flonum(node->ty)) return node->fpval;
             break;
         case ND_ADD:
             return fp128_add(eval_fp128(node->lhs), eval_fp128(node->rhs));
@@ -1952,24 +1912,23 @@ static Fp128 eval_fp128(Node *node) {
         case ND_DIV: {
             Fp128 r = eval_fp128(node->rhs);
             if (fp128_is_zero(r)) error(node->tok, "division by zero");
-            return fp128_div(eval_fp128(node->lhs), r);
+            return fp128_div_rounded(eval_fp128(node->lhs), r, fmt_of(node->ty));
         }
         case ND_NEG:
             return fp128_neg(eval_fp128(node->lhs));
         case ND_COND:
-            return fp128_is_zero(eval_fp128(node->cond)) ? eval_fp128(node->els) : eval_fp128(node->then);
+            // The condition may be an integer (0/1 selects the branch).
+            if (is_flonum(node->cond->ty))
+                return fp128_is_zero(eval_fp128(node->cond)) ? eval_fp128(node->els) : eval_fp128(node->then);
+            return eval(node->cond) ? eval_fp128(node->then) : eval_fp128(node->els);
         case ND_COMMA:
-            eval_fp128(node->lhs);
+            eval(node->lhs);
             return eval_fp128(node->rhs);
         case ND_IMCAST:
         case ND_EXCAST: {
-            // Source may be an integer (or a float of another format).
-            if (is_flonum(node->lhs->ty)) {
-                if (is_fpval(node->lhs->ty)) return fp128_round_to(eval_fp128(node->lhs), fmt_of(node->ty));
-                uint64_t b;
-                memcpy(&b, &(double){eval_double(node->lhs)}, 8);
-                return fp128_round_to(fp128_from_fp64(b), fmt_of(node->ty));
-            }
+            // Source may be an integer (or a float of another format);
+            // round once to the target format.
+            if (is_flonum(node->lhs->ty)) return fp128_round_to(eval_fp128(node->lhs), fmt_of(node->ty));
             Int128 iv = is_bitint128(node->lhs->ty)  ? eval_int128(node->lhs)
                         : node->lhs->ty->is_unsigned ? int128_set_ui((uint64_t)eval(node->lhs))
                                                      : int128_set_i(eval(node->lhs));
@@ -2021,6 +1980,39 @@ static Int128 eval_int128(Node *node) {
             return int128_shl(eval_int128(node->lhs), (int)eval(node->rhs));
         case ND_RIGHT:
             return int128_shr(eval_int128(node->lhs), (int)eval(node->rhs), node->ty->is_unsigned ? UNSIGNED : SIGNED);
+        case ND_NOT:
+            return int128_set_i(int128_is_zero(eval_int128(node->lhs)));
+        case ND_EQ:
+        case ND_NE:
+        case ND_LT:
+        case ND_LE:
+        case ND_GT:
+        case ND_GE: {
+            Int128 l = eval_int128(node->lhs), r = eval_int128(node->rhs);
+            int c = node->lhs->ty->is_unsigned ? int128_cmp_unsigned(l, r) : int128_cmp_signed(l, r);
+            switch (node->kind) {
+                case ND_EQ:
+                    return int128_set_i(c == 0);
+                case ND_NE:
+                    return int128_set_i(c != 0);
+                case ND_LT:
+                    return int128_set_i(c < 0);
+                case ND_LE:
+                    return int128_set_i(c <= 0);
+                case ND_GT:
+                    return int128_set_i(c > 0);
+                default:
+                    return int128_set_i(c >= 0);
+            }
+        }
+        case ND_LOGAND: {
+            if (int128_is_zero(eval_int128(node->lhs))) return int128_set_i(0);
+            return int128_set_i(!int128_is_zero(eval_int128(node->rhs)));
+        }
+        case ND_LOGOR: {
+            if (!int128_is_zero(eval_int128(node->lhs))) return int128_set_i(1);
+            return int128_set_i(!int128_is_zero(eval_int128(node->rhs)));
+        }
         case ND_COND:
             return int128_is_zero(eval_int128(node->cond)) ? eval_int128(node->els) : eval_int128(node->then);
         case ND_COMMA:
@@ -2064,18 +2056,16 @@ static int64_t eval(Node *node) { return eval2(node, NULL); }
 
 static int64_t eval2(Node *node, uint32_t *sym) {
     add_type(node);
-    if (is_fpval(node->ty)) {
-        Fp128 v = eval_fp128(node);
-        // Return the low 64 bits; full-precision contexts use eval_fp128
-        // directly.
-        return (int64_t)v.limb[0] | ((int64_t)v.limb[1] << 32);
+    if (is_flonum(node->ty)) {
+        // Every floating format evaluates in the Fp128 domain; int64
+        // contexts take the double bit pattern of the result.
+        return (int64_t)fp128_to_fp64_bits(eval_fp128(node));
     }
     if (is_bitint128(node->ty)) {
         // #if (and other int64 const-expr contexts) takes the value
         // truncated to 64 bits.
         return int128_to_i64(int128_normalize(eval_int128(node), 64, UNSIGNED));
     }
-    if (is_flonum(node->ty)) return eval_double(node);
 
     switch (node->kind) {
         case ND_NUM:
@@ -2083,50 +2073,34 @@ static int64_t eval2(Node *node, uint32_t *sym) {
         case ND_PLUS:
             return eval(node->lhs);
         case ND_NEG:
-            return -eval(node->lhs);
-        case ND_NOT:
-            return !eval(node->lhs);
         case ND_INVERT:
-            return ~eval(node->lhs);
+        // Integer arithmetic runs in the Int128 domain; the 64-bit
+        // truncation reproduces the wrap of the standard types.
+        case ND_ADD:
+        case ND_SUB:
+        case ND_MUL:
+        case ND_DIV:
+        case ND_MOD:
+        case ND_BAND:
+        case ND_BOR:
+        case ND_XOR:
+        case ND_LEFT:
+        case ND_RIGHT:
+            return int128_to_i64(int128_normalize(eval_int128(node), 64, UNSIGNED));
+        case ND_NOT:
+            return int128_is_zero(eval_int128(node->lhs)) ? 1 : 0;
         case ND_COMMA:
             eval(node->lhs);
             return eval2(node->rhs, sym);
-        case ND_ADD:
-            return eval(node->lhs) + eval(node->rhs);
-        case ND_SUB:
-            return eval(node->lhs) - eval(node->rhs);
-        case ND_MUL:
-            return eval(node->lhs) * eval(node->rhs);
-        case ND_DIV: {
-            int64_t right = eval(node->rhs);
-            if (right == 0) error(node->tok, "division by zero");
-            if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) / (uint64_t)right;
-            return eval(node->lhs) / right;
-        }
-        case ND_MOD: {
-            int64_t right = eval(node->rhs);
-            if (right == 0) error(node->tok, "division by zero");
-            if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) % (uint64_t)right;
-            return eval(node->lhs) % right;
-        }
-        case ND_BAND:
-            return eval(node->lhs) & eval(node->rhs);
-        case ND_BOR:
-            return eval(node->lhs) | eval(node->rhs);
-        case ND_XOR:
-            return eval(node->lhs) ^ eval(node->rhs);
-        case ND_LEFT:
-            return eval(node->lhs) << eval(node->rhs);
-        case ND_RIGHT:
-            if (node->ty->is_unsigned) return (uint64_t)eval(node->lhs) >> eval(node->rhs);
-            return eval(node->lhs) >> eval(node->rhs);
         case ND_EQ:
         case ND_NE:
         case ND_LT:
         case ND_LE:
         case ND_GT:
         case ND_GE: {
-            if (is_fpval(node->lhs->ty)) {
+            if (is_flonum(node->lhs->ty)) {
+                // fp128_cmp returns 2 for unordered (NaN), which must
+                // compare false for every ordered predicate.
                 int c = fp128_cmp(eval_fp128(node->lhs), eval_fp128(node->rhs));
                 switch (node->kind) {
                     case ND_EQ:
@@ -2134,13 +2108,13 @@ static int64_t eval2(Node *node, uint32_t *sym) {
                     case ND_NE:
                         return c != 0;
                     case ND_LT:
-                        return c < 0;
+                        return c == -1;
                     case ND_LE:
-                        return c <= 0;
+                        return c == -1 || c == 0;
                     case ND_GT:
-                        return c > 0;
+                        return c == 1;
                     default:
-                        return c >= 0;
+                        return c == 0 || c == 1;
                 }
             }
             if ((node->lhs->ty->kind & TY_BITINT) || (node->rhs->ty->kind & TY_BITINT)) {
@@ -2181,24 +2155,38 @@ static int64_t eval2(Node *node, uint32_t *sym) {
                                                  : eval(node->lhs) >= eval(node->rhs);
             }
         }
-        case ND_LOGAND:
-            return eval(node->lhs) && eval(node->rhs);
-        case ND_LOGOR:
-            return eval(node->lhs) || eval(node->rhs);
+        case ND_LOGAND: {
+            bool l = is_flonum(node->lhs->ty) ? !fp128_is_zero(eval_fp128(node->lhs))
+                                              : !int128_is_zero(eval_int128(node->lhs));
+            if (!l) return 0;
+            bool r = is_flonum(node->rhs->ty) ? !fp128_is_zero(eval_fp128(node->rhs))
+                                              : !int128_is_zero(eval_int128(node->rhs));
+            return r;
+        }
+        case ND_LOGOR: {
+            bool l = is_flonum(node->lhs->ty) ? !fp128_is_zero(eval_fp128(node->lhs))
+                                              : !int128_is_zero(eval_int128(node->lhs));
+            if (l) return 1;
+            bool r = is_flonum(node->rhs->ty) ? !fp128_is_zero(eval_fp128(node->rhs))
+                                              : !int128_is_zero(eval_int128(node->rhs));
+            return r;
+        }
         case ND_COND:
+            if (is_flonum(node->cond->ty))
+                return fp128_is_zero(eval_fp128(node->cond)) ? eval2(node->els, sym) : eval2(node->then, sym);
             return eval(node->cond) ? eval2(node->then, sym) : eval2(node->els, sym);
         case ND_PTRADD:
             return eval2(node->lhs, sym) + eval(node->rhs) * node->ty->base->size;
         case ND_IMCAST:
         case ND_EXCAST: {
-            if (is_fpval(node->lhs->ty)) {
+            if (is_flonum(node->lhs->ty)) {
                 bool ok;
                 Int128 v = fp128_to_int128(eval_fp128(node->lhs), node->ty->is_unsigned ? UNSIGNED : SIGNED, &ok);
                 if (!ok) error(node->tok, "floating constant out of range");
                 return int128_to_i64(v);
             }
             if (is_bitint128(node->lhs->ty)) {
-                return int128_to_i64(eval_int128(node->lhs));
+                return int128_to_i64(int128_normalize(eval_int128(node->lhs), 64, UNSIGNED));
             }
             int64_t val = eval2(node->lhs, sym);
             return eval_ty(val, node->ty);

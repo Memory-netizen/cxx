@@ -54,6 +54,13 @@ int main() {
     // _BitInt(3) is NOT promoted: it occupies the slot as-is
     ASSERT(5, read_first_int(0, (_BitInt(3))5));
 
+    // === Correctly rounded division (exact rational expectations) ===
+    ASSERT(1, 1234567.0f32 / 891.0f32 == 0x1.5a6636p+10f32);
+    ASSERT(1, 76543.0f32 / 210.0f32 == 0x1.6c7d9p+8f32);
+    ASSERT(1, 999983.0f32 / 61.0f32 == 0x1.0024a8p+14f32);
+    ASSERT(1, 1.0f32 / 3.0f32 == 0x1.555556p-2f32);
+    ASSERT(1, 1.0f32 / 10.0f32 == 0x1.99999ap-4f32);
+
     printf("OK\n");
     return 0;
 }

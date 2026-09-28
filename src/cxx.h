@@ -302,11 +302,11 @@ struct Token {
         Fp128 fpval;  // TK_NUM floating constants
         Int128 ival;  // TK_NUM integer constants and TK_CHARLIT values
     };
-    SrcFile *file;      // Source location
-    uint32_t loc;       // byte offset into file->contents
+    SrcFile *file;  // Source location
+    uint32_t loc;   // byte offset into file->contents
+    uint32_t len;
     uint32_t filename;  // Diagnostic filename
     int32_t line_delta;
-    uint16_t len;
     union {
         // SUF_NONDEC is 0x800: needs more than 8 bits
         uint16_t lit_suffix;  // Used if kind == TK_NUM
@@ -850,11 +850,12 @@ enum {
 // go through getcon/newcon.
 #define BOOL(x) ((Ref){RInt, (int32_t)(x), T.ty_bool, NULL})
 #define INT(x) ((Ref){RInt, (int32_t)(x), T.ty_int, NULL})
-#define LONG(x)                    \
-    ({                             \
-        Ref tmp = getcon(x, curm); \
-        tmp.ty = T.ty_long;        \
-        tmp;                       \
+#define LONG(x)                                                                                                   \
+    ({                                                                                                            \
+        Ref tmp = (int64_t)(x) >= INT_MIN && (int64_t)(x) <= INT_MAX ? (Ref){RInt, (int32_t)(x), T.ty_long, NULL} \
+                                                                     : getcon(x, curm);                           \
+        tmp.ty = T.ty_long;                                                                                       \
+        tmp;                                                                                                      \
     })
 #define FLOAT(x)                   \
     ({                             \

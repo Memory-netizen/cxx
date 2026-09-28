@@ -33,6 +33,17 @@ int main() {
     ASSERT(1, _Generic(0.5f64, _Float64: 1, default: 0));
     ASSERT(1, _Generic(0.5f64 + 0.25, _Float64: 1, default: 0));
 
+    // === Correctly rounded division (exact rational expectations) ===
+    ASSERT(1, 123456789.0f64 / 987654321.0f64 == 0x1.ffffffb1b9669p-4f64);
+    ASSERT(1, 9007199254740993.0f64 / 9007199254740991.0f64 == 0x1.0000000000001p+0f64);
+    // 9007199254740993 = 2^53+1 needs 54 bits: it rounds to 2^53
+    // (halfway, ties-to-even), so this divides 2^53 by 7. The fp128
+    // quotient 0x1.2492492492492DB6...p+50 has guard=0 at bit 53 and
+    // rounds down; a round-to-fp128-then-narrow path would round up.
+    ASSERT(1, 9007199254740993.0f64 / 7.0f64 == 0x1.2492492492492p+50f64);
+    ASSERT(1, 1.0f64 / 3.0f64 == 0x1.5555555555555p-2f64);
+    ASSERT(1, 1.0f64 / 10.0f64 == 0x1.999999999999ap-4f64);
+
     printf("OK\n");
     return 0;
 }

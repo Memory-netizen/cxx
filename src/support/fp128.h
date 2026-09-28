@@ -40,6 +40,10 @@ Fp128 fp128_add(Fp128 a, Fp128 b);
 Fp128 fp128_sub(Fp128 a, Fp128 b);
 Fp128 fp128_mul(Fp128 a, Fp128 b);
 Fp128 fp128_div(Fp128 a, Fp128 b);
+/* Division rounded once to the target format (single rounding; the
+ * 113-bit intermediate of fp128_div would double-round narrower
+ * formats). */
+Fp128 fp128_div_rounded(Fp128 a, Fp128 b, FpFormat target);
 
 Fp128 fp128_from_fp16(uint16_t bits);
 Fp128 fp128_from_fp32(uint32_t bits);

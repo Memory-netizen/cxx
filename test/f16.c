@@ -82,6 +82,12 @@ int main() {
     // mixed comparisons: int converts to f16
     ASSERT(1, 32768.0f16 == 32768);
 
+    // === Correctly rounded division (exact rational expectations) ===
+    ASSERT(1, 7.0f16 / 13.0f16 == 0x1.13cp-1f16);
+    ASSERT(1, 11.0f16 / 17.0f16 == 0x1.4b4p-1f16);
+    ASSERT(1, 19.0f16 / 23.0f16 == 0x1.a7p-1f16);
+    ASSERT(1, 37.0f16 / 41.0f16 == 0x1.cep-1f16);
+
     printf("OK\n");
     return 0;
 }

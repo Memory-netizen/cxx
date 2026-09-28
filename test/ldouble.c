@@ -71,6 +71,21 @@ int main() {
     ASSERT(1, arr[0] + arr[1] == arr[2]);
     ASSERT(1, &arr[1] - &arr[0] == 1);
 
+    // === Correctly rounded division (exact rational expectations) ===
+#if __LDBL_MANT_DIG__ == 64
+    // fp80: operands are exact in the format
+    ASSERT(1, 9223372036854775807.0L / 3.0L == 0x1.5555555555555552p+61L);
+    ASSERT(1, 18446744073709551557.0L / 13.0L == 0x1.3b13b13b13b13accp+60L);
+    ASSERT(1, 1234567890123456789.0L / 987654321.0L == 0x1.2a05f1d2efffffeep+30L);
+    ASSERT(1, 9223372036854775919.0L / 17.0L == 0x1.e1e1e1e1e1e1e384p+58L);
+#else
+    // fp128: operands are exact in the format; (2^63-1)/3 =
+    // 0x1.5555555555555552AAAAAAAA...p+61 (the integer part ends in
+    // ...5550, not ...5555), rounded up at the AAAA... tail
+    ASSERT(1, 9223372036854775807.0L / 3.0L == 0x1.5555555555555552AAAAAAAAAAABp+61L);
+    ASSERT(1, 1.0L / 10.0L == 0x1.999999999999999999999999999ap-4L);
+#endif
+
     printf("OK\n");
     return 0;
 }

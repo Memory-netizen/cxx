@@ -332,31 +332,40 @@ Fp128 fp128_mul(Fp128 a, Fp128 b) {
     return fp128_round_and_pack(r, E, s, sticky != 0);
 }
 
-Fp128 fp128_div(Fp128 a, Fp128 b) {
-    /* 1. Special values */
-    if (fp128_is_nan(a) || fp128_is_nan(b)) return FP128_NAN;
+/* Per-target single rounding of a 116-bit significand (defined below). */
+static Fp128 round116_to_target(Int128 sig, int E_fp128, int sign, FpFormat target, bool sticky);
 
+/* The result of Inf/0/NaN operands: format-independent in the fp128
+ * storage, so a single helper serves every rounding target. */
+static Fp128 div_special(Fp128 a, Fp128 b) {
     bool a_inf = fp128_is_inf(a), b_inf = fp128_is_inf(b);
     bool a_zero = fp128_is_zero(a), b_zero = fp128_is_zero(b);
     int s = (fp128_get_sign(a) ? 1 : 0) ^ (fp128_get_sign(b) ? 1 : 0);
 
-    if (a_inf && b_inf) /* Inf / Inf = NaN */
-        return FP128_NAN;
-    if (a_zero && b_zero) /* 0 / 0 = NaN */
-        return FP128_NAN;
+    if (fp128_is_nan(a) || fp128_is_nan(b) || (a_inf && b_inf) || (a_zero && b_zero)) return FP128_NAN;
     if (a_inf || b_zero) { /* Inf / finite, or finite / 0 = Inf */
-        Fp128 inf;
-        inf.limb[0] = inf.limb[1] = inf.limb[2] = 0;
+        Fp128 inf = {{0, 0, 0, 0}};
         inf.limb[3] = (0x7FFFu << 16) | (s ? LIMB_SIGN_BIT : 0);
         return inf;
     }
-    if (b_inf || a_zero) { /* finite / Inf, or 0 / finite = 0 */
-        Fp128 z = {{0, 0, 0, 0}};
-        z.limb[3] = s ? LIMB_SIGN_BIT : 0;
-        return z;
-    }
+    /* finite / Inf, or 0 / finite = 0 */
+    Fp128 z = {{0, 0, 0, 0}};
+    z.limb[3] = s ? LIMB_SIGN_BIT : 0;
+    return z;
+}
 
-    /* 2. Decompose and add implicit bits */
+/* Long division: Q = floor(ma x 2^115 / mb), a 116-bit quotient with the
+ * implicit bit at bit 115, plus a sticky from the remainder. Returns
+ * false for Inf/0/NaN operands (the caller handles those). */
+static bool div_long(Fp128 a, Fp128 b, Int128 *Q_out, int *E_out, int *s_out, bool *sticky_out) {
+    if (fp128_is_nan(a) || fp128_is_nan(b)) return false;
+    bool a_inf = fp128_is_inf(a), b_inf = fp128_is_inf(b);
+    bool a_zero = fp128_is_zero(a), b_zero = fp128_is_zero(b);
+    if (a_inf || b_inf || a_zero || b_zero) return false;
+
+    int s = (fp128_get_sign(a) ? 1 : 0) ^ (fp128_get_sign(b) ? 1 : 0);
+
+    /* Decompose and add implicit bits */
     int ea = fp128_get_exp(a), eb = fp128_get_exp(b);
     Int128 ma = fp128_get_m(a), mb = fp128_get_m(b);
     if (ea != 0)
@@ -368,7 +377,7 @@ Fp128 fp128_div(Fp128 a, Fp128 b) {
     else
         eb = 1;
 
-    /* 3. Scale the smaller operand left so that both have the same msb,
+    /* Scale the smaller operand left so that both have the same msb,
      * giving ma/mb in [0.5, 2); compensate in the exponent. Without this,
      * subnormal operands would make the quotient overflow the 116-bit
      * window. */
@@ -383,8 +392,6 @@ Fp128 fp128_div(Fp128 a, Fp128 b) {
         E -= bwb - bwa;
     }
 
-    /* 4. Long division: Q = floor(ma x 2^115 / mb), 116 bits, implicit bit
-     * at bit 115 */
     Int128 R = ma;
     Int128 Q = {{0, 0, 0, 0}};
     for (int i = 115; i >= 0; i--) {
@@ -395,14 +402,41 @@ Fp128 fp128_div(Fp128 a, Fp128 b) {
         if (i > 0) R = int128_shl(R, 1);
     }
 
-    /* Nonzero remainder -> sticky */
-    bool sticky = !int128_is_zero(R);
+    *Q_out = Q;
+    *E_out = E;
+    *s_out = s;
+    *sticky_out = !int128_is_zero(R);
+    return true;
+}
 
-    /* 5. value = Q x 2^(E - 16383 - 115); subnormals are handled inside
-     * fp128_round_and_pack */
-
-    /* 6. Round + pack */
+Fp128 fp128_div(Fp128 a, Fp128 b) {
+    Int128 Q;
+    int E, s;
+    bool sticky;
+    if (!div_long(a, b, &Q, &E, &s, &sticky)) return div_special(a, b);
     return fp128_round_and_pack(Q, E, s, sticky);
+}
+
+/* Division rounded ONCE to the target format: the 116-bit quotient with
+ * sticky goes straight to the per-target rounding, avoiding the
+ * double-rounding of fp128_div + fp128_round_to for targets narrower
+ * than binary128. */
+Fp128 fp128_div_rounded(Fp128 a, Fp128 b, FpFormat target) {
+    Int128 Q;
+    int E, s;
+    bool sticky;
+    if (!div_long(a, b, &Q, &E, &s, &sticky)) return div_special(a, b);
+    if (target == FP128) return fp128_round_and_pack(Q, E, s, sticky);
+    /* round116_to_target assumes the implicit bit at position 115; the
+     * quotient may sit in [0.5, 2) after the operand scaling, so
+     * normalize it first (fp128_round_and_pack is msb-relative and does
+     * not need this). */
+    int msb = int128_bit_width(Q, UNSIGNED) - 1;
+    if (msb < 115) {
+        Q = int128_shl(Q, 115 - msb);
+        E -= 115 - msb;
+    }
+    return round116_to_target(Q, E, s, target, sticky);
 }
 
 Fp128 fp128_from_fp16(uint16_t bits) {
@@ -656,7 +690,7 @@ static Int128 round116_to_p(Int128 sig, int p, int extra, int *e, bool sticky) {
  * directly to the target format and extend the result back to canonical
  * fp128 storage. Unlike "round to fp128 first, then narrow with
  * fp128_round_to", this eliminates double-rounding errors. */
-static Fp128 round116_to_target(Int128 sig, int E_fp128, int sign, FpFormat target, bool sticky) {
+Fp128 round116_to_target(Int128 sig, int E_fp128, int sign, FpFormat target, bool sticky) {
     int p, bias, max_exp;
     switch (target) {
         case FP16:

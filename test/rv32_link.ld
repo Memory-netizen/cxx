@@ -15,5 +15,8 @@ SECTIONS {
     __bss_end = .;
   }
   . = ALIGN(16);
-  _stack_top = 0x80020000; /* 128 KB into the virt machine RAM */
+  /* Top of the 128 MB virt RAM: the stack grows down, away from the
+   * image. A fixed offset into RAM (the old 0x80020000) makes the stack
+   * overwrite the code once the image exceeds it. */
+  _stack_top = 0x88000000;
 }

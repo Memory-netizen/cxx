@@ -462,7 +462,8 @@ static Ref gen_expr(Node *node) {
                 rr = DOUBLE(u.bits);
                 rr.ty = node->ty;
             } else if (is_pointer(node->ty)) {
-                // GEP index stays an i64 constant
+                // GEP index must be pointer-sized: T.ty_long (i64 on
+                // LP64, i32 on ILP32)
                 rr = LONG(addend);
             } else {
                 rr = INT(addend);
@@ -1000,7 +1001,12 @@ static void gen_switch(Node *n) {
 
     Node *y = n->case_next;
     for (int j = 0; j < i; ++j) {
-        curb->jmp.args[j] = cond.ty->size == 8 ? LONG(int128_to_i64(y->ival)) : INT(int128_to_i64(y->ival));
+        // Case values must match the switch operand type: LONG stamps
+        // T.ty_long, which is 32-bit on ILP32 targets while an 8-byte
+        // cond is long long / _BitInt(64) (i64) there.
+        Ref c = cond.ty->size == 8 ? LONG(int128_to_i64(y->ival)) : INT(int128_to_i64(y->ival));
+        c.ty = cond.ty;
+        curb->jmp.args[j] = c;
         curb->succ[j] = y->blk;
         add_pred(curb, curb->succ[j]);
         y = y->case_next;

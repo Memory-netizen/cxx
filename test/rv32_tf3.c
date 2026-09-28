@@ -104,3 +104,17 @@ int __fixtfsi(Fp128 *a) {
 int __gttf2(Fp128 *a, Fp128 *b) { return fp128_cmp(*a, *b) == 1 ? 1 : 0; }
 
 int __lttf2(Fp128 *a, Fp128 *b) { return fp128_cmp(*a, *b) == -1 ? -1 : 0; }
+
+void __divtf3(Fp128 *ret, Fp128 *a, Fp128 *b) { *ret = fp128_div(*a, *b); }
+
+int __getf2(Fp128 *a, Fp128 *b) {
+  int c = fp128_cmp(*a, *b);
+  return c == 1 ? 1 : (c == 0 ? 0 : -1); /* unordered(2) -> < 0 */
+}
+
+int __letf2(Fp128 *a, Fp128 *b) {
+  int c = fp128_cmp(*a, *b);
+  return c == -1 ? -1 : (c == 0 ? 0 : 1); /* unordered(2) -> > 0 */
+}
+
+int __unordtf2(Fp128 *a, Fp128 *b) { return fp128_cmp(*a, *b) == 2; }
