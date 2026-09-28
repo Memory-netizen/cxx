@@ -2282,6 +2282,7 @@ static int64_t eval_rval(Node *node, uint32_t *sym) {
 // #if is the exception and pre-truncates its operands to uintmax_t.
 static int64_t eval_ice(Node *node) {
     add_type(node);
+    if (!is_integer(node->ty)) error(node->tok, "expression is not an integer constant expression");
     if (is_bitint128(node->ty)) {
         Int128 v = eval_int128(node);
         if (!int128_fits(v, 64, node->ty->is_unsigned ? UNSIGNED : SIGNED))
@@ -2859,6 +2860,26 @@ static uint32_t push_named_loop(Node *lb, Token *tok) {
     return i;
 }
 
+// StaticAssertDecl ::= ("static_assert" | "_Static_assert") "(" ConstExp ("," StrLit)? ")" ";"
+// The message is optional in C23; a failing assertion is a hard error
+// carrying the message text.
+static Node *static_assert_decl(Token **rest, Token *tok) {
+    Token *start = tok;
+    tok = skip(tok->next, TK_LPAREN);
+    int64_t v = const_expr(&tok, tok);
+    if (tok->kind == TK_COMMA) {
+        Token *msg = tok->next;
+        if (msg->kind != TK_STRLIT) error(msg, "static assertion message must be a string literal");
+        if (!v) error(start, "static assertion failed: %s", str(msg->id));
+        tok = msg->next;
+    } else if (!v) {
+        error(start, "static assertion failed");
+    }
+    tok = skip(tok, TK_RPAREN);
+    *rest = skip(tok, TK_SEMI);
+    return new_node(ND_NOP, start);
+}
+
 // Stmt        ::= LabelStmt | UnLabelStmt
 // LabelStmt   ::= Label Stmt
 // UnLabelStmt ::= ExpStmt | PrimBlk | JmpStmt
@@ -2868,6 +2889,9 @@ static Node *stmt(Token **rest, Token *tok) {
     uint32_t i = push_named_loop(lb, tok);
     Node *stmt;
     switch (tok->kind) {
+        case TK_STATIC_ASSERT:
+            stmt = static_assert_decl(rest, tok);
+            break;
         case TK_LBRACE:
             stmt = compound_stmt(rest, tok);
             break;
@@ -3156,6 +3180,12 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
     Member *cur = &dummy;
 
     while (tok->kind != TK_RBRACE) {
+        // static_assert-declaration is a member-declaration (6.7.2.1);
+        // it declares no member
+        if (tok->kind == TK_STATIC_ASSERT) {
+            static_assert_decl(&tok, tok);
+            continue;
+        }
         int align = 0;
         Type *basety = declspecs(&tok, tok, NULL, &align, NULL);
         int i = 0;
@@ -3940,6 +3970,11 @@ static void resolve_goto_labels(void) {
 static Token *external_declaration(Token *tok) {
     while (match(&tok, tok, TK_SEMI));
     if (tok->kind == TK_EOF) return tok;
+
+    if (tok->kind == TK_STATIC_ASSERT) {
+        static_assert_decl(&tok, tok);
+        return tok;
+    }
 
     SClass sclass = 0;
     int align = 0;

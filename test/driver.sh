@@ -370,4 +370,26 @@ echo 'int f(int n) { struct S { int (*p)[n]; }; return 0; }' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'variably modified'
 check 'pointer-to-VLA struct member'
 
+# static_assert: failing assertions carry the message; the C23 form
+# without a message works; the message must be a string literal
+echo 'static_assert(0, "boom");' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'static assertion failed: boom'
+check 'static_assert failure message'
+
+echo 'static_assert(0);' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'static assertion failed'
+check 'static_assert without message'
+
+echo '_Static_assert(0, "x");' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'static assertion failed: x'
+check '_Static_assert spelling'
+
+echo 'static_assert(1, 5);' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'must be a string literal'
+check 'static_assert message type'
+
+echo 'struct S { static_assert(0, "inner"); int x; };' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'static assertion failed: inner'
+check 'static_assert inside struct'
+
 echo OK
