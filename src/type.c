@@ -330,6 +330,15 @@ Type *type_qual(Type *ty, uint32_t qual) {
     return ty;
 }
 
+// Qualify the element type of an array (rebuilding the array chain);
+// plain types are qualified directly.
+static Type *array_elem_qual(Type *ty, uint32_t qual) {
+    if (ty->kind != TY_ARRAY && ty->kind != TY_VLA) return type_qual(ty, qual);
+    Type *copy = copy_type(ty);
+    copy->base = array_elem_qual(ty->base, qual);
+    return copy;
+}
+
 Type *type_unqual(Type *ty) {
     if (ty->qual == 0) return ty;
     ty = copy_type(ty);
@@ -873,6 +882,12 @@ void add_type(Node *node) {
         case ND_MEMBER:
             add_type(node->lhs);
             node->ty = node->member->ty;
+            if (node->lhs->ty->qual & Q_CONST) {
+                // const propagates from the aggregate object to the
+                // member (6.5.2.3p4); array element qualification
+                // lives on the innermost base type
+                node->ty = array_elem_qual(node->ty, Q_CONST);
+            }
             node->is_lvalue = node->lhs->is_lvalue;
             break;
         // binary

@@ -326,4 +326,48 @@ check -w
 echo '#warning warning' | $compiler -Werror -S -o /dev/null -xc - 2>&1 | grep -q 'error'
 check -Werror
 
+# Q_MEMCONST: a struct/union with a const member is not assignable as
+# a whole (const members propagate through nesting and arrays)
+echo 'struct S { const int x; }; void f(struct S *a, struct S *b) { *a = *b; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'read-only'
+check 'struct assignment with const member'
+
+echo 'struct I { const int x; }; struct S { struct I i; }; void f(struct S *a, struct S *b) { *a = *b; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'read-only'
+check 'nested struct with const member'
+
+echo 'struct S { const int a[2]; }; void f(struct S *a, struct S *b) { *a = *b; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'read-only'
+check 'array-of-const member'
+
+! echo 'struct S { const int *p; }; void f(struct S *a, struct S *b) { *a = *b; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'error'
+check 'pointer-to-const member stays assignable'
+
+# const of an aggregate object propagates down to its members (6.5.2.3)
+echo 'const struct { int x; } y; void f(void) { y.x = 5; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'read-only'
+check 'member of const struct'
+
+echo 'struct B { int x; }; const struct A { struct B b; } a; void f(void) { a.b.x = 5; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'read-only'
+check 'nested member of const struct'
+
+echo 'const struct S { int a[2]; } s; void f(void) { s.a[0] = 5; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'read-only'
+check 'array element of const struct'
+
+echo 'const struct S { int x; } *p; void f(void) { p->x = 5; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'read-only'
+check 'member through pointer to const struct'
+
+# struct members cannot have variably modified type (6.7.6.2p2)
+echo 'int n; struct S { int a[n]; };' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'variably modified'
+check 'VLA struct member'
+
+echo 'int f(int n) { struct S { int (*p)[n]; }; return 0; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'variably modified'
+check 'pointer-to-VLA struct member'
+
 echo OK

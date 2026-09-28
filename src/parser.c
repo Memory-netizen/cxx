@@ -3123,6 +3123,34 @@ static void check_anon_mem(Member *mem1, Member *mem2) {
 
 // MemDecl  ::= TypeSpec+ (MemDeclr ("," MemDeclr)*)? ";"
 // MemDeclr ::= Declr
+// A variably modified type (C11 6.7.6.2p2): a VLA or any type derived
+// from one (pointer to VLA, array of VLA) — not allowed as a
+// struct/union member.
+static bool is_variably_modified(Type *ty) {
+    for (;;) {
+        if (ty->kind == TY_VLA) return true;
+        if (ty->kind == TY_PTR || ty->kind == TY_ARRAY) {
+            ty = ty->base;
+            continue;
+        }
+        return false;
+    }
+}
+
+// A member type that makes the containing struct/union unassignable:
+// const-qualified, or a struct/union that itself has such a member
+// (Q_MEMCONST). Array element const lives on the base type.
+static bool is_memconst(Type *ty) {
+    for (;;) {
+        if (ty->qual & (Q_CONST | Q_MEMCONST)) return true;
+        if (ty->kind == TY_ARRAY) {
+            ty = ty->base;
+            continue;
+        }
+        return false;
+    }
+}
+
 static void struct_members(Token **rest, Token *tok, Type *ty) {
     Member dummy = {};
     Member *cur = &dummy;
@@ -3141,6 +3169,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             }
             Member *mem = emalloc(sizeof(Member));
             mem->ty = basety;
+            if (is_memconst(basety)) ty->qual |= Q_MEMCONST;
             if (align) mem->is_align = true;
             mem->align = MAX(align, mem->ty->align);
             check_anon_mem(dummy.next, mem->ty->members);
@@ -3156,6 +3185,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             if (match(&tok, tok, TK_COLON)) {
                 if (align) error(start, "'_Alignas' cannot be applied to a bit-field");
                 mem->ty = basety;
+                if (is_memconst(basety)) ty->qual |= Q_MEMCONST;
                 mem->align = mem->ty->align;
                 mem->is_bitfield = true;
                 mem->bit_width = const_expr(&tok, tok);
@@ -3164,11 +3194,14 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             }
 
             mem->ty = declarator(&tok, tok, basety);
+            if (is_memconst(mem->ty)) ty->qual |= Q_MEMCONST;
             Token *mem_name = mem->ty->name;
             if (align) mem->is_align = true;
             mem->align = MAX(align, mem->ty->align);
             if (mem->ty->kind == TY_VOID) error(mem_name, "field ‘%s’ declared void", str(mem_name->id));
             if (mem->ty->kind == TY_FUNC) error(mem_name, "field ‘%s’ declared as a function", str(mem_name->id));
+            if (is_variably_modified(mem->ty))
+                error(mem_name, "field ‘%s’ has variably modified type", str(mem_name->id));
             if (mem->ty->size < 0 && tok->next->kind != TK_RBRACE)
                 error(mem_name, "variable ‘%s’ has incomplete type", str(mem_name->id));
 
