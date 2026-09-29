@@ -154,62 +154,59 @@ enum {
     TK_COMMENT,
     TK_LINE,
     TK_PUNCT,
-    TK_COMMA,  // ,
-    TK_AS,     // =
-    TK_ADDAS,  // +=
-    TK_SUBAS,  // -=
-    TK_MULAS,  // *=
-    TK_DIVAS,  // /=
-    TK_MODAS,  // %=
 
-    TK_ANDAS,    // &=
-    TK_ORAS,     // |=
-    TK_XORAS,    // ^=
-    TK_LEFTAS,   // <<=
-    TK_RIGHTAS,  // >>=
+    // Single-byte punctuators are encoded directly as their ASCII code.
+    TK_COMMA = ',',
+    TK_AS = '=',
+    TK_BOR = '|',
+    TK_XOR = '^',
+    TK_BAND = '&',
+    TK_LT = '<',
+    TK_GT = '>',
+    TK_PLUS = '+',
+    TK_MINUS = '-',
+    TK_STAR = '*',
+    TK_SLASH = '/',
+    TK_MOD = '%',
+    TK_INVERT = '~',
+    TK_NOT = '!',
+    TK_DOT = '.',
+    TK_LPAREN = '(',
+    TK_RPAREN = ')',
+    TK_LBRACKET = '[',
+    TK_RBRACKET = ']',
+    TK_LBRACE = '{',
+    TK_RBRACE = '}',
+    TK_SEMI = ';',
+    TK_COLON = ':',
+    TK_QUESTION = '?',
+    TK_HASH = '#',
 
-    TK_OR,    // ||
-    TK_AND,   // &&
-    TK_BOR,   // |
-    TK_XOR,   // ^
-    TK_BAND,  // &
-
-    TK_EQ,  // ==
-    TK_NE,  // !=
-    TK_LT,  // <
-    TK_GT,  // >
-    TK_LE,  // <=
-    TK_GE,  // >=
-
-    TK_LEFT,   // <<
-    TK_RIGHT,  // >>
-
-    TK_PLUS,   // +
-    TK_MINUS,  // -
-    TK_STAR,   // *
-    TK_SLASH,  // /
-    TK_MOD,    // %
-
-    TK_INC,     // ++
-    TK_DEC,     // --
-    TK_INVERT,  // ~
-    TK_NOT,     // !
-    TK_DOT,     // .
-    TK_ARROW,   // ->
-
-    TK_LPAREN,      // (
-    TK_RPAREN,      // )
-    TK_LBRACKET,    // [
-    TK_RBRACKET,    // ]
-    TK_LBRACE,      // {
-    TK_RBRACE,      // }
-    TK_SEMI,        // ;
-    TK_COLON,       // :
-    TK_COLONCOLON,  // ::
-    TK_QUESTION,    // ?
-    TK_ELLIPSIS,    // ...
-    TK_HASH,        // #
-    TK_HASHHASH,    // ##
+    // Multi-byte punctuators, keywords and all other kinds start at 128.
+    TK_COLONCOLON = 128,  // ::
+    TK_ELLIPSIS,          // ...
+    TK_HASHHASH,          // ##
+    TK_ADDAS,             // +=
+    TK_SUBAS,             // -=
+    TK_MULAS,             // *=
+    TK_DIVAS,             // /=
+    TK_MODAS,             // %=
+    TK_ANDAS,             // &=
+    TK_ORAS,              // |=
+    TK_XORAS,             // ^=
+    TK_LEFTAS,            // <<=
+    TK_RIGHTAS,           // >>=
+    TK_OR,                // ||
+    TK_AND,               // &&
+    TK_EQ,                // ==
+    TK_NE,                // !=
+    TK_LE,                // <=
+    TK_GE,                // >=
+    TK_LEFT,              // <<
+    TK_RIGHT,             // >>
+    TK_INC,               // ++
+    TK_DEC,               // --
+    TK_ARROW,             // ->
     TK_PUNCTEND,
 
     TK_IDENT,
@@ -291,6 +288,8 @@ enum {
     TK_OTHER,
     TK_ERR,
     TK_WARN,
+
+    TK_NKIND,  // number of token kinds
 };
 
 struct Token {

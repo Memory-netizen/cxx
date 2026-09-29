@@ -1871,7 +1871,7 @@ static Node *cast(Token **rest, Token *tok) {
 // LAndExp  ::= BOrExp   ("&&" BOrExp)*;
 // LOrExp   ::= LAndExp  ("||" LAndExp)*;
 static Node *binexpr(Token **rest, Token *tok, int min_prec) {
-    static int op_table[][2] = {
+    static int op_table[TK_NKIND][2] = {
         [TK_OR] = {20, ND_LOGOR},    [TK_AND] = {30, ND_LOGAND}, [TK_BOR] = {40, ND_BOR},    [TK_XOR] = {50, ND_XOR},
         [TK_BAND] = {60, ND_BAND},   [TK_EQ] = {70, ND_EQ},      [TK_NE] = {70, ND_NE},      [TK_LT] = {80, ND_LT},
         [TK_GT] = {80, ND_GT},       [TK_LE] = {80, ND_LE},      [TK_GE] = {80, ND_GE},      [TK_LEFT] = {90, ND_LEFT},
@@ -1882,10 +1882,10 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
     Node *lhs = cast(&tok, tok);
     add_type(lhs);
 
-    while (TK_OR <= tok->kind && tok->kind <= TK_MOD) {
+    // Precedence 0 marks every non-operator kind; min_prec is never negative.
+    while (op_table[tok->kind][0] > min_prec) {
         Token *op_tok = tok;
         int cur_prec = op_table[op_tok->kind][0];
-        if (cur_prec <= min_prec) break;
         NodeKind expr_op = op_table[op_tok->kind][1];
 
         Node *rhs = binexpr(&tok, tok->next, cur_prec);
@@ -2299,16 +2299,17 @@ int64_t const_expr(Token **rest, Token *tok) {
 
 // AsOP  ::= "=" | "*=" | "/=" | "%=" | "+=" | "-="
 //         | "<<=" | ">>=" | "&=" | "^=" | "|="
-static inline bool is_assignop(Token *tok) { return TK_AS <= tok->kind && tok->kind <= TK_RIGHTAS; }
+static int as_op[TK_NKIND] = {
+    [TK_AS] = ND_AS,       [TK_ADDAS] = ND_ADDAS,   [TK_SUBAS] = ND_SUBAS,     [TK_MULAS] = ND_MULAS,
+    [TK_DIVAS] = ND_DIVAS, [TK_MODAS] = ND_MODAS,   [TK_ANDAS] = ND_ANDAS,     [TK_ORAS] = ND_ORAS,
+    [TK_XORAS] = ND_XORAS, [TK_LEFTAS] = ND_LEFTAS, [TK_RIGHTAS] = ND_RIGHTAS,
+};
+
+static inline bool is_assignop(Token *tok) { return as_op[tok->kind] != 0; }
 
 // AsExp ::= CondExp (AsOP AsExp)?
 static Node *assign(Token **rest, Token *tok) {
     Node *node = conditional(&tok, tok);
-    static int as_op[] = {
-        [TK_AS] = ND_AS,       [TK_ADDAS] = ND_ADDAS,   [TK_SUBAS] = ND_SUBAS,     [TK_MULAS] = ND_MULAS,
-        [TK_DIVAS] = ND_DIVAS, [TK_MODAS] = ND_MODAS,   [TK_ANDAS] = ND_ANDAS,     [TK_ORAS] = ND_ORAS,
-        [TK_XORAS] = ND_XORAS, [TK_LEFTAS] = ND_LEFTAS, [TK_RIGHTAS] = ND_RIGHTAS,
-    };
     while (is_assignop(tok)) {
         Token *as = tok;
         node = new_binary(as_op[as->kind], node, assign(&tok, tok->next), as);

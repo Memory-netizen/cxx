@@ -392,4 +392,23 @@ echo 'struct S { static_assert(0, "inner"); int x; };' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'static assertion failed: inner'
 check 'static_assert inside struct'
 
+# Digraphs
+echo 'int main() <% return 0; %>' | $compiler -S -o - -xc - | grep -q 'main:'
+check 'digraph <% %>'
+printf 'int a<:2:> = <%%1,2%%>;\nint main() { return a<:0:> + a<:1:>; }\n' \
+  | $compiler -S -o - -xc - | grep -q 'main:'
+check 'digraph <: :>'
+printf '%%:define M 42\nint x = M;\n' | $compiler -E -xc - | grep -q 'int x = 42;'
+check 'digraph %:'
+printf '#define CAT(a,b) a %%:%%: b\nCAT(x,y)\n' | $compiler -E -xc - | grep -q 'xy'
+check 'digraph %:%:'
+
+# Bytes that are punctuation but not C punctuators must not hang the lexer
+printf 'int \\ b;\n' | timeout 5 $compiler -S -o /dev/null -xc - 2>/dev/null
+[ $? -eq 1 ]
+check 'stray backslash'
+echo 'int a = ..;' | timeout 5 $compiler -S -o /dev/null -xc - 2>/dev/null
+[ $? -eq 1 ]
+check 'double dot'
+
 echo OK

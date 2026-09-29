@@ -35,22 +35,27 @@ bool match(Token **rest, Token *tok, uint32_t kind) {
     return false;
 }
 
-static char *expect[] = {
-    [TK_LEFTAS] = "<<=", [TK_RIGHTAS] = ">>=",   [TK_ELLIPSIS] = "...", [TK_MODAS] = "%=",    [TK_ADDAS] = "+=",
-    [TK_SUBAS] = "-=",   [TK_MULAS] = "*=",      [TK_DIVAS] = "/=",     [TK_ANDAS] = "&=",    [TK_XORAS] = "^=",
-    [TK_ORAS] = "|=",    [TK_COLONCOLON] = "::", [TK_LEFT] = "<<",      [TK_RIGHT] = ">>",    [TK_EQ] = "==",
-    [TK_NE] = "!=",      [TK_LE] = "<=",         [TK_GE] = ">=",        [TK_AND] = "&&",      [TK_OR] = "||",
-    [TK_ARROW] = "->",   [TK_INC] = "++",        [TK_DEC] = "--",       [TK_HASHHASH] = "##", [TK_MOD] = "%",
-    [TK_LBRACKET] = "[", [TK_RBRACKET] = "]",    [TK_LPAREN] = "(",     [TK_RPAREN] = ")",    [TK_LBRACE] = "{",
-    [TK_RBRACE] = "}",   [TK_BAND] = "&",        [TK_STAR] = "*",       [TK_PLUS] = "+",      [TK_MINUS] = "-",
-    [TK_INVERT] = "~",   [TK_NOT] = "!",         [TK_SLASH] = "/",      [TK_LT] = "<",        [TK_GT] = ">",
-    [TK_XOR] = "^",      [TK_BOR] = "|",         [TK_QUESTION] = "?",   [TK_COLON] = ":",     [TK_SEMI] = ";",
-    [TK_DOT] = ".",      [TK_AS] = "=",          [TK_COMMA] = ",",      [TK_HASH] = "#",      [TK_WHILE] = "while",
+// The token kinds `skip` may be called with, for error messages.
+static char *expect[TK_NKIND] = {
+    [TK_ELLIPSIS] = "...",
+    [TK_WHILE] = "while",
 };
+
+// Textual representation of a token kind, for error messages.
+// A single-byte punctuator represents itself.
+static char *kind_str(uint32_t kind) {
+    static char buf[2];
+
+    if (kind < 128) {
+        buf[0] = kind;
+        return buf;
+    }
+    return expect[kind];
+}
 
 // Ensure that the current token is `kind`.
 Token *skip(Token *tok, uint32_t kind) {
-    if (tok->kind != kind) error(tok, "expected ‘%s’ before ‘%.*s’", expect[kind], tok->len, tok_text(tok));
+    if (tok->kind != kind) error(tok, "expected ‘%s’ before ‘%.*s’", kind_str(kind), tok->len, tok_text(tok));
     return tok->next;
 }
 
@@ -62,7 +67,9 @@ static inline bool start_with(char *p, char *q) {
     return true;
 }
 
-static int read_punct(char *p, Token *tok) {
+// Read a punctuator at `p`, storing its kind in `*kind`.
+// Returns the length of the punctuator, or 0 if `p` does not begin with one.
+static int read_punct(char *p, uint32_t *kind) {
     static struct {
         char *punct;
         uint32_t type;
@@ -75,20 +82,34 @@ static int read_punct(char *p, Token *tok) {
         {"<<", TK_LEFT, 2},       {">>", TK_RIGHT, 2},    {"==", TK_EQ, 2},       {"!=", TK_NE, 2},
         {"<=", TK_LE, 2},         {">=", TK_GE, 2},       {"&&", TK_AND, 2},      {"||", TK_OR, 2},
         {"->", TK_ARROW, 2},      {"++", TK_INC, 2},      {"--", TK_DEC, 2},      {"##", TK_HASHHASH, 2},
-        {"<:", TK_LBRACKET, 2},   {":>", TK_RBRACKET, 2}, {"%", TK_MOD, 1},       {"[", TK_LBRACKET, 1},
-        {"]", TK_RBRACKET, 1},    {"(", TK_LPAREN, 1},    {")", TK_RPAREN, 1},    {"{", TK_LBRACE, 1},
-        {"}", TK_RBRACE, 1},      {"&", TK_BAND, 1},      {"*", TK_STAR, 1},      {"+", TK_PLUS, 1},
-        {"-", TK_MINUS, 1},       {"~", TK_INVERT, 1},    {"!", TK_NOT, 1},       {"/", TK_SLASH, 1},
-        {"<", TK_LT, 1},          {">", TK_GT, 1},        {"^", TK_XOR, 1},       {"|", TK_BOR, 1},
-        {"?", TK_QUESTION, 1},    {":", TK_COLON, 1},     {";", TK_SEMI, 1},      {".", TK_DOT, 1},
-        {"=", TK_AS, 1},          {",", TK_COMMA, 1},     {"#", TK_HASH, 1},
+        {"<:", TK_LBRACKET, 2},   {":>", TK_RBRACKET, 2},
     };
+
+    // Bytes that may follow the first byte of a multi-byte punctuator.
+    static bool punct_cont[256] = {
+        [':'] = true, ['<'] = true, ['>'] = true, ['.'] = true, ['%'] = true, ['='] = true,
+        ['&'] = true, ['|'] = true, ['-'] = true, ['+'] = true, ['#'] = true,
+    };
+
+    unsigned char c = *p;
+
+    // Single-byte punctuators are encoded as their own ASCII code. No
+    // multi-byte punctuator can match if the next byte doesn't continue one.
+    if (ispunct(c) && !punct_cont[(unsigned char)p[1]]) {
+        *kind = c;
+        return 1;
+    }
 
     for (size_t i = 0; i < sizeof(punct) / sizeof(punct[0]); ++i)
         if (start_with(p, punct[i].punct)) {
-            tok->kind = punct[i].type;
+            *kind = punct[i].type;
             return punct[i].len;
         }
+
+    if (ispunct(c)) {
+        *kind = c;
+        return 1;
+    }
 
     return 0;
 }
@@ -1007,12 +1028,15 @@ Token *tokenize(SrcFile *file) {
         }
 
         // Punctuator
-        if (*p <= 0x7F && ispunct(*p) && *p != '`' && *p != '@') {
-            tok = new_token(TK_PUNCT, p, p);
-            tok->len = read_punct(p, tok);
-            cur = cur->next = tok;
-            p += tok->len;
-            continue;
+        if (*p <= 0x7F) {
+            uint32_t kind;
+            int len = read_punct(p, &kind);
+            if (len) {
+                tok = new_token(kind, p, p + len);
+                cur = cur->next = tok;
+                p += len;
+                continue;
+            }
         }
 
         // Other char
