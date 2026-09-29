@@ -454,6 +454,7 @@ typedef enum {
     ND_LOGOR,    // ||
     ND_COND,     // ?:
     ND_MEMZERO,  // Zero-clear a stack variable
+    ND_CAS,
 
     // Statement
     ND_RETURN,     // return
@@ -495,11 +496,14 @@ struct Node {
 
     union {
         struct {
-            Node *lhs;         // Left-hand side
-            Node *rhs;         // Right-hand side
-            Member *member;    // Struct member access
-            Type *compute_ty;  // Compound assign
-            int mem_order;     // Atomic access memory order + 1; 0 = unspecified (seq_cst)
+            Node *lhs;  // Left-hand side
+            Node *rhs;  // Right-hand side
+            Node *desired;
+            Member *member;       // Struct member access
+            Type *compute_ty;     // Compound assign
+            uint16_t mem_order;   // Atomic access memory order + 1; 0 = unspecified (seq_cst)
+            uint16_t mem_order1;  // Atomic access memory order + 1; 0 = unspecified (seq_cst)
+            bool is_weak;
         };
         struct {
             union {
@@ -569,7 +573,7 @@ struct Initializer {
 };
 
 int64_t const_expr(Token **rest, Token *tok);
-bool is_builtin_fn(uint32_t id);
+int is_builtin_fn(uint32_t id);
 Node *new_unary(NodeKind kind, Node *expr, Token *tok);
 void new_imcast(Node **expr, Type *ty);
 void lvalue_convert(Node **expr);
@@ -765,6 +769,7 @@ typedef enum {
     IR_LORD,
     IR_STR,
     IR_GEP,
+    IR_EXTRACTVAL,
     IR_FENCE,
     IR_CMPXCHG,
     IR_ATOMICRMW,
@@ -914,7 +919,9 @@ struct Ir {
     Ir *prev, *next;
     uint16_t op;
     uint16_t narg;
-    uint16_t mem_order;  // Atomic load/store memory order
+    uint16_t mem_order;   // Atomic load/store order; cmpxchg success order
+    uint16_t mem_order1;  // cmpxchg failure order
+    uint16_t is_weak;     // cmpxchg weak
     Ref args[];
 };
 

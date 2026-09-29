@@ -35,4 +35,13 @@ typedef _Atomic(unsigned long long) atomic_ullong;
 #define atomic_load(object) __c11_atomic_load(object, __ATOMIC_SEQ_CST)
 #define atomic_load_explicit __c11_atomic_load
 
+#define atomic_exchange(object, desired) __c11_atomic_exchange(object, desired, __ATOMIC_SEQ_CST)
+#define atomic_exchange_explicit __c11_atomic_exchange
+
+#define atomic_compare_exchange_strong(object, expected, desired) __c11_atomic_compare_exchange_strong(object, expected, desired, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)
+#define atomic_compare_exchange_strong_explicit __c11_atomic_compare_exchange_strong
+
+#define atomic_compare_exchange_weak(object, expected, desired) __c11_atomic_compare_exchange_weak(object, expected, desired, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)
+#define atomic_compare_exchange_weak_explicit __c11_atomic_compare_exchange_weak
+
 #endif // __CXX_STDATOMIC_H

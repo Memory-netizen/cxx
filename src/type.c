@@ -1072,6 +1072,14 @@ void add_type(Node *node) {
         case ND_LABEL_VAL:
             node->ty = pointer_to(T.ty_void, 0);
             break;
+        case ND_CAS:
+            add_type(node->lhs);
+            add_type(node->rhs);
+            add_type(node->desired);
+            lvalue_convert(&node->rhs);
+            lvalue_convert(&node->desired);
+            node->ty = T.ty_bool;
+            break;
         // other
         case ND_NOP:
         case ND_GOTO:

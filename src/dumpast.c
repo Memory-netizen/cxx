@@ -491,6 +491,8 @@ static void dump_node(Node *node) {
         case ND_SP_RESTORE:
             fprintf(stdout, "stack restore\n");
             break;
+        case ND_CAS:
+            break;
     }
 }
 

@@ -98,6 +98,67 @@ int main() {
     ASSERT(4, sizeof(atomic_int));
     ASSERT(8, sizeof(_Atomic(double)));
 
+    // compare_exchange: failure stores the actual value into *expected
+    // (C11 7.17.7.4p2), success leaves it untouched.
+    int e;
+    x = 3;
+    e = 5;
+    ASSERT(0, atomic_compare_exchange_strong(&x, &e, 7));
+    ASSERT(3, e);
+    ASSERT(3, x);
+
+    e = 3;
+    _Bool b = atomic_compare_exchange_strong(&x, &e, 9);
+    ASSERT(1, b);
+    ASSERT(3, e);
+    ASSERT(9, x);
+
+    // Explicit orders: release success / relaxed failure; acquire
+    // success / consume failure (consume maps to acquire in LLVM).
+    e = 9;
+    ASSERT(1, atomic_compare_exchange_strong_explicit(&x, &e, 11, memory_order_release, memory_order_relaxed));
+    ASSERT(9, e);
+    ASSERT(11, x);
+
+    e = 11;
+    ASSERT(1, atomic_compare_exchange_weak_explicit(&x, &e, 13, memory_order_acquire, memory_order_consume));
+    ASSERT(11, e);
+    ASSERT(13, x);
+
+    // weak may fail spuriously, so the classic retry loop must converge.
+    e = 13;
+    while (!atomic_compare_exchange_weak(&x, &e, 15)) {
+    }
+    ASSERT(15, x);
+    ASSERT(13, e);
+
+    // _Atomic volatile object.
+    e = 8;
+    vx = 8;
+    ASSERT(1, atomic_compare_exchange_strong(&vx, &e, 9));
+    ASSERT(9, vx);
+    ASSERT(8, e);
+
+    // _Atomic pointer: on failure *expected becomes the actual pointer.
+    int pv1 = 1;
+    int *ep = &pv1;
+    ap = 0;
+    ASSERT(0, atomic_compare_exchange_strong(&ap, &ep, &pv1));
+    ASSERT(1, ep == 0);
+    ep = 0;
+    ASSERT(1, atomic_compare_exchange_strong(&ap, &ep, &pv1));
+    ASSERT(1, ep == 0);
+    ASSERT(1, ap == &pv1);
+
+    // char.
+    ac = 1;
+    char ec = 2;
+    ASSERT(0, atomic_compare_exchange_strong(&ac, &ec, 3));
+    ASSERT(1, ec);
+    ec = 1;
+    ASSERT(1, atomic_compare_exchange_strong(&ac, &ec, 4));
+    ASSERT(4, ac);
+
     printf("OK\n");
     return 0;
 }

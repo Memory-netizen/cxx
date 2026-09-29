@@ -489,6 +489,72 @@ void f(void) { x += __c11_atomic_load(&y, __ATOMIC_RELAXED); }' \
 grep -q 'ptr @y monotonic, align 4' $tmp/nest.ll && grep -q 'ptr @x seq_cst, align 4' $tmp/nest.ll
 check 'nested atomic order'
 
+# compare_exchange: weak keyword, both orders, non-i32 types.
+echo '#include <stdatomic.h>
+_Atomic long x; long e;
+int f(void) { return __c11_atomic_compare_exchange_weak(&x, &e, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED); }' \
+  | $compiler -S -emit-llvm -o - -xc - > $tmp/cas.ll
+grep -q 'cmpxchg weak ptr @x, i64 %' $tmp/cas.ll
+check 'cmpxchg weak i64'
+grep -q 'acquire monotonic, align 8' $tmp/cas.ll
+check 'cmpxchg success/failure orders'
+grep -q 'extractvalue { i64, i1 } %' $tmp/cas.ll
+check 'extractvalue i64 type'
+grep -q 'zext i1 %' $tmp/cas.ll
+check 'cmpxchg result zext to bool'
+
+# On failure the actual value is stored back into *expected.
+echo '#include <stdatomic.h>
+_Atomic int x; int e;
+int f(void) { return __c11_atomic_compare_exchange_strong(&x, &e, 1, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'store i32 %[0-9]*, ptr @e, align 4'
+check 'cas failure writes back expected'
+
+# _Atomic volatile: cmpxchg takes the volatile keyword.
+echo '#include <stdatomic.h>
+_Atomic volatile int vx; int e;
+int f(void) { return __c11_atomic_compare_exchange_strong(&vx, &e, 1, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'cmpxchg volatile ptr @vx, i32 %'
+check 'cmpxchg volatile'
+
+# release is a legal success order for cmpxchg (unlike plain stores).
+echo '#include <stdatomic.h>
+_Atomic int x; int e;
+int f(void) { return __c11_atomic_compare_exchange_strong(&x, &e, 1, __ATOMIC_RELEASE, __ATOMIC_RELAXED); }' \
+  | $compiler -S -emit-llvm -o - -xc - 2>/dev/null | grep -q 'release monotonic, align 4'
+check 'cmpxchg release success order'
+
+# An invalid failure order warns and falls back to monotonic.
+echo '#include <stdatomic.h>
+_Atomic int x; int e;
+int f(void) { return __c11_atomic_compare_exchange_strong(&x, &e, 1, __ATOMIC_SEQ_CST, __ATOMIC_RELEASE); }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'failure memory order argument to atomic operation is invalid'
+check 'invalid failure order warning'
+echo '#include <stdatomic.h>
+_Atomic int x; int e;
+int f(void) { return __c11_atomic_compare_exchange_strong(&x, &e, 1, __ATOMIC_RELEASE, __ATOMIC_RELEASE); }' \
+  | $compiler -S -emit-llvm -o - -xc - 2>/dev/null | grep -q 'release monotonic, align 4'
+check 'invalid failure order falls back to monotonic'
+
+# An invalid success order warns and falls back to seq_cst.
+echo '#include <stdatomic.h>
+_Atomic int x; int e;
+int f(void) { return __c11_atomic_compare_exchange_strong(&x, &e, 1, 99, __ATOMIC_RELAXED); }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'success memory order argument to atomic operation is invalid'
+check 'invalid success order warning'
+
+# The expected argument must be a pointer to the same non-atomic type.
+echo '#include <stdatomic.h>
+_Atomic int x;
+int f(void) { return __c11_atomic_compare_exchange_strong(&x, 5, 1, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'second argument to atomic operation must be a pointer to non-atomic type'
+check 'cas expected non-pointer'
+echo '#include <stdatomic.h>
+_Atomic int x; long e;
+int f(void) { return __c11_atomic_compare_exchange_strong(&x, &e, 1, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'second argument to atomic operation must be a pointer to the same type'
+check 'cas expected type mismatch'
+
 # Non-atomic accesses must stay atomic-free.
 echo 'volatile int v; void f(void) { v = 1; }' \
   | $compiler -S -emit-llvm -o - -xc - | grep -q 'store volatile i32 1, ptr @v, align 4'

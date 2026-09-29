@@ -15,6 +15,8 @@ static int atomic_order;  // Memory order of the next atomic load/store
 // nodes that never went through the atomic builtins (seq_cst default).
 static int node_mem_order(Node *node) { return node->mem_order ? node->mem_order - 1 : MEM_ORDER_SEQ_CST; }
 
+static int node_mem_order1(Node *node) { return node->mem_order1 ? node->mem_order1 - 1 : MEM_ORDER_SEQ_CST; }
+
 static bool is_atomic_ptr(Ref addr) {
     return addr.ty && is_pointer(addr.ty) && addr.ty->base && (addr.ty->base->qual & Q_ATOMIC);
 }
@@ -31,6 +33,8 @@ static Ir *new_ins(IrKind op, Ref dst, Ref *args, uint32_t narg) {
     new->dst = dst;
     new->narg = narg;
     new->mem_order = MEM_ORDER_SEQ_CST;
+    new->mem_order1 = MEM_ORDER_SEQ_CST;
+    new->is_weak = 0;
     if (narg > 0 && args) memcpy(new->args, args, narg * sizeof(Ref));
 
     new->prev = curb->tail;
@@ -568,6 +572,45 @@ static Ref gen_expr(Node *node) {
                 dst = TMP(tmp_id++, node->ty);
             new_ins(IR_CALL, dst, call_ops, nargs + 1);
             return dst;
+        }
+        case ND_CAS: {
+            Ref addr1 = gen_expr(node->lhs);
+            Ref addr2 = gen_expr(node->rhs);
+            Ref old_val = load(addr2, node->rhs->ty->base, node->rhs->ty->base->align, NULL);
+            Ref new_val = gen_expr(node->desired);
+            Ref args[] = {addr1, old_val, new_val};
+            // The ty carried by the cmpxchg dst is the value type T; the
+            // result itself is { T, i1 }, which dumpir derives from it.
+            Ref res = TMP(tmp_id++, node->rhs->ty->base);
+            Ir *ins = new_ins(IR_CMPXCHG, res, args, 3);
+            ins->mem_order = node_mem_order(node);
+            ins->mem_order1 = node_mem_order1(node);
+            ins->is_weak = node->is_weak;
+            Ref val = TMP(tmp_id++, node->rhs->ty->base);
+            Ref success = TMP(tmp_id++, bitint[1][1]);
+            new_ins(IR_EXTRACTVAL, val, (Ref[]){res, INT(0)}, 2);
+            new_ins(IR_EXTRACTVAL, success, (Ref[]){res, INT(1)}, 2);
+            Blk *f_blk = new_blk();
+            Blk *m_blk = new_blk();
+            // IR_JNZ branches to succ1 on true: success goes straight to
+            // the merge block, failure falls through to write the actual
+            // value into *expected (C11 7.17.7.4p2).
+            curb->jmp.type = IR_JNZ;
+            curb->jmp.arg = success;
+            curb->succ1 = m_blk;
+            curb->succ2 = f_blk;
+            add_pred(curb, curb->succ1);
+            add_pred(curb, curb->succ2);
+
+            curb = f_blk;
+            insert_blk(curb);
+            store(val, addr2, node->rhs->ty->base->align, NULL);
+            curb->jmp.type = IR_JMP;
+            curb->succ1 = m_blk;
+            add_pred(curb, curb->succ1);
+            curb = m_blk;
+            insert_blk(curb);
+            return cast(success, bitint[1][1], node->ty);
         }
         default:
             break;
