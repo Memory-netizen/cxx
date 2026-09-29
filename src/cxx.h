@@ -499,6 +499,7 @@ struct Node {
             Node *rhs;         // Right-hand side
             Member *member;    // Struct member access
             Type *compute_ty;  // Compound assign
+            int mem_order;     // Atomic access memory order + 1; 0 = unspecified (seq_cst)
         };
         struct {
             union {
@@ -584,6 +585,17 @@ enum {
     Q_VOLATILE = 1 << 1,
     Q_RESTRICT = 1 << 2,
     Q_MEMCONST = 1 << 3,
+    Q_ATOMIC = 1 << 4,
+};
+
+// Memory orders (C11 7.17.3; values of __ATOMIC_* / memory_order).
+enum {
+    MEM_ORDER_RELAXED,
+    MEM_ORDER_CONSUME,
+    MEM_ORDER_ACQUIRE,
+    MEM_ORDER_RELEASE,
+    MEM_ORDER_ACQ_REL,
+    MEM_ORDER_SEQ_CST,
 };
 
 typedef enum {
@@ -902,6 +914,7 @@ struct Ir {
     Ir *prev, *next;
     uint16_t op;
     uint16_t narg;
+    uint16_t mem_order;  // Atomic load/store memory order
     Ref args[];
 };
 

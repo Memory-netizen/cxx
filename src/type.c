@@ -943,6 +943,7 @@ void add_type(Node *node) {
         case ND_INIT:
             add_type(node->lhs);
             check_asop(node->lhs->ty, node->rhs, CTX_INIT);
+            node->lhs->ty = type_unqual(node->lhs->ty);
             if (!is_record(node->lhs->ty)) lvalue_convert(&node->rhs);
             new_imcast(&node->rhs, node->lhs->ty);
             node->ty = node->lhs->ty;

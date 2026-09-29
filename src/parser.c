@@ -1257,10 +1257,9 @@ bool is_builtin_fn(uint32_t id) {
         char *name;
         uint32_t id;
     } builtin_fn[] = {
-        {"__builtin_alloca", 0},
-        {"__builtin_alloca_with_align", 0},
-        {"__builtin_constant_p", 0},
-        {"__builtin_types_compatible_p", 0},
+        {"__builtin_alloca", 0},     {"__builtin_alloca_with_align", 0},
+        {"__builtin_constant_p", 0}, {"__builtin_types_compatible_p", 0},
+        {"__c11_atomic_store", 0},   {"__c11_atomic_load", 0},
     };
     if (!builtin_fn[0].id) {
         for (size_t i = 0; i < sizeof(builtin_fn) / sizeof(builtin_fn[0]); ++i)
@@ -1274,6 +1273,18 @@ bool is_builtin_fn(uint32_t id) {
 static bool is_const_expr(Node *node) {
     node = fold_node(node);
     return node->kind == ND_NUM;
+}
+
+// C11 7.17.3: stores accept only relaxed/release/seq_cst, loads do not
+// accept release/acq_rel. Like clang, warn and fall back to seq_cst on
+// any other value.
+static int check_mem_order(Token *tok, int order, bool is_store) {
+    bool ok = is_store ? (order == MEM_ORDER_RELAXED || order == MEM_ORDER_RELEASE || order == MEM_ORDER_SEQ_CST)
+                       : (order == MEM_ORDER_RELAXED || order == MEM_ORDER_CONSUME || order == MEM_ORDER_ACQUIRE ||
+                          order == MEM_ORDER_SEQ_CST);
+    if (ok) return order;
+    warning(tok, "memory order argument to atomic operation is invalid");
+    return MEM_ORDER_SEQ_CST;
 }
 
 static Node *parse_builtin_fn(Token **rest, Token *tok) {
@@ -1291,6 +1302,46 @@ static Node *parse_builtin_fn(Token **rest, Token *tok) {
         Node *node = assign(&tok, tok);
         *rest = skip(tok, TK_RPAREN);
         return new_num(is_const_expr(node), start);
+    }
+    if (tok->id == intern("__c11_atomic_store", 18)) {
+        tok = skip(tok->next, TK_LPAREN);
+        Node *object = assign(&tok, tok);
+        if (!is_pointer(object->ty) || (object->ty->base->qual & Q_ATOMIC) == 0)
+            error(start, "address argument to atomic operation must be a pointer to _Atomic type");
+        tok = skip(tok, TK_COMMA);
+        Node *desired = assign(&tok, tok);
+        tok = skip(tok, TK_COMMA);
+        Sym *var = new_lvar(intern("", 0), type_unqual(object->ty->base));
+        Node *var_init = new_var_node(var, start);
+
+        var_init = new_binary(ND_INIT, var_init, desired, tok);
+        Token *order_tok = tok;
+        int mem_order = const_expr(&tok, tok);
+        mem_order = check_mem_order(order_tok, mem_order, true);
+        *rest = skip(tok, TK_RPAREN);
+        Node *dst = new_unary(ND_DEREF, object, tok);
+        Node *node = new_binary(ND_AS, dst, new_var_node(var, start), tok);
+        node->mem_order = mem_order + 1;
+        node = new_binary(ND_COMMA, var_init, node, tok);
+        return node;
+    }
+    if (tok->id == intern("__c11_atomic_load", 17)) {
+        tok = skip(tok->next, TK_LPAREN);
+        Node *object = assign(&tok, tok);
+        if (!is_pointer(object->ty) || (object->ty->base->qual & Q_ATOMIC) == 0)
+            error(start, "address argument to atomic operation must be a pointer to _Atomic type");
+        tok = skip(tok, TK_COMMA);
+        Token *order_tok = tok;
+        int mem_order = const_expr(&tok, tok);
+        mem_order = check_mem_order(order_tok, mem_order, false);
+        *rest = skip(tok, TK_RPAREN);
+        Sym *var = new_lvar(intern("", 0), type_unqual(object->ty->base));
+        Node *var_init = new_var_node(var, start);
+        Node *src = new_unary(ND_DEREF, object, tok);
+        src->mem_order = mem_order + 1;
+        Node *node = new_binary(ND_AS, var_init, src, tok);
+        node = new_binary(ND_COMMA, node, new_var_node(var, start), tok);
+        return node;
     }
     return NULL;
 }
@@ -1634,6 +1685,7 @@ static Node *postfix(Token **rest, Token *tok) {
     } else {
         node = primary(&tok, tok);
     }
+
     while (1) {
         add_type(node);
         if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base, 0));
@@ -3548,6 +3600,19 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
             case TK_RESTRICT:
                 error(tok, "restrict requires a pointer or reference");
                 break;
+            case TK_ATOMIC: {
+                Token *start = tok;
+                qual |= Q_ATOMIC;
+                if (tok->next->kind != TK_LPAREN) break;
+                ty = typename(&tok, tok->next->next);
+                if (is_array(ty)) error(start, "_Atomic cannot be applied to array type");
+                if (ty->kind == TY_FUNC) error(start, "_Atomic cannot be applied to function type");
+                if (ty->qual & Q_ATOMIC) error(start, "_Atomic cannot be applied to atomic type");
+                if (ty->qual != 0) error(start, "_Atomic cannot be applied to qualified type");
+                typespec_cnt += OTHER;
+                tok = skip(tok, TK_RPAREN);
+                goto check_type;
+            }
             case TK_IDENT: {
                 if (typespec_cnt) goto loop_end;
                 Type *orig = find_typedef(tok, true);

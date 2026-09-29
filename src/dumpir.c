@@ -28,6 +28,12 @@ static const char *op_str[][3] = {
     [IR_INTTOPTR] = {"inttoptr", "inttoptr", NULL},
 };
 
+// LLVM has no 'consume' order (dropped in favor of acquire).
+static const char *mem_order_str[] = {
+    [MEM_ORDER_RELAXED] = "monotonic", [MEM_ORDER_CONSUME] = "acquire", [MEM_ORDER_ACQUIRE] = "acquire",
+    [MEM_ORDER_RELEASE] = "release",   [MEM_ORDER_ACQ_REL] = "acq_rel", [MEM_ORDER_SEQ_CST] = "seq_cst",
+};
+
 static const char *ty_str[] = {
     [TY_VOID] = "void",   [TY_BOOL] = "i8",       [TY_CHAR] = "i8",       [TY_SCHAR] = "i8",    [TY_UCHAR] = "i8",
     [TY_SHORT] = "i16",   [TY_INT] = "i32",       [TY_ENUM] = "i32",      [TY_LONG] = "i64",    [TY_LLONG] = "i64",
@@ -260,22 +266,26 @@ void dump_blk(Blk *b) {
                 break;
             case IR_LORD:
                 fprintf(out_file, "load ");
+                if (ir->args[0].ty->base->qual & Q_ATOMIC) fprintf(out_file, "atomic ");
                 if (ir->args[0].ty->base->qual & Q_VOLATILE) fprintf(out_file, "volatile ");
                 print_type(ir->dst.ty);
                 fprintf(out_file, ", ptr ");
                 print_operand(ir->args[0]);
+                if (ir->args[0].ty->base->qual & Q_ATOMIC) fprintf(out_file, " %s", mem_order_str[ir->mem_order]);
                 fprintf(out_file, ", align ");
                 print_operand(ir->args[1]);
                 fprintf(out_file, "\n");
                 break;
             case IR_STR:
                 fprintf(out_file, "store ");
+                if (ir->args[1].ty->base->qual & Q_ATOMIC) fprintf(out_file, "atomic ");
                 if (ir->args[1].ty->base->qual & Q_VOLATILE) fprintf(out_file, "volatile ");
                 print_type(ir->args[0].ty);
                 fprintf(out_file, " ");
                 print_operand(ir->args[0]);
                 fprintf(out_file, ", ptr ");
                 print_operand(ir->args[1]);
+                if (ir->args[1].ty->base->qual & Q_ATOMIC) fprintf(out_file, " %s", mem_order_str[ir->mem_order]);
                 fprintf(out_file, ", align ");
                 print_operand(ir->args[2]);
                 fprintf(out_file, "\n");

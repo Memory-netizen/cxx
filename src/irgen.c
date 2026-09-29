@@ -9,6 +9,15 @@ static Blk *unreach = &(Blk){};
 static int tmp_id;
 static Blk *brk_blk;
 static Blk *cont_blk;
+static int atomic_order;  // Memory order of the next atomic load/store
+
+// node->mem_order is stored +1 so that 0 can mean "unspecified" for
+// nodes that never went through the atomic builtins (seq_cst default).
+static int node_mem_order(Node *node) { return node->mem_order ? node->mem_order - 1 : MEM_ORDER_SEQ_CST; }
+
+static bool is_atomic_ptr(Ref addr) {
+    return addr.ty && is_pointer(addr.ty) && addr.ty->base && (addr.ty->base->qual & Q_ATOMIC);
+}
 
 static Ref gen_stmt(Node *node);
 static Ref gen_expr(Node *node);
@@ -21,6 +30,7 @@ static Ir *new_ins(IrKind op, Ref dst, Ref *args, uint32_t narg) {
     new->op = op;
     new->dst = dst;
     new->narg = narg;
+    new->mem_order = MEM_ORDER_SEQ_CST;
     if (narg > 0 && args) memcpy(new->args, args, narg * sizeof(Ref));
 
     new->prev = curb->tail;
@@ -251,7 +261,8 @@ static Ref load(Ref addr, Type *type, int align, Member *mem) {
         return addr;
     } else {
         Ref dst = TMP(tmp_id++, type);
-        new_ins(IR_LORD, dst, (Ref[]){addr, INT(align)}, 2);
+        Ir *ins = new_ins(IR_LORD, dst, (Ref[]){addr, INT(align)}, 2);
+        if (is_atomic_ptr(addr)) ins->mem_order = atomic_order;
         return dst;
     }
 }
@@ -295,7 +306,8 @@ static void store(Ref val, Ref addr, int align, Member *mem) {
         // g. store
         new_ins(IR_STR, R, (Ref[]){new_val, addr, INT(align)}, 3);
     } else {
-        new_ins(IR_STR, R, (Ref[]){val, addr, INT(align)}, 3);
+        Ir *ins = new_ins(IR_STR, R, (Ref[]){val, addr, INT(align)}, 3);
+        if (is_atomic_ptr(addr)) ins->mem_order = atomic_order;
     }
 }
 
@@ -386,7 +398,9 @@ static Ref gen_expr(Node *node) {
         case ND_LVTOR: {
             int align = node->ty->align;
             if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
-            return load(gen_expr(node->lhs), node->ty, align, node->lhs->member);
+            Ref addr = gen_expr(node->lhs);
+            atomic_order = node_mem_order(node->lhs);
+            return load(addr, node->ty, align, node->lhs->member);
         }
         case ND_VAR:
         case ND_MEMBER:
@@ -423,6 +437,7 @@ static Ref gen_expr(Node *node) {
             if (node->ty->kind == TY_VLA) {
                 node->lhs->var->vreg = dst.val;
             } else {
+                atomic_order = node_mem_order(node);
                 store(dst, addr, align, node->lhs->member);
             }
             return dst;
@@ -435,6 +450,7 @@ static Ref gen_expr(Node *node) {
             Ref addr = gen_expr(node->lhs);
             int align = node->ty->align;
             if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
+            atomic_order = node_mem_order(node);
             Ref lr = load(addr, node->ty, align, node->lhs->member);
             int addend = (node->kind == ND_PREINC || node->kind == ND_POSTINC) ? 1 : -1;
             union {
@@ -492,10 +508,12 @@ static Ref gen_expr(Node *node) {
             Ref addr = gen_expr(node->lhs);
             int align = node->ty->align;
             if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
+            atomic_order = node_mem_order(node);
             Ref lr = load(addr, node->ty, align, node->lhs->member);
             Ref rr = gen_expr(node->rhs);
             dst = TMP(tmp_id++, node->ty);
             new_ins(IR_GEP, dst, (Ref[]){lr, rr}, 2);
+            atomic_order = node_mem_order(node);
             store(dst, addr, align, node->lhs->member);
             return dst;
         }
@@ -512,6 +530,7 @@ static Ref gen_expr(Node *node) {
             Ref addr = gen_expr(node->lhs);
             int align = node->ty->align;
             if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
+            atomic_order = node_mem_order(node);
             Ref lr = load(addr, node->ty, align, node->lhs->member);
             lr = cast(lr, node->ty, node->compute_ty);
             Ref rr = gen_expr(node->rhs);
@@ -524,6 +543,7 @@ static Ref gen_expr(Node *node) {
             Ref res = TMP(tmp_id++, node->compute_ty);
             new_ins(bin_op[node->kind], res, (Ref[]){lr, rr}, 2);
             dst = cast(res, node->compute_ty, node->ty);
+            atomic_order = node_mem_order(node);
             store(dst, addr, align, node->lhs->member);
             return dst;
         }
