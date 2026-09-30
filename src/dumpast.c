@@ -492,6 +492,7 @@ static void dump_node(Node *node) {
             fprintf(stdout, "stack restore\n");
             break;
         case ND_CAS:
+        case ND_ATOMICRMW:
             break;
     }
 }

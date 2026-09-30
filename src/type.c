@@ -1076,9 +1076,17 @@ void add_type(Node *node) {
             add_type(node->lhs);
             add_type(node->rhs);
             add_type(node->desired);
+            lvalue_convert(&node->lhs);
             lvalue_convert(&node->rhs);
             lvalue_convert(&node->desired);
             node->ty = T.ty_bool;
+            break;
+        case ND_ATOMICRMW:
+            add_type(node->lhs);
+            add_type(node->desired);
+            lvalue_convert(&node->lhs);
+            lvalue_convert(&node->desired);
+            node->ty = type_unqual(node->lhs->ty->base);
             break;
         // other
         case ND_NOP:

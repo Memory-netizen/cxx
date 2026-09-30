@@ -413,48 +413,49 @@ typedef enum {
     ND_DIVAS,  // /=
     ND_MODAS,  // %=
 
-    ND_ANDAS,    // &=
-    ND_ORAS,     // |=
-    ND_XORAS,    // ^=
-    ND_LEFTAS,   // <<=
-    ND_RIGHTAS,  // >>=
-    ND_BOR,      // |
-    ND_XOR,      // ^
-    ND_BAND,     // &
-    ND_EQ,       // ==
-    ND_NE,       // !=
-    ND_LT,       // <
-    ND_LE,       // <=
-    ND_GT,       // >
-    ND_GE,       // >=
-    ND_LEFT,     // <<
-    ND_RIGHT,    // >>
-    ND_ADD,      // +
-    ND_SUB,      // -
-    ND_MUL,      // *
-    ND_DIV,      // /
-    ND_MOD,      // %
-    ND_PLUS,     // unary +
-    ND_NEG,      // unary -
-    ND_NOT,      // !
-    ND_INVERT,   // ~
-    ND_ADDR,     // unary &
-    ND_DEREF,    // unary *
-    ND_MEMBER,   // . (struct member access)
-    ND_PTRADD,   // ptr + num
-    ND_PREINC,   // pre ++
-    ND_PREDEC,   // pre --
-    ND_POSTINC,  // post ++
-    ND_POSTDEC,  // post --
-    ND_FUNCALL,  // Function call
-    ND_IMCAST,   // Implicit cast
-    ND_EXCAST,   // Cast
-    ND_LVTOR,    // LValue to rvalue
-    ND_LOGAND,   // &&
-    ND_LOGOR,    // ||
-    ND_COND,     // ?:
-    ND_MEMZERO,  // Zero-clear a stack variable
-    ND_CAS,
+    ND_ANDAS,      // &=
+    ND_ORAS,       // |=
+    ND_XORAS,      // ^=
+    ND_LEFTAS,     // <<=
+    ND_RIGHTAS,    // >>=
+    ND_BOR,        // |
+    ND_XOR,        // ^
+    ND_BAND,       // &
+    ND_EQ,         // ==
+    ND_NE,         // !=
+    ND_LT,         // <
+    ND_LE,         // <=
+    ND_GT,         // >
+    ND_GE,         // >=
+    ND_LEFT,       // <<
+    ND_RIGHT,      // >>
+    ND_ADD,        // +
+    ND_SUB,        // -
+    ND_MUL,        // *
+    ND_DIV,        // /
+    ND_MOD,        // %
+    ND_PLUS,       // unary +
+    ND_NEG,        // unary -
+    ND_NOT,        // !
+    ND_INVERT,     // ~
+    ND_ADDR,       // unary &
+    ND_DEREF,      // unary *
+    ND_MEMBER,     // . (struct member access)
+    ND_PTRADD,     // ptr + num
+    ND_PREINC,     // pre ++
+    ND_PREDEC,     // pre --
+    ND_POSTINC,    // post ++
+    ND_POSTDEC,    // post --
+    ND_FUNCALL,    // Function call
+    ND_IMCAST,     // Implicit cast
+    ND_EXCAST,     // Cast
+    ND_LVTOR,      // LValue to rvalue
+    ND_LOGAND,     // &&
+    ND_LOGOR,      // ||
+    ND_COND,       // ?:
+    ND_MEMZERO,    // Zero-clear a stack variable
+    ND_CAS,        // Atomic compare-and-swap
+    ND_ATOMICRMW,  // Atomic read-modify-write (atomicrmw)
 
     // Statement
     ND_RETURN,     // return
@@ -504,6 +505,7 @@ struct Node {
             uint16_t mem_order;   // Atomic access memory order + 1; 0 = unspecified (seq_cst)
             uint16_t mem_order1;  // Atomic access memory order + 1; 0 = unspecified (seq_cst)
             bool is_weak;
+            int armw_op;  // ND_ATOMICRMW: A_* operation (atomicrmw)
         };
         struct {
             union {

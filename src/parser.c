@@ -1299,8 +1299,9 @@ static bool is_const_expr(Node *node) {
 enum {
     MO_STORE,
     MO_LOAD,
-    MO_RMW,       // cmpxchg success: any of the six orders
-    MO_CAS_FAIL,  // cmpxchg failure: no release/acq_rel
+    MO_RMW,        // cmpxchg success: any of the six orders
+    MO_CAS_FAIL,   // cmpxchg failure: no release/acq_rel
+    MO_ATOMICRMW,  // single-order RMW (exchange, fetch_*): any of the six orders
 };
 
 static int check_mem_order(Token *tok, int order, int mode) {
@@ -1314,7 +1315,7 @@ static int check_mem_order(Token *tok, int order, int mode) {
             ok = order == MEM_ORDER_RELAXED || order == MEM_ORDER_CONSUME || order == MEM_ORDER_ACQUIRE ||
                  order == MEM_ORDER_SEQ_CST;
             break;
-        default:  // MO_RMW
+        default:  // MO_RMW / MO_ATOMICRMW
             ok = MEM_ORDER_RELAXED <= order && order <= MEM_ORDER_SEQ_CST;
             break;
     }
@@ -1386,8 +1387,36 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             node = new_binary(ND_COMMA, node, new_var_node(var, start), tok);
             return node;
         }
-        case ATOMIC_EXCHANGE:
-            break;
+        case ATOMIC_EXCHANGE: {
+            Node *node = new_node(ND_ATOMICRMW, tok);
+            tok = skip(tok->next, TK_LPAREN);
+            Node *object = assign(&tok, tok);
+            if (!is_pointer(object->ty) || (object->ty->base->qual & Q_ATOMIC) == 0)
+                error(start, "address argument to atomic operation must be a pointer to _Atomic type");
+            Type *t = type_unqual(object->ty->base);
+            tok = skip(tok, TK_COMMA);
+            Node *desired = assign(&tok, tok);
+            new_imcast(&desired, t);
+            tok = skip(tok, TK_COMMA);
+            Token *order_tok = tok;
+            int mem_order = const_expr(&tok, tok);
+            mem_order = check_mem_order(order_tok, mem_order, MO_ATOMICRMW);
+            *rest = skip(tok, TK_RPAREN);
+            Sym *tmp_desired = new_lvar(intern("", 0), t);
+            Node *var_init = new_var_node(tmp_desired, start);
+            Node *node1 = new_binary(ND_AS, var_init, desired, tok);
+
+            Sym *tmp_result = new_lvar(intern("", 0), t);
+            Node *tmp_res = new_var_node(tmp_result, start);
+            node->lhs = object;
+            node->desired = new_var_node(tmp_desired, start);
+            node->mem_order = mem_order + 1;
+            node->armw_op = A_XCHG;
+            add_type(node);
+            Node *node2 = new_binary(ND_AS, tmp_res, node, tok);
+            node2 = new_binary(ND_COMMA, node1, node2, tok);
+            return new_binary(ND_COMMA, node2, new_var_node(tmp_result, start), tok);
+        }
         case ATOMIC_COMPARE_EXCHANGE_WEAK:
             is_weak = true;
         // fall through

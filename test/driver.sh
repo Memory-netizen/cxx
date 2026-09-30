@@ -555,6 +555,33 @@ int f(void) { return __c11_atomic_compare_exchange_strong(&x, &e, 1, __ATOMIC_SE
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'second argument to atomic operation must be a pointer to the same type'
 check 'cas expected type mismatch'
 
+# atomic_exchange: atomicrmw xchg with the requested order.
+echo '#include <stdatomic.h>
+_Atomic int x;
+int f(void) { return __c11_atomic_exchange(&x, 1, __ATOMIC_RELEASE); }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'atomicrmw xchg ptr @x, i32 %'
+check 'atomicrmw xchg'
+echo '#include <stdatomic.h>
+_Atomic int x;
+int f(void) { return __c11_atomic_exchange(&x, 1, __ATOMIC_RELEASE); }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q ' release, align 4'
+check 'atomicrmw exchange release order'
+echo '#include <stdatomic.h>
+_Atomic int x;
+int f(void) { return __c11_atomic_exchange(&x, 1, __ATOMIC_RELAXED); }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q ' monotonic, align 4'
+check 'atomicrmw exchange relaxed order'
+echo '#include <stdatomic.h>
+_Atomic volatile int vx;
+int f(void) { return __c11_atomic_exchange(&vx, 1, __ATOMIC_SEQ_CST); }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'atomicrmw volatile xchg ptr @vx, i32 %'
+check 'atomicrmw volatile'
+echo '#include <stdatomic.h>
+_Atomic int x;
+int f(void) { return __c11_atomic_exchange(&x, 1, 99); }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'memory order argument to atomic operation is invalid'
+check 'exchange invalid order warning'
+
 # Non-atomic accesses must stay atomic-free.
 echo 'volatile int v; void f(void) { v = 1; }' \
   | $compiler -S -emit-llvm -o - -xc - | grep -q 'store volatile i32 1, ptr @v, align 4'

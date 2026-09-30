@@ -34,6 +34,28 @@ static const char *mem_order_str[] = {
     [MEM_ORDER_RELEASE] = "release",   [MEM_ORDER_ACQ_REL] = "acq_rel", [MEM_ORDER_SEQ_CST] = "seq_cst",
 };
 
+static const char *atomicrmw_op[] = {
+    [A_XCHG] = "xchg",
+    [A_ADD] = "add",
+    [A_SUB] = "sub",
+    [A_AND] = "and",
+    [A_NAND] = "nand",
+    [A_OR] = "or",
+    [A_XOR] = "xor",
+    [A_MAX] = "max",
+    [A_MIN] = "min",
+    [A_UMAX] = "umax",
+    [A_UMIN] = "umin",
+    [A_FADD] = "fadd",
+    [A_FSUB] = "fsub",
+    [A_FMAX] = "fmax",
+    [A_FMIN] = "fmin",
+    [A_UINC_WRAP] = "uinc_wrap",
+    [A_UDEC_WRAP] = "udec_wrap",
+    [A_USUB_COND] = "usub_cond",
+    [A_USUB_SAT] = "usub_sat",
+};
+
 static const char *ty_str[] = {
     [TY_VOID] = "void",   [TY_BOOL] = "i8",       [TY_CHAR] = "i8",       [TY_SCHAR] = "i8",    [TY_UCHAR] = "i8",
     [TY_SHORT] = "i16",   [TY_INT] = "i32",       [TY_ENUM] = "i32",      [TY_LONG] = "i64",    [TY_LLONG] = "i64",
@@ -332,6 +354,22 @@ void dump_blk(Blk *b) {
                 fprintf(out_file, " %s %s", mem_order_str[ir->mem_order], mem_order_str[ir->mem_order1]);
                 fprintf(out_file, ", align %d\n", ir->args[1].ty->align);
                 break;
+
+            case IR_ATOMICRMW:
+                fprintf(out_file, "atomicrmw ");
+                if (ir->args[1].ty->base->qual & Q_VOLATILE) fprintf(out_file, "volatile ");
+                fprintf(out_file, "%s ", atomicrmw_op[ir->args[0].val]);
+                fprintf(out_file, "ptr ");
+                print_operand(ir->args[1]);
+                fprintf(out_file, ", ");
+                print_type(ir->args[2].ty);
+                fprintf(out_file, " ");
+                print_operand(ir->args[2]);
+
+                fprintf(out_file, " %s", mem_order_str[ir->mem_order]);
+                fprintf(out_file, ", align %d\n", ir->args[2].ty->align);
+                break;
+
             case IR_MEMCPY:
                 fprintf(out_file, "call void @llvm.memcpy.p0.p0.i64(ptr ");
                 print_operand(ir->args[0]);

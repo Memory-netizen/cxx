@@ -159,6 +159,45 @@ int main() {
     ASSERT(1, atomic_compare_exchange_strong(&ac, &ec, 4));
     ASSERT(4, ac);
 
+    // CAS through a pointer-variable object (lvalue conversion).
+    _Atomic int *xp = &x;
+    x = 60;
+    e = 60;
+    ASSERT(1, atomic_compare_exchange_strong(xp, &e, 61));
+    ASSERT(61, x);
+    ASSERT(60, e);
+
+    // atomic_exchange returns the previous value (C11 7.17.7.4p2).
+    x = 20;
+    ASSERT(20, atomic_exchange(&x, 21));
+    ASSERT(21, x);
+    ASSERT(21, atomic_exchange_explicit(&x, 22, memory_order_release));
+    ASSERT(22, x);
+    ASSERT(22, atomic_exchange_explicit(&x, 23, memory_order_relaxed));
+    ASSERT(23, x);
+
+    // The object argument may be any pointer expression, not just &x.
+    ASSERT(23, atomic_exchange(xp, 24));
+    ASSERT(24, x);
+
+    // _Atomic volatile, char, and pointer objects.
+    vx = 30;
+    ASSERT(30, atomic_exchange(&vx, 31));
+    ASSERT(31, vx);
+
+    ASSERT(4, atomic_exchange(&ac, 5));
+    ASSERT(5, ac);
+
+    int pv = 9;
+    ap = 0;
+    ASSERT(1, atomic_exchange(&ap, &pv) == 0);
+    ASSERT(1, ap == &pv);
+
+    // The result participates in larger expressions.
+    x = 40;
+    ASSERT(41, atomic_exchange(&x, 41) + 1);
+    ASSERT(41, x);
+
     printf("OK\n");
     return 0;
 }

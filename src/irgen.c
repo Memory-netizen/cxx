@@ -612,6 +612,15 @@ static Ref gen_expr(Node *node) {
             insert_blk(curb);
             return cast(success, bitint[1][1], node->ty);
         }
+        case ND_ATOMICRMW: {
+            Ref addr = gen_expr(node->lhs);
+            Ref new_val = gen_expr(node->desired);
+            Ref args[] = {INT(node->armw_op), addr, new_val};
+            Ref res = TMP(tmp_id++, node->ty);
+            Ir *ins = new_ins(IR_ATOMICRMW, res, args, 3);
+            ins->mem_order = node_mem_order(node);
+            return res;
+        }
         default:
             break;
     }
