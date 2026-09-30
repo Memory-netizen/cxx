@@ -233,6 +233,20 @@ int main() { x = 1; x += 2; x *= 3; return x == 9 ? 0 : 1; }' \
   | $compiler -o $tmp/cmpd -xc - && $tmp/cmpd
 check 'compound assign end to end'
 
+# alloca: emitted at the call site; plain alloca is an i8 array aligned
+# to 16 bytes; with_align takes the alignment in bits; VLAs allocate
+# their element type.
+echo 'int g(int n) { int *p = __builtin_alloca(n); return *p; }
+int h(int n) { int *p = __builtin_alloca_with_align(n, 32); return *p; }' \
+  | $compiler -S -emit-llvm -o - -xc - > $tmp/alloca.ll
+grep -q 'alloca i8, i64 %.*, align 16' $tmp/alloca.ll
+check 'alloca i8 align 16'
+grep -q 'alloca i8, i64 %.*, align 4' $tmp/alloca.ll
+check 'alloca_with_align bits to bytes'
+echo 'int f(int n) { int a[n]; return a[0]; }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'alloca i32, i64 %'
+check 'VLA typed alloca'
+
 # Non-atomic accesses must stay atomic-free.
 echo 'volatile int v; void f(void) { v = 1; }' \
   | $compiler -S -emit-llvm -o - -xc - | grep -q 'store volatile i32 1, ptr @v, align 4'

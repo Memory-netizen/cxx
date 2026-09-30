@@ -101,24 +101,6 @@ static void insert_phi(Blk *blk, Phi *phi) {
     blk->phi = phi;
 }
 
-static Ref gen_builtin_fn(Node *node) {
-    if (node->func->lhs->var->id == intern("__builtin_alloca", 16)) {
-        Ref size = gen_expr(node->args);
-        Ref dst = TMP(tmp_id++, pointer_to(T.ty_char, 0));
-        new_ins(IR_ALLOCA, dst, (Ref[]){size, INT(16)}, 2);
-        return dst;
-    }
-    if (node->func->lhs->var->id == intern("__builtin_alloca_with_align", 27)) {
-        Ref size = gen_expr(node->args);
-        int align = (int)int128_to_i64(node->args->next->ival);
-        Type *base_ty = node->base_ty ?: T.ty_char;
-        Ref dst = TMP(tmp_id++, pointer_to(base_ty, 0));
-        new_ins(IR_ALLOCA, dst, (Ref[]){size, INT(align / 8)}, 2);
-        return dst;
-    }
-    return R;
-}
-
 static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
     if (target_ty->kind == TY_BOOL) {
         Ref tmp = TMP(tmp_id++, bitint[1][1]);
@@ -558,7 +540,6 @@ static Ref gen_expr(Node *node) {
         case ND_COND:
             return gen_cond(node);
         case ND_FUNCALL: {
-            if (node->func->kind == ND_IMCAST && is_builtin_fn(node->func->lhs->var->id)) return gen_builtin_fn(node);
             int nargs = node->narg;
             Ref *call_ops = emalloc((nargs + 1) * sizeof(Ref));
             call_ops[0] = gen_expr(node->func);
@@ -623,6 +604,14 @@ static Ref gen_expr(Node *node) {
             Ir *ins = new_ins(IR_ATOMICRMW, res, args, 3);
             ins->mem_order = node_mem_order(node);
             return ptr_addsub ? cast(res, T.ty_long, node->ty) : res;
+        }
+        case ND_ALLOCA: {
+            // Emitted at the call site, like clang: the memory lives
+            // until the function returns (not scope-bound).
+            Ref size = gen_expr(node->lhs);
+            Ref dst = TMP(tmp_id++, pointer_to(node->base_ty ?: T.ty_char, 0));
+            new_ins(IR_ALLOCA, dst, (Ref[]){size, INT(int128_to_i64(node->rhs->ival))}, 2);
+            return dst;
         }
         default:
             break;

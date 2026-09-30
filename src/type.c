@@ -1088,6 +1088,13 @@ void add_type(Node *node) {
             lvalue_convert(&node->desired);
             node->ty = type_unqual(node->lhs->ty->base);
             break;
+        case ND_ALLOCA:
+            add_type(node->lhs);
+            lvalue_convert(&node->lhs);
+            // The C type is void *, like the old declared prototype; the
+            // alloca element type (base_ty ?: char) is only for the IR.
+            node->ty = pointer_to(T.ty_void, 0);
+            break;
         // other
         case ND_NOP:
         case ND_GOTO:

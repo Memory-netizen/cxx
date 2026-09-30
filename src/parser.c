@@ -13,7 +13,6 @@
     })
 
 static Module *curm;
-static Sym *builtin_alloca_with_align;
 
 static const SClass sc_table[] = {
     [TK_EXTERN] = SC_EXTERN,   [TK_REGISTER] = SC_REG, [TK_STATIC] = SC_STATIC,       [TK_THREAD] = SC_THREAD,
@@ -1269,27 +1268,36 @@ enum {
     ATOMIC_COMPARE_EXCHANGE_STRONG,
 };
 
+// Interned once at the top of parse(): the anonymous name for
+// compiler-generated temporaries and __func__/__FUNCTION__.
+static uint32_t id_anon;
+static uint32_t id_func;
+static uint32_t id_function;
+
+static struct {
+    char *name;
+    uint32_t id;
+    int kind;
+} builtin_fn[] = {
+    {"__builtin_alloca", 0, BUILTIN_FN_ALLOCA},
+    {"__builtin_alloca_with_align", 0, BUILTIN_ALLOCA_WITH_ALIGN},
+    {"__builtin_constant_p", 0, BUILTIN_CONSTANT_P},
+    {"__builtin_types_compatible_p", 0, BUILTIN_TYPES_COMPATIBLE_P},
+    {"__c11_atomic_store", 0, ATOMIC_STORE},
+    {"__c11_atomic_load", 0, ATOMIC_LOAD},
+    {"__c11_atomic_exchange", 0, ATOMIC_EXCHANGE},
+    {"__c11_atomic_fetch_add", 0, ATOMIC_FETCH_ADD},
+    {"__c11_atomic_fetch_sub", 0, ATOMIC_FETCH_SUB},
+    {"__c11_atomic_fetch_and", 0, ATOMIC_FETCH_AND},
+    {"__c11_atomic_fetch_or", 0, ATOMIC_FETCH_OR},
+    {"__c11_atomic_fetch_xor", 0, ATOMIC_FETCH_XOR},
+    {"__c11_atomic_compare_exchange_weak", 0, ATOMIC_COMPARE_EXCHANGE_WEAK},
+    {"__c11_atomic_compare_exchange_strong", 0, ATOMIC_COMPARE_EXCHANGE_STRONG},
+};
+
+// The table ids are interned lazily on first use: the preprocessor
+// calls this for __has_builtin before parse() runs.
 int is_builtin_fn(uint32_t id) {
-    static struct {
-        char *name;
-        uint32_t id;
-        int kind;
-    } builtin_fn[] = {
-        {"__builtin_alloca", 0, BUILTIN_FN_ALLOCA},
-        {"__builtin_alloca_with_align", 0, BUILTIN_ALLOCA_WITH_ALIGN},
-        {"__builtin_constant_p", 0, BUILTIN_CONSTANT_P},
-        {"__builtin_types_compatible_p", 0, BUILTIN_TYPES_COMPATIBLE_P},
-        {"__c11_atomic_store", 0, ATOMIC_STORE},
-        {"__c11_atomic_load", 0, ATOMIC_LOAD},
-        {"__c11_atomic_exchange", 0, ATOMIC_EXCHANGE},
-        {"__c11_atomic_fetch_add", 0, ATOMIC_FETCH_ADD},
-        {"__c11_atomic_fetch_sub", 0, ATOMIC_FETCH_SUB},
-        {"__c11_atomic_fetch_and", 0, ATOMIC_FETCH_AND},
-        {"__c11_atomic_fetch_or", 0, ATOMIC_FETCH_OR},
-        {"__c11_atomic_fetch_xor", 0, ATOMIC_FETCH_XOR},
-        {"__c11_atomic_compare_exchange_weak", 0, ATOMIC_COMPARE_EXCHANGE_WEAK},
-        {"__c11_atomic_compare_exchange_strong", 0, ATOMIC_COMPARE_EXCHANGE_STRONG},
-    };
     if (!builtin_fn[0].id) {
         for (size_t i = 0; i < sizeof(builtin_fn) / sizeof(builtin_fn[0]); ++i)
             builtin_fn[i].id = intern(builtin_fn[i].name, strlen(builtin_fn[i].name));
@@ -1365,7 +1373,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             tok = skip(tok, TK_COMMA);
             Node *desired = assign(&tok, tok);
             tok = skip(tok, TK_COMMA);
-            Sym *var = new_lvar(intern("", 0), type_unqual(object->ty->base));
+            Sym *var = new_lvar(id_anon, type_unqual(object->ty->base));
             Node *var_init = new_var_node(var, start);
 
             var_init = new_binary(ND_INIT, var_init, desired, tok);
@@ -1389,12 +1397,40 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             int mem_order = const_expr(&tok, tok);
             mem_order = check_mem_order(order_tok, mem_order, MO_LOAD);
             *rest = skip(tok, TK_RPAREN);
-            Sym *var = new_lvar(intern("", 0), type_unqual(object->ty->base));
+            Sym *var = new_lvar(id_anon, type_unqual(object->ty->base));
             Node *var_init = new_var_node(var, start);
             Node *src = new_unary(ND_DEREF, object, tok);
             src->mem_order = mem_order + 1;
             Node *node = new_binary(ND_AS, var_init, src, tok);
             node = new_binary(ND_COMMA, node, new_var_node(var, start), tok);
+            return node;
+        }
+        case BUILTIN_FN_ALLOCA:
+        case BUILTIN_ALLOCA_WITH_ALIGN: {
+            if (tok->next->kind != TK_LPAREN) error(tok, "builtin functions must be directly called");
+            tok = skip(tok->next, TK_LPAREN);
+            Node *size = assign(&tok, tok);
+            lvalue_convert(&size);
+            new_imcast(&size, T.ty_ulong);
+            int64_t align = 16;  // Plain alloca: 16 bytes, like clang.
+            if (kind == BUILTIN_ALLOCA_WITH_ALIGN) {
+                tok = skip(tok, TK_COMMA);
+                Token *align_tok = tok;
+                Node *arg = assign(&tok, tok);
+                if (!is_integer(arg->ty))
+                    error(align_tok, "argument to ‘__builtin_alloca_with_align’ must be a constant integer");
+                fold_node(arg);
+                if (arg->kind != ND_NUM)
+                    error(align_tok, "argument to ‘__builtin_alloca_with_align’ must be a constant integer");
+                int64_t a = int128_to_i64(arg->ival);
+                if (a & (a - 1)) error(align_tok, "requested alignment ‘%ld’ is not a positive power of 2", a);
+                if (a < 8) error(align_tok, "requested alignment must be 8 or greater");
+                align = a / 8;
+            }
+            *rest = skip(tok, TK_RPAREN);
+            Node *node = new_node(ND_ALLOCA, tok);
+            node->lhs = size;
+            node->rhs = new_ulong(align, tok);
             return node;
         }
         case ATOMIC_EXCHANGE:
@@ -1432,11 +1468,11 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             int mem_order = const_expr(&tok, tok);
             mem_order = check_mem_order(order_tok, mem_order, MO_ATOMICRMW);
             *rest = skip(tok, TK_RPAREN);
-            Sym *tmp_desired = new_lvar(intern("", 0), operand_ty);
+            Sym *tmp_desired = new_lvar(id_anon, operand_ty);
             Node *var_init = new_var_node(tmp_desired, start);
             Node *node1 = new_binary(ND_AS, var_init, desired, tok);
 
-            Sym *tmp_result = new_lvar(intern("", 0), t);
+            Sym *tmp_result = new_lvar(id_anon, t);
             Node *tmp_res = new_var_node(tmp_result, start);
             node->lhs = object;
             node->desired = new_var_node(tmp_desired, start);
@@ -1495,11 +1531,11 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             mem_order2 = check_mem_order(order_tok2, mem_order2, MO_CAS_FAIL);
             *rest = skip(tok, TK_RPAREN);
 
-            Sym *tmp_desired = new_lvar(intern("", 0), t);
+            Sym *tmp_desired = new_lvar(id_anon, t);
             Node *var_init = new_var_node(tmp_desired, start);
             Node *node1 = new_binary(ND_AS, var_init, desired, tok);
 
-            Sym *tmp_result = new_lvar(intern("", 0), T.ty_bool);
+            Sym *tmp_result = new_lvar(id_anon, T.ty_bool);
             Node *tmp_bool = new_var_node(tmp_result, start);
             Node *cas = new_node(ND_CAS, start);
             cas->lhs = object;
@@ -1546,7 +1582,7 @@ static Node *atomic_compound_assign(Node *lhs, NodeKind op, Node *rhs, bool post
     // Type the rhs exactly like the plain compound assignment would and
     // steal the converted operand and the common type. The scratch lhs
     // is unqualified, so get_common_type sees the same kinds.
-    Sym *scratch = new_lvar(intern("", 0), t);
+    Sym *scratch = new_lvar(id_anon, t);
     Node *bin = new_binary(op, new_var_node(scratch, tok), rhs, tok);
     add_type(bin);
     rhs = bin->rhs;
@@ -1554,12 +1590,12 @@ static Node *atomic_compound_assign(Node *lhs, NodeKind op, Node *rhs, bool post
 
     bool armw = !is_ptr && op != ND_MULAS && op != ND_DIVAS && op != ND_MODAS && op != ND_LEFTAS && op != ND_RIGHTAS;
 
-    Sym *v_addr = new_lvar(intern("", 0), pointer_to(at, 0));
-    Sym *v_val = new_lvar(intern("", 0), val_ty);
-    Sym *v_old = new_lvar(intern("", 0), t);
-    Sym *v_new = new_lvar(intern("", 0), t);
-    Sym *v_r = new_lvar(intern("", 0), t);
-    Sym *v_res = new_lvar(intern("", 0), t);
+    Sym *v_addr = new_lvar(id_anon, pointer_to(at, 0));
+    Sym *v_val = new_lvar(id_anon, val_ty);
+    Sym *v_old = new_lvar(id_anon, t);
+    Sym *v_new = new_lvar(id_anon, t);
+    Sym *v_r = new_lvar(id_anon, t);
+    Sym *v_res = new_lvar(id_anon, t);
 
     Node *stmt = new_node(ND_STMT_EXPR, tok);
     Node dummy, *cur = &dummy;
@@ -1856,41 +1892,6 @@ static Node *primary(Token **rest, Token *tok) {
     return NULL;
 }
 
-static Node *new_alloca_with_align(Node *size, int align, Type *base_ty, Token *tok) {
-    Node *node = new_node(ND_FUNCALL, tok);
-    Node *fn = new_var_node(builtin_alloca_with_align, tok);
-    add_type(fn);
-    new_imcast(&fn, pointer_to(fn->ty, 0));
-    lvalue_convert(&fn);
-    node->func = fn;
-
-    Type *ty = (fn->ty->kind == TY_FUNC) ? fn->ty : fn->ty->base;
-    node->base_ty = base_ty;
-    node->ty = ty->ret;
-
-    node->args = size;
-    node->args->next = new_ulong(align * 8, tok);
-    node->narg = 2;
-    return node;
-}
-
-static void check_builtin_fn(Node *node) {
-    uint32_t id = node->func->lhs->var->id;
-    if (node->func->kind != ND_IMCAST) return;
-    int builtin_fn_kind = is_builtin_fn(id);
-    if (!builtin_fn_kind) return;
-    if (builtin_fn_kind == BUILTIN_ALLOCA_WITH_ALIGN) {
-        Node *arg1 = node->args->next;
-        if (!is_integer(arg1->ty))
-            error(node->tok, "argument to ‘__builtin_alloca_with_align’ must be a constant integer");
-        int64_t align = eval(arg1);
-        if (align & (align - 1)) error(arg1->tok, "requested alignment ‘%ld’ is not a positive power of 2", align);
-        if (align < 8) error(arg1->tok, "requested alignment must be 8 or greater");
-        node->args->next = new_ulong(align, arg1->tok);
-        return;
-    }
-}
-
 static Node *fncall(Token **rest, Token *tok, Node *fn) {
     if (fn->ty->kind != TY_FUNC && !is_funcptr(fn->ty))
         error(tok, "called object ‘%.*s’ is not a function or function pointer", fn->tok->len, tok_text(fn->tok));
@@ -1949,7 +1950,6 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
 
     node->args = dummy.next;
     node->narg = i;
-    check_builtin_fn(node);
     return node;
 }
 
@@ -1992,7 +1992,7 @@ static Node *postfix(Token **rest, Token *tok) {
             var = new_gvar(uid, ty);
             gvar_initializer(&tok, tok, var);
         } else {
-            var = new_lvar(intern("", 0), ty);
+            var = new_lvar(id_anon, ty);
             init = lvar_initializer(&tok, tok, var);
         }
         var->sclass = sclass;
@@ -2300,7 +2300,7 @@ static Node *conditional(Token **rest, Token *tok) {
         // [GNU] Compile `a ?: b` as `tmp = a, tmp ? tmp : b`.
         // Omitting the middle operand uses the value already computed
         // without the undesirable effects of recomputing it
-        Sym *var = new_lvar(intern("", 0), cond->ty);
+        Sym *var = new_lvar(id_anon, cond->ty);
         Node *lhs = new_binary(ND_AS, new_var_node(var, tok), cond, tok);
         Node *rhs = new_node(ND_COND, tok);
         rhs->cond = new_var_node(var, tok);
@@ -2818,7 +2818,11 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             Type *base_ty = var->ty;
             while (base_ty->kind == TY_VLA) base_ty = base_ty->base;
             add_type(size);
-            Node *alloc = new_alloca_with_align(size, var->align, base_ty, tok);
+            Node *alloc = new_node(ND_ALLOCA, tok);
+            alloc->lhs = size;
+            alloc->rhs = new_ulong(var->align, tok);
+            alloc->base_ty = base_ty;
+            add_type(alloc);
             Node *vla_var = new_var_node(var, tok);
             add_type(vla_var);
             Node *expr = new_binary(ND_AS, vla_var, alloc, tok);
@@ -4277,8 +4281,8 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
         ty = array_of(ty, -1);
     } else if (ty->kind == TY_VLA || !is_const_expr(len)) {
         ty = vla_of(ty, len);
-        if (!scope->stack_top) scope->stack_top = new_lvar(intern("", 0), pointer_to(T.ty_void, 0));
-        ty->vla_cnt = new_lvar(intern("", 0), T.ty_ulong);
+        if (!scope->stack_top) scope->stack_top = new_lvar(id_anon, pointer_to(T.ty_void, 0));
+        ty->vla_cnt = new_lvar(id_anon, T.ty_ulong);
         ty->vla_len = len;
         Node *expr = new_binary(ND_AS, new_var_node(ty->vla_cnt, tok), len, tok);
         scope->vla_expr = vgrow(scope->vla_expr, scope->vla_num + 1);
@@ -4438,7 +4442,7 @@ static Token *external_declaration(Token *tok) {
             while (param) {
                 if (is_pointer(param) && param->is_star)
                     error(var_name, "‘[*]’ not allowed in other than function prototype scope");
-                uint32_t id = intern("", 0);
+                uint32_t id = id_anon;
                 if (param->name) id = get_ident(param->name);
                 push_namespace(id, SYM_VAR, ty, param->name)->var = new_lvar(id, param);
                 param = param->next;
@@ -4447,15 +4451,10 @@ static Token *external_declaration(Token *tok) {
             //  "__func__" is automatically defined as if
             // static const char __func__[] = "function-name";
             // [GNU] "__FUNCTION__" is yet another name of "__func__".
-            static uint32_t fn_id = 0;
-            static uint32_t fn_id2 = 0;
-            if (fn_id == 0) fn_id = intern("__func__", 8);
-            if (fn_id2 == 0) fn_id2 = intern("__FUNCTION__", 12);
-
             Type *fn_name = array_of(T.ty_char, str_len(var->id) + 1);
 
-            NameSpace *tmp = push_namespace(fn_id, SYM_VAR, fn_name, var_name);
-            NameSpace *tmp2 = push_namespace(fn_id2, SYM_VAR, fn_name, var_name);
+            NameSpace *tmp = push_namespace(id_func, SYM_VAR, fn_name, var_name);
+            NameSpace *tmp2 = push_namespace(id_function, SYM_VAR, fn_name, var_name);
 
             tmp2->var = tmp->var = new_string_literal(var->id, fn_name);
 
@@ -4547,34 +4546,17 @@ static Token *external_declaration(Token *tok) {
     }
 }
 
-static Sym *declare_builtin_function(uint32_t id, Type *ty) {
-    Sym *builtin = new_gvar(id, ty);
-    builtin->is_function = true;
-    builtin->is_defined = false;
-    NameSpace *ns = push_namespace(id, SYM_FUNC, ty, NULL);
-    ns->var = builtin;
-    ns->lnk = LK_EXTERN;
-    return builtin;
-}
-
-static void declare_builtin_functions(void) {
-    Type *ty = func_type(pointer_to(T.ty_void, 0));
-    ty->params = copy_type(T.ty_ulong);
-    uint32_t id = intern("__builtin_alloca", 16);
-    declare_builtin_function(id, ty);
-
-    ty = func_type(pointer_to(T.ty_void, 0));
-    ty->params = copy_type(T.ty_ulong);
-    ty->params->next = copy_type(T.ty_ulong);
-    id = intern("__builtin_alloca_with_align", 27);
-    builtin_alloca_with_align = declare_builtin_function(id, ty);
-}
-
 // TransUnit ::= ExDecl+
 Module *parse(Token *tok) {
     Module *md = emalloc(sizeof(Module));
     md->con = vnew(2, sizeof md->con[0]);
     curm = md;
+
+    // Intern the shared identifiers once; intern() dedups, so repeated
+    // parses reuse the same ids.
+    id_anon = intern("", 0);
+    id_func = intern("__func__", 8);
+    id_function = intern("__FUNCTION__", 12);
 
     cont_depth = 0;
     brk_depth = 0;
@@ -4582,7 +4564,6 @@ Module *parse(Token *tok) {
 
     enter_scope();
     file_scope = scope;
-    declare_builtin_functions();
 
     while (tok->kind != TK_EOF) tok = external_declaration(tok);
     leave_scope(tok);

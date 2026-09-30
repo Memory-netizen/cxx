@@ -456,6 +456,7 @@ typedef enum {
     ND_MEMZERO,    // Zero-clear a stack variable
     ND_CAS,        // Atomic compare-and-swap
     ND_ATOMICRMW,  // Atomic read-modify-write (atomicrmw)
+    ND_ALLOCA,     // __builtin_alloca / __builtin_alloca_with_align
 
     // Statement
     ND_RETURN,     // return

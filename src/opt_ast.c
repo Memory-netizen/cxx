@@ -438,6 +438,9 @@ Node *fold_node(Node *node) {
         case ND_CAS:
         case ND_ATOMICRMW:
             break;
+        case ND_ALLOCA:
+            node->lhs = fold_node(node->lhs);
+            return node;
     }
     return node;
 }

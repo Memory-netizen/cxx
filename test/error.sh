@@ -141,6 +141,22 @@ int f(void) { return __c11_atomic_exchange(&x, 1, 99); }' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'memory order argument to atomic operation is invalid'
 check 'exchange invalid order warning'
 
+# Builtin functions must be directly called (no &-use).
+echo 'int f(void) { return (int)__builtin_alloca; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'builtin functions must be directly called'
+check 'alloca must be directly called'
+
+# __builtin_alloca_with_align: constant power-of-2 alignment >= 8 bits.
+echo 'int f(int n) { return (int)__builtin_alloca_with_align(n, n); }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'must be a constant integer'
+check 'alloca_with_align constant align'
+echo 'int f(int n) { return (int)__builtin_alloca_with_align(n, 12); }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'not a positive power of 2'
+check 'alloca_with_align power of 2'
+echo 'int f(int n) { return (int)__builtin_alloca_with_align(n, 4); }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'must be 8 or greater'
+check 'alloca_with_align min 8'
+
 # float *= and /= on atomics need a float cmpxchg (bitcast), which is
 # not implemented yet (clang supports them via the bitcast loop).
 echo '#include <stdatomic.h>

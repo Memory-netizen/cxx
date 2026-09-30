@@ -494,6 +494,9 @@ static void dump_node(Node *node) {
         case ND_CAS:
         case ND_ATOMICRMW:
             break;
+        case ND_ALLOCA:
+            fprintf(stdout, "alloca\n");
+            break;
     }
 }
 
