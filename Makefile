@@ -100,6 +100,8 @@ test/%.out: $(TARGET) test/%.c
 test: $(TARGET) $(TESTS)
 	@for i in $(TESTS); do echo "Running $$i"; $$i || exit 1; echo; done
 	@bash test/driver.sh ./cxx
+	@bash test/error.sh ./cxx
+	@bash test/ir.sh ./cxx
 
 # Cross-architecture suites. amd64/arm64/rv64 run under qemu user-mode
 # (test/run_cross.sh); rv32 uses the bare-metal harness (test/run_rv32.sh).
