@@ -1347,63 +1347,64 @@ static int check_mem_order(Token *tok, int order, int mode) {
     return mode == MO_CAS_FAIL ? MEM_ORDER_RELAXED : MEM_ORDER_SEQ_CST;
 }
 
+// atomicrmw op for each exchange/fetch builtin; fetch_add/sub on
+// floating types use fadd/fsub instead (adjusted at the call site).
+static int armw_op_of[] = {
+    [ATOMIC_EXCHANGE] = A_XCHG, [ATOMIC_FETCH_ADD] = A_ADD, [ATOMIC_FETCH_SUB] = A_SUB,
+    [ATOMIC_FETCH_AND] = A_AND, [ATOMIC_FETCH_OR] = A_OR,   [ATOMIC_FETCH_XOR] = A_XOR,
+};
+
+// Parse the object argument of an atomic builtin: any expression of
+// pointer-to-_Atomic type.
+static Node *atomic_object(Token **tok, Token *start) {
+    Node *object = assign(tok, *tok);
+    if (!is_pointer(object->ty) || (object->ty->base->qual & Q_ATOMIC) == 0)
+        error(start, "address argument to atomic operation must be a pointer to _Atomic type");
+    return object;
+}
+
+// Parse a memory-order argument: a constant expression validated
+// against the orders the operation allows.
+static int atomic_order(Token **tok, int mode) {
+    Token *order_tok = *tok;
+    int order = const_expr(tok, *tok);
+    return check_mem_order(order_tok, order, mode);
+}
+
+// Assign value into a fresh anonymous temp; builtin arguments are
+// evaluated exactly once through such temps.
+static Node *temp_assign(Sym *temp, Node *value, Token *tok) {
+    return new_binary(ND_AS, new_var_node(temp, tok), value, tok);
+}
+
+// Sequence: run operand_init (stores the argument temp), perform the
+// atomic operation, and yield the result temp's value.
+static Node *atomic_result(Node *operand_init, Node *op_assign, Sym *result, Token *tok) {
+    Node *seq = new_binary(ND_COMMA, operand_init, op_assign, tok);
+    return new_binary(ND_COMMA, seq, new_var_node(result, tok), tok);
+}
+
+// Builtins lower to dedicated node kinds (ND_ATOMICRMW, ND_CAS,
+// ND_ALLOCA, ...) carrying the memory order; arguments are parsed with
+// the normal expression grammar and stored into anonymous temps so they
+// are evaluated exactly once before the atomic operation.
 static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
     Token *start = tok;
-    int is_weak = false;
+    bool is_weak = false;
     switch (kind) {
         case BUILTIN_TYPES_COMPATIBLE_P: {
             tok = skip(tok->next, TK_LPAREN);
-            Type *t1 = typename(&tok, tok);
+            Type *type1 = typename(&tok, tok);
             tok = skip(tok, TK_COMMA);
-            Type *t2 = typename(&tok, tok);
+            Type *type2 = typename(&tok, tok);
             *rest = skip(tok, TK_RPAREN);
-            return new_num(is_compatible(type_unqual(t1), type_unqual(t2)), start);
+            return new_num(is_compatible(type_unqual(type1), type_unqual(type2)), start);
         }
         case BUILTIN_CONSTANT_P: {
             tok = skip(tok->next, TK_LPAREN);
-            Node *node = assign(&tok, tok);
+            Node *operand = assign(&tok, tok);
             *rest = skip(tok, TK_RPAREN);
-            return new_num(is_const_expr(node), start);
-        }
-        case ATOMIC_STORE: {
-            tok = skip(tok->next, TK_LPAREN);
-            Node *object = assign(&tok, tok);
-            if (!is_pointer(object->ty) || (object->ty->base->qual & Q_ATOMIC) == 0)
-                error(start, "address argument to atomic operation must be a pointer to _Atomic type");
-            tok = skip(tok, TK_COMMA);
-            Node *desired = assign(&tok, tok);
-            tok = skip(tok, TK_COMMA);
-            Sym *var = new_lvar(id_anon, type_unqual(object->ty->base));
-            Node *var_init = new_var_node(var, start);
-
-            var_init = new_binary(ND_INIT, var_init, desired, tok);
-            Token *order_tok = tok;
-            int mem_order = const_expr(&tok, tok);
-            mem_order = check_mem_order(order_tok, mem_order, MO_STORE);
-            *rest = skip(tok, TK_RPAREN);
-            Node *dst = new_unary(ND_DEREF, object, tok);
-            Node *node = new_binary(ND_AS, dst, new_var_node(var, start), tok);
-            node->mem_order = mem_order + 1;
-            node = new_binary(ND_COMMA, var_init, node, tok);
-            return node;
-        }
-        case ATOMIC_LOAD: {
-            tok = skip(tok->next, TK_LPAREN);
-            Node *object = assign(&tok, tok);
-            if (!is_pointer(object->ty) || (object->ty->base->qual & Q_ATOMIC) == 0)
-                error(start, "address argument to atomic operation must be a pointer to _Atomic type");
-            tok = skip(tok, TK_COMMA);
-            Token *order_tok = tok;
-            int mem_order = const_expr(&tok, tok);
-            mem_order = check_mem_order(order_tok, mem_order, MO_LOAD);
-            *rest = skip(tok, TK_RPAREN);
-            Sym *var = new_lvar(id_anon, type_unqual(object->ty->base));
-            Node *var_init = new_var_node(var, start);
-            Node *src = new_unary(ND_DEREF, object, tok);
-            src->mem_order = mem_order + 1;
-            Node *node = new_binary(ND_AS, var_init, src, tok);
-            node = new_binary(ND_COMMA, node, new_var_node(var, start), tok);
-            return node;
+            return new_num(is_const_expr(operand), start);
         }
         case BUILTIN_FN_ALLOCA:
         case BUILTIN_ALLOCA_WITH_ALIGN: {
@@ -1416,22 +1417,54 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             if (kind == BUILTIN_ALLOCA_WITH_ALIGN) {
                 tok = skip(tok, TK_COMMA);
                 Token *align_tok = tok;
-                Node *arg = assign(&tok, tok);
-                if (!is_integer(arg->ty))
+                Node *align_arg = assign(&tok, tok);
+                if (!is_integer(align_arg->ty))
                     error(align_tok, "argument to ‘__builtin_alloca_with_align’ must be a constant integer");
-                fold_node(arg);
-                if (arg->kind != ND_NUM)
+                fold_node(align_arg);
+                if (align_arg->kind != ND_NUM)
                     error(align_tok, "argument to ‘__builtin_alloca_with_align’ must be a constant integer");
-                int64_t a = int128_to_i64(arg->ival);
-                if (a & (a - 1)) error(align_tok, "requested alignment ‘%ld’ is not a positive power of 2", a);
-                if (a < 8) error(align_tok, "requested alignment must be 8 or greater");
-                align = a / 8;
+                int64_t align_bits = int128_to_i64(align_arg->ival);
+                if (align_bits & (align_bits - 1))
+                    error(align_tok, "requested alignment ‘%ld’ is not a positive power of 2", align_bits);
+                if (align_bits < 8) error(align_tok, "requested alignment must be 8 or greater");
+                align = align_bits / 8;
             }
             *rest = skip(tok, TK_RPAREN);
-            Node *node = new_node(ND_ALLOCA, tok);
-            node->lhs = size;
-            node->rhs = new_ulong(align, tok);
-            return node;
+            Node *alloc = new_node(ND_ALLOCA, tok);
+            alloc->lhs = size;
+            alloc->rhs = new_ulong(align, tok);
+            return alloc;
+        }
+        case ATOMIC_STORE: {
+            // temp = desired; *object = temp with the given order.
+            tok = skip(tok->next, TK_LPAREN);
+            Node *object = atomic_object(&tok, start);
+            tok = skip(tok, TK_COMMA);
+            Node *desired = assign(&tok, tok);
+            tok = skip(tok, TK_COMMA);
+            int order = atomic_order(&tok, MO_STORE);
+            *rest = skip(tok, TK_RPAREN);
+
+            Sym *desired_sym = new_lvar(id_anon, type_unqual(object->ty->base));
+            Node *desired_init = new_binary(ND_INIT, new_var_node(desired_sym, start), desired, tok);
+            Node *target = new_unary(ND_DEREF, object, tok);
+            Node *store = new_binary(ND_AS, target, new_var_node(desired_sym, start), tok);
+            store->mem_order = order + 1;
+            return new_binary(ND_COMMA, desired_init, store, tok);
+        }
+        case ATOMIC_LOAD: {
+            // temp = *object with the given order; yield temp.
+            tok = skip(tok->next, TK_LPAREN);
+            Node *object = atomic_object(&tok, start);
+            tok = skip(tok, TK_COMMA);
+            int order = atomic_order(&tok, MO_LOAD);
+            *rest = skip(tok, TK_RPAREN);
+
+            Sym *result_sym = new_lvar(id_anon, type_unqual(object->ty->base));
+            Node *src = new_unary(ND_DEREF, object, tok);
+            src->mem_order = order + 1;
+            Node *load = new_binary(ND_AS, new_var_node(result_sym, start), src, tok);
+            return new_binary(ND_COMMA, load, new_var_node(result_sym, start), tok);
         }
         case ATOMIC_EXCHANGE:
         case ATOMIC_FETCH_ADD:
@@ -1439,118 +1472,90 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
         case ATOMIC_FETCH_AND:
         case ATOMIC_FETCH_OR:
         case ATOMIC_FETCH_XOR: {
-            Node *node = new_node(ND_ATOMICRMW, tok);
+            // operand = temp (converted); result = temp;
+            // result = atomicrmw(object, operand).
             tok = skip(tok->next, TK_LPAREN);
-            Node *object = assign(&tok, tok);
-            if (!is_pointer(object->ty) || (object->ty->base->qual & Q_ATOMIC) == 0)
-                error(start, "address argument to atomic operation must be a pointer to _Atomic type");
-            Type *t = type_unqual(object->ty->base);
+            Node *object = atomic_object(&tok, start);
+            Type *value_ty = type_unqual(object->ty->base);
             bool is_addsub = kind == ATOMIC_FETCH_ADD || kind == ATOMIC_FETCH_SUB;
             if (kind != ATOMIC_EXCHANGE) {
                 // C11 7.17.7.5: fetch_* apply to atomic integer types;
                 // like clang, also accept pointer and floating types for
                 // fetch_add/sub (fadd/fsub).
-                bool ok = is_addsub ? (is_integer(t) || is_pointer(t) || is_flonum(t)) : is_integer(t);
+                bool ok = is_addsub ? (is_integer(value_ty) || is_pointer(value_ty) || is_flonum(value_ty))
+                                    : is_integer(value_ty);
                 if (!ok) error(object->tok, "address argument to atomic operation must be a pointer to atomic integer");
             }
             // atomicrmw add/sub on a pointer takes a pointer-sized
             // integer operand; LLVM's pointer atomicrmw operates on raw
             // integers, so scale by the element size like clang does.
-            Type *operand_ty = is_addsub && is_pointer(t) ? T.ty_long : t;
+            Type *operand_ty = is_addsub && is_pointer(value_ty) ? T.ty_long : value_ty;
             tok = skip(tok, TK_COMMA);
-            Node *desired = assign(&tok, tok);
-            lvalue_convert(&desired);
-            new_imcast(&desired, operand_ty);
-            if (is_addsub && is_pointer(t))
-                desired = new_binary(ND_MUL, desired, new_num(t->base->size, desired->tok), desired->tok);
+            Node *operand = assign(&tok, tok);
+            lvalue_convert(&operand);
+            new_imcast(&operand, operand_ty);
+            if (is_addsub && is_pointer(value_ty))
+                operand = new_binary(ND_MUL, operand, new_num(value_ty->base->size, operand->tok), operand->tok);
             tok = skip(tok, TK_COMMA);
-            Token *order_tok = tok;
-            int mem_order = const_expr(&tok, tok);
-            mem_order = check_mem_order(order_tok, mem_order, MO_ATOMICRMW);
+            int order = atomic_order(&tok, MO_ATOMICRMW);
             *rest = skip(tok, TK_RPAREN);
-            Sym *tmp_desired = new_lvar(id_anon, operand_ty);
-            Node *var_init = new_var_node(tmp_desired, start);
-            Node *node1 = new_binary(ND_AS, var_init, desired, tok);
 
-            Sym *tmp_result = new_lvar(id_anon, t);
-            Node *tmp_res = new_var_node(tmp_result, start);
-            node->lhs = object;
-            node->desired = new_var_node(tmp_desired, start);
-            node->mem_order = mem_order + 1;
-            switch (kind) {
-                case ATOMIC_FETCH_ADD:
-                    node->armw_op = is_flonum(t) ? A_FADD : A_ADD;
-                    break;
-                case ATOMIC_FETCH_SUB:
-                    node->armw_op = is_flonum(t) ? A_FSUB : A_SUB;
-                    break;
-                case ATOMIC_FETCH_AND:
-                    node->armw_op = A_AND;
-                    break;
-                case ATOMIC_FETCH_OR:
-                    node->armw_op = A_OR;
-                    break;
-                case ATOMIC_FETCH_XOR:
-                    node->armw_op = A_XOR;
-                    break;
-                default:
-                    node->armw_op = A_XCHG;
-                    break;
-            }
-            add_type(node);
-            Node *node2 = new_binary(ND_AS, tmp_res, node, tok);
-            node2 = new_binary(ND_COMMA, node1, node2, tok);
-            return new_binary(ND_COMMA, node2, new_var_node(tmp_result, start), tok);
+            int aop = armw_op_of[kind];
+            if (is_flonum(value_ty) && (aop == A_ADD || aop == A_SUB)) aop = aop == A_ADD ? A_FADD : A_FSUB;
+
+            Sym *operand_sym = new_lvar(id_anon, operand_ty);
+            Node *operand_init = temp_assign(operand_sym, operand, tok);
+
+            Sym *result_sym = new_lvar(id_anon, value_ty);
+            Node *rmw = new_node(ND_ATOMICRMW, start);
+            rmw->lhs = object;
+            rmw->desired = new_var_node(operand_sym, start);
+            rmw->mem_order = order + 1;
+            rmw->armw_op = aop;
+            add_type(rmw);
+            Node *rmw_assign = temp_assign(result_sym, rmw, tok);
+            return atomic_result(operand_init, rmw_assign, result_sym, tok);
         }
         case ATOMIC_COMPARE_EXCHANGE_WEAK:
             is_weak = true;
         // fall through
         case ATOMIC_COMPARE_EXCHANGE_STRONG: {
+            // desired = temp; result = temp (bool);
+            // result = cas(object, &expected, desired).
             tok = skip(tok->next, TK_LPAREN);
-            Node *object = assign(&tok, tok);
-            if (!is_pointer(object->ty) || (object->ty->base->qual & Q_ATOMIC) == 0)
-                error(start, "address argument to atomic operation must be a pointer to _Atomic type");
+            Node *object = atomic_object(&tok, start);
             tok = skip(tok, TK_COMMA);
             Node *expected = assign(&tok, tok);
             if (!is_pointer(expected->ty) || (expected->ty->base->qual & Q_ATOMIC))
                 error(expected->tok, "second argument to atomic operation must be a pointer to non-atomic type");
-            Type *t = type_unqual(object->ty->base);
-            if (!is_compatible(type_unqual(expected->ty->base), t))
+            Type *value_ty = type_unqual(object->ty->base);
+            if (!is_compatible(type_unqual(expected->ty->base), value_ty))
                 error(expected->tok, "second argument to atomic operation must be a pointer to the same type");
             tok = skip(tok, TK_COMMA);
             Node *desired = assign(&tok, tok);
             lvalue_convert(&desired);
-            new_imcast(&desired, t);
+            new_imcast(&desired, value_ty);
             tok = skip(tok, TK_COMMA);
-            Token *order_tok1 = tok;
-            int mem_order1 = const_expr(&tok, tok);
-            mem_order1 = check_mem_order(order_tok1, mem_order1, MO_RMW);
+            int success_order = atomic_order(&tok, MO_RMW);
             tok = skip(tok, TK_COMMA);
-            Token *order_tok2 = tok;
-            int mem_order2 = const_expr(&tok, tok);
-            mem_order2 = check_mem_order(order_tok2, mem_order2, MO_CAS_FAIL);
+            int failure_order = atomic_order(&tok, MO_CAS_FAIL);
             *rest = skip(tok, TK_RPAREN);
 
-            Sym *tmp_desired = new_lvar(id_anon, t);
-            Node *var_init = new_var_node(tmp_desired, start);
-            Node *node1 = new_binary(ND_AS, var_init, desired, tok);
+            Sym *desired_sym = new_lvar(id_anon, value_ty);
+            Node *desired_init = temp_assign(desired_sym, desired, tok);
 
-            Sym *tmp_result = new_lvar(id_anon, T.ty_bool);
-            Node *tmp_bool = new_var_node(tmp_result, start);
+            Sym *result_sym = new_lvar(id_anon, T.ty_bool);
             Node *cas = new_node(ND_CAS, start);
             cas->lhs = object;
             cas->rhs = expected;
-            cas->desired = new_var_node(tmp_desired, start);
-            cas->mem_order = mem_order1 + 1;
-            cas->mem_order1 = mem_order2 + 1;
+            cas->desired = new_var_node(desired_sym, start);
+            cas->mem_order = success_order + 1;
+            cas->mem_order1 = failure_order + 1;
             cas->is_weak = is_weak;
             add_type(cas);
-            Node *node2 = new_binary(ND_AS, tmp_bool, cas, tok);
-            node2 = new_binary(ND_COMMA, node1, node2, tok);
-
-            Node *node3 = new_binary(ND_COMMA, node2, new_var_node(tmp_result, start), tok);
-            cnt_blk(2);
-            return node3;
+            Node *cas_assign = temp_assign(result_sym, cas, tok);
+            cnt_blk(2);  // ND_CAS: failure + merge blocks
+            return atomic_result(desired_init, cas_assign, result_sym, tok);
         }
     }
     return NULL;
