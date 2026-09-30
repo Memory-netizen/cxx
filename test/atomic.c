@@ -301,6 +301,21 @@ int main() {
     s.a += 4;
     ASSERT(14, s.a);
 
+    // stdatomic.h API surface: atomic_flag, atomic_init, is_lock_free.
+    atomic_flag flag = ATOMIC_FLAG_INIT;
+    atomic_init(&x, 70);
+    ASSERT(70, x);
+    ASSERT(0, atomic_flag_test_and_set(&flag));
+    ASSERT(1, atomic_flag_test_and_set(&flag));
+    atomic_flag_clear(&flag);
+    ASSERT(0, atomic_flag_test_and_set_explicit(&flag, memory_order_relaxed));
+    atomic_flag_clear_explicit(&flag, memory_order_release);
+    ASSERT(1, atomic_is_lock_free(&x));
+    ASSERT(2, ATOMIC_INT_LOCK_FREE);
+    ASSERT(1, kill_dependency(x) == x);
+    atomic_size_t az = 5;
+    ASSERT(5, az);
+
     printf("OK\n");
     return 0;
 }
