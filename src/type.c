@@ -621,7 +621,7 @@ void check_asop(Type *dst, Node *src, int ctx) {
     error(src->tok, "incompatible types when %s", msg[ctx]);
 }
 
-static void modifiable_lvalue(Node *node) {
+void modifiable_lvalue(Node *node) {
     add_type(node->lhs);
     Node *lhs = node->lhs;
     if (!lhs->is_lvalue || lhs->ty->kind == TY_FUNC)

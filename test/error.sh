@@ -141,6 +141,19 @@ int f(void) { return __c11_atomic_exchange(&x, 1, 99); }' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'memory order argument to atomic operation is invalid'
 check 'exchange invalid order warning'
 
+# float *= and /= on atomics need a float cmpxchg (bitcast), which is
+# not implemented yet (clang supports them via the bitcast loop).
+echo '#include <stdatomic.h>
+_Atomic float af;
+float f(void) { af *= 2.0f; return af; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "atomic compound assignment with '\*' on a floating type is not supported"
+check 'float atomic *='
+echo '#include <stdatomic.h>
+_Atomic float af;
+float f(void) { af /= 2.0f; return af; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "atomic compound assignment with '/' on a floating type is not supported"
+check 'float atomic /='
+
 # fetch_and/or/xor apply to integer atomics only (C11 7.17.7.5).
 echo '#include <stdatomic.h>
 _Atomic float af;

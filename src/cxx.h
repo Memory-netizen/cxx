@@ -579,6 +579,7 @@ int is_builtin_fn(uint32_t id);
 Node *new_unary(NodeKind kind, Node *expr, Token *tok);
 void new_imcast(Node **expr, Type *ty);
 void lvalue_convert(Node **expr);
+void modifiable_lvalue(Node *node);
 void integer_promotion(Node **expr);
 Module *parse(Token *tok);
 

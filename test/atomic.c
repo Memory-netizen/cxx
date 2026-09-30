@@ -235,6 +235,72 @@ int main() {
     ASSERT(5, atomic_fetch_add(&vx, 1));
     ASSERT(6, vx);
 
+    // Compound assignment is a single atomic evaluation (C11 6.5.16.2p3).
+    x = 10;
+    x += 3;
+    ASSERT(13, x);
+    x -= 2;
+    ASSERT(11, x);
+    x *= 2;
+    ASSERT(22, x);
+    x /= 2;
+    ASSERT(11, x);
+    x %= 4;
+    ASSERT(3, x);
+    x <<= 2;
+    ASSERT(12, x);
+    x >>= 1;
+    ASSERT(6, x);
+    x &= 5;
+    ASSERT(4, x);
+    x |= 3;
+    ASSERT(7, x);
+    x ^= 2;
+    ASSERT(5, x);
+
+    // ++/--: the postfix value is the old value, prefix the new one.
+    int r;
+    r = x++;
+    ASSERT(5, r);
+    ASSERT(6, x);
+    r = ++x;
+    ASSERT(7, r);
+    ASSERT(7, x);
+    r = x--;
+    ASSERT(7, r);
+    ASSERT(6, x);
+    r = --x;
+    ASSERT(5, r);
+    ASSERT(5, x);
+
+    // Mixed operand widths convert like the plain compound assignment.
+    x = 10;
+    x += 1L;
+    ASSERT(11, x);
+    x *= 2L;
+    ASSERT(22, x);
+
+    // Pointer compound assignment advances by whole elements.
+    _Atomic(int *) ap3 = arr;
+    ap3 += 2;
+    ASSERT(1, ap3 == arr + 2);
+    ap3 -= 1;
+    ASSERT(1, ap3 == arr + 1);
+    int *oldp = ap3++;
+    ASSERT(1, oldp == arr + 1);
+    ASSERT(1, ap3 == arr + 2);
+    oldp = ++ap3;
+    ASSERT(1, oldp == arr + 3);
+    ASSERT(1, ap3 == arr + 3);
+
+    // Compound assignment through a pointer and a member.
+    st2(&x, 30);
+    x += 5;
+    ASSERT(35, ld2(&x));
+    s.a = 10;
+    s.a += 4;
+    ASSERT(14, s.a);
+
     printf("OK\n");
     return 0;
 }

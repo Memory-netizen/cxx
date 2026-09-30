@@ -80,12 +80,13 @@ echo '_Atomic volatile int vx; void f(void) { vx = 3; }' \
 check 'atomic volatile end to end'
 
 # A nested atomic access in the RHS must not leak its order onto the
-# outer operation.
+# outer operation: the relaxed load keeps monotonic, the compound
+# assignment itself stays seq_cst.
 echo '#include <stdatomic.h>
 _Atomic int x, y;
 void f(void) { x += __c11_atomic_load(&y, __ATOMIC_RELAXED); }' \
   | $compiler -S -emit-llvm -o - -xc - > $tmp/nest.ll
-grep -q 'ptr @y monotonic, align 4' $tmp/nest.ll && grep -q 'ptr @x seq_cst, align 4' $tmp/nest.ll
+grep -q 'ptr @y monotonic, align 4' $tmp/nest.ll && grep -q 'atomicrmw add ptr %[0-9]*, i32 %[0-9]* seq_cst' $tmp/nest.ll
 check 'nested atomic order'
 
 # compare_exchange: weak keyword, both orders, non-i32 types.
@@ -181,6 +182,56 @@ grep -q 'atomicrmw fadd ptr @af, float %' $tmp/ffetch.ll
 check 'atomicrmw fadd'
 grep -q 'atomicrmw fsub ptr @af, float %' $tmp/ffetch.ll
 check 'atomicrmw fsub'
+
+# Compound assignment on atomics (C11 6.5.16.2p3): +,-,&,|,^ use a
+# single atomicrmw with a local recompute of the new value; the postfix
+# ++ value is the atomicrmw result itself (no recompute).
+echo '#include <stdatomic.h>
+_Atomic int x;
+int f(void) { x += 3; return x; }
+int g(void) { x++; return x; }' \
+  | $compiler -S -emit-llvm -o - -xc - > $tmp/casgn.ll
+[ $(grep -c 'atomicrmw add ptr %[0-9]*, i32 %' $tmp/casgn.ll) -eq 2 ]
+check 'compound assign atomicrmw'
+[ $(grep -c 'add i32 %' $tmp/casgn.ll) -eq 1 ]
+check 'compound recompute only for +='
+
+# *,/,%,<<,>> lower to a CAS loop.
+echo '#include <stdatomic.h>
+_Atomic int x;
+int f(void) { x *= 2; return x; }' \
+  | $compiler -S -emit-llvm -o - -xc - > $tmp/casloop.ll
+grep -q 'cmpxchg ptr %[0-9]*, i32 %' $tmp/casloop.ll
+check 'compound assign cas loop'
+grep -q 'extractvalue { i32, i1 } %' $tmp/casloop.ll
+check 'cas loop extractvalue'
+grep -q 'load atomic i32, ptr %[0-9]* seq_cst' $tmp/casloop.ll
+check 'cas loop atomic load'
+
+# Pointer compound assignment uses a ptr cmpxchg loop.
+echo '#include <stdatomic.h>
+_Atomic(int *) ap;
+int *f(void) { ap += 1; return ap; }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'cmpxchg ptr %[0-9]*, ptr %'
+check 'pointer compound cas loop'
+
+# Float += / -= use atomicrmw fadd/fsub.
+echo '#include <stdatomic.h>
+_Atomic float af;
+float f(void) { af += 1.0f; return af; }
+float g(void) { af -= 0.5f; return af; }' \
+  | $compiler -S -emit-llvm -o - -xc - > $tmp/fcasgn.ll
+grep -q 'atomicrmw fadd ptr %' $tmp/fcasgn.ll
+check 'float compound fadd'
+grep -q 'atomicrmw fsub ptr %' $tmp/fcasgn.ll
+check 'float compound fsub'
+
+# End to end: the transformed loop runs correctly.
+echo '#include <stdatomic.h>
+_Atomic int x;
+int main() { x = 1; x += 2; x *= 3; return x == 9 ? 0 : 1; }' \
+  | $compiler -o $tmp/cmpd -xc - && $tmp/cmpd
+check 'compound assign end to end'
 
 # Non-atomic accesses must stay atomic-free.
 echo 'volatile int v; void f(void) { v = 1; }' \

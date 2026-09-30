@@ -1423,6 +1423,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             Type *operand_ty = is_addsub && is_pointer(t) ? T.ty_long : t;
             tok = skip(tok, TK_COMMA);
             Node *desired = assign(&tok, tok);
+            lvalue_convert(&desired);
             new_imcast(&desired, operand_ty);
             if (is_addsub && is_pointer(t))
                 desired = new_binary(ND_MUL, desired, new_num(t->base->size, desired->tok), desired->tok);
@@ -1482,6 +1483,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
                 error(expected->tok, "second argument to atomic operation must be a pointer to the same type");
             tok = skip(tok, TK_COMMA);
             Node *desired = assign(&tok, tok);
+            lvalue_convert(&desired);
             new_imcast(&desired, t);
             tok = skip(tok, TK_COMMA);
             Token *order_tok1 = tok;
@@ -1516,6 +1518,145 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
         }
     }
     return NULL;
+}
+
+// The plain binary node kind for each compound-assign node kind.
+static NodeKind as_binop[] = {
+    [ND_ADDAS] = ND_ADD,  [ND_SUBAS] = ND_SUB, [ND_MULAS] = ND_MUL, [ND_DIVAS] = ND_DIV,   [ND_MODAS] = ND_MOD,
+    [ND_ANDAS] = ND_BAND, [ND_ORAS] = ND_BOR,  [ND_XORAS] = ND_XOR, [ND_LEFTAS] = ND_LEFT, [ND_RIGHTAS] = ND_RIGHT,
+};
+
+// Lower an atomic compound assignment or ++/-- (C11 6.5.16.2p3: the
+// operation is a single atomic evaluation) into a statement expression.
+// Integer +,-,&,|,^ use atomicrmw with a local recompute of the new
+// value (like clang); *,/,%,<<,>> and pointers use a CAS loop. The
+// postfix ++/-- value is the old value, prefix/compound the new one.
+static Node *atomic_compound_assign(Node *lhs, NodeKind op, Node *rhs, bool postfix, Token *tok) {
+    Node wrapper = {.lhs = lhs, .tok = tok};
+    modifiable_lvalue(&wrapper);
+
+    Type *at = lhs->ty;
+    Type *t = type_unqual(at);
+    bool is_ptr = is_pointer(t);
+
+    if (is_flonum(t) && (op == ND_MULAS || op == ND_DIVAS))
+        error(tok, "atomic compound assignment with '%s' on a floating type is not supported",
+              op == ND_MULAS ? "*" : "/");
+
+    // Type the rhs exactly like the plain compound assignment would and
+    // steal the converted operand and the common type. The scratch lhs
+    // is unqualified, so get_common_type sees the same kinds.
+    Sym *scratch = new_lvar(intern("", 0), t);
+    Node *bin = new_binary(op, new_var_node(scratch, tok), rhs, tok);
+    add_type(bin);
+    rhs = bin->rhs;
+    Type *val_ty = is_ptr ? T.ty_long : bin->compute_ty;
+
+    bool armw = !is_ptr && op != ND_MULAS && op != ND_DIVAS && op != ND_MODAS && op != ND_LEFTAS && op != ND_RIGHTAS;
+
+    Sym *v_addr = new_lvar(intern("", 0), pointer_to(at, 0));
+    Sym *v_val = new_lvar(intern("", 0), val_ty);
+    Sym *v_old = new_lvar(intern("", 0), t);
+    Sym *v_new = new_lvar(intern("", 0), t);
+    Sym *v_r = new_lvar(intern("", 0), t);
+    Sym *v_res = new_lvar(intern("", 0), t);
+
+    Node *stmt = new_node(ND_STMT_EXPR, tok);
+    Node dummy, *cur = &dummy;
+
+    // addr = &A: the address expression is evaluated once.
+    Node *as = new_binary(ND_AS, new_var_node(v_addr, tok), new_unary(ND_ADDR, lhs, tok), tok);
+    add_type(as);
+    cur = cur->next = new_unary(ND_EXPR_STMT, as, tok);
+
+    // val = B: the operand is evaluated once.
+    as = new_binary(ND_AS, new_var_node(v_val, tok), rhs, tok);
+    add_type(as);
+    cur = cur->next = new_unary(ND_EXPR_STMT, as, tok);
+
+    if (armw) {
+        Node *desired = new_var_node(v_val, tok);
+        add_type(desired);
+        lvalue_convert(&desired);
+        new_imcast(&desired, t);
+        Node *arm = new_node(ND_ATOMICRMW, tok);
+        arm->lhs = new_var_node(v_addr, tok);
+        arm->desired = desired;
+        if (is_flonum(t)) {
+            arm->armw_op = op == ND_ADDAS ? A_FADD : A_FSUB;
+        } else {
+            switch (op) {
+                case ND_ADDAS:
+                    arm->armw_op = A_ADD;
+                    break;
+                case ND_SUBAS:
+                    arm->armw_op = A_SUB;
+                    break;
+                case ND_ANDAS:
+                    arm->armw_op = A_AND;
+                    break;
+                case ND_ORAS:
+                    arm->armw_op = A_OR;
+                    break;
+                default:
+                    arm->armw_op = A_XOR;
+                    break;
+            }
+        }
+        add_type(arm);
+        as = new_binary(ND_AS, new_var_node(v_r, tok), arm, tok);
+        add_type(as);
+        cur = cur->next = new_unary(ND_EXPR_STMT, as, tok);
+
+        Sym *value_var = v_r;
+        if (!postfix) {
+            // new = (T1)(old op val), recomputed locally from the
+            // atomicrmw result (the old value).
+            Node *rb = new_binary(as_binop[op], new_var_node(v_r, tok), new_var_node(v_val, tok), tok);
+            add_type(rb);
+            new_imcast(&rb, t);
+            as = new_binary(ND_AS, new_var_node(v_res, tok), rb, tok);
+            add_type(as);
+            cur = cur->next = new_unary(ND_EXPR_STMT, as, tok);
+            value_var = v_res;
+        }
+        cur = cur->next = new_unary(ND_EXPR_STMT, new_var_node(value_var, tok), tok);
+        add_type(cur);
+    } else {
+        // old = *addr (a seq_cst atomic load).
+        as = new_binary(ND_AS, new_var_node(v_old, tok), new_unary(ND_DEREF, new_var_node(v_addr, tok), tok), tok);
+        add_type(as);
+        cur = cur->next = new_unary(ND_EXPR_STMT, as, tok);
+
+        // do { new = (T1)(old op val); } while (!cas(addr, &old, new));
+        Node *rb = is_ptr ? new_binary(ND_PTRADD, new_var_node(v_old, tok), new_var_node(v_val, tok), tok)
+                          : new_binary(as_binop[op], new_var_node(v_old, tok), new_var_node(v_val, tok), tok);
+        add_type(rb);
+        new_imcast(&rb, t);
+        as = new_binary(ND_AS, new_var_node(v_new, tok), rb, tok);
+        add_type(as);
+        Node *body = new_unary(ND_EXPR_STMT, as, tok);
+
+        Node *cas = new_node(ND_CAS, tok);
+        cas->lhs = new_var_node(v_addr, tok);
+        cas->rhs = new_unary(ND_ADDR, new_var_node(v_old, tok), tok);
+        cas->desired = new_var_node(v_new, tok);
+        add_type(cas);
+        Node *cond = new_unary(ND_NOT, cas, tok);
+        add_type(cond);
+        Node *loop = new_node(ND_DO, tok);
+        loop->body = body;
+        loop->cond = cond;
+        cnt_blk(5);  // gen_do: 3 blocks + ND_CAS: 2 blocks
+        cur = cur->next = loop;
+
+        cur = cur->next = new_unary(ND_EXPR_STMT, new_var_node(postfix ? v_old : v_new, tok), tok);
+        add_type(cur);
+    }
+
+    stmt->body = dummy.next;
+    stmt->ty = t;
+    return stmt;
 }
 
 typedef struct {
@@ -1913,11 +2054,17 @@ static Node *postfix(Token **rest, Token *tok) {
                 continue;
             }
             case TK_INC:
-                node = new_unary(ND_POSTINC, node, tok);
+                if (node->ty->qual & Q_ATOMIC)
+                    node = atomic_compound_assign(node, ND_ADDAS, new_num(1, tok), true, tok);
+                else
+                    node = new_unary(ND_POSTINC, node, tok);
                 tok = tok->next;
                 continue;
             case TK_DEC:
-                node = new_unary(ND_POSTDEC, node, tok);
+                if (node->ty->qual & Q_ATOMIC)
+                    node = atomic_compound_assign(node, ND_SUBAS, new_num(1, tok), true, tok);
+                else
+                    node = new_unary(ND_POSTDEC, node, tok);
                 tok = tok->next;
                 continue;
             default:
@@ -1961,10 +2108,18 @@ static Node *unary(Token **rest, Token *tok) {
             if (node->ty->kind == TY_FUNC) new_imcast(&node, pointer_to(node->ty, 0));
             return node;
         }
-        case TK_INC:
-            return new_unary(ND_PREINC, unary(rest, tok->next), tok);
-        case TK_DEC:
-            return new_unary(ND_PREDEC, unary(rest, tok->next), tok);
+        case TK_INC: {
+            Node *operand = unary(rest, tok->next);
+            if (operand->ty->qual & Q_ATOMIC)
+                return atomic_compound_assign(operand, ND_ADDAS, new_num(1, tok), false, tok);
+            return new_unary(ND_PREINC, operand, tok);
+        }
+        case TK_DEC: {
+            Node *operand = unary(rest, tok->next);
+            if (operand->ty->qual & Q_ATOMIC)
+                return atomic_compound_assign(operand, ND_SUBAS, new_num(1, tok), false, tok);
+            return new_unary(ND_PREDEC, operand, tok);
+        }
         case TK_ALIGNOF:
         case TK_COUNTOF:
         case TK_SIZEOF: {
@@ -2539,7 +2694,12 @@ static Node *assign(Token **rest, Token *tok) {
     Node *node = conditional(&tok, tok);
     while (is_assignop(tok)) {
         Token *as = tok;
-        node = new_binary(as_op[as->kind], node, assign(&tok, tok->next), as);
+        Node *rhs = assign(&tok, tok->next);
+        NodeKind op = as_op[as->kind];
+        if (op != ND_AS && (node->ty->qual & Q_ATOMIC))
+            node = atomic_compound_assign(node, op, rhs, false, as);
+        else
+            node = new_binary(op, node, rhs, as);
     }
     *rest = tok;
     add_type(node);
