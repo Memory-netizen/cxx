@@ -198,6 +198,43 @@ int main() {
     ASSERT(41, atomic_exchange(&x, 41) + 1);
     ASSERT(41, x);
 
+    // fetch_* return the previous value (C11 7.17.7.5).
+    x = 10;
+    ASSERT(10, atomic_fetch_add(&x, 5));
+    ASSERT(15, x);
+    ASSERT(15, atomic_fetch_sub(&x, 3));
+    ASSERT(12, x);
+    ASSERT(12, atomic_fetch_or(&x, 3));  // 12 | 3 = 15
+    ASSERT(15, x);
+    ASSERT(15, atomic_fetch_and(&x, 10));  // 15 & 10 = 10
+    ASSERT(10, x);
+    ASSERT(10, atomic_fetch_xor(&x, 6));  // 10 ^ 6 = 12
+    ASSERT(12, x);
+    ASSERT(12, atomic_fetch_add_explicit(&x, 1, memory_order_relaxed));
+    ASSERT(13, x);
+
+    // unsigned and char.
+    atomic_uint u = 10;
+    ASSERT(10, atomic_fetch_sub(&u, 4));
+    ASSERT(6, u);
+    ac = 3;
+    ASSERT(3, atomic_fetch_add(&ac, 2));
+    ASSERT(5, ac);
+
+    // Pointer fetch_add/sub take an integer operand and advance by
+    // whole elements.
+    int arr[3];
+    _Atomic(int *) ap2 = arr;
+    ASSERT(1, atomic_fetch_add(&ap2, 1) == arr);
+    ASSERT(1, ap2 == arr + 1);
+    ASSERT(1, atomic_fetch_sub(&ap2, 1) == arr + 1);
+    ASSERT(1, ap2 == arr);
+
+    // volatile.
+    vx = 5;
+    ASSERT(5, atomic_fetch_add(&vx, 1));
+    ASSERT(6, vx);
+
     printf("OK\n");
     return 0;
 }

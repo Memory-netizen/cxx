@@ -616,10 +616,13 @@ static Ref gen_expr(Node *node) {
             Ref addr = gen_expr(node->lhs);
             Ref new_val = gen_expr(node->desired);
             Ref args[] = {INT(node->armw_op), addr, new_val};
-            Ref res = TMP(tmp_id++, node->ty);
+            // LLVM's atomicrmw add/sub on a pointer pointee yields the
+            // raw integer result; convert it back to the pointer.
+            bool ptr_addsub = (node->armw_op == A_ADD || node->armw_op == A_SUB) && is_pointer(node->ty);
+            Ref res = TMP(tmp_id++, ptr_addsub ? T.ty_long : node->ty);
             Ir *ins = new_ins(IR_ATOMICRMW, res, args, 3);
             ins->mem_order = node_mem_order(node);
-            return res;
+            return ptr_addsub ? cast(res, T.ty_long, node->ty) : res;
         }
         default:
             break;

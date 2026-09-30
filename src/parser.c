@@ -1260,6 +1260,11 @@ enum {
     ATOMIC_STORE,
     ATOMIC_LOAD,
     ATOMIC_EXCHANGE,
+    ATOMIC_FETCH_ADD,
+    ATOMIC_FETCH_SUB,
+    ATOMIC_FETCH_AND,
+    ATOMIC_FETCH_OR,
+    ATOMIC_FETCH_XOR,
     ATOMIC_COMPARE_EXCHANGE_WEAK,
     ATOMIC_COMPARE_EXCHANGE_STRONG,
 };
@@ -1277,6 +1282,11 @@ int is_builtin_fn(uint32_t id) {
         {"__c11_atomic_store", 0, ATOMIC_STORE},
         {"__c11_atomic_load", 0, ATOMIC_LOAD},
         {"__c11_atomic_exchange", 0, ATOMIC_EXCHANGE},
+        {"__c11_atomic_fetch_add", 0, ATOMIC_FETCH_ADD},
+        {"__c11_atomic_fetch_sub", 0, ATOMIC_FETCH_SUB},
+        {"__c11_atomic_fetch_and", 0, ATOMIC_FETCH_AND},
+        {"__c11_atomic_fetch_or", 0, ATOMIC_FETCH_OR},
+        {"__c11_atomic_fetch_xor", 0, ATOMIC_FETCH_XOR},
         {"__c11_atomic_compare_exchange_weak", 0, ATOMIC_COMPARE_EXCHANGE_WEAK},
         {"__c11_atomic_compare_exchange_strong", 0, ATOMIC_COMPARE_EXCHANGE_STRONG},
     };
@@ -1387,22 +1397,41 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             node = new_binary(ND_COMMA, node, new_var_node(var, start), tok);
             return node;
         }
-        case ATOMIC_EXCHANGE: {
+        case ATOMIC_EXCHANGE:
+        case ATOMIC_FETCH_ADD:
+        case ATOMIC_FETCH_SUB:
+        case ATOMIC_FETCH_AND:
+        case ATOMIC_FETCH_OR:
+        case ATOMIC_FETCH_XOR: {
             Node *node = new_node(ND_ATOMICRMW, tok);
             tok = skip(tok->next, TK_LPAREN);
             Node *object = assign(&tok, tok);
             if (!is_pointer(object->ty) || (object->ty->base->qual & Q_ATOMIC) == 0)
                 error(start, "address argument to atomic operation must be a pointer to _Atomic type");
             Type *t = type_unqual(object->ty->base);
+            bool is_addsub = kind == ATOMIC_FETCH_ADD || kind == ATOMIC_FETCH_SUB;
+            if (kind != ATOMIC_EXCHANGE) {
+                // C11 7.17.7.5: fetch_* apply to atomic integer types;
+                // like clang, also accept pointer and floating types for
+                // fetch_add/sub (fadd/fsub).
+                bool ok = is_addsub ? (is_integer(t) || is_pointer(t) || is_flonum(t)) : is_integer(t);
+                if (!ok) error(object->tok, "address argument to atomic operation must be a pointer to atomic integer");
+            }
+            // atomicrmw add/sub on a pointer takes a pointer-sized
+            // integer operand; LLVM's pointer atomicrmw operates on raw
+            // integers, so scale by the element size like clang does.
+            Type *operand_ty = is_addsub && is_pointer(t) ? T.ty_long : t;
             tok = skip(tok, TK_COMMA);
             Node *desired = assign(&tok, tok);
-            new_imcast(&desired, t);
+            new_imcast(&desired, operand_ty);
+            if (is_addsub && is_pointer(t))
+                desired = new_binary(ND_MUL, desired, new_num(t->base->size, desired->tok), desired->tok);
             tok = skip(tok, TK_COMMA);
             Token *order_tok = tok;
             int mem_order = const_expr(&tok, tok);
             mem_order = check_mem_order(order_tok, mem_order, MO_ATOMICRMW);
             *rest = skip(tok, TK_RPAREN);
-            Sym *tmp_desired = new_lvar(intern("", 0), t);
+            Sym *tmp_desired = new_lvar(intern("", 0), operand_ty);
             Node *var_init = new_var_node(tmp_desired, start);
             Node *node1 = new_binary(ND_AS, var_init, desired, tok);
 
@@ -1411,7 +1440,26 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             node->lhs = object;
             node->desired = new_var_node(tmp_desired, start);
             node->mem_order = mem_order + 1;
-            node->armw_op = A_XCHG;
+            switch (kind) {
+                case ATOMIC_FETCH_ADD:
+                    node->armw_op = is_flonum(t) ? A_FADD : A_ADD;
+                    break;
+                case ATOMIC_FETCH_SUB:
+                    node->armw_op = is_flonum(t) ? A_FSUB : A_SUB;
+                    break;
+                case ATOMIC_FETCH_AND:
+                    node->armw_op = A_AND;
+                    break;
+                case ATOMIC_FETCH_OR:
+                    node->armw_op = A_OR;
+                    break;
+                case ATOMIC_FETCH_XOR:
+                    node->armw_op = A_XOR;
+                    break;
+                default:
+                    node->armw_op = A_XCHG;
+                    break;
+            }
             add_type(node);
             Node *node2 = new_binary(ND_AS, tmp_res, node, tok);
             node2 = new_binary(ND_COMMA, node1, node2, tok);

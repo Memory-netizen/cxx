@@ -38,6 +38,21 @@ typedef _Atomic(unsigned long long) atomic_ullong;
 #define atomic_exchange(object, desired) __c11_atomic_exchange(object, desired, __ATOMIC_SEQ_CST)
 #define atomic_exchange_explicit __c11_atomic_exchange
 
+#define atomic_fetch_add(object, operand) __c11_atomic_fetch_add(object, operand, __ATOMIC_SEQ_CST)
+#define atomic_fetch_add_explicit __c11_atomic_fetch_add
+
+#define atomic_fetch_sub(object, operand) __c11_atomic_fetch_sub(object, operand, __ATOMIC_SEQ_CST)
+#define atomic_fetch_sub_explicit __c11_atomic_fetch_sub
+
+#define atomic_fetch_or(object, operand) __c11_atomic_fetch_or(object, operand, __ATOMIC_SEQ_CST)
+#define atomic_fetch_or_explicit __c11_atomic_fetch_or
+
+#define atomic_fetch_xor(object, operand) __c11_atomic_fetch_xor(object, operand, __ATOMIC_SEQ_CST)
+#define atomic_fetch_xor_explicit __c11_atomic_fetch_xor
+
+#define atomic_fetch_and(object, operand) __c11_atomic_fetch_and(object, operand, __ATOMIC_SEQ_CST)
+#define atomic_fetch_and_explicit __c11_atomic_fetch_and
+
 #define atomic_compare_exchange_strong(object, expected, desired) __c11_atomic_compare_exchange_strong(object, expected, desired, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)
 #define atomic_compare_exchange_strong_explicit __c11_atomic_compare_exchange_strong
 

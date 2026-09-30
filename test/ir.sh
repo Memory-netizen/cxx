@@ -145,6 +145,43 @@ int f(void) { return __c11_atomic_exchange(&vx, 1, __ATOMIC_SEQ_CST); }' \
   | $compiler -S -emit-llvm -o - -xc - | grep -q 'atomicrmw volatile xchg ptr @vx, i32 %'
 check 'atomicrmw volatile'
 
+# fetch_*: atomicrmw op selection and operand types.
+echo '#include <stdatomic.h>
+_Atomic int x;
+int f(void) { return __c11_atomic_fetch_add(&x, 1, __ATOMIC_SEQ_CST); }
+int g(void) { return __c11_atomic_fetch_sub(&x, 1, __ATOMIC_SEQ_CST); }
+int h(void) { return __c11_atomic_fetch_and(&x, 1, __ATOMIC_SEQ_CST); }
+int i(void) { return __c11_atomic_fetch_or(&x, 1, __ATOMIC_SEQ_CST); }
+int j(void) { return __c11_atomic_fetch_xor(&x, 1, __ATOMIC_SEQ_CST); }' \
+  | $compiler -S -emit-llvm -o - -xc - > $tmp/fetch.ll
+grep -q 'atomicrmw add ptr @x, i32 %' $tmp/fetch.ll
+check 'atomicrmw fetch_add'
+grep -q 'atomicrmw sub ptr @x, i32 %' $tmp/fetch.ll
+check 'atomicrmw fetch_sub'
+grep -q 'atomicrmw and ptr @x, i32 %' $tmp/fetch.ll
+check 'atomicrmw fetch_and'
+grep -q 'atomicrmw or ptr @x, i32 %' $tmp/fetch.ll
+check 'atomicrmw fetch_or'
+grep -q 'atomicrmw xor ptr @x, i32 %' $tmp/fetch.ll
+check 'atomicrmw fetch_xor'
+
+# fetch_add/sub on pointers take a pointer-sized integer operand;
+# floating atomics use fadd/fsub.
+echo '#include <stdatomic.h>
+_Atomic(int *) ap;
+int *f(void) { return __c11_atomic_fetch_add(&ap, 1, __ATOMIC_SEQ_CST); }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'atomicrmw add ptr @ap, i64 %'
+check 'atomicrmw fetch_add pointer operand'
+echo '#include <stdatomic.h>
+_Atomic float af;
+float f(void) { return __c11_atomic_fetch_add(&af, 1.0f, __ATOMIC_SEQ_CST); }
+float g(void) { return __c11_atomic_fetch_sub(&af, 0.5f, __ATOMIC_SEQ_CST); }' \
+  | $compiler -S -emit-llvm -o - -xc - > $tmp/ffetch.ll
+grep -q 'atomicrmw fadd ptr @af, float %' $tmp/ffetch.ll
+check 'atomicrmw fadd'
+grep -q 'atomicrmw fsub ptr @af, float %' $tmp/ffetch.ll
+check 'atomicrmw fsub'
+
 # Non-atomic accesses must stay atomic-free.
 echo 'volatile int v; void f(void) { v = 1; }' \
   | $compiler -S -emit-llvm -o - -xc - | grep -q 'store volatile i32 1, ptr @v, align 4'

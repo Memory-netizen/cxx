@@ -141,4 +141,16 @@ int f(void) { return __c11_atomic_exchange(&x, 1, 99); }' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'memory order argument to atomic operation is invalid'
 check 'exchange invalid order warning'
 
+# fetch_and/or/xor apply to integer atomics only (C11 7.17.7.5).
+echo '#include <stdatomic.h>
+_Atomic float af;
+float f(void) { return atomic_fetch_and(&af, 1.0f); }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'must be a pointer to atomic integer'
+check 'fetch_and on float'
+echo '#include <stdatomic.h>
+_Atomic(int *) ap;
+int *f(void) { return atomic_fetch_or(&ap, 1); }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'must be a pointer to atomic integer'
+check 'fetch_or on pointer'
+
 echo OK
