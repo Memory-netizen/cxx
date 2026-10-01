@@ -532,7 +532,6 @@ Target T_rv64 = {
         "#define __unix__ 1\n"
         "#define linux 1\n"
         "#define unix 1\n"
-        "#define __STDC_NO_ATOMICS__ 1\n"
         "#define __STDC_NO_COMPLEX__ 1\n"
         "#define __cxx__ 1\n"
         "#define __alignof__ _Alignof\n"

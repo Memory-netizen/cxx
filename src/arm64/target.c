@@ -358,7 +358,6 @@ Target T_arm64 = {
         "#define __STDC_EMBED_FOUND__ 1\n"
         "#define __STDC_EMBED_NOT_FOUND__ 0\n"
         "#define __STDC_HOSTED__ 1\n"
-        "#define __STDC_NO_ATOMICS__ 1\n"
         "#define __STDC_NO_COMPLEX__ 1\n"
         "#define __STDC_UTF_16__ 1\n"
         "#define __STDC_UTF_32__ 1\n"
