@@ -2068,6 +2068,8 @@ static Node *postfix(Token **rest, Token *tok) {
 
                 if (ty->kind != TY_STRUCT && ty->kind != TY_UNION)
                     error(dot, "request for member ‘%s’ in something not a structure or union", str(mem_id));
+                if (ty->qual & Q_ATOMIC)
+                    error(dot, "accessing a member of an atomic structure or union is undefined behavior");
                 Member *mem = get_struct_member(ty->members, tok);
                 if (!mem) error(tok, "no member named ‘%s’ in ‘%s’", str(tok->id), str(ty->uid));
 
@@ -2818,6 +2820,11 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             if (is_extern)
                 error(var_name, "declaration of block scope identifier ‘%s’ with linkage cannot have an initializer",
                       str(var_name->id));
+            // Like clang: atomic aggregates cannot be brace-initialized
+            // (copy-initialization from another object stays legal).
+            if ((ty->qual & Q_ATOMIC) && (ty->kind == TY_STRUCT || ty->kind == TY_UNION) &&
+                tok->next->kind == TK_LBRACE)
+                error(var_name, "illegal initializer type '_Atomic(%s)'", str(ty->uid));
             if (is_static) {
                 gvar_initializer(&tok, tok->next, var);
             } else {
@@ -4557,6 +4564,10 @@ static Token *external_declaration(Token *tok) {
             if (ty->kind == TY_VOID) error(var_name, "variable ‘%s’ declared void", str(var_name->id));
 
             if (tok->kind == TK_AS) {
+                // Like clang: atomic aggregates cannot be brace-initialized.
+                if ((ty->qual & Q_ATOMIC) && (ty->kind == TY_STRUCT || ty->kind == TY_UNION) &&
+                    tok->next->kind == TK_LBRACE)
+                    error(var_name, "illegal initializer type '_Atomic(%s)'", str(ty->uid));
                 gvar_initializer(&tok, tok->next, var);
                 var->is_defined = true;
             }

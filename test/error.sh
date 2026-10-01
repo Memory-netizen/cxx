@@ -148,6 +148,23 @@ void f(void) { atomic_thread_fence(99); }' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'memory order argument to atomic operation is invalid'
 check 'fence invalid order warning'
 
+# Atomic aggregates: member access is undefined behavior (clang errors,
+# gcc warns); brace initialization is rejected like clang.
+echo 'struct S { int a; };
+_Atomic struct S s;
+int f(void) { return s.a; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'accessing a member of an atomic structure or union is undefined behavior'
+check 'atomic struct member read'
+echo 'struct S { int a; };
+_Atomic struct S s;
+void g(void) { s.a = 5; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'accessing a member of an atomic structure or union is undefined behavior'
+check 'atomic struct member write'
+echo 'struct S { int a, b; };
+_Atomic struct S x = { 1, 2 };' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "illegal initializer type '_Atomic(struct.S)'"
+check 'atomic struct brace init'
+
 # Builtin functions must be directly called (no &-use).
 echo 'int f(void) { return (int)__builtin_alloca; }' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'builtin functions must be directly called'

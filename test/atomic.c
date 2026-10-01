@@ -349,6 +349,20 @@ int main() {
     ASSERT(1, fres == 3.0f);
     ASSERT(1, af == 3.0f);
 
+    // Whole access to _Atomic aggregates (4 bytes: lock-free everywhere).
+    struct SA {
+        int v;
+    };
+    _Atomic struct SA asa, asb;
+    struct SA sa_in = {11};
+    asa = sa_in;             // atomic store of a plain value
+    struct SA sa_out = asa;  // atomic load into a plain object
+    ASSERT(11, sa_out.v);
+    asb = asa;  // atomic to atomic
+    struct SA sa_out2 = asb;
+    ASSERT(11, sa_out2.v);
+    ASSERT(4, sizeof(asa));
+
     printf("OK\n");
     return 0;
 }

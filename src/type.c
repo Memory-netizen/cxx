@@ -604,7 +604,7 @@ void check_asop(Type *dst, Node *src, int ctx) {
     add_type(src);
     Type *src_ty = src->ty;
     if (is_arith(dst) && is_arith(src_ty)) return;
-    if (is_record(dst) && is_compatible(type_unqual(dst), src_ty)) return;
+    if (is_record(dst) && is_compatible(type_unqual(dst), type_unqual(src_ty))) return;
     if (is_pointer(dst) && is_pointer(src_ty) && is_compatible(type_unqual(dst->base), type_unqual(src_ty->base)))
         if (BIT_SUPERSET(dst->base->qual, src_ty->base->qual)) return;
 

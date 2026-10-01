@@ -313,6 +313,24 @@ check 'float *= cmpxchg'
 grep -q 'fmul float' $tmp/fcasgn.ll
 check 'float *= fmul'
 
+# Whole access to _Atomic aggregates moves the bit pattern through a
+# same-size integer (clang emits the same shape).
+echo '#include <stdatomic.h>
+struct S { int a, b; };
+_Atomic struct S x, y;
+void f(void) { x = y; }' \
+  | $compiler -S -emit-llvm -o - -xc - > $tmp/atagg.ll
+grep -q 'load atomic i64, ptr @y seq_cst' $tmp/atagg.ll
+check 'atomic aggregate load i64'
+grep -q 'store atomic i64 %.*, ptr @x seq_cst' $tmp/atagg.ll
+check 'atomic aggregate store i64'
+echo '#include <stdatomic.h>
+struct S { int a, b; };
+_Atomic struct S y;
+void f(void) { _Atomic struct S x = y; }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'load atomic i64, ptr @y seq_cst'
+check 'atomic aggregate init reads atomically'
+
 # Non-atomic accesses must stay atomic-free.
 echo 'volatile int v; void f(void) { v = 1; }' \
   | $compiler -S -emit-llvm -o - -xc - | grep -q 'store volatile i32 1, ptr @v, align 4'

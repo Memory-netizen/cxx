@@ -405,6 +405,16 @@ static Ref gen_expr(Node *node) {
             if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
             Ref addr = gen_expr(node->lhs);
             atomic_order = node_mem_order(node->lhs);
+            if (is_record(node->ty) && is_atomic_ptr(addr)) {
+                // Whole access to an _Atomic aggregate reads the bit
+                // pattern through an integer of the same size (clang
+                // does the same; consumers store it type-punned).
+                int sz = node->ty->size;
+                if (sz != 1 && sz != 2 && sz != 4 && sz != 8)
+                    error(node->tok,
+                          "atomic aggregate larger than 8 bytes or of non-power-of-two size is not supported");
+                return load(addr, bitint[sz * 8][1], align, NULL);
+            }
             return load(addr, node->ty, align, node->lhs->member);
         }
         case ND_VAR:
@@ -432,8 +442,28 @@ static Ref gen_expr(Node *node) {
             if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
 
             if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) {
-                Ref src = gen_expr(node->rhs);
-                Ref ops[] = {addr, src, INT(node->ty->size)};
+                Ref src_addr = gen_expr(node->rhs);
+                // The rhs record conversion may wrap in ND_IMCAST and
+                // rewrite the Ref ty (hiding or adding the atomic
+                // qualifier): normalize to the true source type.
+                Type *src_ty = node->rhs->ty;
+                if (node->rhs->kind == ND_IMCAST) src_ty = node->rhs->lhs->ty;
+                src_addr.ty = pointer_to(src_ty, 0);
+                if (is_atomic_ptr(addr) || is_atomic_ptr(src_addr)) {
+                    // Whole access to an _Atomic aggregate: move the bit
+                    // pattern through a same-size integer. The load/store
+                    // are atomic iff their respective object is atomic.
+                    int sz = node->ty->size;
+                    if (sz != 1 && sz != 2 && sz != 4 && sz != 8)
+                        error(node->tok,
+                              "atomic aggregate larger than 8 bytes or of non-power-of-two size is not supported");
+                    atomic_order = node_mem_order(node);
+                    Ref src = load(src_addr, bitint[sz * 8][1], align, NULL);
+                    atomic_order = node_mem_order(node);
+                    store(src, addr, align, NULL);
+                    return addr;
+                }
+                Ref ops[] = {addr, src_addr, INT(node->ty->size)};
                 new_ins(IR_MEMCPY, R, ops, 3);
                 return addr;
             }
