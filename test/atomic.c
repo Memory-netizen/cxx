@@ -322,6 +322,33 @@ int main() {
     atomic_thread_fence(memory_order_relaxed);
     atomic_signal_fence(memory_order_acquire);
 
+    // Float compare_exchange compares bit patterns (via _BitInt), with
+    // the failure writeback storing the actual float back.
+    _Atomic float af = 1.5f;
+    float fe = 2.5f;
+    ASSERT(0, atomic_compare_exchange_strong(&af, &fe, 3.5f));
+    ASSERT(1, fe == 1.5f);
+    ASSERT(1, af == 1.5f);
+    fe = 1.5f;
+    ASSERT(1, atomic_compare_exchange_strong(&af, &fe, 3.5f));
+    ASSERT(1, fe == 1.5f);
+    ASSERT(1, af == 3.5f);
+    fe = 3.5f;
+    while (!atomic_compare_exchange_weak(&af, &fe, -0.0f)) {
+    }
+    ASSERT(1, fe == 3.5f);
+    ASSERT(1, af == -0.0f);
+
+    // Float compound *=, /= lower to the bitcast CAS loop.
+    af = 2.0f;
+    af *= 3.0f;
+    ASSERT(1, af == 6.0f);
+    af /= 4.0f;
+    ASSERT(1, af == 1.5f);
+    float fres = (af *= 2.0f);  // the expression value is the new value
+    ASSERT(1, fres == 3.0f);
+    ASSERT(1, af == 3.0f);
+
     printf("OK\n");
     return 0;
 }

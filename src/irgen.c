@@ -102,6 +102,13 @@ static void insert_phi(Blk *blk, Phi *phi) {
     blk->phi = phi;
 }
 
+// Reinterpret the bits of val as `to` (same-size first-class types).
+static Ref bitcast(Ref val, Type *to) {
+    Ref dst = TMP(tmp_id++, to);
+    new_ins(IR_BITCAST, dst, (Ref[]){val}, 1);
+    return dst;
+}
+
 static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
     if (target_ty->kind == TY_BOOL) {
         Ref tmp = TMP(tmp_id++, bitint[1][1]);
@@ -569,17 +576,29 @@ static Ref gen_expr(Node *node) {
         case ND_CAS: {
             Ref addr1 = gen_expr(node->lhs);
             Ref addr2 = gen_expr(node->rhs);
-            Ref old_val = load(addr2, node->rhs->ty->base, node->rhs->ty->base->align, NULL);
+            Type *t = node->rhs->ty->base;
+            Ref old_val = load(addr2, t, t->align, NULL);
             Ref new_val = gen_expr(node->desired);
+            // LLVM cmpxchg takes integer/pointer operands only: floating
+            // values compare by their bit pattern in an unsigned _BitInt
+            // of the same width (clang does the same). The failure
+            // writeback stores the integer into the float-typed *expected
+            // (type punning), matching clang's IR.
+            Type *cmp_ty = t;
+            if (is_flonum(t)) {
+                cmp_ty = bitint[t->size * 8][1];
+                old_val = bitcast(old_val, cmp_ty);
+                new_val = bitcast(new_val, cmp_ty);
+            }
             Ref args[] = {addr1, old_val, new_val};
-            // The ty carried by the cmpxchg dst is the value type T; the
+            // The ty carried by the cmpxchg dst is the compare type; the
             // result itself is { T, i1 }, which dumpir derives from it.
-            Ref res = TMP(tmp_id++, node->rhs->ty->base);
+            Ref res = TMP(tmp_id++, cmp_ty);
             Ir *ins = new_ins(IR_CMPXCHG, res, args, 3);
             ins->mem_order = node_mem_order(node);
             ins->mem_order1 = node_mem_order1(node);
             ins->is_weak = node->is_weak;
-            Ref val = TMP(tmp_id++, node->rhs->ty->base);
+            Ref val = TMP(tmp_id++, cmp_ty);
             Ref success = TMP(tmp_id++, bitint[1][1]);
             new_ins(IR_EXTRACTVAL, val, (Ref[]){res, INT(0)}, 2);
             new_ins(IR_EXTRACTVAL, success, (Ref[]){res, INT(1)}, 2);

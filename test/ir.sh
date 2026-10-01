@@ -266,6 +266,53 @@ check 'thread fence relaxed dropped'
 grep -q 'fence syncscope("singlethread") acquire' $tmp/fence.ll
 check 'signal fence singlethread syncscope'
 
+# Floating compare_exchange: LLVM cmpxchg takes integer operands, so
+# the floats are bitcast to an unsigned _BitInt of the same width and
+# the failure writeback type-puns the integer into the float expected
+# (clang emits the same shape).
+echo '#include <stdatomic.h>
+_Atomic float af;
+float e;
+int f(void) { float d = 1.5f; return atomic_compare_exchange_strong(&af, &e, d); }' \
+  | $compiler -S -emit-llvm -o - -xc - > $tmp/fcas.ll
+grep -q 'bitcast float %.* to i32' $tmp/fcas.ll
+check 'float cas bitcast'
+grep -q 'cmpxchg ptr @af, i32 %' $tmp/fcas.ll
+check 'float cas i32 cmpxchg'
+grep -q 'extractvalue { i32, i1 } %' $tmp/fcas.ll
+check 'float cas extractvalue'
+grep -q 'store i32 %.*, ptr @e' $tmp/fcas.ll
+check 'float cas writeback type pun'
+
+echo '#include <stdatomic.h>
+_Atomic double ad;
+double e;
+int f(void) { double d = 1.5; return atomic_compare_exchange_strong(&ad, &e, d); }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'bitcast double %.* to i64'
+check 'double cas bitcast'
+
+echo '#include <stdatomic.h>
+_Atomic _Float128 af;
+_Float128 e;
+int f(void) { _Float128 d = 1.5; return atomic_compare_exchange_strong(&af, &e, d); }' \
+  | $compiler -S -emit-llvm -o - -xc - > $tmp/f128cas.ll
+grep -q 'bitcast fp128 %.* to i128' $tmp/f128cas.ll
+check 'fp128 cas bitcast'
+grep -q 'cmpxchg ptr @af, i128 %' $tmp/f128cas.ll
+check 'fp128 cas i128 cmpxchg'
+
+# Float compound *=, /= reuse the bitcast CAS loop.
+echo '#include <stdatomic.h>
+_Atomic float af;
+float f(void) { af *= 2.0f; return af; }' \
+  | $compiler -S -emit-llvm -o - -xc - > $tmp/fcasgn.ll
+grep -q 'bitcast float %.* to i32' $tmp/fcasgn.ll
+check 'float *= bitcast loop'
+grep -q 'cmpxchg ptr %.*, i32 %' $tmp/fcasgn.ll
+check 'float *= cmpxchg'
+grep -q 'fmul float' $tmp/fcasgn.ll
+check 'float *= fmul'
+
 # Non-atomic accesses must stay atomic-free.
 echo 'volatile int v; void f(void) { v = 1; }' \
   | $compiler -S -emit-llvm -o - -xc - | grep -q 'store volatile i32 1, ptr @v, align 4'

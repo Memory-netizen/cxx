@@ -1608,10 +1608,6 @@ static Node *atomic_compound_assign(Node *lhs, NodeKind op, Node *rhs, bool post
     Type *t = type_unqual(at);
     bool is_ptr = is_pointer(t);
 
-    if (is_flonum(t) && (op == ND_MULAS || op == ND_DIVAS))
-        error(tok, "atomic compound assignment with '%s' on a floating type is not supported",
-              op == ND_MULAS ? "*" : "/");
-
     // Type the rhs exactly like the plain compound assignment would and
     // steal the converted operand and the common type. The scratch lhs
     // is unqualified, so get_common_type sees the same kinds.

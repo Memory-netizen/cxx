@@ -164,19 +164,6 @@ echo 'int f(int n) { return (int)__builtin_alloca_with_align(n, 4); }' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'must be 8 or greater'
 check 'alloca_with_align min 8'
 
-# float *= and /= on atomics need a float cmpxchg (bitcast), which is
-# not implemented yet (clang supports them via the bitcast loop).
-echo '#include <stdatomic.h>
-_Atomic float af;
-float f(void) { af *= 2.0f; return af; }' \
-  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "atomic compound assignment with '\*' on a floating type is not supported"
-check 'float atomic *='
-echo '#include <stdatomic.h>
-_Atomic float af;
-float f(void) { af /= 2.0f; return af; }' \
-  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "atomic compound assignment with '/' on a floating type is not supported"
-check 'float atomic /='
-
 # fetch_and/or/xor apply to integer atomics only (C11 7.17.7.5).
 echo '#include <stdatomic.h>
 _Atomic float af;

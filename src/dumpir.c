@@ -464,6 +464,15 @@ void dump_blk(Blk *b) {
                 fprintf(out_file, "\n");
                 break;
             }
+            case IR_BITCAST:
+                fprintf(out_file, "bitcast ");
+                print_type(ir->args[0].ty);
+                fprintf(out_file, " ");
+                print_operand(ir->args[0]);
+                fprintf(out_file, " to ");
+                print_type(ir->dst.ty);
+                fprintf(out_file, "\n");
+                break;
             // fneg
             case IR_NEG:
                 fprintf(out_file, "fneg ");
