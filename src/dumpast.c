@@ -497,6 +497,9 @@ static void dump_node(Node *node) {
         case ND_ALLOCA:
             fprintf(stdout, "alloca\n");
             break;
+        case ND_FENCE:
+            fprintf(stdout, "fence\n");
+            break;
     }
 }
 

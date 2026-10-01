@@ -1105,6 +1105,7 @@ void add_type(Node *node) {
         case ND_FUNCALL:
         case ND_SP_SAVE:
         case ND_SP_RESTORE:
+        case ND_FENCE:
             // Nothing to do
             break;
     }

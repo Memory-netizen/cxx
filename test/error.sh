@@ -141,6 +141,13 @@ int f(void) { return __c11_atomic_exchange(&x, 1, 99); }' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'memory order argument to atomic operation is invalid'
 check 'exchange invalid order warning'
 
+# An invalid fence order warns and falls back to seq_cst (clang emits
+# nothing for this UB; cxx is deliberately stricter).
+echo '#include <stdatomic.h>
+void f(void) { atomic_thread_fence(99); }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'memory order argument to atomic operation is invalid'
+check 'fence invalid order warning'
+
 # Builtin functions must be directly called (no &-use).
 echo 'int f(void) { return (int)__builtin_alloca; }' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'builtin functions must be directly called'

@@ -311,10 +311,16 @@ int main() {
     ASSERT(0, atomic_flag_test_and_set_explicit(&flag, memory_order_relaxed));
     atomic_flag_clear_explicit(&flag, memory_order_release);
     ASSERT(1, atomic_is_lock_free(&x));
+    ASSERT(1, __c11_atomic_is_lock_free(4));
     ASSERT(2, ATOMIC_INT_LOCK_FREE);
     ASSERT(1, kill_dependency(x) == x);
     atomic_size_t az = 5;
     ASSERT(5, az);
+
+    // Fences compile and run (ordering is a no-op single-threaded).
+    atomic_thread_fence(memory_order_seq_cst);
+    atomic_thread_fence(memory_order_relaxed);
+    atomic_signal_fence(memory_order_acquire);
 
     printf("OK\n");
     return 0;

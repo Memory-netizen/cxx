@@ -1266,6 +1266,9 @@ enum {
     ATOMIC_FETCH_XOR,
     ATOMIC_COMPARE_EXCHANGE_WEAK,
     ATOMIC_COMPARE_EXCHANGE_STRONG,
+    ATOMIC_THREAD_FENCE,
+    ATOMIC_SIGNAL_FENCE,
+    ATOMIC_IS_LOCK_FREE,
 };
 
 // Interned once at the top of parse(): the anonymous name for
@@ -1293,6 +1296,9 @@ static struct {
     {"__c11_atomic_fetch_xor", 0, ATOMIC_FETCH_XOR},
     {"__c11_atomic_compare_exchange_weak", 0, ATOMIC_COMPARE_EXCHANGE_WEAK},
     {"__c11_atomic_compare_exchange_strong", 0, ATOMIC_COMPARE_EXCHANGE_STRONG},
+    {"__c11_atomic_thread_fence", 0, ATOMIC_THREAD_FENCE},
+    {"__c11_atomic_signal_fence", 0, ATOMIC_SIGNAL_FENCE},
+    {"__c11_atomic_is_lock_free", 0, ATOMIC_IS_LOCK_FREE},
 };
 
 // The table ids are interned lazily on first use: the preprocessor
@@ -1319,7 +1325,7 @@ enum {
     MO_LOAD,
     MO_RMW,        // cmpxchg success: any of the six orders
     MO_CAS_FAIL,   // cmpxchg failure: no release/acq_rel
-    MO_ATOMICRMW,  // single-order RMW (exchange, fetch_*): any of the six orders
+    MO_ATOMICRMW,  // single-order RMW (exchange, fetch_*, fences): any of the six orders
 };
 
 static int check_mem_order(Token *tok, int order, int mode) {
@@ -1391,6 +1397,7 @@ static Node *atomic_result(Node *operand_init, Node *op_assign, Sym *result, Tok
 static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
     Token *start = tok;
     bool is_weak = false;
+    bool is_signal = false;
     switch (kind) {
         case BUILTIN_TYPES_COMPATIBLE_P: {
             tok = skip(tok->next, TK_LPAREN);
@@ -1556,6 +1563,27 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             Node *cas_assign = temp_assign(result_sym, cas, tok);
             cnt_blk(2);  // ND_CAS: failure + merge blocks
             return atomic_result(desired_init, cas_assign, result_sym, tok);
+        }
+        case ATOMIC_SIGNAL_FENCE:
+            is_signal = true;
+        // fall through
+        case ATOMIC_THREAD_FENCE: {
+            Node *fence = new_node(ND_FENCE, tok);
+            tok = skip(tok->next, TK_LPAREN);
+            int order = atomic_order(&tok, MO_ATOMICRMW);
+            *rest = skip(tok, TK_RPAREN);
+            fence->mem_order = order + 1;
+            fence->is_signal = is_signal;
+            fence->ty = T.ty_void;
+            return fence;
+        }
+        case ATOMIC_IS_LOCK_FREE: {
+            // Every target provides native atomics up to the pointer
+            // size (riscv32's 8-byte atomics use libcalls).
+            tok = skip(tok->next, TK_LPAREN);
+            int64_t size = const_expr(&tok, tok);
+            *rest = skip(tok, TK_RPAREN);
+            return new_num(size <= T.ty_nullptr->size, start);
         }
     }
     return NULL;

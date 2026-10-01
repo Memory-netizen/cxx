@@ -413,47 +413,48 @@ typedef enum {
     ND_DIVAS,  // /=
     ND_MODAS,  // %=
 
-    ND_ANDAS,      // &=
-    ND_ORAS,       // |=
-    ND_XORAS,      // ^=
-    ND_LEFTAS,     // <<=
-    ND_RIGHTAS,    // >>=
-    ND_BOR,        // |
-    ND_XOR,        // ^
-    ND_BAND,       // &
-    ND_EQ,         // ==
-    ND_NE,         // !=
-    ND_LT,         // <
-    ND_LE,         // <=
-    ND_GT,         // >
-    ND_GE,         // >=
-    ND_LEFT,       // <<
-    ND_RIGHT,      // >>
-    ND_ADD,        // +
-    ND_SUB,        // -
-    ND_MUL,        // *
-    ND_DIV,        // /
-    ND_MOD,        // %
-    ND_PLUS,       // unary +
-    ND_NEG,        // unary -
-    ND_NOT,        // !
-    ND_INVERT,     // ~
-    ND_ADDR,       // unary &
-    ND_DEREF,      // unary *
-    ND_MEMBER,     // . (struct member access)
-    ND_PTRADD,     // ptr + num
-    ND_PREINC,     // pre ++
-    ND_PREDEC,     // pre --
-    ND_POSTINC,    // post ++
-    ND_POSTDEC,    // post --
-    ND_FUNCALL,    // Function call
-    ND_IMCAST,     // Implicit cast
-    ND_EXCAST,     // Cast
-    ND_LVTOR,      // LValue to rvalue
-    ND_LOGAND,     // &&
-    ND_LOGOR,      // ||
-    ND_COND,       // ?:
-    ND_MEMZERO,    // Zero-clear a stack variable
+    ND_ANDAS,    // &=
+    ND_ORAS,     // |=
+    ND_XORAS,    // ^=
+    ND_LEFTAS,   // <<=
+    ND_RIGHTAS,  // >>=
+    ND_BOR,      // |
+    ND_XOR,      // ^
+    ND_BAND,     // &
+    ND_EQ,       // ==
+    ND_NE,       // !=
+    ND_LT,       // <
+    ND_LE,       // <=
+    ND_GT,       // >
+    ND_GE,       // >=
+    ND_LEFT,     // <<
+    ND_RIGHT,    // >>
+    ND_ADD,      // +
+    ND_SUB,      // -
+    ND_MUL,      // *
+    ND_DIV,      // /
+    ND_MOD,      // %
+    ND_PLUS,     // unary +
+    ND_NEG,      // unary -
+    ND_NOT,      // !
+    ND_INVERT,   // ~
+    ND_ADDR,     // unary &
+    ND_DEREF,    // unary *
+    ND_MEMBER,   // . (struct member access)
+    ND_PTRADD,   // ptr + num
+    ND_PREINC,   // pre ++
+    ND_PREDEC,   // pre --
+    ND_POSTINC,  // post ++
+    ND_POSTDEC,  // post --
+    ND_FUNCALL,  // Function call
+    ND_IMCAST,   // Implicit cast
+    ND_EXCAST,   // Cast
+    ND_LVTOR,    // LValue to rvalue
+    ND_LOGAND,   // &&
+    ND_LOGOR,    // ||
+    ND_COND,     // ?:
+    ND_MEMZERO,  // Zero-clear a stack variable
+    ND_FENCE,
     ND_CAS,        // Atomic compare-and-swap
     ND_ATOMICRMW,  // Atomic read-modify-write (atomicrmw)
     ND_ALLOCA,     // __builtin_alloca / __builtin_alloca_with_align
@@ -505,8 +506,9 @@ struct Node {
             Type *compute_ty;     // Compound assign
             uint16_t mem_order;   // Atomic access memory order + 1; 0 = unspecified (seq_cst)
             uint16_t mem_order1;  // Atomic access memory order + 1; 0 = unspecified (seq_cst)
+            int armw_op;          // ND_ATOMICRMW: A_* operation (atomicrmw)
             bool is_weak;
-            int armw_op;  // ND_ATOMICRMW: A_* operation (atomicrmw)
+            bool is_signal;
         };
         struct {
             union {
@@ -923,9 +925,10 @@ struct Ir {
     Ir *prev, *next;
     uint16_t op;
     uint16_t narg;
-    uint16_t mem_order;   // Atomic load/store order; cmpxchg success order
-    uint16_t mem_order1;  // cmpxchg failure order
-    uint16_t is_weak;     // cmpxchg weak
+    uint8_t mem_order;   // Atomic load/store order; cmpxchg success order
+    uint8_t mem_order1;  // cmpxchg failure order
+    uint8_t is_weak;     // cmpxchg weak
+    uint8_t is_signal;
     Ref args[];
 };
 

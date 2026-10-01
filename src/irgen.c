@@ -35,6 +35,7 @@ static Ir *new_ins(IrKind op, Ref dst, Ref *args, uint32_t narg) {
     new->mem_order = MEM_ORDER_SEQ_CST;
     new->mem_order1 = MEM_ORDER_SEQ_CST;
     new->is_weak = 0;
+    new->is_signal = 0;
     if (narg > 0 && args) memcpy(new->args, args, narg * sizeof(Ref));
 
     new->prev = curb->tail;
@@ -301,6 +302,17 @@ static Ref gen_expr(Node *node) {
     if (!node) return R;
     Ref dst;
     switch (node->kind) {
+        case ND_FENCE: {
+            // LLVM has no monotonic fence (clang drops relaxed fences
+            // entirely); skip emission for relaxed.
+            int order = node_mem_order(node);
+            if (order != MEM_ORDER_RELAXED) {
+                Ir *ins = new_ins(IR_FENCE, R, NULL, 0);
+                ins->mem_order = order;
+                ins->is_signal = node->is_signal;
+            }
+            return R;
+        }
         case ND_SP_SAVE:
             dst = TMP(tmp_id++, node->ty);
             new_ins(IR_SP_SAVE, dst, NULL, 0);

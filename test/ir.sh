@@ -247,6 +247,25 @@ echo 'int f(int n) { int a[n]; return a[0]; }' \
   | $compiler -S -emit-llvm -o - -xc - | grep -q 'alloca i32, i64 %'
 check 'VLA typed alloca'
 
+# Fences: thread fences emit plain fence instructions (consume maps to
+# acquire); signal fences carry the singlethread syncscope.
+echo '#include <stdatomic.h>
+void f(void) {
+  atomic_thread_fence(memory_order_seq_cst);
+  atomic_thread_fence(memory_order_consume);
+  atomic_thread_fence(memory_order_relaxed);
+  atomic_signal_fence(memory_order_acquire);
+}' \
+  | $compiler -S -emit-llvm -o - -xc - > $tmp/fence.ll
+grep -q 'fence seq_cst' $tmp/fence.ll
+check 'thread fence seq_cst'
+grep -q 'fence acquire' $tmp/fence.ll
+check 'thread fence consume maps to acquire'
+! grep -q 'fence monotonic' $tmp/fence.ll
+check 'thread fence relaxed dropped'
+grep -q 'fence syncscope("singlethread") acquire' $tmp/fence.ll
+check 'signal fence singlethread syncscope'
+
 # Non-atomic accesses must stay atomic-free.
 echo 'volatile int v; void f(void) { v = 1; }' \
   | $compiler -S -emit-llvm -o - -xc - | grep -q 'store volatile i32 1, ptr @v, align 4'

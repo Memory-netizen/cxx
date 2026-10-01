@@ -59,10 +59,15 @@ typedef _Atomic(ptrdiff_t)          atomic_ptrdiff_t;
 /* 7.17.3.1 kill_dependency: a no-op on all targets. */
 #define kill_dependency(y) (y)
 
+/* 7.17.4 Fences */
+
+#define atomic_thread_fence(order) __c11_atomic_thread_fence(order)
+#define atomic_signal_fence(order) __c11_atomic_signal_fence(order)
+
 /* 7.17.5.1 Lock-free property of a given object: every target provides
  * native atomics up to the pointer size (riscv32's 8-byte atomics use
  * libcalls, so this is exact for sizeof > sizeof(void *)). */
-#define atomic_is_lock_free(object) (sizeof(*(object)) <= sizeof(void *))
+#define atomic_is_lock_free(obj) __c11_atomic_is_lock_free(sizeof(*(obj)))
 
 /* 7.17.7 Operations on atomic types */
 

@@ -437,6 +437,7 @@ Node *fold_node(Node *node) {
         case ND_SP_RESTORE:
         case ND_CAS:
         case ND_ATOMICRMW:
+        case ND_FENCE:
             break;
         case ND_ALLOCA:
             node->lhs = fold_node(node->lhs);

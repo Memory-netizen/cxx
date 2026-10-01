@@ -312,6 +312,11 @@ void dump_blk(Blk *b) {
                 print_operand(ir->args[2]);
                 fprintf(out_file, "\n");
                 break;
+            case IR_FENCE:
+                fprintf(out_file, "fence");
+                if (ir->is_signal) fprintf(out_file, " syncscope(\"singlethread\")");
+                fprintf(out_file, " %s\n", mem_order_str[ir->mem_order]);
+                break;
             case IR_GEP:
                 fprintf(out_file, "getelementptr ");
                 print_type(ir->args[0].ty->base);
