@@ -574,23 +574,26 @@ void dump_type(Type *ty) {
     Member *mem = ty->members;
     if (ty->kind == TY_STRUCT) {
         int pos = 0;
-        while (mem) {
-            bool is_bitfield = mem->is_bitfield;
-            Type *memty = is_bitfield ? mem->unit_ty : mem->ty;
+        bool first = true;
+        for (; mem; mem = mem->next) {
+            int off = mem->offset;
+            // A bit-field inside an earlier member's access unit has no
+            // element of its own; it is addressed through that member.
+            if (off < pos) continue;
+            Type *memty = mem->is_bitfield ? mem->unit_ty : mem->ty;
+            if (!first) fprintf(out_file, ", ");
+            first = false;
+            if (pos < off) {
+                fprintf(out_file, "[%d x i8], ", off - pos);
+                pos = off;
+            }
             print_type(memty);
             pos += memty->size;
-            int off = mem->offset;
-            do {
-                mem = mem->next;
-            } while (mem && mem->offset == off);
-            if (!mem) break;
-            fprintf(out_file, ", ");
-            if (pos < mem->offset) {
-                fprintf(out_file, "[%d x i8], ", mem->offset - pos);
-                pos = mem->offset;
-            }
         }
-        if (pos < ty->size) fprintf(out_file, ", [%d x i8]", ty->size - pos);
+        if (pos < ty->size) {
+            if (!first) fprintf(out_file, ", ");
+            fprintf(out_file, "[%d x i8]", ty->size - pos);
+        }
     } else if (ty->kind == TY_UNION) {
         print_type(mem->ty);
         if (mem->ty->size < ty->size) fprintf(out_file, ", [%d x i8]", ty->size - mem->ty->size);

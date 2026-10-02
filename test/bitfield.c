@@ -165,6 +165,78 @@ int main() {
     bw.w = -1;
     ASSERT(-1, bw.w);
 
+    // Mixed declared types share the storage unit; the unit is anchored
+    // at multiples of the declared type's size (as in gcc/clang).
+    ASSERT(4, sizeof(struct {
+               char a : 3;
+               int b : 5;
+           }));
+    ASSERT(2, sizeof(struct {
+               char a : 5;
+               char b : 5;
+           }));
+    ASSERT(3, sizeof(struct {
+               char a : 1;
+               char b : 8;
+               char c : 8;
+           }));
+    ASSERT(8, sizeof(struct {
+               char a : 3;
+               int b : 30;
+           }));
+    ASSERT(4, sizeof(struct {
+               int a : 28;
+               char b : 4;
+           }));
+    ASSERT(4, sizeof(struct {
+               int a : 1;
+               char b : 1;
+               int c : 1;
+           }));
+    ASSERT(3, ({
+               struct {
+                   char a : 3;
+                   int b : 5;
+               } x = {3, 17};
+               x.a;
+           }));
+    ASSERT(15, ({
+               struct {
+                   char a : 3;
+                   int b : 5;
+               } x = {3, 15};
+               x.b;
+           }));
+    ASSERT(-1, ({
+        struct {
+            char a : 3;
+            int b : 5;
+        } x = {0, -1};
+        x.b;
+    }));
+    ASSERT(3, ({
+               struct __attribute__((packed)) {
+                   char a : 3;
+                   int b : 29;
+               } x;
+               x.a = 3;
+               x.a;
+           }));
+    ASSERT(-1, ({
+        struct __attribute__((packed)) {
+            char a : 3;
+            int b : 29;
+        } x;
+        x.a = 0;
+        x.b = -1;
+        x.b;
+    }));
+    ASSERT(2, sizeof(struct __attribute__((packed)) {
+               char a : 5;
+               char b : 5;
+               char c : 5;
+           }));
+
     printf("OK\n");
     return 0;
 }

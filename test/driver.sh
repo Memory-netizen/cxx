@@ -224,6 +224,8 @@ enum E { A [[deprecated]] };
 int *px [[gnu::packed]];
 void pf(int p __attribute__((unused)));
 [[deprecated]];
+[[deprecated("msg")]] int wx;
+[[clang::annotate(x[1]{2})]] int yx;
 int fun(int x) {
     for ([[maybe_unused]] int i = 0; i < 1; i++) {}
     if ([[maybe_unused]] int y = x) return y;
@@ -256,6 +258,55 @@ int main(void) {
 EOF
 $compiler -o $tmp/packed $tmp/packed.c && $tmp/packed
 check 'packed aligned layout'
+
+# Bit-field layout: fields of different types share the storage unit,
+# anchored at multiples of the declared type's size (as in gcc/clang).
+cat > $tmp/bitf.c <<'EOF'
+struct B { char a:3; int b:5; };
+_Static_assert(sizeof(struct B) == 4, "mixed unit");
+struct C { char a:5; char b:5; };
+_Static_assert(sizeof(struct C) == 2, "char split");
+struct D { int a:1; int :0; int b:1; };
+_Static_assert(sizeof(struct D) == 8, "zero width");
+struct __attribute__((packed)) E { char a:3; int b:29; };
+_Static_assert(sizeof(struct E) == 4, "packed stream");
+struct __attribute__((packed)) F { char c; int i __attribute__((aligned(4))); };
+_Static_assert(sizeof(struct F) == 8, "member aligned overrides packed");
+int main(void) {
+    struct B b;
+    b.a = 5;
+    b.b = 7;
+    unsigned char buf[8];
+    for (int i = 0; i < 4; i++) buf[i] = ((unsigned char*)&b)[i];
+    return buf[0] == 0x3D ? 0 : 1;
+}
+EOF
+$compiler -o $tmp/bitf $tmp/bitf.c && $tmp/bitf
+check 'bit-field unit layout'
+
+# clang:: attributes are recognized and ignored; deprecated typedefs,
+# variables and parameters warn on use (as in clang).
+cat > $tmp/attr5.c <<'EOF'
+[[clang::annotate("m")]] int ax;
+int bx [[clang::annotate("m")]];
+typedef int T [[deprecated]];
+int dv __attribute__((deprecated));
+int f(int p __attribute__((deprecated))) { return p; }
+int main(void) {
+    T t = 1;
+    dv = 2;
+    return t + dv + f(3) - 6;
+}
+EOF
+$compiler -o $tmp/attr5 $tmp/attr5.c 2> $tmp/attr5.err && $tmp/attr5
+grep -q '‘T’ is deprecated' $tmp/attr5.err
+check 'deprecated typedef use'
+grep -q '‘dv’ is deprecated' $tmp/attr5.err
+check 'deprecated variable use'
+grep -q '‘p’ is deprecated' $tmp/attr5.err
+check 'deprecated parameter use'
+! grep -q 'unknown attribute' $tmp/attr5.err
+check 'clang::annotate accepted'
 
 # Statement / label attribute positions and use warnings (as in clang).
 cat > $tmp/stmtattr.c <<'EOF'

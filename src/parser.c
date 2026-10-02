@@ -1928,10 +1928,12 @@ static Node *primary(Token **rest, Token *tok) {
         }
         while (sc->prev) sc = sc->prev;
         if (sc->kind == SYM_TYNAME) error(tok, "unexpected type name ‘%s’: expected expression", str(tok->id));
-        if (sc->kind == SYM_ENUM)
+        if (sc->kind == SYM_ENUM) {
             node = new_num(sc->enum_val, tok);
-        else
+        } else {
+            if (sc->var->is_deprecated) warning(tok, "‘%s’ is deprecated", str(sc->var->id));
             node = new_var_node(sc->var, tok);
+        }
         *rest = tok->next;
         return node;
     }
@@ -1940,10 +1942,6 @@ static Node *primary(Token **rest, Token *tok) {
 }
 
 static Node *fncall(Token **rest, Token *tok, Node *fn) {
-    Node *f = fn;
-    while (f->kind == ND_IMCAST || f->kind == ND_LVTOR) f = f->lhs;
-    if (f->kind == ND_VAR && f->var->is_deprecated) warning(f->tok, "‘%s’ is deprecated", str(f->var->id));
-
     if (fn->ty->kind != TY_FUNC && !is_funcptr(fn->ty))
         error(tok, "called object ‘%.*s’ is not a function or function pointer", fn->tok->len, tok_text(fn->tok));
 
@@ -3871,21 +3869,20 @@ static void layout_struct(Type *ty, bool is_union) {
             ap = &a->next;
     }
 
+    // Bit-field layout follows gcc/clang: each bit-field lives in a
+    // storage unit of its declared type's size, anchored at multiples
+    // of that size (in bits); fields of different types share a unit as
+    // long as they fit. `bitpos` is the absolute bit cursor; it rebases
+    // at every non-bit-field member. A packed record has no unit
+    // boundaries (except zero-width bit-fields, as in clang).
     ty->align = 1;
+    uint64_t bitpos = 0;
     int offset = 0;
-    int bits = 0;
-    int unit_size = 0;
     uint32_t idx = 0;
-
-#define END_UNIT()                                      \
-    do {                                                \
-        if (unit_size && bits > 0) offset += unit_size; \
-        unit_size = 0;                                  \
-        bits = 0;                                       \
-    } while (0)
 
     for (Member *mem = ty->members; mem; mem = mem->next) {
         int mem_align = (ty->is_packed || mem->is_packed) ? 1 : mem->align;
+        if (mem->is_align) mem_align = mem->align;  // explicit alignment overrides packed
         ty->align = MAX(ty->align, mem_align);
         mem->idx = idx++;
 
@@ -3896,45 +3893,33 @@ static void layout_struct(Type *ty, bool is_union) {
 
         if (mem->is_bitfield) {
             int width = mem->bit_width;
-
+            int unit = mem->ty->size * 8;
+            uint64_t s = bitpos;
             if (width == 0) {
-                END_UNIT();
-                offset = ALIGN_UP(offset, mem_align);
+                s = ALIGN_UP(s, unit);
+            } else if (!ty->is_packed) {
+                // The field must not cross its unit's boundary.
+                while (s + width > (s / unit + 1) * unit) s = (s / unit + 1) * unit;
             }
-
-            if (unit_size == 0) {
-                int total_bits = width;
-                for (Member *m = mem->next; m && m->is_bitfield && m->bit_width; m = m->next)
-                    total_bits += m->bit_width;
-
-                unit_size = min_bytes_for_bits(total_bits);
-                bits = 0;
-            }
-
-            if (bits + width > unit_size * 8) {
-                END_UNIT();
-
-                int total_bits = width;
-                for (Member *m = mem->next; m && m->is_bitfield && m->bit_width; m = m->next)
-                    total_bits += m->bit_width;
-
-                unit_size = min_bytes_for_bits(total_bits);
-                bits = 0;
-            }
-            mem->offset = offset;
-            mem->bit_offset = bits;
-            mem->unit_ty = get_unit_ty(unit_size, mem->ty->is_unsigned);
-            bits += width;
+            mem->offset = s / 8;
+            mem->bit_offset = s % 8;
+            // The access unit is the smallest one covering the field's
+            // bits, so that the load stays within the record (a packed
+            // field may cross the boundary of its declared type).
+            mem->unit_ty = get_unit_ty(min_bytes_for_bits(mem->bit_offset + width), mem->ty->is_unsigned);
+            bitpos = s + width;
+            offset = bitpos / 8;
         } else {
-            END_UNIT();
-            offset = ALIGN_UP(offset, mem_align);
+            offset = ALIGN_UP((bitpos + 7) / 8, mem_align);
             mem->offset = offset;
             mem->unit_ty = mem->ty;
             offset += mem->ty->size;
+            bitpos = (uint64_t)offset * 8;
         }
     }
 
-    END_UNIT();
+    // For unions offset holds the largest member (bitpos stays 0).
+    offset = MAX(offset, (int)((bitpos + 7) / 8));
     if (attr_align) ty->align = MAX(ty->align, attr_align);
     ty->size = ALIGN_UP(offset, ty->align);
 }
@@ -4237,10 +4222,11 @@ static char *attr_disp_name(Attr *a) {
 static void apply_postdecl_attrs(Type *ty) {
     for (Attr *a = ty->attrs; a; a = a->next) {
         if (!a->info || a->is_gnu) continue;
+        if (a->info->ns == ATTR_NS_CLANG) continue;  // recognized and ignored
         if (!strcmp(a->info->name, "aligned") && a->args) {
             Token *t;
             ty->align = MAX(ty->align, (int)const_expr(&t, a->args->next));
-        } else if (!strcmp(a->info->name, "packed") || !(a->info->targets & ATTR_TYPE)) {
+        } else if (!strcmp(a->info->name, "packed") || !(a->info->targets & ATTR_TYPE) || ty->kind == TY_FUNC) {
             warning(a->tok, "attribute '%s' ignored, because it cannot be applied to a type", attr_disp_name(a));
         }
     }
@@ -4253,9 +4239,10 @@ static void sym_attr_flags(Sym *var, Attr *attrs, bool gnu_only) {
         if (gnu_only && !a->is_gnu) continue;
         if (!strcmp(a->info->name, "deprecated"))
             var->is_deprecated = true;
-        else if (!strcmp(a->info->name, "nodiscard"))
+        else if (!strcmp(a->info->name, "nodiscard")) {
+            if (!var->is_function) warning(a->tok, "‘nodiscard’ attribute only applies to functions");
             var->is_nodiscard = true;
-        else if (!strcmp(a->info->name, "maybe_unused"))
+        } else if (!strcmp(a->info->name, "maybe_unused"))
             var->is_maybe_unused = true;
         else if (!strcmp(a->info->name, "unused"))
             var->is_unused = true;
@@ -4345,6 +4332,11 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                     // the full declaration attribute set, as in clang).
                     a->next = NULL;
                     if (attrs) attr_cur = attr_cur->next = a;
+                } else if (a->info->ns == ATTR_NS_CLANG) {
+                    // clang:: attributes are recognized and ignored.
+                } else if (!seen_declspec && !a->is_gnu && a->info->ns == ATTR_NS_GNU &&
+                           (a->info->targets & ATTR_TYPE) && (tok->kind == TK_STRUCT || tok->kind == TK_UNION)) {
+                    error(a->tok, "misplaced attributes; expected attributes here");
                 } else {
                     warning(a->tok, "unknown attribute '%s' ignored", str(a->tok->id));
                 }
@@ -4415,6 +4407,9 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 if (typespec_cnt) goto loop_end;
                 Type *orig = find_typedef(tok, true);
                 if (orig) {
+                    for (Attr *a = orig->attrs; a; a = a->next)
+                        if (a->info && !strcmp(a->info->name, "deprecated"))
+                            warning(tok, "‘%s’ is deprecated", str(tok->id));
                     ty = orig;
                     typespec_cnt += OTHER;
                     break;
@@ -4925,7 +4920,9 @@ static Token *external_declaration(Token *tok) {
                     error(var_name, "‘[*]’ not allowed in other than function prototype scope");
                 uint32_t id = id_anon;
                 if (param->name) id = get_ident(param->name);
-                push_namespace(id, SYM_VAR, ty, param->name)->var = new_lvar(id, param);
+                Sym *pvar = new_lvar(id, param);
+                sym_attr_flags(pvar, param->attrs, true);
+                push_namespace(id, SYM_VAR, ty, param->name)->var = pvar;
                 param = param->next;
             }
 

@@ -240,6 +240,9 @@ check 'unused unknown at declspec position'
 echo '[[packed]] int x;' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "unknown attribute 'packed' ignored"
 check 'packed unknown at declspec position'
+echo '[[ aligned(8) ]] int x;' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "unknown attribute 'aligned' ignored"
+check 'aligned unknown at declspec position'
 
 # Statement / label attribute position diagnostics (as in clang).
 echo 'int f(void){ [[deprecated]]; return 0; }' \
@@ -257,6 +260,13 @@ check 'fallthrough on non-empty statement'
 echo 'void g(void) [[gnu::noreturn]];' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'ignored, because it cannot be applied to a type'
 check 'post-declarator type attribute warning'
+
+echo '[[gnu::packed]] struct S { char c; };' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'misplaced attributes'
+check 'misplaced type attribute'
+echo '[[nodiscard]] int x;' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'only applies to functions'
+check 'nodiscard on variable'
 
 # Delimited universal character names: empty and surrogate are invalid.
 echo 'char *s = "\u{}";' \

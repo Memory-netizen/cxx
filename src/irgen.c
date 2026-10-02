@@ -212,26 +212,14 @@ static Ref gen_addr(Node *node) {
                 return addr;
             }
 
-            int pos = 0;
-            int idx = 0;
-            int mem_off = node->member->offset;
-            Member *cur = node->lhs->ty->members;
-
-            while (cur->offset != mem_off) {
-                pos += cur->unit_ty->size;
-                idx++;
-                int off = cur->offset;
-                do {
-                    cur = cur->next;
-                } while (cur->offset == off);
-                if (pos < cur->offset) {
-                    pos = cur->offset;
-                    idx++;
-                }
-            }
-            Ref gep_ops[] = {addr, INT(0), INT(idx)};
+            // Byte-offset addressing: the member may overlap another
+            // member's access unit (bit-fields), so the LLVM element
+            // layout cannot express its address.
+            Ref a8 = addr;
+            a8.ty = pointer_to(T.ty_char, 0);
+            Ref gep_ops[] = {a8, INT(node->member->offset)};
             Ref dst = TMP(tmp_id++, pointer_to(node->ty, 0));
-            new_ins(IR_GEP, dst, gep_ops, 3);
+            new_ins(IR_GEP, dst, gep_ops, 2);
             return dst;
         }
         default:
@@ -313,7 +301,11 @@ static int lvalue_align(Node *node) {
         if (node->member->is_packed) return 1;
         for (Node *n = node; n->kind == ND_MEMBER; n = n->lhs)
             if (n->lhs->ty->is_packed) return 1;
-        return node->member->align;
+        int align = node->member->align;
+        // A bit-field may start at a byte offset not aligned to its
+        // declared type (the unit is shared with other fields).
+        if (node->member->is_bitfield && node->member->offset % align) return 1;
+        return align;
     }
     return node->ty->align;
 }

@@ -343,5 +343,8 @@ echo 'struct __attribute__((packed)) P { char c; int i; };
 int f(struct P *p) { p->i = 3; return p->i; }' \
   | $compiler -S -emit-llvm -o - -xc - | grep -q 'align 1'
 check 'packed member access align 1'
+echo 'int x __attribute__((aligned(16)));' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q '@x = .*align 16'
+check 'global aligned(16)'
 
 echo OK
