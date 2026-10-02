@@ -165,6 +165,11 @@ _Atomic struct S x = { 1, 2 };' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "illegal initializer type '_Atomic(struct.S)'"
 check 'atomic struct brace init'
 
+# __has_include/_next are only usable inside preprocessing directives.
+echo 'int x = __has_include_next("foo.h");' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "'__has_include_next' must be used within a preprocessing directive"
+check 'has_include_next outside directive'
+
 # Builtin functions must be directly called (no &-use).
 echo 'int f(void) { return (int)__builtin_alloca; }' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'builtin functions must be directly called'

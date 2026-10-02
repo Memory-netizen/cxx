@@ -42,6 +42,7 @@ static uint32_t vaarg_id;
 static uint32_t vaopt_id;
 static uint32_t once_id;
 static uint32_t has_include_id;
+static uint32_t has_include_next_id;
 
 static Token *expand_macro(Token *dst, Token *list);
 static char *join_tokens(Token *tok);
@@ -282,21 +283,25 @@ static bool exist_include(Token *tok, char *filename, bool is_dquote) {
     return file_exists(path ? path : filename);
 }
 
+static bool exist_include_next(char *filename);
+
 static Token *eval_has_include(Token *tok) {
     Token dummy = {};
     Token *cur = &dummy;
     while (tok) {
-        // __has_include("file") or __has_include(<file>)
-        // becomes "1" if the file can beincluded,
-        // otherwise "0".
-        if (tok->kind == TK_IDENT && tok->id == has_include_id) {
+        // __has_include[_next]("file") or __has_include[_next](<file>)
+        // becomes "1" if the file can be included, otherwise "0".
+        // The _next variant searches like #include_next: it skips the
+        // directory of the current file.
+        if (tok->kind == TK_IDENT && (tok->id == has_include_id || tok->id == has_include_next_id)) {
             Token *start = tok;
+            bool is_next = tok->id == has_include_next_id;
             tok = skip(tok->next, TK_LPAREN);
 
             bool exists = false;
             if (tok->kind == TK_STRLIT && tok->enc_prefix == PREFIX_NONE) {
                 char *path = strndup(tok_text(tok) + 1, tok->len - 2);
-                exists = exist_include(start, path, true);
+                exists = is_next ? exist_include_next(path) : exist_include(start, path, true);
             } else if (tok->kind == TK_LT) {
                 Token *lt = tok;
                 for (; tok->kind != TK_GT; tok = tok->next)
@@ -304,9 +309,9 @@ static Token *eval_has_include(Token *tok) {
                 Token *gt = tok;
                 gt->kind = TK_EOF;
                 char *path = join_tokens(lt->next);
-                exists = exist_include(start, path, false);
+                exists = is_next ? exist_include_next(path) : exist_include(start, path, false);
             } else {
-                error(tok, "__has_include expects \"FILENAME\" or <FILENAME>");
+                error(tok, "%s expects \"FILENAME\" or <FILENAME>", is_next ? "__has_include_next" : "__has_include");
             }
 
             tok = skip(tok->next, TK_RPAREN);
@@ -904,6 +909,11 @@ static char *search_include_next(char *filename) {
     return NULL;
 }
 
+static bool exist_include_next(char *filename) {
+    char *path = search_include_next(filename);
+    return file_exists(path ? path : filename);
+}
+
 // Read an #include argument.
 static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
     // Pattern 1: #include "foo.h"
@@ -1107,8 +1117,9 @@ static Token *preprocess2(Token *tok) {
                     tok->filename = display_name;
                     if (tok->kind == TK_ERR) error(tok, "%s", tok->msg);
                     if (tok->kind == TK_WARN) warning(tok, "%s", tok->msg);
-                    if (tok->id == has_include_id)
-                        error(tok, "'__has_include' must be used within a preprocessing directive");
+                    if (tok->id == has_include_id || tok->id == has_include_next_id)
+                        error(tok, "'%s' must be used within a preprocessing directive",
+                              tok->id == has_include_id ? "__has_include" : "__has_include_next");
                     buf = buf->next = tok;
                 }
                 tok = tok->next;
@@ -1529,6 +1540,7 @@ void init_macros(void) {
     vaopt_id = intern("__VA_OPT__", 10);
     once_id = intern("once", 4);
     has_include_id = intern("__has_include", 13);
+    has_include_next_id = intern("__has_include_next", 18);
 
     prep_builtin();
 

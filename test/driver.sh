@@ -140,6 +140,26 @@ echo 'foo' > $tmp/next3/file2.h
 $compiler -I$tmp/next1 -I$tmp/next2 -I$tmp/next3 -E $tmp/file.c | grep -q foo
 check '#include_next'
 
+# __has_include: current directory first; __has_include_next: skip the
+# current directory like #include_next.
+echo '#include "file1.h"' > $tmp/has.c
+echo '#if __has_include("file1.h")
+HAS
+#endif
+#if __has_include_next("file1.h")
+NEXT
+#endif
+#if !__has_include_next("nonexistent.h")
+NO
+#endif' > $tmp/next1/file1.h
+$compiler -I$tmp/next1 -I$tmp/next2 -I$tmp/next3 -E $tmp/has.c > $tmp/has.out
+grep -q HAS $tmp/has.out
+check '__has_include'
+grep -q NEXT $tmp/has.out
+check '__has_include_next'
+grep -q NO $tmp/has.out
+check '__has_include_next negative'
+
 # BOM marker
 printf '\xef\xbb\xbfxyz\n' | $compiler -E -o- - | grep -q '^xyz'
 check 'BOM marker'
