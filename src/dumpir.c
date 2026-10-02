@@ -567,6 +567,9 @@ void dump_blk(Blk *b) {
     }
 }
 
+static void dump_init(Initializer *init, Type *ty);
+static Member *union_canon_member(Type *ty);
+
 void dump_type(Type *ty) {
     fprintf(out_file, "%%");
     print_ident(ty->uid);
@@ -595,13 +598,131 @@ void dump_type(Type *ty) {
             fprintf(out_file, "[%d x i8]", ty->size - pos);
         }
     } else if (ty->kind == TY_UNION) {
+        mem = union_canon_member(ty);
         print_type(mem->ty);
         if (mem->ty->size < ty->size) fprintf(out_file, ", [%d x i8]", ty->size - mem->ty->size);
     }
     fprintf(out_file, " }\n");
 }
 
+// The union's canonical element: the member with the largest
+// alignment (as in clang); the union's LLVM type is that member plus
+// padding. Initializers of other members use anonymous member-typed
+// element types so that any member's value is a valid constant
+// (type-punning).
+static Member *union_canon_member(Type *ty) {
+    Member *m = ty->members;
+    for (Member *x = ty->members->next; x; x = x->next)
+        if (x->align > m->align) m = x;
+    return m;
+}
+
+// The anonymous member-typed element type: "{ <mem-ty> [, pad] }".
+static void print_union_elem_ty(Type *ty, Member *mem) {
+    fprintf(out_file, "{ ");
+    print_type(mem->ty);
+    if (mem->ty->size < ty->size) fprintf(out_file, ", [%d x i8]", ty->size - mem->ty->size);
+    fprintf(out_file, " }");
+}
+
+// A scalar union member value, cast through pointers as needed.
+static void print_union_con(Con *c, Type *mem_ty) {
+    if (c->type == CAddr && mem_ty->kind != TY_PTR) {
+        fprintf(out_file, "ptrtoint (ptr ");
+        printcon(c, mem_ty);
+        fprintf(out_file, " to i%d)", mem_ty->size * 8);
+        return;
+    }
+    if (c->type == CBits && mem_ty->kind == TY_PTR) {
+        fprintf(out_file, "inttoptr (i%d ", mem_ty->size * 8);
+        printcon(c, mem_ty);
+        fprintf(out_file, " to ptr)");
+        return;
+    }
+    printcon(c, mem_ty);
+}
+
+// The union element value: the member-typed value plus padding.
+static void dump_union_elem(Type *ty, Member *mem, Initializer *child) {
+    fprintf(out_file, "{ ");
+    if (mem->ty->kind == TY_STRUCT || mem->ty->kind == TY_ARRAY) {
+        dump_init(child, mem->ty);
+    } else {
+        print_type(mem->ty);
+        fprintf(out_file, " ");
+        print_union_con(child->val, mem->ty);
+    }
+    if (mem->ty->size < ty->size) fprintf(out_file, ", [%d x i8] zeroinitializer", ty->size - mem->ty->size);
+    fprintf(out_file, " }");
+}
+
 static void dump_init(Initializer *init, Type *ty) {
+    if (ty->kind == TY_UNION) {
+        if (!init || !init->is_inited) {
+            print_type(ty);
+            fprintf(out_file, " zeroinitializer");
+            return;
+        }
+        Member *mem = init->mem ? init->mem : ty->members;
+        Member *canon = union_canon_member(ty);
+        Initializer *child = init->child[mem->idx];
+        if (mem != canon) {
+            // Anonymous member-typed form (type-punning, as in clang).
+            print_union_elem_ty(ty, mem);
+        } else {
+            print_type(ty);
+        }
+        fprintf(out_file, " ");
+        dump_union_elem(ty, mem, child);
+        return;
+    }
+
+    if (ty->kind == TY_ARRAY && ty->base->kind == TY_UNION) {
+        // An array of unions whose elements initialize different
+        // members is emitted as a packed struct of per-element
+        // member-typed (padded) elements (as in clang).
+        bool mixed = false;
+        if (init && init->is_inited) {
+            Member *canon = union_canon_member(ty->base);
+            for (int i = 0; i < ty->len; i++) {
+                Initializer *c = init->child[i];
+                if (c->is_inited && c->mem && c->mem != canon) mixed = true;
+            }
+        }
+        if (mixed) {
+            Member *canon = union_canon_member(ty->base);
+            fprintf(out_file, "<{ ");
+            for (int i = 0; i < ty->len; i++) {
+                if (i) fprintf(out_file, ", ");
+                Initializer *c = init->child[i];
+                Member *mem = (c->is_inited && c->mem) ? c->mem : canon;
+                if (!c->is_inited || mem == canon)
+                    print_type(ty->base);
+                else
+                    print_union_elem_ty(ty->base, mem);
+            }
+            fprintf(out_file, " }> <{ ");
+            for (int i = 0; i < ty->len; i++) {
+                if (i) fprintf(out_file, ", ");
+                Initializer *c = init->child[i];
+                if (!c->is_inited) {
+                    print_type(ty->base);
+                    fprintf(out_file, " zeroinitializer");
+                    continue;
+                }
+                Member *mem = c->mem ? c->mem : canon;
+                if (mem == canon)
+                    print_type(ty->base);
+                else
+                    print_union_elem_ty(ty->base, mem);
+                fprintf(out_file, " ");
+                dump_union_elem(ty->base, mem, c->child[mem->idx]);
+            }
+            fprintf(out_file, " }>");
+            return;
+        }
+    }
+
     print_type(ty);
     fprintf(out_file, " ");
     if (ty->kind == TY_ARRAY) {
@@ -667,19 +788,6 @@ static void dump_init(Initializer *init, Type *ty) {
             }
         }
         if (pos < ty->size) fprintf(out_file, ", [%d x i8] zeroinitializer", ty->size - pos);
-        fprintf(out_file, " }");
-        return;
-    }
-    if (ty->kind == TY_UNION) {
-        if (!init || !init->is_inited) {
-            fprintf(out_file, "zeroinitializer");
-            return;
-        }
-        fprintf(out_file, "{ ");
-        dump_init(init->child[0], ty->members->ty);
-
-        if (ty->members->ty->size < ty->size)
-            fprintf(out_file, ", [%d x i8] zeroinitializer", ty->size - ty->members->ty->size);
         fprintf(out_file, " }");
         return;
     }

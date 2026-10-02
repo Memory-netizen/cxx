@@ -205,6 +205,15 @@ static Ref gen_addr(Node *node) {
             }
         case ND_DEREF:
             return gen_expr(node->lhs);
+        case ND_SUBACCESS: {
+            Ref addr = gen_addr(node->lhs);
+            addr.ty = pointer_to(node->ty, 0);
+            Ref idx = gen_expr(node->rhs);
+            Ref gep_ops[] = {addr, idx};
+            Ref dst = TMP(tmp_id++, pointer_to(node->ty, 0));
+            new_ins(IR_GEP, dst, gep_ops, 2);
+            return dst;
+        }
         case ND_MEMBER: {
             Ref addr = gen_expr(node->lhs);
             if (node->lhs->ty->kind == TY_UNION) {
@@ -423,6 +432,7 @@ static Ref gen_expr(Node *node) {
         }
         case ND_VAR:
         case ND_MEMBER:
+        case ND_SUBACCESS:
             return gen_addr(node);
         case ND_ADDR:
             return gen_addr(node->lhs);
@@ -788,8 +798,8 @@ static Ref gen_cond(Node *node) {
     // cond
     Ref tmp = gen_expr(node->cond);
     Ref cond = TMP(tmp_id++, bitint[1][1]);
-    Ref zr = INT(0);
-    zr.ty = tmp.ty;
+    Ref zr = (is_pointer(tmp.ty) || tmp.ty->kind == TY_NULLPTR) ? NULLPTR : INT(0);
+    if (zr.type == RInt) zr.ty = tmp.ty;
     new_ins(IR_CMP_NE, cond, (Ref[]){tmp, zr}, 2);
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;

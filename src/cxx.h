@@ -491,9 +491,10 @@ typedef enum {
     ND_INIT,
 
     // Term
-    ND_VAR,      // Variable
-    ND_NUM,      // Int
-    ND_NULLPTR,  // nullptr
+    ND_VAR,        // Variable
+    ND_NUM,        // Int
+    ND_NULLPTR,    // nullptr
+    ND_SUBACCESS,  // E[m] on an array operand (C2y 6.5.3.2)
     ND_SP_SAVE,
     ND_SP_RESTORE,
 } NodeKind;
@@ -587,6 +588,9 @@ struct Initializer {
 };
 
 int64_t const_expr(Token **rest, Token *tok);
+bool constexpr_fold(Sym *var, int64_t *val, uint32_t *sym);
+Fp128 eval_fp128(Node *node);
+Node *new_node(NodeKind kind, Token *tok);
 int is_builtin_fn(uint32_t id);
 Node *new_unary(NodeKind kind, Node *expr, Token *tok);
 void new_imcast(Node **expr, Type *ty);

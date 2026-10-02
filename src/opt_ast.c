@@ -428,6 +428,8 @@ Node *fold_node(Node *node) {
             break;
         case ND_NULLPTR:
             break;
+        case ND_SUBACCESS:
+            break;
         case ND_NOP:
         case ND_MEMZERO:
         case ND_GOTO:

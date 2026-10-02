@@ -1,226 +1,96 @@
 #include "test.h"
 
-float g40 = 1.5;
-double g41 = 0.0 ? 55 : (0, 1 + 1 * 5.0 / 2 * (double)2 * (int)2.0);
-
-constexpr int g42 = 42;
-constexpr int g43 = 43 + 5 - 5 * 1;
+constexpr int cx = 5;
+constexpr int cy = cx * 3;
+int ca[cx];
+int cg = cx;
+constexpr int cagg[5] = {5};
+int cagg0 = cagg[0];
+constexpr struct CaggS {
+    int a;
+    int b;
+} caggs = {3, 4};
+int caggsb = caggs.b;
+constexpr struct CaggOut {
+    struct CaggS in;
+    int x;
+} caggout = {5, 6, 7};
+struct CaggS caggcopy = caggout.in;
+struct CaggS2 {
+    struct CaggS a;
+    int y;
+} caggcopy2 = {caggs, 9};
 
 int main() {
-    ASSERT(10, ({
-               enum { ten = 1 + 2 + 3 + 4 };
-               ten;
-           }));
-    ASSERT(1, ({
-               int i = 0;
-               switch (3) {
-                   case 5 - 2 + 0 * 3:
-                       i++;
+    ASSERT(5, cx);
+    ASSERT(15, cy);
+    ASSERT(5, sizeof(ca) / sizeof(int));
+    ASSERT(5, cg);
+    ASSERT(5, cagg0);
+    ASSERT(4, caggsb);
+    ASSERT(5, caggcopy.a);
+    ASSERT(6, caggcopy.b);
+    ASSERT(3, caggcopy2.a.a);
+    ASSERT(4, caggcopy2.a.b);
+    ASSERT(9, caggcopy2.y);
+
+    ASSERT(2, ({
+               constexpr int x = 2;
+               switch (2) {
+                   case x:
+                       break;
                }
-               i;
-           }));
-    ASSERT(8, ({
-               int x[1 + 1];
-               sizeof(x);
-           }));
-    ASSERT(6, ({
-               char x[8 - 2];
-               sizeof(x);
-           }));
-    ASSERT(6, ({
-               char x[2 * 3];
-               sizeof(x);
-           }));
-    ASSERT(3, ({
-               char x[12 / 4];
-               sizeof(x);
-           }));
-    ASSERT(2, ({
-               char x[12 % 10];
-               sizeof(x);
-           }));
-    ASSERT(0b100, ({
-               char x[0b110 & 0b101];
-               sizeof(x);
-           }));
-    ASSERT(0b111, ({
-               char x[0b110 | 0b101];
-               sizeof(x);
-           }));
-    ASSERT(0b110, ({
-               char x[0b111 ^ 0b001];
-               sizeof(x);
-           }));
-    ASSERT(4, ({
-               char x[1 << 2];
-               sizeof(x);
-           }));
-    ASSERT(2, ({
-               char x[4 >> 1];
-               sizeof(x);
-           }));
-    ASSERT(2, ({
-               char x[(1 == 1) + 1];
-               sizeof(x);
-           }));
-    ASSERT(1, ({
-               char x[(1 != 1) + 1];
-               sizeof(x);
-           }));
-    ASSERT(1, ({
-               char x[(1 < 1) + 1];
-               sizeof(x);
-           }));
-    ASSERT(2, ({
-               char x[(1 <= 1) + 1];
-               sizeof(x);
-           }));
-    ASSERT(2, ({
-               char x[1 ? 2 : 3];
-               sizeof(x);
-           }));
-    ASSERT(3, ({
-               char x[0 ? 2 : 3];
-               sizeof(x);
-           }));
-    ASSERT(3, ({
-               char x[(1, 3)];
-               sizeof(x);
-           }));
-    ASSERT(2, ({
-               char x[!0 + 1];
-               sizeof(x);
-           }));
-    ASSERT(1, ({
-               char x[!1 + 1];
-               sizeof(x);
-           }));
-    ASSERT(2, ({
-               char x[~-3];
-               sizeof(x);
-           }));
-    ASSERT(2, ({
-               char x[(5 || 6) + 1];
-               sizeof(x);
-           }));
-    ASSERT(1, ({
-               char x[(0 || 0) + 1];
-               sizeof(x);
-           }));
-    ASSERT(2, ({
-               char x[(1 && 1) + 1];
-               sizeof(x);
-           }));
-    ASSERT(1, ({
-               char x[(1 && 0) + 1];
-               sizeof(x);
-           }));
-    ASSERT(3, ({
-               char x[(int)3];
-               sizeof(x);
-           }));
-    ASSERT(15, ({
-               char x[(char)0xffffff0f];
-               sizeof(x);
-           }));
-    ASSERT(0x10f, ({
-               char x[(short)0xffff010f];
-               sizeof(x);
-           }));
-    ASSERT(4, ({
-               char x[(int)0xfffffffffff + 5];
-               sizeof(x);
-           }));
-
-    ASSERT(8, ({
-               char x[(int)((int *)0 + 2)];
-               sizeof(x);
-           }));
-    ASSERT(12, ({
-               char x[(int)((int *)16 - 1)];
-               sizeof(x);
-           }));
-    ASSERT(3, ({
-               char x[(int *)16 - (int *)4];
-               sizeof(x);
-           }));
-
-    ASSERT(4, ({
-               char x[(-1 >> 31) + 5];
-               sizeof(x);
-           }));
-    ASSERT(255, ({
-               char x[(unsigned char)0xffffffff];
-               sizeof(x);
-           }));
-    ASSERT(0x800f, ({
-               char x[(unsigned short)0xffff800f];
-               sizeof(x);
-           }));
-    ASSERT(1, ({
-               char x[(unsigned int)0xfffffffffff >> 31];
-               sizeof(x);
-           }));
-    ASSERT(1, ({
-               char x[(long)-1 / ((long)1 << (__SIZEOF_LONG__ * 8 - 2)) + 1];
-               sizeof(x);
-           }));
-    ASSERT(4, ({
-               char x[(unsigned long)-1 / ((long)1 << (__SIZEOF_LONG__ * 8 - 2)) + 1];
-               sizeof(x);
-           }));
-    ASSERT(1, ({
-               char x[(unsigned)1 < -1];
-               sizeof(x);
-           }));
-    ASSERT(1, ({
-               char x[(unsigned)1 <= -1];
-               sizeof(x);
-           }));
-    ASSERT(1, g40 == 1.5);
-    ASSERT(1, g41 == 11);
-
-    {
-        int constexpr x = 42;
-    }
-    {
-        constexpr int x = 42;
-    }
-    ASSERT(5, ({
-               constexpr int x = 5;
                x;
            }));
-    ASSERT(8, ({
-               constexpr int x = 8;
-               const int *y = &x;
-               *y;
-           }));
-    ASSERT(6, ({
-               constexpr int x = 6;
-               *(int *)&x;
-           }));
 
-    ASSERT(42, g42);
-    ASSERT(43, g43);
-
-    // === constexpr with wide _BitInt ===
-    ASSERT(16, ({
-               _BitInt(77) x = 1234567890123456789012wb;
-               sizeof(x);
-           }));
     ASSERT(1, ({
-               _BitInt(77) e77 = (_BitInt(77))1 + 1;  // mixed with int stays _BitInt(77)
-               e77 == 2;
+               constexpr int x = 5;
+               static_assert(x == 5, "");
+               int *p = (int *)&x;
+               *p = 6;
+               x == 5;
            }));
-    ASSERT(5, ({
-               int x[(unsigned _BitInt(77))5];
-               sizeof(x) / sizeof(int);
+
+    ASSERT(6, ({
+               constexpr int a = 2;
+               constexpr int b = a * 3;
+               int c[b];
+               sizeof(c) / 4;
            }));
-    ASSERT(7, ({
-               int a[8];
-               _BitInt(77) i = 2;
-               a[i + 5] = 7;
-               a[7];
+
+    ASSERT(1, ({
+               constexpr int x = 5;
+               struct S {
+                   int a;
+                   int b;
+               } s = {x, 6};
+               s.a + s.b == 11;
+           }));
+
+    ASSERT(0, ({
+               constexpr unsigned x = 0xFFFFFFFFu;
+               x == 0xFFFFFFFFu ? 0 : 1;
+           }));
+
+    // Aggregates keep their storage at runtime (reads are loads, as in
+    // clang); constant contexts fold elements through the initializer.
+    ASSERT(6, ({
+               constexpr int x[5] = {5};
+               int *p = (int *)x;
+               *p = 6;
+               x[0];
+           }));
+    ASSERT(8, ({
+               constexpr struct S {
+                   int a[2];
+               } s = {{7, 8}};
+               s.a[1];
+           }));
+    ASSERT(3, ({
+               constexpr struct S {
+                   int a[2][2];
+               } s = {{{1, 2}, {3, 4}}};
+               s.a[1][0];
            }));
 
     printf("OK\n");

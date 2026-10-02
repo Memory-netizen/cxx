@@ -241,6 +241,11 @@ static void dump_node(Node *node) {
             fprintf(stdout, "\n");
             break;
 
+        case ND_SUBACCESS:
+            dump_node(node->lhs);
+            dump_node(node->rhs);
+            break;
+
         case ND_MEMBER:
             fprintf(stdout, "  member=‘%s’\n", str(node->member->name->id));
             depth++;

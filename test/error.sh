@@ -260,6 +260,12 @@ check 'fallthrough on non-empty statement'
 echo 'void g(void) [[gnu::noreturn]];' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'ignored, because it cannot be applied to a type'
 check 'post-declarator type attribute warning'
+echo 'int x [[gnu::packed]];' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "ignored, because it cannot be applied to a type"
+check 'packed on non-record type'
+echo 'int *p [[gnu::packed]];' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "ignored, because it cannot be applied to a type"
+check 'packed on pointer type'
 
 echo '[[gnu::packed]] struct S { char c; };' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'misplaced attributes'

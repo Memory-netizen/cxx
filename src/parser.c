@@ -28,6 +28,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty, bool is_param);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
 static Node *declaration(Token **rest, Token *tok, Type *ty, SClass sclass, int align, int funcspec, Attr *attrs);
+
 static void attr_decl_apply(Attr *attrs, int *funcspec, int *align, bool gnu_only);
 static void sym_attr_flags(Sym *var, Attr *attrs, bool gnu_only);
 static bool is_attr_start(Token *tok);
@@ -35,6 +36,8 @@ static Token *skip_leading_attrs(Token *tok);
 static bool attr_decl_then_semi(Token *tok);
 static bool attr_then_typename(Token *tok);
 static Token *attr_decl(Token *tok);
+static Initializer *constexpr_elem(Node *node, Initializer *init);
+static Node *elem_root(Node *node);
 static Type *decl_attrs(Token **rest, Token *tok, Type *ty);
 static void apply_postdecl_attrs(Type *ty);
 static char *attr_disp_name(Attr *a);
@@ -49,13 +52,13 @@ static Node *cast(Token **rest, Token *tok);
 static int64_t eval(Node *node);
 static int64_t eval2(Node *node, uint32_t *sym);
 static int64_t eval_rval(Node *node, uint32_t *sym);
-static Fp128 eval_fp128(Node *node);
+Fp128 eval_fp128(Node *node);
 static Int128 eval_int128(Node *node);
 static void array_initializer2(Token **rest, Token *tok, Initializer *init, int i);
 static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Member *mem);
 static Member *get_struct_member(Member *mem, Token *tok);
 
-static Node *new_node(NodeKind kind, Token *tok) {
+Node *new_node(NodeKind kind, Token *tok) {
     Node *node = emalloc(sizeof(Node));
     node->kind = kind;
     node->tok = tok;
@@ -1021,6 +1024,14 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
         return;
     }
     init->expr = assign(rest, tok);
+    add_type(init->expr);
+    // Convert a numeric initializer expression to the target type (a
+    // double initializing an int member, ...).
+    if ((is_integer(init->ty) || is_flonum(init->ty)) && (is_integer(init->expr->ty) || is_flonum(init->expr->ty)) &&
+        !is_compatible(init->expr->ty, init->ty)) {
+        check_asop(init->ty, init->expr, CTX_INIT);
+        new_imcast(&init->expr, init->ty);
+    }
 }
 
 static void insert_ty(Type *ty, char *kind) {
@@ -1121,6 +1132,23 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
 
     Node *lhs = init_desg_expr(desg, tok);
     Node *rhs = init->expr;
+    // Scalar initializers load the value (record copies keep the
+    // address-based memcpy form). The target conversion may wrap the
+    // expression in ND_IMCAST; the lvalue (and the constexpr fold)
+    // lives underneath.
+    if (is_scalar(init->ty)) {
+        add_type(rhs);
+        Node *lval = rhs;
+        if (lval->kind == ND_IMCAST && !lval->is_lvalue) lval = lval->lhs;
+        // Only scalar lvalues load (arrays decay to their address).
+        if (lval->is_lvalue && is_scalar(lval->ty)) {
+            lvalue_convert(&lval);
+            if (rhs->kind == ND_IMCAST)
+                rhs->lhs = lval;
+            else
+                rhs = lval;
+        }
+    }
     Node *node = new_binary(ND_INIT, lhs, rhs, tok);
     add_type(node);
     return node;
@@ -1160,10 +1188,31 @@ static Node *lvar_initializer(Token **rest, Token *tok, Sym *var) {
         lhs = new_unary(ND_MEMZERO, new_var_node(var, tok), tok);
 
     Node *rhs = create_lvar_init(init, var->ty, &desg, tok);
+    var->init = init;
     return new_binary(ND_COMMA, lhs, rhs, tok);
 }
 
+// Mount a constexpr aggregate's initializer root onto a copy
+// initializer: the children are already in place under the source root
+// and follow it. NULL (an uninitialized part) keeps the zero fill.
+static void mount_gvar_data(Initializer *dst, Initializer *src) {
+    if (!src) return;
+    *dst = *src;
+}
+
 static void eval_gvar_data(Initializer *init, Type *ty) {
+    // A whole-aggregate copy from a constexpr source mounts the source's
+    // children at the matching positions (the element-wise evaluation
+    // below then folds their expressions).
+    if (init->expr && (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT || ty->kind == TY_UNION)) {
+        Node *root = elem_root(init->expr);
+        if (root->kind == ND_VAR && (root->var->sclass & SC_CONSTEXPR) && root->var->init) {
+            Initializer *src = constexpr_elem(init->expr, root->var->init);
+            mount_gvar_data(init, src);
+            init->expr = NULL;
+        }
+    }
+
     if (ty->kind == TY_ARRAY) {
         for (int i = 0; i < ty->len; i++) {
             eval_gvar_data(init->child[i], ty->base);
@@ -1333,7 +1382,12 @@ int is_builtin_fn(uint32_t id) {
 
 static bool is_const_expr(Node *node) {
     node = fold_node(node);
-    return node->kind == ND_NUM;
+    if (node->kind == ND_NUM) return true;
+    // A constexpr variable or an element of a constexpr aggregate is
+    // usable in constant expressions (C23 6.6).
+    Node *root = node;
+    while (root->kind == ND_SUBACCESS || root->kind == ND_MEMBER) root = root->lhs;
+    return root->kind == ND_VAR && (root->var->sclass & SC_CONSTEXPR);
 }
 
 // C11 7.17.3: each operation accepts a subset of the six orders. Like
@@ -2053,7 +2107,7 @@ static Node *postfix(Token **rest, Token *tok) {
 
     while (1) {
         add_type(node);
-        if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base, 0));
+        if (node->ty->kind == TY_ARRAY && tok->kind != TK_LBRACKET) new_imcast(&node, pointer_to(node->ty->base, 0));
         if (node->ty->kind == TY_VLA) new_imcast(&node, pointer_to(node->ty->base, 0));
         if (node->ty->kind == TY_FUNC) new_imcast(&node, pointer_to(node->ty, 0));
         switch (tok->kind) {
@@ -2066,9 +2120,21 @@ static Node *postfix(Token **rest, Token *tok) {
                 Token *start = tok;
                 Node *idx = expr(&tok, tok->next);
                 if (!is_pointer(node->ty) && is_pointer(idx->ty)) swap(&node, &idx);
-                if (!is_pointer(node->ty)) error(start, "subscripted value is neither array nor pointer");
                 if (!is_integer(idx->ty)) error(start, "array subscript is not an integer");
+                if (!is_pointer(node->ty) && node->ty->kind != TY_ARRAY)
+                    error(start, "subscripted value is neither array nor pointer");
                 if (is_funcptr(node->ty)) error(start, "subscripted value is pointer to function");
+                // C2y 6.5.3.2: an array operand designates the element
+                // directly (no pointer rewrite); the decay was already
+                // suppressed for the subscript (6.3.3.1).
+                if (node->ty->kind == TY_ARRAY) {
+                    if (idx->kind == ND_NUM && int128_to_i64(idx->ival) < 0)
+                        error(idx->tok, "array subscript is negative");
+                    node = new_binary(ND_SUBACCESS, node, idx, start);
+                    node->is_lvalue = node->lhs->is_lvalue;
+                    tok = skip(tok, TK_RBRACKET);
+                    continue;
+                }
                 tok = skip(tok, TK_RBRACKET);
                 node = new_unary(ND_DEREF, new_add(node, idx, start), start);
                 continue;
@@ -2375,7 +2441,7 @@ static Node *conditional(Token **rest, Token *tok) {
 // Compile-time evaluation in the Fp128 domain for every floating
 // format (all float constants live in node->fpval, already rounded to
 // their declared format).
-static Fp128 eval_fp128(Node *node) {
+Fp128 eval_fp128(Node *node) {
     add_type(node);
     switch (node->kind) {
         case ND_NUM:
@@ -2532,6 +2598,49 @@ static int64_t eval_ty(int64_t val, Type *ty) {
 
 static int64_t eval(Node *node) { return eval2(node, NULL); }
 
+// Descend a constexpr aggregate's initializer tree along an element
+// access expression (ND_SUBACCESS / ND_MEMBER chains ending in ND_VAR):
+// the base descends first, then the subscript indexes the array child
+// and the member its member child (structs and unions alike). Returns
+// the element's Initializer (NULL for uninitialized parts).
+static Initializer *constexpr_elem(Node *node, Initializer *init) {
+    switch (node->kind) {
+        case ND_SUBACCESS: {
+            Initializer *base = constexpr_elem(node->lhs, init);
+            int idx = (int)eval(node->rhs);
+            if (!base || !base->is_inited || idx < 0 || idx >= base->ty->len) return NULL;
+            return base->child[idx];
+        }
+        case ND_MEMBER:
+            return constexpr_elem(node->lhs, init)->child[node->member->idx];
+        case ND_VAR:
+            return init;
+        default:
+            return NULL;
+    }
+}
+
+// The ND_VAR root of an element access chain.
+static Node *elem_root(Node *node) {
+    while (node->kind == ND_SUBACCESS || node->kind == ND_MEMBER) node = node->lhs;
+    return node;
+}
+
+// Fold a constexpr variable to its initializer's constant value (C23
+// 6.6). Only scalar types fold; aggregates keep their normal storage.
+bool constexpr_fold(Sym *var, int64_t *val, uint32_t *sym) {
+    if (!(var->sclass & SC_CONSTEXPR)) return false;
+    Initializer *init = var->init;
+    if (!init || !init->expr) return false;
+    if (!is_integer(init->expr->ty) && !is_flonum(init->expr->ty) && !is_pointer(init->expr->ty)) return false;
+    static int depth;
+    if (++depth > 100) error(init->expr->tok, "not a compile-time constant");
+    *sym = 0;
+    *val = eval2(init->expr, sym);
+    depth--;
+    return true;
+}
+
 static int64_t eval2(Node *node, uint32_t *sym) {
     add_type(node);
     if (is_flonum(node->ty)) {
@@ -2669,16 +2778,43 @@ static int64_t eval2(Node *node, uint32_t *sym) {
             int64_t val = eval2(node->lhs, sym);
             return eval_ty(val, node->ty);
         }
+        case ND_NULLPTR:
+            return 0;
         case ND_ADDR:
             return eval_rval(node->lhs, sym);
-        case ND_MEMBER:
+        case ND_SUBACCESS:
+        case ND_MEMBER: {
+            // An element read of a constexpr aggregate folds through
+            // the initializer tree (as in clang).
+            Node *root = elem_root(node->lhs);
+            if (root->kind == ND_VAR && (root->var->sclass & SC_CONSTEXPR) && root->var->init) {
+                Initializer *leaf = constexpr_elem(node, root->var->init);
+                if (leaf && leaf->expr && (is_integer(leaf->expr->ty) || is_flonum(leaf->expr->ty))) {
+                    uint32_t s = 0;
+                    int64_t v = eval2(leaf->expr, &s);
+                    if (s && sym) *sym = s;
+                    return v;
+                }
+                return 0;  // zero-filled part
+            }
             if (!sym) error(node->tok, "not a compile-time constant");
             if (node->ty->kind != TY_ARRAY) error(node->tok, "invalid initializer");
             return eval_rval(node->lhs, sym) + node->member->offset;
+        }
         case ND_VAR:
+            // A constexpr variable with a scalar constant initializer is
+            // usable in constant expressions (C23 6.6).
+            if (node->var->sclass & SC_CONSTEXPR) {
+                int64_t v;
+                uint32_t s = 0;
+                if (constexpr_fold(node->var, &v, &s)) {
+                    if (s && sym) *sym = s;
+                    return v;
+                }
+            }
             if (!sym) error(node->tok, "not a compile-time constant");
             if (node->var->ty->kind != TY_ARRAY && node->var->ty->kind != TY_VLA && node->var->ty->kind != TY_FUNC)
-                error(node->tok, "invalid initializer");
+                error(node->tok, "not a compile-time constant");
             *sym = node->var->id;
             return 0;
         case ND_LABEL_VAL:
@@ -2700,6 +2836,8 @@ static int64_t eval_rval(Node *node, uint32_t *sym) {
             return 0;
         case ND_DEREF:
             return eval2(node->lhs, sym);
+        case ND_SUBACCESS:
+            return eval_rval(node->lhs, sym) + eval(node->rhs) * node->lhs->ty->base->size;
         case ND_MEMBER:
             return eval_rval(node->lhs, sym) + node->member->offset;
         default:
@@ -2860,6 +2998,12 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
                 Node *expr = lvar_initializer(&tok, tok->next, var);
                 cur = cur->next = new_unary(ND_EXPR_STMT, expr, tok);
             }
+        }
+        if (is_constexpr) {
+            // A constexpr initializer must be a constant expression.
+            int64_t v;
+            uint32_t s = 0;
+            constexpr_fold(var, &v, &s);
         }
         for (int i = 0; i < scope->vla_num; i++) {
             cur = cur->next = new_unary(ND_EXPR_STMT, scope->vla_expr[i], scope->vla_expr[i]->tok);
@@ -5012,6 +5156,12 @@ static Token *external_declaration(Token *tok) {
                     error(var_name, "illegal initializer type '_Atomic(%s)'", str(ty->uid));
                 gvar_initializer(&tok, tok->next, var);
                 var->is_defined = true;
+                if (sclass & SC_CONSTEXPR) {
+                    // A constexpr initializer must be a constant expression.
+                    int64_t v;
+                    uint32_t s = 0;
+                    constexpr_fold(var, &v, &s);
+                }
             }
             var->funcspec |= fspec;
             sym_attr_flags(var, attrs, false);

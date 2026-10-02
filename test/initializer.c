@@ -21,6 +21,23 @@ union {
     int a;
     char b[8];
 } g14[2] = {0x01020304, 0x05060708};
+union {
+    int i;
+    float f;
+} gp1 = {.f = 2.5f};
+union {
+    int i;
+    double d;
+} gp2 = {.d = 2.5};
+union {
+    int i;
+    float f;
+} gp3[2] = {{.i = 5}, {.f = 2.5f}};
+union {
+    int i;
+    char *p;
+} gp4 = {.p = "abc"};
+
 char g17[] = "foobar";
 char g18[10] = "foobar";
 char g19[3] = "foobar";
@@ -879,6 +896,21 @@ int main() {
     } s77 = {1234567890123456789012wb, 1.5f16};
     ASSERT(1, s77.x == 1234567890123456789012wb);
     ASSERT(1, s77.h == 1.5f16);
+
+    // Union type-punning in global initializers: the member used
+    // initializes its own type (as in clang).
+    ASSERT(1, gp1.f == 2.5f);
+    ASSERT(1, gp2.d == 2.5);
+    ASSERT(5, gp3[0].i);
+    ASSERT(1, gp3[1].f == 2.5f);
+    ASSERT(1, gp4.p[1] == 'b');
+    ASSERT(1, ({
+               union {
+                   float f;
+                   int i;
+               } u = {.i = 7};
+               u.i == 7;
+           }));
 
     printf("OK\n");
     return 0;
