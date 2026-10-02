@@ -223,8 +223,8 @@ struct S2 { char c; } __attribute__((packed));
 enum E { A [[deprecated]] };
 int *px [[gnu::packed]];
 void pf(int p __attribute__((unused)));
+[[deprecated]];
 int fun(int x) {
-    [[deprecated]];
     for ([[maybe_unused]] int i = 0; i < 1; i++) {}
     if ([[maybe_unused]] int y = x) return y;
     return 0;
@@ -256,6 +256,43 @@ int main(void) {
 EOF
 $compiler -o $tmp/packed $tmp/packed.c && $tmp/packed
 check 'packed aligned layout'
+
+# Statement / label attribute positions and use warnings (as in clang).
+cat > $tmp/stmtattr.c <<'EOF'
+int fun(int x) {
+    int n = 0;
+    switch (x) {
+    case 1:
+        [[fallthrough]];
+    case 2:
+        n = 2;
+        break;
+    default:
+        n = 3;
+    }
+    [[maybe_unused]] L: n++;
+    L2: __attribute__((unused));
+    return n;
+}
+int main(void) { return fun(1) == 3 ? 0 : 1; }
+EOF
+$compiler -o $tmp/stmtattr $tmp/stmtattr.c && $tmp/stmtattr
+check 'statement and label attributes'
+cat > $tmp/attrwarn.c <<'EOF'
+void old(void) __attribute__((deprecated));
+[[nodiscard]] int g(void) { return 1; }
+int main(void) {
+    old();
+    g();
+    int x = g();
+    return x;
+}
+EOF
+$compiler -c -o $tmp/attrwarn.o $tmp/attrwarn.c 2> $tmp/attrwarn.err
+grep -q 'is deprecated' $tmp/attrwarn.err
+check 'deprecated use warning'
+grep -q 'ignoring return value of function' $tmp/attrwarn.err
+check 'nodiscard warning'
 
 # C23/C2y delimited universal character names (\u{...} and \U{...}).
 printf 'int \\u{00E9}x = 65; int main() { return ("\\u{41}"[0] == 65 && \\u{00E9}x == 65 && "\\U{1F600}"[0] == (char)0xF0) ? 0 : 1; }\n' \

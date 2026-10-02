@@ -241,6 +241,23 @@ echo '[[packed]] int x;' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "unknown attribute 'packed' ignored"
 check 'packed unknown at declspec position'
 
+# Statement / label attribute position diagnostics (as in clang).
+echo 'int f(void){ [[deprecated]]; return 0; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'cannot be applied to a statement'
+check 'decl attribute on statement'
+echo '[[fallthrough]];' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'cannot be applied to a declaration'
+check 'statement attribute as declaration'
+echo 'int f(void){ [[fallthrough]]; return 0; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'outside switch statement'
+check 'fallthrough outside switch'
+echo 'int f(int x){ if (x) [[fallthrough]] {} return 0; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'only applies to empty statements'
+check 'fallthrough on non-empty statement'
+echo 'void g(void) [[gnu::noreturn]];' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'ignored, because it cannot be applied to a type'
+check 'post-declarator type attribute warning'
+
 # Delimited universal character names: empty and surrogate are invalid.
 echo 'char *s = "\u{}";' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'empty delimited universal character name'

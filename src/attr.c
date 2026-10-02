@@ -8,7 +8,7 @@ static AttrInfo attrs[] = {
     {"deprecated", ATTR_NS_STD, 201904L, ATTR_DECL | ATTR_TYPE | ATTR_FIELD | ATTR_PARAM},
     {"fallthrough", ATTR_NS_STD, 201910L, ATTR_STMT},
     {"nodiscard", ATTR_NS_STD, 202003L, ATTR_DECL | ATTR_TYPE},
-    {"maybe_unused", ATTR_NS_STD, 202106L, ATTR_DECL | ATTR_TYPE | ATTR_FIELD | ATTR_PARAM | ATTR_STMT | ATTR_LABEL},
+    {"maybe_unused", ATTR_NS_STD, 202106L, ATTR_DECL | ATTR_TYPE | ATTR_FIELD | ATTR_PARAM | ATTR_LABEL},
     {"noreturn", ATTR_NS_STD, 202202L, ATTR_DECL},
 
     // GNU attributes (__attribute__ and [[gnu::...]]).
@@ -18,7 +18,7 @@ static AttrInfo attrs[] = {
     {"deprecated", ATTR_NS_GNU, 1, ATTR_DECL | ATTR_TYPE | ATTR_FIELD | ATTR_PARAM},
     {"unused", ATTR_NS_GNU, 1, ATTR_DECL | ATTR_TYPE | ATTR_FIELD | ATTR_PARAM | ATTR_STMT | ATTR_LABEL},
     {"fallthrough", ATTR_NS_GNU, 1, ATTR_STMT},
-    {"maybe_unused", ATTR_NS_GNU, 1, ATTR_DECL | ATTR_TYPE | ATTR_FIELD | ATTR_PARAM | ATTR_STMT | ATTR_LABEL},
+    {"maybe_unused", ATTR_NS_GNU, 1, ATTR_DECL | ATTR_TYPE | ATTR_FIELD | ATTR_PARAM | ATTR_LABEL},
     {"nodiscard", ATTR_NS_GNU, 1, ATTR_DECL | ATTR_TYPE},
 
     // Clang attributes.

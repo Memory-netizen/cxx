@@ -33,8 +33,11 @@ static void sym_attr_flags(Sym *var, Attr *attrs, bool gnu_only);
 static bool is_attr_start(Token *tok);
 static Token *skip_leading_attrs(Token *tok);
 static bool attr_decl_then_semi(Token *tok);
+static bool attr_then_typename(Token *tok);
 static Token *attr_decl(Token *tok);
 static Type *decl_attrs(Token **rest, Token *tok, Type *ty);
+static void apply_postdecl_attrs(Type *ty);
+static char *attr_disp_name(Attr *a);
 static Attr *attr_list_gnu(Token **rest, Token *tok);
 static Attr *attr_list_c23(Token **rest, Token *tok);
 static void ty_prepend_attrs(Type *ty, Attr *attrs);
@@ -1937,6 +1940,10 @@ static Node *primary(Token **rest, Token *tok) {
 }
 
 static Node *fncall(Token **rest, Token *tok, Node *fn) {
+    Node *f = fn;
+    while (f->kind == ND_IMCAST || f->kind == ND_LVTOR) f = f->lhs;
+    if (f->kind == ND_VAR && f->var->is_deprecated) warning(f->tok, "‘%s’ is deprecated", str(f->var->id));
+
     if (fn->ty->kind != TY_FUNC && !is_funcptr(fn->ty))
         error(tok, "called object ‘%.*s’ is not a function or function pointer", fn->tok->len, tok_text(fn->tok));
 
@@ -2778,6 +2785,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         scope->vla_num = 0;
         Type *ty = declarator(&tok, tok, basety);
         Token *var_name = ty->name;
+        apply_postdecl_attrs(ty);
 
         // GNU post-declarator attributes attach to the declaration.
         int fspec = funcspec;
@@ -2908,6 +2916,17 @@ static Node *expr_stmt(Token **rest, Token *tok) {
     }
 
     node->lhs = expr(&tok, tok);
+
+    // A discarded call to a nodiscard function warns (as in clang).
+    Node *call = node->lhs;
+    while (call->kind == ND_LVTOR || call->kind == ND_IMCAST || call->kind == ND_EXCAST) call = call->lhs;
+    if (call->kind == ND_FUNCALL) {
+        Node *f = call->func;
+        while (f->kind == ND_IMCAST || f->kind == ND_LVTOR) f = f->lhs;
+        if (f->kind == ND_VAR && f->var->is_nodiscard)
+            warning(node->lhs->tok, "ignoring return value of function ‘%s’ declared with ‘nodiscard’ attribute",
+                    str(f->var->id));
+    }
 
     *rest = skip(tok, TK_SEMI);
     return node;
@@ -3212,6 +3231,20 @@ static void check_case(int64_t val, Token *tok) {
 static Node *label(Token **rest, Token *tok) {
     Node dummy = {}, *cur = &dummy;
     int idx = -1;
+    // Label ::= AttrSpec* (Ident | "case" ... | "default") ":". If no
+    // label follows, leave the attributes for the statement.
+    if (is_attr_start(tok)) {
+        Token *t = skip_leading_attrs(tok);
+        bool is_label =
+            (t->kind == TK_IDENT && t->next->kind == TK_COLON) || t->kind == TK_CASE || t->kind == TK_DEFAULT;
+        if (!is_label) return NULL;
+        while (is_attr_start(tok)) {
+            Attr *list = tok->kind == TK_ATTR ? attr_list_gnu(&tok, tok) : attr_list_c23(&tok, tok);
+            for (Attr *a = list; a; a = a->next)
+                if (a->info && !(a->info->targets & ATTR_LABEL))
+                    error(a->tok, "‘%s’ attribute cannot be applied to a label", attr_disp_name(a));
+        }
+    }
     while (1) {
         if (tok->kind == TK_IDENT && tok->next->kind == TK_COLON) {
             Node *node = new_node(ND_LABEL, tok);
@@ -3346,6 +3379,30 @@ static Node *static_assert_decl(Token **rest, Token *tok) {
 static Node *stmt(Token **rest, Token *tok) {
     Node *lb = label(&tok, tok);
     uint32_t i = push_named_loop(lb, tok);
+    // UnLabelStmt ::= AttrSpec* (PrimBlk | JmpStmt) / ExpStmt ::= AttrSpec*
+    // Exp ";". Only fallthrough (and the GNU statement attributes) apply
+    // to statements.
+    bool has_fallthrough = false;
+    if (is_attr_start(tok)) {
+        Token *start = tok;
+        while (is_attr_start(tok)) {
+            Attr *list = tok->kind == TK_ATTR ? attr_list_gnu(&tok, tok) : attr_list_c23(&tok, tok);
+            for (Attr *a = list; a; a = a->next) {
+                if (!a->info) continue;
+                if (!strcmp(a->info->name, "fallthrough") && (a->info->targets & ATTR_STMT)) {
+                    has_fallthrough = true;
+                } else if (a->is_gnu && !strcmp(a->info->name, "unused")) {
+                    // GNU statement attribute: accepted.
+                } else {
+                    error(a->tok, "‘%s’ attribute cannot be applied to a statement", attr_disp_name(a));
+                }
+            }
+        }
+        if (has_fallthrough) {
+            if (tok->kind != TK_SEMI) error(start, "‘fallthrough’ attribute only applies to empty statements");
+            if (!cur_sw) error(start, "fallthrough annotation is outside switch statement");
+        }
+    }
     Node *stmt;
     switch (tok->kind) {
         case TK_STATIC_ASSERT:
@@ -3435,14 +3492,7 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
         }
 
         // Decl
-        if (is_typename(tok, true) || is_attr_start(tok)) {
-            if (is_attr_start(tok) && attr_decl_then_semi(tok)) {
-                // AttrDecl: a standalone attribute declaration.
-                cur = cur->next = new_node(ND_EXPR_STMT, tok);
-                add_type(cur);
-                tok = attr_decl(tok);
-                continue;
-            }
+        if (is_typename(tok, true) || (is_attr_start(tok) && attr_then_typename(tok))) {
             SClass sclass = 0;
             int align = 0;
             int funcspec = 0;
@@ -3451,6 +3501,7 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
 
             if (sclass & SC_TYPEDEF) {
                 Type *ty = declarator(&tok, tok, basety);
+                apply_postdecl_attrs(ty);
                 if (tok->kind == TK_AS)
                     error(tok,
                           "illegal initializer (only variables can be "
@@ -3808,6 +3859,17 @@ static void layout_struct(Type *ty, bool is_union) {
             attr_align = MAX(attr_align, (int)const_expr(&t, a->args->next));
         }
     }
+    // The packed / aligned attributes are consumed by the layout; they
+    // must not trigger post-declarator type diagnostics later.
+    Attr **ap = &ty->attrs;
+    while (*ap) {
+        Attr *a = *ap;
+        if (a->info && a->info->ns == ATTR_NS_GNU &&
+            (!strcmp(a->info->name, "packed") || !strcmp(a->info->name, "aligned")))
+            *ap = a->next;
+        else
+            ap = &a->next;
+    }
 
     ty->align = 1;
     int offset = 0;
@@ -4162,6 +4224,28 @@ static void attr_decl_apply(Attr *attrs, int *funcspec, int *align, bool gnu_onl
     }
 }
 
+// The name for diagnostics: gnu attributes print with their namespace.
+static char *attr_disp_name(Attr *a) {
+    if (a->info && a->info->ns == ATTR_NS_GNU) return format("gnu::%s", a->info->name);
+    return str(a->tok->id);
+}
+
+// Apply C23 post-declarator (type) attributes: aligned adjusts the type
+// alignment; attributes that cannot apply to a type are diagnosed (as
+// in clang). Packed is type-valid only before a record's layout, so it
+// is rejected here too.
+static void apply_postdecl_attrs(Type *ty) {
+    for (Attr *a = ty->attrs; a; a = a->next) {
+        if (!a->info || a->is_gnu) continue;
+        if (!strcmp(a->info->name, "aligned") && a->args) {
+            Token *t;
+            ty->align = MAX(ty->align, (int)const_expr(&t, a->args->next));
+        } else if (!strcmp(a->info->name, "packed") || !(a->info->targets & ATTR_TYPE)) {
+            warning(a->tok, "attribute '%s' ignored, because it cannot be applied to a type", attr_disp_name(a));
+        }
+    }
+}
+
 // Set the per-symbol flags for declaration attributes.
 static void sym_attr_flags(Sym *var, Attr *attrs, bool gnu_only) {
     for (Attr *a = attrs; a; a = a->next) {
@@ -4192,15 +4276,22 @@ static Token *skip_leading_attrs(Token *tok) {
 // A standalone attribute declaration: AttrSpec+ ";" with no declspecs.
 static bool attr_decl_then_semi(Token *tok) { return skip_leading_attrs(tok)->kind == TK_SEMI; }
 
+// A declaration follows the leading attribute lists (a typename).
+static bool attr_then_typename(Token *tok) { return is_typename(skip_leading_attrs(tok), true); }
+
 // AttrDecl ::= AttrSpec+ ";": applies the declaration attribute checks
-// (as in clang, noreturn is rejected), then returns the token past ';'.
+// (as in clang, statement attributes and noreturn are rejected), then
+// returns the token past ';'.
 static Token *attr_decl(Token *tok) {
     Token *t = tok;
     while (is_attr_start(t)) {
         Attr *list = t->kind == TK_ATTR ? attr_list_gnu(&t, t) : attr_list_c23(&t, t);
-        for (Attr *a = list; a; a = a->next)
-            if (a->info && !strcmp(a->info->name, "noreturn"))
-                error(a->tok, "‘noreturn’ attribute only applies to functions");
+        for (Attr *a = list; a; a = a->next) {
+            if (!a->info) continue;
+            if (a->info->targets & ATTR_STMT)
+                error(a->tok, "‘%s’ attribute cannot be applied to a declaration", attr_disp_name(a));
+            if (!strcmp(a->info->name, "noreturn")) error(a->tok, "‘noreturn’ attribute only applies to functions");
+        }
     }
     return t->next;
 }
@@ -4575,6 +4666,7 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
         Token *start = tok;
         Type *basety = declspecs(&tok, tok, NULL, NULL, NULL, NULL);
         Type *paramty = abstract_declarator(&tok, tok, basety, true);
+        apply_postdecl_attrs(paramty);
         if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type");
         // "array of T" is converted to "pointer to T" in the parameter
         // context. For example, *argv[] is converted to **argv by this.
@@ -4774,6 +4866,7 @@ static Token *external_declaration(Token *tok) {
     while (1) {
         cnt++;
         Type *ty = declarator(&tok, tok, basety);
+        apply_postdecl_attrs(ty);
         Token *var_name = ty->name;
         NameSpace *ns = find_ident(var_name, false, false);
         Sym *var;
