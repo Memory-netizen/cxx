@@ -3729,6 +3729,18 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             Token *mem_name = mem->ty->name;
             if (align) mem->is_align = true;
             mem->align = MAX(align, mem->ty->align);
+            // packed / aligned on the member (either spelling, as in
+            // clang) adjust the member layout.
+            for (Attr *a = mem->ty->attrs; a; a = a->next) {
+                if (!a->info || a->info->ns != ATTR_NS_GNU) continue;
+                if (!strcmp(a->info->name, "packed")) {
+                    mem->is_packed = true;
+                } else if (!strcmp(a->info->name, "aligned") && a->args) {
+                    Token *t;
+                    mem->align = MAX(mem->align, (int)const_expr(&t, a->args->next));
+                    mem->is_align = true;
+                }
+            }
             if (mem->ty->kind == TY_VOID) error(mem_name, "field ‘%s’ declared void", str(mem_name->id));
             if (mem->ty->kind == TY_FUNC) error(mem_name, "field ‘%s’ declared as a function", str(mem_name->id));
             if (is_variably_modified(mem->ty))
@@ -3783,6 +3795,20 @@ static int min_bytes_for_bits(int bits) {
 }
 
 static void layout_struct(Type *ty, bool is_union) {
+    // packed / aligned on the record type: packed lowers every member
+    // alignment to 1; an explicit aligned(N) still raises the final
+    // alignment above that (as in clang).
+    int attr_align = 0;
+    for (Attr *a = ty->attrs; a; a = a->next) {
+        if (!a->info || a->info->ns != ATTR_NS_GNU) continue;
+        if (!strcmp(a->info->name, "packed")) {
+            ty->is_packed = true;
+        } else if (!strcmp(a->info->name, "aligned") && a->args) {
+            Token *t;
+            attr_align = MAX(attr_align, (int)const_expr(&t, a->args->next));
+        }
+    }
+
     ty->align = 1;
     int offset = 0;
     int bits = 0;
@@ -3797,7 +3823,8 @@ static void layout_struct(Type *ty, bool is_union) {
     } while (0)
 
     for (Member *mem = ty->members; mem; mem = mem->next) {
-        ty->align = MAX(ty->align, mem->align);
+        int mem_align = (ty->is_packed || mem->is_packed) ? 1 : mem->align;
+        ty->align = MAX(ty->align, mem_align);
         mem->idx = idx++;
 
         if (is_union) {
@@ -3810,7 +3837,7 @@ static void layout_struct(Type *ty, bool is_union) {
 
             if (width == 0) {
                 END_UNIT();
-                offset = ALIGN_UP(offset, mem->align);
+                offset = ALIGN_UP(offset, mem_align);
             }
 
             if (unit_size == 0) {
@@ -3838,7 +3865,7 @@ static void layout_struct(Type *ty, bool is_union) {
             bits += width;
         } else {
             END_UNIT();
-            offset = ALIGN_UP(offset, mem->align);
+            offset = ALIGN_UP(offset, mem_align);
             mem->offset = offset;
             mem->unit_ty = mem->ty;
             offset += mem->ty->size;
@@ -3846,6 +3873,7 @@ static void layout_struct(Type *ty, bool is_union) {
     }
 
     END_UNIT();
+    if (attr_align) ty->align = MAX(ty->align, attr_align);
     ty->size = ALIGN_UP(offset, ty->align);
 }
 
@@ -4102,9 +4130,10 @@ static Type *decl_attrs(Token **rest, Token *tok, Type *ty) {
 // Prepend attributes to a type (record_decl / enum_decl attach directly
 // to the freshly created type).
 static void ty_prepend_attrs(Type *ty, Attr *attrs) {
+    if (!attrs) return;
     Attr *tail = attrs;
-    while (tail && tail->next) tail = tail->next;
-    if (tail) tail->next = ty->attrs;
+    while (tail->next) tail = tail->next;
+    tail->next = ty->attrs;
     ty->attrs = attrs;
 }
 

@@ -233,6 +233,30 @@ EOF
 $compiler -S -o /dev/null $tmp/attrs.c
 check 'declaration attribute positions'
 
+# packed / aligned change the record layout (as in clang).
+cat > $tmp/packed.c <<'EOF'
+struct __attribute__((packed)) P { char c; int i; };
+_Static_assert(sizeof(struct P) == 5, "packed size");
+_Static_assert(_Alignof(struct P) == 1, "packed align");
+struct [[gnu::packed]] Q { char c; int i; };
+_Static_assert(sizeof(struct Q) == 5, "gnu packed size");
+struct __attribute__((aligned(16))) A { char c; };
+_Static_assert(sizeof(struct A) == 16, "aligned size");
+_Static_assert(_Alignof(struct A) == 16, "aligned align");
+struct __attribute__((packed, aligned(4))) B { char c; int i; };
+_Static_assert(sizeof(struct B) == 8, "packed aligned size");
+struct M { char c; int i __attribute__((packed)); };
+_Static_assert(sizeof(struct M) == 5, "member packed size");
+struct X { char c; int i; } __attribute__((packed));
+int main(void) {
+    struct X x;
+    x.i = 42;
+    return x.i == 42 ? 0 : 1;
+}
+EOF
+$compiler -o $tmp/packed $tmp/packed.c && $tmp/packed
+check 'packed aligned layout'
+
 # C23/C2y delimited universal character names (\u{...} and \U{...}).
 printf 'int \\u{00E9}x = 65; int main() { return ("\\u{41}"[0] == 65 && \\u{00E9}x == 65 && "\\U{1F600}"[0] == (char)0xF0) ? 0 : 1; }\n' \
   | $compiler -o $tmp/ucn -xc - && $tmp/ucn

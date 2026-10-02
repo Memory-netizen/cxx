@@ -652,6 +652,7 @@ struct Type {
     int size;          // sizeof() value
     int align;         // alignof() value
     bool is_unsigned;  // unsigned or signed
+    bool is_packed;    // packed attribute on a record type
     uint32_t id;
     uint32_t uid;
     // Declaration
@@ -702,6 +703,7 @@ struct Member {
     int align;
     int offset;
     bool is_align;
+    bool is_packed;
 
     // Bitfield
     bool is_bitfield;

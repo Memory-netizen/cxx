@@ -305,6 +305,19 @@ static void store(Ref val, Ref addr, int align, Member *mem) {
     }
 }
 
+// Effective alignment of an lvalue: a variable's declared alignment,
+// a packed member's (or packed record's) 1, otherwise the type alignment.
+static int lvalue_align(Node *node) {
+    if (node->kind == ND_VAR) return node->var->align;
+    if (node->kind == ND_MEMBER) {
+        if (node->member->is_packed) return 1;
+        for (Node *n = node; n->kind == ND_MEMBER; n = n->lhs)
+            if (n->lhs->ty->is_packed) return 1;
+        return node->member->align;
+    }
+    return node->ty->align;
+}
+
 static Ref gen_expr(Node *node) {
     if (!node) return R;
     Ref dst;
@@ -401,8 +414,7 @@ static Ref gen_expr(Node *node) {
             dst.val = node->target->blk_idx;
             return dst;
         case ND_LVTOR: {
-            int align = node->ty->align;
-            if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
+            int align = lvalue_align(node->lhs);
             Ref addr = gen_expr(node->lhs);
             atomic_order = node_mem_order(node->lhs);
             if (is_record(node->ty) && is_atomic_ptr(addr)) {
@@ -438,8 +450,7 @@ static Ref gen_expr(Node *node) {
         case ND_INIT:
         case ND_AS: {
             Ref addr = gen_expr(node->lhs);
-            int align = node->ty->align;
-            if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
+            int align = lvalue_align(node->lhs);
 
             if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) {
                 Ref src_addr = gen_expr(node->rhs);
@@ -483,8 +494,7 @@ static Ref gen_expr(Node *node) {
         case ND_POSTDEC: {
             int ir_op = is_pointer(node->ty) ? IR_GEP : IR_ADD;
             Ref addr = gen_expr(node->lhs);
-            int align = node->ty->align;
-            if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
+            int align = lvalue_align(node->lhs);
             atomic_order = node_mem_order(node);
             Ref lr = load(addr, node->ty, align, node->lhs->member);
             int addend = (node->kind == ND_PREINC || node->kind == ND_POSTINC) ? 1 : -1;
@@ -541,8 +551,7 @@ static Ref gen_expr(Node *node) {
         }
         case ND_PTRAS: {
             Ref addr = gen_expr(node->lhs);
-            int align = node->ty->align;
-            if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
+            int align = lvalue_align(node->lhs);
             atomic_order = node_mem_order(node);
             Ref lr = load(addr, node->ty, align, node->lhs->member);
             Ref rr = gen_expr(node->rhs);
@@ -563,8 +572,7 @@ static Ref gen_expr(Node *node) {
         case ND_LEFTAS:
         case ND_RIGHTAS: {
             Ref addr = gen_expr(node->lhs);
-            int align = node->ty->align;
-            if (node->lhs->kind == ND_VAR) align = node->lhs->var->align;
+            int align = lvalue_align(node->lhs);
             atomic_order = node_mem_order(node);
             Ref lr = load(addr, node->ty, align, node->lhs->member);
             lr = cast(lr, node->ty, node->compute_ty);

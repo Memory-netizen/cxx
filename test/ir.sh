@@ -339,4 +339,9 @@ echo 'int x; void f(void) { x = 1; }' \
   | $compiler -S -emit-llvm -o - -xc - | grep -q 'store i32 1, ptr @x, align 4'
 check 'plain store'
 
+echo 'struct __attribute__((packed)) P { char c; int i; };
+int f(struct P *p) { p->i = 3; return p->i; }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'align 1'
+check 'packed member access align 1'
+
 echo OK
