@@ -160,6 +160,31 @@ check '__has_include_next'
 grep -q NO $tmp/has.out
 check '__has_include_next negative'
 
+# _Pragma: destringized and processed like #pragma (the only effective
+# pragma is "once"), also when produced by macro expansion.
+echo '_Pragma("once")
+#define GUARDED 42
+HDR_MARKER' > $tmp/pragma_once.h
+echo '#include "pragma_once.h"
+#include "pragma_once.h"
+GUARDED' | $compiler -I$tmp -E -xc - | grep -c 'HDR_MARKER' | grep -q '^1$'
+check '_Pragma once'
+echo '#define ONCE _Pragma("once")
+ONCE
+#define GUARDED2 43
+HDR_MARKER2' > $tmp/pragma_macro.h
+echo '#include "pragma_macro.h"
+#include "pragma_macro.h"
+GUARDED2' | $compiler -I$tmp -E -xc - | grep -c 'HDR_MARKER2' | grep -q '^1$'
+check '_Pragma from macro'
+echo '_Pragma("GCC diagnostic push")
+int x;' | $compiler -E -xc - | grep -q 'int x'
+check '_Pragma unknown ignored'
+
+# The compiler implements C23; advertise it.
+echo '__STDC_VERSION__' | $compiler -E -xc - | grep -q '202311L'
+check '__STDC_VERSION__'
+
 # BOM marker
 printf '\xef\xbb\xbfxyz\n' | $compiler -E -o- - | grep -q '^xyz'
 check 'BOM marker'

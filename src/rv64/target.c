@@ -346,7 +346,7 @@ Target T_rv64 = {
         "#define __STDC_HOSTED__ 1\n"
         "#define __STDC_UTF_16__ 1\n"
         "#define __STDC_UTF_32__ 1\n"
-        "#define __STDC_VERSION__ 201710L\n"
+        "#define __STDC_VERSION__ 202311L\n"
         "#define __STDC__ 1\n"
         "#define __UINT16_C(c) c\n"
         "#define __UINT16_C_SUFFIX__ \n"

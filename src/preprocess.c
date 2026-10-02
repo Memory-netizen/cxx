@@ -43,6 +43,7 @@ static uint32_t vaopt_id;
 static uint32_t once_id;
 static uint32_t has_include_id;
 static uint32_t has_include_next_id;
+static uint32_t pragma_op_id;
 
 static Token *expand_macro(Token *dst, Token *list);
 static char *join_tokens(Token *tok);
@@ -1013,6 +1014,49 @@ static bool find_pragma(uint32_t file_id) {
     return false;
 }
 
+// _Pragma ( string-literal ): destringize the literal and process it as
+// a #pragma directive (C99 6.10.9). The only pragma with an effect is
+// "once"; anything else is ignored, like the #pragma directive.
+static Token *process_pragma_op(Token *tok) {
+    Token *lp = tok->next;
+    if (!lp || lp->kind != TK_LPAREN) error(tok, "_Pragma takes a parenthesized string literal");
+    Token *str = lp->next;
+    if (!str || str->kind != TK_STRLIT || str->enc_prefix != PREFIX_NONE)
+        error(tok, "_Pragma takes a parenthesized string literal");
+    Token *rp = str->next;
+    if (!rp || rp->kind != TK_RPAREN) error(tok, "_Pragma takes a parenthesized string literal");
+
+    // Destringize: the content between the quotes, unescaping \\ and \".
+    char *p = tok_text(str) + 1;
+    char *buf = emalloc(str->len - 1);
+    int n = 0;
+    for (uint32_t i = 0; i < str->len - 2; i++) {
+        char c = p[i];
+        if (c == '\\' && i + 1 < str->len - 2 && (p[i + 1] == '\\' || p[i + 1] == '"')) c = p[++i];
+        buf[n++] = c;
+    }
+    buf[n] = '\0';
+
+    if (!strcmp(buf, "once")) add_pragma(str);
+    return rp->next;
+}
+
+// Process and remove _Pragma operators from a NULL-terminated token
+// list produced by macro expansion.
+static Token *scan_pragma_op(Token *tok) {
+    Token dummy = {};
+    Token *cur = &dummy;
+    while (tok) {
+        if (tok->kind == TK_IDENT && tok->id == pragma_op_id) {
+            tok = process_pragma_op(tok);
+            continue;
+        }
+        cur = cur->next = tok;
+        tok = tok->next;
+    }
+    return dummy.next;
+}
+
 static Token *new_linemarker(Token *tmpl, int line, uint32_t filename) {
     Token *linemarker = copy_token(tmpl);
     linemarker->kind = TK_LINE;
@@ -1125,7 +1169,13 @@ static Token *preprocess2(Token *tok) {
                 tok = tok->next;
             }
             buf->next = new_eof(tok);
+            Token *seg = cur;
             cur = expand_macro(cur, dummy2.next);
+            if (seg->next) {
+                seg->next = scan_pragma_op(seg->next);
+                cur = seg;
+                while (cur->next) cur = cur->next;
+            }
             if (tok->kind == TK_EOF) continue;
         }
 
@@ -1541,6 +1591,7 @@ void init_macros(void) {
     once_id = intern("once", 4);
     has_include_id = intern("__has_include", 13);
     has_include_next_id = intern("__has_include_next", 18);
+    pragma_op_id = intern("_Pragma", 7);
 
     prep_builtin();
 

@@ -170,6 +170,11 @@ echo 'int x = __has_include_next("foo.h");' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "'__has_include_next' must be used within a preprocessing directive"
 check 'has_include_next outside directive'
 
+# _Pragma requires a parenthesized string literal.
+echo 'int x = _Pragma(5);' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q '_Pragma takes a parenthesized string literal'
+check '_Pragma non-string argument'
+
 # Builtin functions must be directly called (no &-use).
 echo 'int f(void) { return (int)__builtin_alloca; }' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'builtin functions must be directly called'
