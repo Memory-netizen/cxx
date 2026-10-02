@@ -1,3 +1,4 @@
+#include "attr.h"
 #include "cxx.h"
 
 struct tm *tm;
@@ -66,6 +67,7 @@ static uint32_t has_include_id;
 static uint32_t has_include_next_id;
 static uint32_t has_embed_id;
 static uint32_t has_c_attribute_id;
+static uint32_t has_attribute_id;
 static uint32_t pragma_op_id;
 
 static Token *expand_macro(Token *dst, Token *list);
@@ -425,26 +427,46 @@ static Token *eval_has_embed(Token *tok) {
     return dummy.next;
 }
 
-// __has_c_attribute ( tokens ): attribute support is not implemented
-// yet, so this stub always yields 0 (C23 6.10.1). The parenthesized
-// token sequence is consumed without evaluation.
-static Token *eval_has_c_attribute(Token *tok) {
+// Parse the parenthesized attribute of __has_c_attribute /
+// __has_attribute: Ident ( "::" Ident )?, with no attribute argument
+// (as in clang). tok must point at the operator token; on return *rest
+// is past the closing ')'.
+static int64_t eval_attr_query(Token **rest, Token *tok, bool c23_form, char *op) {
+    tok = tok->next->next;
+    if (tok->kind != TK_IDENT) error(tok, "expected attribute name in '%s'", op);
+    char *ns = NULL;
+    char *name = str(tok->id);
+    tok = tok->next;
+    if (tok->kind == TK_COLONCOLON) {
+        ns = name;
+        tok = tok->next;
+        if (tok->kind != TK_IDENT) error(tok, "expected attribute name in '%s'", op);
+        name = str(tok->id);
+        tok = tok->next;
+    }
+    if (tok->kind != TK_RPAREN) error(tok, "missing ')' after '%s'", op);
+    *rest = tok->next;
+
+    // Unqualified names are looked up in the standard namespace only
+    // (as in clang); the GNU form checks the gnu namespace.
+    if (c23_form) {
+        AttrInfo *a = attr_lookup(ns, name);
+        return a ? a->version : 0;
+    }
+    return attr_lookup("gnu", name) ? 1 : 0;
+}
+
+// Evaluate __has_c_attribute / __has_attribute calls in a token list,
+// replacing each call with its integer result.
+static Token *eval_has_attr(Token *tok, uint32_t id, bool c23_form, char *op) {
     Token dummy = {};
     Token *cur = &dummy;
     while (tok) {
-        if (tok->kind == TK_IDENT && tok->id == has_c_attribute_id) {
+        if (tok->kind == TK_IDENT && tok->id == id) {
             Token *start = tok;
-            if (!tok->next || tok->next->kind != TK_LPAREN) error(tok, "missing '(' after '__has_c_attribute'");
-            int depth = 1;
-            for (tok = tok->next->next; tok; tok = tok->next) {
-                if (tok->kind == TK_LPAREN) depth++;
-                if (tok->kind == TK_RPAREN && --depth == 0) {
-                    tok = tok->next;
-                    break;
-                }
-                if (tok->kind == TK_EOF || tok->is_sol) error(start, "missing ')' after '__has_c_attribute'");
-            }
-            cur = cur->next = ident_to_num(start, 0);
+            if (!tok->next || tok->next->kind != TK_LPAREN) error(tok, "missing '(' after '%s'", op);
+            int64_t val = eval_attr_query(&tok, tok, c23_form, op);
+            cur = cur->next = ident_to_num(start, val);
             continue;
         }
         cur = cur->next = tok;
@@ -453,6 +475,12 @@ static Token *eval_has_c_attribute(Token *tok) {
 
     return dummy.next;
 }
+
+static Token *eval_has_c_attribute(Token *tok) {
+    return eval_has_attr(tok, has_c_attribute_id, true, "__has_c_attribute");
+}
+
+static Token *eval_has_attribute(Token *tok) { return eval_has_attr(tok, has_attribute_id, false, "__has_attribute"); }
 
 // Evaluate a constant expression from a NULL-terminated token list
 // (used by #if and by the #embed limit parameter).
@@ -464,6 +492,7 @@ static int64_t eval_const_tokens(Token *expr) {
     expr = eval_has_include(expr);
     expr = eval_has_embed(expr);
     expr = eval_has_c_attribute(expr);
+    expr = eval_has_attribute(expr);
 
     // we replace remaining non-macro identifiers with "0"
     Token dummy2 = {};
@@ -1421,7 +1450,7 @@ static Token *read_line_marker(Token **rest, Token *tok) {
 
 static void check_invalid_ident(Token *tok) {
     if (tok->id == has_include_id || tok->id == has_include_next_id || tok->id == has_embed_id ||
-        tok->id == has_c_attribute_id)
+        tok->id == has_c_attribute_id || tok->id == has_attribute_id)
         error(tok, "'%s' must be used within a preprocessing directive", str(tok->id));
 }
 
@@ -1910,6 +1939,7 @@ void init_macros(void) {
     has_include_next_id = intern("__has_include_next", 18);
     has_embed_id = intern("__has_embed", 11);
     has_c_attribute_id = intern("__has_c_attribute", 17);
+    has_attribute_id = intern("__has_attribute", 15);
     pragma_op_id = intern("_Pragma", 7);
     for (size_t i = 0; i < sizeof(embed_params) / sizeof(embed_params[0]); i++)
         embed_params[i].id = intern(embed_params[i].name, strlen(embed_params[i].name));

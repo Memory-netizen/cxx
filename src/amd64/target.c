@@ -473,6 +473,7 @@ Target T_amd64 = {
         "#define unix 1\n"
         "#define __alignof__ _Alignof\n"
         "#define __const__ const\n"
+        "#define __has_attribute __has_attribute\n"
         "#define __has_c_attribute __has_c_attribute\n"
         "#define __has_embed __has_embed\n"
         "#define __has_include __has_include\n"

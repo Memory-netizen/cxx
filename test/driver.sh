@@ -185,14 +185,26 @@ check '_Pragma unknown ignored'
 echo '__STDC_VERSION__' | $compiler -E -xc - | grep -q '202311L'
 check '__STDC_VERSION__'
 
-# __has_c_attribute: stub, always 0 until attribute support lands
-# (clang returns 202311L for standard attributes; documented divergence).
-echo '#if __has_c_attribute(deprecated)
-HASATTR
-#else
-NOATTR
-#endif' | $compiler -E -xc - | grep -q NOATTR
-check '__has_c_attribute stub'
+# __has_c_attribute: standard attributes return their introduction
+# YYYYMM, vendor attributes 1, unknown attributes 0 (as in clang).
+echo '#if __has_c_attribute(deprecated) == 201904L && __has_c_attribute(fallthrough) == 201910L && __has_c_attribute(nodiscard) == 202003L && __has_c_attribute(maybe_unused) == 202106L && __has_c_attribute(noreturn) == 202202L
+STD_ATTRS
+#endif' | $compiler -E -xc - | grep -q STD_ATTRS
+check '__has_c_attribute standard values'
+echo '#if __has_c_attribute(gnu::packed) == 1 && __has_c_attribute(gnu::__packed__) == 1 && __has_c_attribute(clang::annotate) == 1
+VENDOR_ATTRS
+#endif' | $compiler -E -xc - | grep -q VENDOR_ATTRS
+check '__has_c_attribute vendor namespaces'
+# Unqualified names are looked up in the standard namespace only.
+echo '#if !__has_c_attribute(bogus) && !__has_c_attribute(packed) && !__has_c_attribute(gnu::bogus)
+NO_ATTRS
+#endif' | $compiler -E -xc - | grep -q NO_ATTRS
+check '__has_c_attribute unknown names'
+# GNU __has_attribute checks the gnu namespace.
+echo '#if __has_attribute(packed) && __has_attribute(deprecated) && __has_attribute(aligned) && !__has_attribute(bogus)
+GNU_HAS_ATTR
+#endif' | $compiler -E -xc - | grep -q GNU_HAS_ATTR
+check '__has_attribute'
 
 # C23/C2y delimited universal character names (\u{...} and \U{...}).
 printf 'int \\u{00E9}x = 65; int main() { return ("\\u{41}"[0] == 65 && \\u{00E9}x == 65 && "\\U{1F600}"[0] == (char)0xF0) ? 0 : 1; }\n' \

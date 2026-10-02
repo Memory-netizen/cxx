@@ -217,6 +217,15 @@ echo '#if __has_c_attribute
 #endif' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "missing '(' after '__has_c_attribute'"
 check 'has_c_attribute missing paren'
+# No attribute argument: clang errors with "missing ')'".
+echo '#if __has_c_attribute(noreturn(a))
+#endif' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "missing ')'"
+check 'has_c_attribute rejects attribute arguments'
+echo '#if __has_attribute(packed(1))
+#endif' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "missing ')'"
+check '__has_attribute rejects arguments'
 
 # Delimited universal character names: empty and surrogate are invalid.
 echo 'char *s = "\u{}";' \
