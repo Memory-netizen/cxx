@@ -206,6 +206,33 @@ GNU_HAS_ATTR
 #endif' | $compiler -E -xc - | grep -q GNU_HAS_ATTR
 check '__has_attribute'
 
+# C23/GNU attributes at the declaration positions (parsing; the
+# semantic effects land in later milestones).
+cat > $tmp/attrs.c <<'EOF'
+[[deprecated]] int ax;
+[[maybe_unused]] int bx;
+[[noreturn]] void cf(void);
+__attribute__((noreturn)) void cg(void);
+[[,]] int ex;
+[ [deprecated]] int fx;
+int gx[[]];
+int hx [[gnu::packed]];
+int ix __attribute__((aligned(8)));
+struct [[gnu::packed]] S { char c; int i; };
+struct S2 { char c; } __attribute__((packed));
+enum E { A [[deprecated]] };
+int *px [[gnu::packed]];
+void pf(int p __attribute__((unused)));
+int fun(int x) {
+    [[deprecated]];
+    for ([[maybe_unused]] int i = 0; i < 1; i++) {}
+    if ([[maybe_unused]] int y = x) return y;
+    return 0;
+}
+EOF
+$compiler -S -o /dev/null $tmp/attrs.c
+check 'declaration attribute positions'
+
 # C23/C2y delimited universal character names (\u{...} and \U{...}).
 printf 'int \\u{00E9}x = 65; int main() { return ("\\u{41}"[0] == 65 && \\u{00E9}x == 65 && "\\U{1F600}"[0] == (char)0xF0) ? 0 : 1; }\n' \
   | $compiler -o $tmp/ucn -xc - && $tmp/ucn

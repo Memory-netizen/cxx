@@ -33,6 +33,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "attr.h"
 #include "support/fp128.h"
 
 typedef struct SrcFile SrcFile;
@@ -381,6 +382,12 @@ struct Sym {
     bool is_defined;
     bool is_str;
 
+    // Attribute flags
+    bool is_deprecated;
+    bool is_nodiscard;
+    bool is_maybe_unused;
+    bool is_unused;
+
     // Global variable
     uint32_t init_data;
 
@@ -652,6 +659,7 @@ struct Type {
     Type *next;
     Type *base;
     Type *origin;  // for type compatibility check
+    Attr *attrs;   // attributes attached to the type
 
     // Data
     union {
@@ -706,6 +714,7 @@ struct EnumVal {
     EnumVal *next;
     Token *name;
     int64_t val;
+    Attr *attrs;
 };
 
 enum {

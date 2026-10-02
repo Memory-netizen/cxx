@@ -24,10 +24,20 @@ static const char *sclass_name[] = {
     [SC_THREAD] = "thread_local", [SC_REG] = "register",    [SC_AUTO] = "auto",     [SC_CONSTEXPR] = "constexpr",
 };
 
-static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec);
+static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec, Attr **attrs);
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty, bool is_param);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
-static Node *declaration(Token **rest, Token *tok, Type *ty, SClass sclass, int align, int funcspec);
+static Node *declaration(Token **rest, Token *tok, Type *ty, SClass sclass, int align, int funcspec, Attr *attrs);
+static void attr_decl_apply(Attr *attrs, int *funcspec, int *align, bool gnu_only);
+static void sym_attr_flags(Sym *var, Attr *attrs, bool gnu_only);
+static bool is_attr_start(Token *tok);
+static Token *skip_leading_attrs(Token *tok);
+static bool attr_decl_then_semi(Token *tok);
+static Token *attr_decl(Token *tok);
+static Type *decl_attrs(Token **rest, Token *tok, Type *ty);
+static Attr *attr_list_gnu(Token **rest, Token *tok);
+static Attr *attr_list_c23(Token **rest, Token *tok);
+static void ty_prepend_attrs(Type *ty, Attr *attrs);
 static Node *stmt(Token **rest, Token *tok);
 static Node *compound_stmt(Token **rest, Token *tok);
 static Node *expr(Token **rest, Token *tok);
@@ -554,7 +564,10 @@ static uint32_t typequal(Token **rest, Token *tok) {
 
 // Ptr ::= ("*" TypeQual*)+
 static Type *pointers(Token **rest, Token *tok, Type *ty) {
-    while (match(&tok, tok, TK_STAR)) ty = pointer_to(ty, typequal(&tok, tok));
+    while (match(&tok, tok, TK_STAR)) {
+        ty = pointer_to(ty, typequal(&tok, tok));
+        ty = decl_attrs(&tok, tok, ty);
+    }
     *rest = tok;
     return ty;
 }
@@ -576,6 +589,7 @@ static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool is_par
         abstract_declarator(&tok, start->next, &dummy, is_param);
         tok = skip(tok, TK_RPAREN);
         ty = decl_suffix(rest, tok, ty, is_param);
+        ty = decl_attrs(rest, *rest, ty);
         return abstract_declarator(&tok, start->next, ty, is_param);
     }
 
@@ -586,12 +600,13 @@ static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool is_par
     }
     ty = decl_suffix(rest, tok, ty, is_param);
     ty->name = name;
+    ty = decl_attrs(rest, *rest, ty);
     return ty;
 }
 
 // TypeName ::= DeclSpecs AbsDeclr?
 static Type *typename(Token **rest, Token *tok) {
-    Type *ty = declspecs(&tok, tok, NULL, NULL, NULL);
+    Type *ty = declspecs(&tok, tok, NULL, NULL, NULL, NULL);
     return abstract_declarator(rest, tok, ty, false);
 }
 
@@ -2751,7 +2766,8 @@ static Node *expr(Token **rest, Token *tok) {
 
 // InitDecls ::= InitDeclr ("," InitDeclr)*
 // InitDeclr ::= Declr ("=" Init)?
-static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclass, int align, int funcspec) {
+static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclass, int align, int funcspec,
+                            Attr *attrs) {
     bool is_static = sclass & SC_STATIC;
     bool is_constexpr = sclass & SC_CONSTEXPR;
     bool is_typedef = sclass & SC_TYPEDEF;
@@ -2763,12 +2779,17 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         Type *ty = declarator(&tok, tok, basety);
         Token *var_name = ty->name;
 
+        // GNU post-declarator attributes attach to the declaration.
+        int fspec = funcspec;
+        attr_decl_apply(attrs, &fspec, &align, false);
+        attr_decl_apply(ty->attrs, &fspec, &align, true);
+
         if (ty->kind == TY_VOID) error(start, "variable ‘%s’ declared void", str(var_name->id));
 
         bool is_fn = ty->kind == TY_FUNC;
-        if (funcspec && !is_fn) {
-            if (funcspec & Q_NORETURN) error(tok, "‘noreturn’ can only appear on functions");
-            if (funcspec & Q_INLINE) error(tok, "‘inline’ can only appear on functions");
+        if (fspec && !is_fn) {
+            if (fspec & Q_NORETURN) error(tok, "‘noreturn’ can only appear on functions");
+            if (fspec & Q_INLINE) error(tok, "‘inline’ can only appear on functions");
         }
         SymKind symkind = is_fn ? SYM_FUNC : SYM_VAR;
         if (is_fn || is_typedef) {
@@ -2815,7 +2836,9 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         var->sclass = sclass;
         var->align = MAX(align, ty->align);
         var->is_function = is_fn;
-        var->funcspec |= funcspec;
+        var->funcspec |= fspec;
+        sym_attr_flags(var, attrs, false);
+        sym_attr_flags(var, ty->attrs, true);
         if (tok->kind == TK_AS) {
             if (is_extern)
                 error(var_name, "declaration of block scope identifier ‘%s’ with linkage cannot have an initializer",
@@ -2897,13 +2920,14 @@ static int brk_depth;
 // SimDecl ::= DeclSpecs Declr "=" Init
 static Node *select_head(Token **rest, Token *tok) {
     Node *node;
-    if (is_typename(tok, true)) {
+    if (is_typename(tok, true) || is_attr_start(tok)) {
         SClass sclass = 0;
         int align = 0;
         int funcspec = 0;
-        Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
+        Attr *attrs = NULL;
+        Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec, &attrs);
         node = new_node(ND_DECL, tok);
-        if (tok->kind != TK_SEMI) node->body = init_decl_list(&tok, tok, basety, sclass, align, funcspec);
+        if (tok->kind != TK_SEMI) node->body = init_decl_list(&tok, tok, basety, sclass, align, funcspec, attrs);
         if (tok->kind == TK_SEMI) {
             Node *stmt = node->body;
             while (stmt->next) stmt = stmt->next;
@@ -3023,12 +3047,19 @@ static Node *for_stmt(Token **rest, Token *tok) {
     tok = skip(tok->next, TK_LPAREN);
 
     // Init
-    if (is_typename(tok, true)) {
-        SClass sclass = 0;
-        int align = 0;
-        int funcspec = 0;
-        Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
-        node->init = declaration(&tok, tok, basety, sclass, align, funcspec);
+    if (is_typename(tok, true) || is_attr_start(tok)) {
+        if (is_attr_start(tok) && attr_decl_then_semi(tok)) {
+            // AttrDecl: a standalone attribute declaration.
+            node->init = new_node(ND_EXPR_STMT, tok);
+            tok = attr_decl(tok);
+        } else {
+            SClass sclass = 0;
+            int align = 0;
+            int funcspec = 0;
+            Attr *attrs = NULL;
+            Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec, &attrs);
+            node->init = declaration(&tok, tok, basety, sclass, align, funcspec, attrs);
+        }
     } else {
         node->init = expr_stmt(&tok, tok);
     }
@@ -3404,11 +3435,19 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
         }
 
         // Decl
-        if (is_typename(tok, true)) {
+        if (is_typename(tok, true) || is_attr_start(tok)) {
+            if (is_attr_start(tok) && attr_decl_then_semi(tok)) {
+                // AttrDecl: a standalone attribute declaration.
+                cur = cur->next = new_node(ND_EXPR_STMT, tok);
+                add_type(cur);
+                tok = attr_decl(tok);
+                continue;
+            }
             SClass sclass = 0;
             int align = 0;
             int funcspec = 0;
-            Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
+            Attr *attrs = NULL;
+            Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec, &attrs);
 
             if (sclass & SC_TYPEDEF) {
                 Type *ty = declarator(&tok, tok, basety);
@@ -3418,7 +3457,7 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
                           "initialized)");
                 push_namespace(get_ident(ty->name), SYM_TYNAME, ty, ty->name);
             } else {
-                cur = cur->next = declaration(&tok, tok, basety, sclass, align, funcspec);
+                cur = cur->next = declaration(&tok, tok, basety, sclass, align, funcspec, attrs);
             }
 
             add_type(cur);
@@ -3448,6 +3487,15 @@ static Node *compound_stmt(Token **rest, Token *tok) { return compound_stmt2(res
 // Enumr    ::= Ident ("=" ConstExp)?
 static Type *enum_decl(Token **rest, Token *tok) {
     tok = tok->next;
+    // EnumSpec ::= "enum" AttrSpec* Ident? ...
+    Attr *enum_attrs = NULL;
+    while (is_attr_start(tok)) {
+        Attr *list = tok->kind == TK_ATTR ? attr_list_gnu(&tok, tok) : attr_list_c23(&tok, tok);
+        Attr *tail = list;
+        while (tail && tail->next) tail = tail->next;
+        if (tail) tail->next = enum_attrs;
+        enum_attrs = list;
+    }
     // Read a enum tag.
     Token *tag = NULL;
     Type *ty = NULL;
@@ -3466,12 +3514,14 @@ static Type *enum_decl(Token **rest, Token *tok) {
                 diag("error", tag, "use of ‘%s’ with tag type that does not match previous declaration", str(tag->id));
                 goto note;
             }
+            ty_prepend_attrs(ty, enum_attrs);
             return ty;
         }
 
         ty = enum_type();
         ty->size = -1;
         push_tag_namespace(tag->id, ty, tag);
+        ty->attrs = enum_attrs;
         return ty;
     }
 
@@ -3503,6 +3553,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
         ty = enum_type();
         ty->is_anon = true;
     }
+    ty_prepend_attrs(ty, enum_attrs);
 
     // Read an enum-list.
     EnumVal dummy = {};
@@ -3532,14 +3583,36 @@ static Type *enum_decl(Token **rest, Token *tok) {
         }
         tok = tok->next;
 
+        // Enumr ::= Ident AttrSpec* ("=" ConstExp)?
+        Attr *enm_attrs = NULL;
+        while (is_attr_start(tok)) {
+            Attr *list = tok->kind == TK_ATTR ? attr_list_gnu(&tok, tok) : attr_list_c23(&tok, tok);
+            Attr *tail = list;
+            while (tail && tail->next) tail = tail->next;
+            if (tail) tail->next = enm_attrs;
+            enm_attrs = list;
+        }
+
         if (tok->kind == TK_AS) val = const_expr(&tok, tok->next);
 
         push_namespace(name, SYM_ENUM, ty, enm_name)->enum_val = val;
         EnumVal *enm = emalloc(sizeof(EnumVal));
         enm->name = enm_name;
         enm->val = val++;
+        enm->attrs = enm_attrs;
         cur = cur->next = enm;
     }
+
+    // Trailing attributes (after the closing brace) apply to the type.
+    Attr *trail = NULL;
+    while (is_attr_start(*rest)) {
+        Attr *list = (*rest)->kind == TK_ATTR ? attr_list_gnu(rest, *rest) : attr_list_c23(rest, *rest);
+        Attr *tail = list;
+        while (tail && tail->next) tail = tail->next;
+        if (tail) tail->next = trail;
+        trail = list;
+    }
+    ty_prepend_attrs(ty, trail);
 
     if (!dummy.next) error(tok, "empty enum is invalid");
     ty->enumvals = dummy.next;
@@ -3615,7 +3688,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             continue;
         }
         int align = 0;
-        Type *basety = declspecs(&tok, tok, NULL, &align, NULL);
+        Type *basety = declspecs(&tok, tok, NULL, &align, NULL, NULL);
         int i = 0;
         Token *start = tok;
 
@@ -3781,6 +3854,15 @@ static Type *record_decl(Token **rest, Token *tok) {
     bool is_union = tok->kind == TK_UNION;
     char *ty_kind = tok->kind == TK_UNION ? "union" : "struct";
     tok = tok->next;
+    // RecordSpec ::= Record AttrSpec* Ident? ...
+    Attr *rec_attrs = NULL;
+    while (is_attr_start(tok)) {
+        Attr *list = tok->kind == TK_ATTR ? attr_list_gnu(&tok, tok) : attr_list_c23(&tok, tok);
+        Attr *tail = list;
+        while (tail && tail->next) tail = tail->next;
+        if (tail) tail->next = rec_attrs;
+        rec_attrs = list;
+    }
     // Read a tag.
     Token *tag = NULL;
     TagNameSpace *ns;
@@ -3804,12 +3886,14 @@ static Type *record_decl(Token **rest, Token *tok) {
                 diag("error", tag, "use of ‘%s’ with tag type that does not match previous declaration", str(tag->id));
                 goto note;
             }
+            ty_prepend_attrs(ty, rec_attrs);
             return ty;
         }
 
         ty = struct_type(is_union);
         ty->size = -1;
         push_tag_namespace(tag->id, ty, tag);
+        ty->attrs = rec_attrs;
         return ty;
     }
 
@@ -3847,8 +3931,19 @@ static Type *record_decl(Token **rest, Token *tok) {
         ty->is_anon = true;
         ty->id = intern("anon", 4);
     }
+    ty_prepend_attrs(ty, rec_attrs);
 
     struct_members(rest, tok, ty);
+    // Trailing attributes (after the closing brace) apply to the type.
+    Attr *trail = NULL;
+    while (is_attr_start(*rest)) {
+        Attr *list = (*rest)->kind == TK_ATTR ? attr_list_gnu(rest, *rest) : attr_list_c23(rest, *rest);
+        Attr *tail = list;
+        while (tail && tail->next) tail = tail->next;
+        if (tail) tail->next = trail;
+        trail = list;
+    }
+    ty_prepend_attrs(ty, trail);
     layout_struct(ty, is_union);
 
     if (redefine) {
@@ -3900,7 +3995,188 @@ static Type *typeof_specifier(Token **rest, Token *tok, bool is_unqual) {
 // AlignSpec ::= "alignas" "(" (TypeName | ConstExp) ")"
 // TypeQual  ::= "const" | "restrict" | "volatile"
 // FuncSpec  ::= "inline" | "_Noreturn"
-static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec) {
+
+// Attribute lists. The token stream reaching the parser has no
+// whitespace tokens, so "[ [" and "[[]]" are detected structurally.
+
+static bool is_attr_start(Token *tok) {
+    return tok->kind == TK_ATTR || (tok->kind == TK_LBRACKET && tok->next->kind == TK_LBRACKET);
+}
+
+// Attr ::= Ident ("::" Ident)? AttrArg?, one entry of an attribute
+// list. AttrArg is a sequence of balanced ( ) [ ] { } tokens; an empty
+// entry ("[[]]", "[[,]]") yields an Attr with info == NULL.
+static Attr *attr_entry(Token **rest, Token *tok, bool is_gnu) {
+    Token *start = tok;
+    AttrInfo *info = NULL;
+    if (tok->kind == TK_IDENT) {
+        char *ns = NULL;
+        char *name = str(tok->id);
+        tok = tok->next;
+        if (tok->kind == TK_COLONCOLON) {
+            ns = name;
+            tok = tok->next;
+            if (tok->kind != TK_IDENT) error(tok, "expected attribute name");
+            name = str(tok->id);
+            tok = tok->next;
+        }
+        // The GNU spelling lives in the gnu namespace; the C23 spelling
+        // defaults to the standard namespace.
+        info = attr_lookup(is_gnu ? "gnu" : ns, name);
+        if (!info) warning(start, "unknown attribute '%s' ignored", name);
+    } else if (is_gnu) {
+        error(tok, "expected attribute name");
+    }
+
+    Attr *attr = emalloc(sizeof(Attr));
+    attr->info = info;
+    attr->tok = start;
+    attr->is_gnu = is_gnu;
+    if (tok->kind == TK_LPAREN) {
+        attr->args = tok;
+        int depth = 0;
+        for (;;) {
+            if (tok->kind == TK_EOF || tok->is_sol) error(start, "expected ')'");
+            if (tok->kind == TK_LPAREN || tok->kind == TK_LBRACKET || tok->kind == TK_LBRACE) depth++;
+            if (tok->kind == TK_RPAREN || tok->kind == TK_RBRACKET || tok->kind == TK_RBRACE)
+                if (--depth == 0) break;
+            tok = tok->next;
+        }
+        tok = tok->next;
+    }
+    *rest = tok;
+    return attr;
+}
+
+// AttrSpec ::= "[" "[" Attr? ("," Attr?)* "]" "]"
+static Attr *attr_list_c23(Token **rest, Token *tok) {
+    Token *start = tok;
+    tok = tok->next->next;
+    Attr dummy = {}, *cur = &dummy;
+    while (tok->kind != TK_RBRACKET || tok->next->kind != TK_RBRACKET) {
+        if (cur != &dummy) tok = skip(tok, TK_COMMA);
+        cur = cur->next = attr_entry(&tok, tok, false);
+        if (tok->kind == TK_EOF || tok->is_sol) error(start, "expected ']]'");
+    }
+    *rest = tok->next->next;
+    return dummy.next;
+}
+
+// __attribute__ ( ( Attr ("," Attr)* )? ), the GNU spelling.
+static Attr *attr_list_gnu(Token **rest, Token *tok) {
+    Token *start = tok;
+    tok = skip(tok->next, TK_LPAREN);
+    tok = skip(tok, TK_LPAREN);
+    Attr dummy = {}, *cur = &dummy;
+    while (tok->kind != TK_RPAREN) {
+        if (cur != &dummy) tok = skip(tok, TK_COMMA);
+        cur = cur->next = attr_entry(&tok, tok, true);
+        if (tok->kind == TK_EOF || tok->is_sol) error(start, "expected ')'");
+    }
+    tok = skip(tok, TK_RPAREN);
+    *rest = tok->next;
+    return dummy.next;
+}
+
+// Consume attribute lists after a declarator (or after '*') and attach
+// them to the type.
+static Type *decl_attrs(Token **rest, Token *tok, Type *ty) {
+    if (!is_attr_start(tok)) {
+        *rest = tok;
+        return ty;
+    }
+    ty = copy_type(ty);
+    Attr *head = ty->attrs;
+    while (is_attr_start(tok)) {
+        Attr *list = tok->kind == TK_ATTR ? attr_list_gnu(&tok, tok) : attr_list_c23(&tok, tok);
+        Attr *tail = list;
+        while (tail && tail->next) tail = tail->next;
+        if (tail) tail->next = head;
+        head = list;
+    }
+    ty->attrs = head;
+    *rest = tok;
+    return ty;
+}
+
+// Prepend attributes to a type (record_decl / enum_decl attach directly
+// to the freshly created type).
+static void ty_prepend_attrs(Type *ty, Attr *attrs) {
+    Attr *tail = attrs;
+    while (tail && tail->next) tail = tail->next;
+    if (tail) tail->next = ty->attrs;
+    ty->attrs = attrs;
+}
+
+// Attributes recognized at the declspec position in C23 spelling (as in
+// clang); the GNU spelling additionally accepts all declaration
+// attributes there.
+static bool declspec_pos_attr(AttrInfo *info) {
+    return !strcmp(info->name, "deprecated") || !strcmp(info->name, "nodiscard") ||
+           !strcmp(info->name, "maybe_unused") || !strcmp(info->name, "noreturn");
+}
+
+// Merge declaration attributes into *funcspec and *align. With
+// gnu_only, only __attribute__-spelled attributes apply (post-declarator
+// GNU attributes attach to the declaration; C23 spellings attach to the
+// type).
+static void attr_decl_apply(Attr *attrs, int *funcspec, int *align, bool gnu_only) {
+    for (Attr *a = attrs; a; a = a->next) {
+        if (!a->info) continue;
+        if (gnu_only && !a->is_gnu) continue;
+        if (!strcmp(a->info->name, "noreturn")) {
+            *funcspec |= Q_NORETURN;
+        } else if (!strcmp(a->info->name, "aligned") && a->args) {
+            Token *t;
+            *align = MAX(*align, (int)const_expr(&t, a->args->next));
+        }
+    }
+}
+
+// Set the per-symbol flags for declaration attributes.
+static void sym_attr_flags(Sym *var, Attr *attrs, bool gnu_only) {
+    for (Attr *a = attrs; a; a = a->next) {
+        if (!a->info) continue;
+        if (gnu_only && !a->is_gnu) continue;
+        if (!strcmp(a->info->name, "deprecated"))
+            var->is_deprecated = true;
+        else if (!strcmp(a->info->name, "nodiscard"))
+            var->is_nodiscard = true;
+        else if (!strcmp(a->info->name, "maybe_unused"))
+            var->is_maybe_unused = true;
+        else if (!strcmp(a->info->name, "unused"))
+            var->is_unused = true;
+    }
+}
+
+// Skip leading attribute lists; returns the first token after them.
+static Token *skip_leading_attrs(Token *tok) {
+    while (is_attr_start(tok)) {
+        if (tok->kind == TK_ATTR)
+            attr_list_gnu(&tok, tok);
+        else
+            attr_list_c23(&tok, tok);
+    }
+    return tok;
+}
+
+// A standalone attribute declaration: AttrSpec+ ";" with no declspecs.
+static bool attr_decl_then_semi(Token *tok) { return skip_leading_attrs(tok)->kind == TK_SEMI; }
+
+// AttrDecl ::= AttrSpec+ ";": applies the declaration attribute checks
+// (as in clang, noreturn is rejected), then returns the token past ';'.
+static Token *attr_decl(Token *tok) {
+    Token *t = tok;
+    while (is_attr_start(t)) {
+        Attr *list = t->kind == TK_ATTR ? attr_list_gnu(&t, t) : attr_list_c23(&t, t);
+        for (Attr *a = list; a; a = a->next)
+            if (a->info && !strcmp(a->info->name, "noreturn"))
+                error(a->tok, "‘noreturn’ attribute only applies to functions");
+    }
+    return t->next;
+}
+
+static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec, Attr **attrs) {
     Type *ty;
     bool seen_auto = false;
     bool is_constexpr = false;
@@ -3928,8 +4204,35 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
         UNSIGNED = 1 << 29,
     };
 
-    while (is_typename(tok, true)) {
+    Attr dummy_a = {}, *attr_cur = &dummy_a;
+    Attr *type_attrs = NULL;
+    bool seen_declspec = false;
+
+    while (is_typename(tok, true) || is_attr_start(tok)) {
         Token *ty_tok = tok;
+        if (is_attr_start(tok)) {
+            Attr *list = tok->kind == TK_ATTR ? attr_list_gnu(&tok, tok) : attr_list_c23(&tok, tok);
+            for (Attr *a = list; a;) {
+                Attr *next = a->next;
+                if (!a->info) {
+                    // empty entry
+                } else if (seen_declspec && !a->is_gnu) {
+                    // C23 spelling after the declspecs: type attributes.
+                    a->next = type_attrs;
+                    type_attrs = a;
+                } else if (declspec_pos_attr(a->info) || (a->is_gnu && (a->info->targets & ATTR_DECL))) {
+                    // Declaration attributes (the GNU spelling accepts
+                    // the full declaration attribute set, as in clang).
+                    a->next = NULL;
+                    if (attrs) attr_cur = attr_cur->next = a;
+                } else {
+                    warning(a->tok, "unknown attribute '%s' ignored", str(a->tok->id));
+                }
+                a = next;
+            }
+            continue;
+        }
+        seen_declspec = true;
         switch (tok->kind) {
             case TK_AUTO:
                 if (seen_auto) error(tok, "duplicate ‘auto’");
@@ -4212,7 +4515,13 @@ loop_end:
     }
 
     *rest = tok;
-    return type_qual(ty, qual);
+    ty = type_qual(ty, qual);
+    if (type_attrs) {
+        ty = copy_type(ty);
+        ty_prepend_attrs(ty, type_attrs);
+    }
+    if (attrs) *attrs = dummy_a.next;
+    return ty;
 }
 
 static Type *func_param(Token **rest, Token *tok, Type *ty) {
@@ -4235,7 +4544,7 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
         }
 
         Token *start = tok;
-        Type *basety = declspecs(&tok, tok, NULL, NULL, NULL);
+        Type *basety = declspecs(&tok, tok, NULL, NULL, NULL, NULL);
         Type *paramty = abstract_declarator(&tok, tok, basety, true);
         if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type");
         // "array of T" is converted to "pointer to T" in the parameter
@@ -4339,14 +4648,14 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty, bool is_param) {
     if (tok->kind == TK_LPAREN)
         ty = func_param(&tok, tok, ty);
-    else if (tok->kind == TK_LBRACKET)
+    else if (tok->kind == TK_LBRACKET && !is_attr_start(tok))
         ty = array_dimensions(&tok, tok, ty, is_param);
 
     // int arr[]()
     if ((ty->kind == TY_ARRAY || ty->kind == TY_VLA) && ty->base->kind == TY_FUNC)
         error(tok, "declaration as array of functions");
     // void foo()[]
-    if (tok->kind == TK_LBRACKET) error(tok, "function cannot return array type");
+    if (tok->kind == TK_LBRACKET && !is_attr_start(tok)) error(tok, "function cannot return array type");
     // void foo()()
     if (tok->kind == TK_LPAREN) error(tok, "function cannot return function type");
 
@@ -4368,24 +4677,26 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
         declarator(&tok, start->next, &dummy);
         tok = skip(tok, TK_RPAREN);
         ty = decl_suffix(rest, tok, ty, false);
+        ty = decl_attrs(rest, *rest, ty);
         return declarator(&tok, start->next, ty);
     }
 
     if (tok->kind != TK_IDENT) error(tok, "expected identifier or ‘(’");
     ty = decl_suffix(rest, tok->next, ty, false);
     ty->name = tok;
+    ty = decl_attrs(rest, *rest, ty);
     return ty;
 }
 
 // Decl ::= DeclSpecs InitDecls? ";"
-static Node *declaration(Token **rest, Token *tok, Type *basety, SClass sclass, int align, int funcspec) {
+static Node *declaration(Token **rest, Token *tok, Type *basety, SClass sclass, int align, int funcspec, Attr *attrs) {
     Node *node = new_node(ND_DECL, tok);
     if (tok->kind == TK_SEMI) {
         if (sclass & SC_CONSTEXPR) error(tok, "‘constexpr’ requires an initialized data declaration");
         *rest = tok->next;
         return node;
     }
-    node->body = init_decl_list(&tok, tok, basety, sclass, align, funcspec);
+    node->body = init_decl_list(&tok, tok, basety, sclass, align, funcspec, attrs);
     *rest = skip(tok, TK_SEMI);
     return node;
 }
@@ -4417,10 +4728,17 @@ static Token *external_declaration(Token *tok) {
         return tok;
     }
 
+    if (is_attr_start(tok) && attr_decl_then_semi(tok)) {
+        // AttrDecl: a standalone attribute declaration.
+        return attr_decl(tok);
+    }
+
     SClass sclass = 0;
     int align = 0;
     int funcspec = 0;
-    Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec);
+    Attr *attrs = NULL;
+    Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec, &attrs);
+    attr_decl_apply(attrs, &funcspec, &align, false);
     if (tok->kind == TK_SEMI) return tok->next;
 
     int cnt = -1;
@@ -4431,9 +4749,12 @@ static Token *external_declaration(Token *tok) {
         NameSpace *ns = find_ident(var_name, false, false);
         Sym *var;
         bool is_fn = ty->kind == TY_FUNC;
-        if (funcspec && !is_fn) {
-            if (funcspec & Q_NORETURN) error(tok, "‘noreturn’ can only appear on functions");
-            if (funcspec & Q_INLINE) error(tok, "‘inline’ can only appear on functions");
+        // GNU post-declarator attributes attach to the declaration.
+        int fspec = funcspec;
+        attr_decl_apply(ty->attrs, &fspec, &align, true);
+        if (fspec && !is_fn) {
+            if (fspec & Q_NORETURN) error(tok, "‘noreturn’ can only appear on functions");
+            if (fspec & Q_INLINE) error(tok, "‘inline’ can only appear on functions");
         }
 
         // function-definition
@@ -4467,7 +4788,9 @@ static Token *external_declaration(Token *tok) {
             }
 
             var->is_defined = true;
-            var->funcspec |= funcspec;
+            var->funcspec |= fspec;
+            sym_attr_flags(var, attrs, false);
+            sym_attr_flags(var, ty->attrs, true);
             cur_fn = var;
             cur_fn->num_blk = 2;  // fn->start + fn->end
             cur_fn->num_lbl = 0;
@@ -4571,7 +4894,9 @@ static Token *external_declaration(Token *tok) {
                 gvar_initializer(&tok, tok->next, var);
                 var->is_defined = true;
             }
-            var->funcspec |= funcspec;
+            var->funcspec |= fspec;
+            sym_attr_flags(var, attrs, false);
+            sym_attr_flags(var, ty->attrs, true);
             if (var->ty->size < 0 && (var->ty->kind != TY_ARRAY && var->ty->kind != TY_VLA))
                 error(var_name, "variable ‘%s’ has incomplete type", str(var_name->id));
         }

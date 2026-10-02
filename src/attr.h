@@ -6,6 +6,7 @@
 // Attribute names and lookup, shared by the parser and the preprocessor
 // (__has_c_attribute / __has_attribute) so that they cannot drift.
 
+typedef struct Token Token;
 typedef struct AttrInfo AttrInfo;
 
 // Namespaces. Unqualified names in __has_c_attribute are looked up in
@@ -38,5 +39,16 @@ struct AttrInfo {
 // Look up an attribute by namespace and name; "__x__" spellings are
 // normalized to "x". Returns NULL if unknown.
 AttrInfo *attr_lookup(char *ns, char *name);
+
+// An attribute instance in a declaration context. Attached to Type
+// (type attributes) or collected by declspecs (declaration attributes).
+typedef struct Attr Attr;
+struct Attr {
+    Attr *next;
+    AttrInfo *info;  // NULL for empty "[[]]" entries
+    Token *tok;      // the attribute name token, for diagnostics
+    Token *args;     // the '(' of the argument list, NULL if none
+    bool is_gnu;     // written as __attribute__ (GNU spelling)
+};
 
 #endif

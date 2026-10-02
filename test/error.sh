@@ -227,6 +227,20 @@ echo '#if __has_attribute(packed(1))
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "missing ')'"
 check '__has_attribute rejects arguments'
 
+# Attribute position diagnostics (as in clang).
+echo '[[noreturn]] int v;' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'noreturn.*can only appear on functions'
+check 'noreturn on variable'
+echo '[[noreturn]];' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'noreturn.*only applies to functions'
+check 'standalone noreturn attribute'
+echo '[[unused]] int x;' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "unknown attribute 'unused' ignored"
+check 'unused unknown at declspec position'
+echo '[[packed]] int x;' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "unknown attribute 'packed' ignored"
+check 'packed unknown at declspec position'
+
 # Delimited universal character names: empty and surrogate are invalid.
 echo 'char *s = "\u{}";' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'empty delimited universal character name'

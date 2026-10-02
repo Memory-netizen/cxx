@@ -1,7 +1,7 @@
 #include "cxx.h"
 
 #define TYPE(kind, size, align, is_unsigned) \
-    &(Type) { kind, 0, size, align, is_unsigned, 0, 0, NULL, NULL, NULL, NULL, {0} }
+    &(Type) { kind, 0, size, align, is_unsigned, 0, 0, NULL, NULL, NULL, NULL, NULL, {0} }
 
 Type *bitint[129][2] = {
     {NULL, NULL},
