@@ -200,26 +200,57 @@ printf 'int \\u{00E9}x = 65; int main() { return ("\\u{41}"[0] == 65 && \\u{00E9
 check 'delimited universal character names'
 
 # #embed: replaced by a comma-separated list of the resource bytes
-# (C23 6.10.4).
+# (C23 6.10.4). Resources are searched in the -embed-dir directories,
+# not the include paths (as in clang).
 printf 'AB\001\377' > $tmp/data.bin
-echo '#embed "data.bin"' | $compiler -I$tmp -E -xc - | grep -q '65,66,1,255'
+echo '#embed "data.bin"' | $compiler -embed-dir=$tmp -E -xc - | grep -q '65,66,1,255'
 check '#embed bytes'
 echo '#define X 99
-#embed "data.bin" limit(2) prefix(X + 1,) suffix(, 7)' | $compiler -I$tmp -E -xc - | grep -q '99 + 1,65,66, 7'
+#embed "data.bin" limit(2) prefix(X + 1,) suffix(, 7)' | $compiler -embed-dir=$tmp -E -xc - | grep -q '99 + 1,65,66, 7'
 check '#embed limit prefix suffix'
 : > $tmp/empty.bin
-echo '#embed "empty.bin" prefix(1,) suffix(, 2) if_empty(42)' | $compiler -I$tmp -E -xc - | grep -q '^ *42$'
+echo '#embed "empty.bin" prefix(1,) suffix(, 2) if_empty(42)' | $compiler -embed-dir=$tmp -E -xc - | grep -q '^ *42$'
 check '#embed if_empty'
-echo '#embed "empty.bin" prefix(1,) suffix(, 2)' | $compiler -I$tmp -E -xc - | grep -c '1,' | grep -q '^0$'
+echo '#embed "empty.bin" prefix(1,) suffix(, 2)' | $compiler -embed-dir=$tmp -E -xc - | grep -c '1,' | grep -q '^0$'
 check '#embed empty without if_empty'
 echo '#define EMBF "data.bin"
-#embed EMBF limit(3)' | $compiler -I$tmp -E -xc - | grep -q '65,66,1$'
+#embed EMBF limit(3)' | $compiler -embed-dir=$tmp -E -xc - | grep -q '65,66,1$'
 check '#embed macro form'
 # The underscored spellings name the same parameters (C23 6.10.3.1).
-echo '#embed "data.bin" __limit__(1) __prefix__(7,) __suffix__(, 9)' | $compiler -I$tmp -E -xc - | grep -q '7,65, 9'
+echo '#embed "data.bin" __limit__(1) __prefix__(7,) __suffix__(, 9)' | $compiler -embed-dir=$tmp -E -xc - | grep -q '7,65, 9'
 check '#embed underscored parameters'
-echo '#embed "empty.bin" __if_empty__(42)' | $compiler -I$tmp -E -xc - | grep -q '^ *42$'
+echo '#embed "empty.bin" __if_empty__(42)' | $compiler -embed-dir=$tmp -E -xc - | grep -q '^ *42$'
 check '#embed underscored if_empty'
+
+# -embed-dir adds resource search paths (include paths are not searched).
+mkdir -p $tmp/ed1 $tmp/idir
+printf 'ED' > $tmp/ed1/e.bin
+printf 'ID' > $tmp/idir/e.bin
+echo '#embed "e.bin"' | $compiler -embed-dir=$tmp/ed1 -I$tmp/idir -E -xc - | grep -q '69,68'
+check '#embed -embed-dir'
+echo '#embed <e.bin>' | $compiler --embed-dir=$tmp/ed1 -I$tmp/idir -E -xc - | grep -q '69,68'
+check '#embed --embed-dir angle form'
+echo '#if __has_embed(<e.bin>)
+HAS_EDIR
+#endif' | $compiler -embed-dir $tmp/ed1 -E -xc - | grep -q HAS_EDIR
+check '__has_embed -embed-dir'
+# Include paths are not searched for embed resources.
+echo '#if !__has_embed(<e.bin>) && !__has_embed("e.bin")
+NO_IDIR
+#endif' | $compiler -I$tmp/idir -E -xc - | grep -q NO_IDIR
+check '#embed ignores -I dirs'
+# The quoted form also checks the current file's directory and the
+# plain filename (working directory) before the -embed-dir directories.
+mkdir -p $tmp/emb
+printf 'FD' > $tmp/emb/f.bin
+echo '#embed "f.bin"' > $tmp/emb/t.c
+$compiler -E -P $tmp/emb/t.c | grep -q '70,68'
+check '#embed quoted file directory'
+cabs=`readlink -f $compiler`
+mkdir -p $tmp/emb2
+echo '#embed "pw.bin"' > $tmp/emb2/t.c
+(cd $tmp && printf 'PW' > pw.bin && $cabs -E -P $tmp/emb2/t.c | grep -q '80,87')
+check '#embed quoted working directory'
 
 # __has_embed: found / empty / not found, with the __STDC_EMBED_* values.
 echo '#if __has_embed("data.bin") == __STDC_EMBED_FOUND__
@@ -230,7 +261,7 @@ HAS_EMPTY
 #endif
 #if !__has_embed("nonexistent_embed.bin")
 HAS_NONE
-#endif' | $compiler -I$tmp -E -xc - > $tmp/hasemb.out
+#endif' | $compiler -embed-dir=$tmp -E -xc - > $tmp/hasemb.out
 grep -q HAS_EMBED $tmp/hasemb.out
 check '__has_embed found'
 grep -q HAS_EMPTY $tmp/hasemb.out
@@ -239,12 +270,12 @@ grep -q HAS_NONE $tmp/hasemb.out
 check '__has_embed not found'
 echo '#if __has_embed("data.bin" __limit__(1))
 HAS_ULIMIT
-#endif' | $compiler -I$tmp -E -xc - | grep -q HAS_ULIMIT
+#endif' | $compiler -embed-dir=$tmp -E -xc - | grep -q HAS_ULIMIT
 check '__has_embed underscored parameter'
 # An unknown parameter makes __has_embed report "not found" silently.
 echo '#if !__has_embed("data.bin" bogus(1))
 HAS_NOPARAM
-#endif' | $compiler -I$tmp -E -xc - | grep -q HAS_NOPARAM
+#endif' | $compiler -embed-dir=$tmp -E -xc - | grep -q HAS_NOPARAM
 check '__has_embed unknown parameter'
 
 # BOM marker

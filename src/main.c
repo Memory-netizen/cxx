@@ -51,6 +51,9 @@ static char *opt_sysroot;
 char **include_paths;
 int num_include_paths;
 
+char **embed_dirs;
+int num_embed_dirs;
+
 char **std_include_paths;
 int num_std_include_paths;
 
@@ -73,8 +76,8 @@ static void usage(int status) {
 }
 
 static bool take_arg(char *arg) {
-    char *x[] = {"-o",  "-I",  "-include", "-x",      "-idirafter", "-MF",
-                 "-MT", "-MQ", "-Xlinker", "-target", "-isystem",   "--sysroot"};
+    char *x[] = {"-o",  "-I",       "-include", "-x",       "-idirafter", "-MF",        "-MT",
+                 "-MQ", "-Xlinker", "-target",  "-isystem", "--sysroot",  "-embed-dir", "--embed-dir"};
     for (size_t i = 0; i < sizeof(x) / sizeof(*x); i++)
         if (!strcmp(arg, x[i])) return true;
     return false;
@@ -315,6 +318,21 @@ static void parse_args(int argc, char **argv) {
 
         if (!strncmp(argv[i], "-I", 2)) {
             include_paths[num_include_paths++] = argv[i] + 2;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-embed-dir") || !strcmp(argv[i], "--embed-dir")) {
+            embed_dirs[num_embed_dirs++] = argv[++i];
+            continue;
+        }
+
+        if (!strncmp(argv[i], "-embed-dir=", 11)) {
+            embed_dirs[num_embed_dirs++] = argv[i] + 11;
+            continue;
+        }
+
+        if (!strncmp(argv[i], "--embed-dir=", 12)) {
+            embed_dirs[num_embed_dirs++] = argv[i] + 12;
             continue;
         }
 
@@ -785,6 +803,7 @@ int main(int argc, char **argv) {
     input_paths = emalloc(argc * sizeof(char *));
     tmpfiles = emalloc(argc * 4 * sizeof(char *));
     include_paths = emalloc((argc + 16) * sizeof(char *));
+    embed_dirs = emalloc((argc + 16) * sizeof(char *));
     std_include_paths = emalloc((argc + 16) * sizeof(char *));
     dirafter = emalloc(argc * sizeof(char *));
     ld_extra_args = emalloc(argc * 2 * sizeof(char *));

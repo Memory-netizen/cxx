@@ -1187,17 +1187,22 @@ static void read_embed_params(Token **rest, Token *arg, Token *eol, int64_t *lim
     *rest = eol ? eol : arg;
 }
 
-// Resolve an embed resource path: the quoted form checks the current
-// file's directory first, then the include path. Returns NULL if the
-// resource cannot be found.
+// Resolve an embed resource path (as in clang): absolute paths are used
+// as-is; the quoted form checks the current file's directory, then the
+// plain filename, then the -embed-dir directories; the angle form only
+// the -embed-dir directories. Include paths are not searched. Returns
+// NULL if the resource cannot be found.
 static char *resolve_embed_path(Token *tok, char *filename, bool is_dquote) {
-    if (filename[0] != '/' && is_dquote) {
+    if (filename[0] == '/') return filename;
+    if (is_dquote) {
         char *path = format("%s/%s", dirname(strdup(tok->file->name)), filename);
         if (file_exists(path)) return path;
+        if (file_exists(filename)) return filename;
     }
-    char *path = search_include_paths(filename);
-    if (path) return path;
-    if (file_exists(filename)) return filename;
+    for (int i = 0; i < num_embed_dirs; i++) {
+        char *path = format("%s/%s", embed_dirs[i], filename);
+        if (file_exists(path)) return path;
+    }
     return NULL;
 }
 
