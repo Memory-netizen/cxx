@@ -162,41 +162,37 @@ static int from_hex(char c) {
     return c - 'A' + 10;
 }
 
-uint32_t read_universal_char(char **new_pos, char *p, int ch) {
+uint32_t read_universal_char(char **new_pos, char *p, int ch, SrcFile *file) {
     int len = ch == 'u' ? 4 : 8;
     if (*p == '{') {
         char *q = ++p;
         while (isxdigit(*q)) q++;
-        if (*q != '}')
-            error_at(cur_file, (uint32_t)(p - 1 - cur_file->contents), "‘\\%c{’ not terminated with ‘}’", ch);
+        if (*q != '}') error_at(file, (uint32_t)(p - 1 - file->contents), "‘\\%c{’ not terminated with ‘}’", ch);
         len = q - p;
-        if (len == 0)
-            error_at(cur_file, (uint32_t)(p - 1 - cur_file->contents), "empty delimited universal character name");
+        if (len == 0) error_at(file, (uint32_t)(p - 1 - file->contents), "empty delimited universal character name");
     }
     uint32_t c = 0;
     for (int i = 0; i < len; i++) {
         if (!isxdigit(p[i]))
-            error_at(cur_file, (uint32_t)(p + i - cur_file->contents), "invalid digit ‘%c’ in universal character name",
-                     p[i]);
+            error_at(file, (uint32_t)(p + i - file->contents), "invalid digit ‘%c’ in universal character name", p[i]);
         c = (c << 4) | from_hex(p[i]);
     }
-    if (0xD800 <= c && c <= 0xDFFF)
-        error_at(cur_file, (uint32_t)(p - 1 - cur_file->contents), "invalid universal character");
-    if (c > 0x10FFFF) error_at(cur_file, (uint32_t)(p - 1 - cur_file->contents), "invalid universal character");
+    if (0xD800 <= c && c <= 0xDFFF) error_at(file, (uint32_t)(p - 1 - file->contents), "invalid universal character");
+    if (c > 0x10FFFF) error_at(file, (uint32_t)(p - 1 - file->contents), "invalid universal character");
     if (*(p - 1) == '{') len++;
     *new_pos = p + len;
     return c;
 }
 
 // Replace \u or \U escape sequences with corresponding UTF-8 bytes.
-static char *convert_universal_chars(char *p, int len) {
+static char *convert_universal_chars(char *p, int len, SrcFile *file) {
     char *end = p + len;
     char *buf = emalloc(len + 1);
     char *cur = buf;
 
     while (p < end) {
         if (*p == '\\' && (p[1] == 'u' || p[1] == 'U')) {
-            uint32_t c = read_universal_char(&p, p + 2, p[1]);
+            uint32_t c = read_universal_char(&p, p + 2, p[1], file);
             cur += encode_utf8(cur, c);
         } else {
             *cur++ = *p++;
@@ -213,7 +209,7 @@ static int read_ident(char *start) {
     char *p = start;
     uint32_t c;
     if (*p == '\\' && (p[1] == 'u' || p[1] == 'U')) {
-        c = read_universal_char(&p, p + 2, p[1]);
+        c = read_universal_char(&p, p + 2, p[1], cur_file);
         if (c <= 0x9F)
             error_at(cur_file, (uint32_t)(start - cur_file->contents),
                      "universal character %.*s is not valid in an identifier", (int)(p - start), start);
@@ -232,7 +228,7 @@ static int read_ident(char *start) {
     while (1) {
         char *uc_start = p;
         if (*p == '\\' && (p[1] == 'u' || p[1] == 'U')) {
-            c = read_universal_char(&p, p + 2, p[1]);
+            c = read_universal_char(&p, p + 2, p[1], cur_file);
             if (c <= 0x9F)
                 error_at(cur_file, (uint32_t)(uc_start - cur_file->contents),
                          "universal character %.*s is not valid in an identifier", (int)(p - uc_start), uc_start);
@@ -306,7 +302,7 @@ static uint64_t read_escaped_char(char **new_pos, char *p, char *end) {
         return val;
     }
 
-    if (c == 'u' || c == 'U') return read_universal_char(new_pos, p + 1, c);
+    if (c == 'u' || c == 'U') return read_universal_char(new_pos, p + 1, c, cur_file);
 
     *new_pos = p + 1;
     return c;
@@ -401,7 +397,7 @@ static void convert_utf32_str_literal(Token *tok, char *str) {
 }
 
 void convert_str_literal(Token *tok) {
-    char *str = convert_universal_chars(tok_text(tok), tok->len);
+    char *str = convert_universal_chars(tok_text(tok), tok->len, tok->file);
     switch (tok->enc_prefix) {
         case PREFIX_NONE:
         case PREFIX_u8:
@@ -1020,7 +1016,7 @@ Token *tokenize(SrcFile *file) {
         int ident_len = read_ident(p);
         if (ident_len) {
             tok = new_token(TK_IDENT, p, p + ident_len);
-            char *buf = convert_universal_chars(p, ident_len);
+            char *buf = convert_universal_chars(p, ident_len, cur_file);
             tok->id = intern(buf, strlen(buf));
             cur = cur->next = tok;
             p += tok->len;

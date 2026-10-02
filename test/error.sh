@@ -175,6 +175,57 @@ echo 'int x = _Pragma(5);' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q '_Pragma takes a parenthesized string literal'
 check '_Pragma non-string argument'
 
+# #embed parameter diagnostics.
+echo '#embed "nonexistent_embed.bin"' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "'nonexistent_embed.bin' file not found"
+check 'embed file not found'
+echo '#embed "x.bin" limit(1) limit(2)' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "cannot specify parameter 'limit' twice"
+check 'embed duplicate parameter'
+echo '#embed "x.bin" limit(1) __limit__(1)' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "cannot specify parameter '__limit__' twice"
+check 'embed duplicate across spellings'
+echo '#embed "x.bin" bogus(1)' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "unknown embed preprocessor parameter 'bogus'"
+check 'embed unknown parameter'
+echo '#embed "x.bin" limit(-1)' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "invalid value '-1'; must be positive"
+check 'embed negative limit'
+
+# __has_embed diagnostics.
+echo '#if __has_embed("x.bin" limit(1) limit(2))
+#endif' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "cannot specify parameter 'limit' twice"
+check 'has_embed duplicate parameter'
+echo '#if __has_embed("x.bin" limit(-1))
+#endif' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "invalid value '-1'; must be positive"
+check 'has_embed negative limit'
+echo 'int x = __has_embed("foo.bin");' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "'__has_embed' must be used within a preprocessing directive"
+check 'has_embed outside directive'
+echo '#if __has_embed
+#endif' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "missing '(' after '__has_embed'"
+check 'has_embed missing paren'
+
+# __has_c_attribute diagnostics (the evaluation is a stub returning 0).
+echo 'int x = __has_c_attribute(deprecated);' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "'__has_c_attribute' must be used within a preprocessing directive"
+check 'has_c_attribute outside directive'
+echo '#if __has_c_attribute
+#endif' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q "missing '(' after '__has_c_attribute'"
+check 'has_c_attribute missing paren'
+
+# Delimited universal character names: empty and surrogate are invalid.
+echo 'char *s = "\u{}";' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'empty delimited universal character name'
+check 'empty delimited escape'
+echo 'char *s = "\u{D800}";' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'invalid universal character'
+check 'surrogate delimited escape'
+
 # Builtin functions must be directly called (no &-use).
 echo 'int f(void) { return (int)__builtin_alloca; }' \
   | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'builtin functions must be directly called'

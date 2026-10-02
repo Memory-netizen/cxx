@@ -18,16 +18,19 @@ case "$target" in
     cc=x86_64-linux-gnu-gcc
     qemu=qemu-x86_64
     sysroot=/usr/x86_64-linux-gnu
+    ctriple=x86_64-linux-gnu
     ;;
   arm64)
     cc=aarch64-linux-gnu-gcc
     qemu=qemu-aarch64
     sysroot=/usr/aarch64-linux-gnu
+    ctriple=aarch64-linux-gnu
     ;;
   rv64)
     cc=riscv64-linux-gnu-gcc
     qemu=qemu-riscv64
     sysroot=/usr/riscv64-linux-gnu
+    ctriple=riscv64-linux-gnu
     ;;
   *)
     echo "usage: run_cross.sh amd64|arm64|rv64"
@@ -75,7 +78,10 @@ for t in test/*.c; do
     failed=$((failed + 1))
     continue
   fi
-  if ! "$cc" -c "$work/$b.s" -o "$work/$b.o" 2>"$work/$b.aerr"; then
+  # Assemble with the clang integrated assembler: it accepts the
+  # directives clang emits (e.g. .prefalign, newer RISC-V ISA
+  # attributes) that older binutils reject.
+  if ! clang -target "$ctriple" -x assembler -c "$work/$b.s" -o "$work/$b.o" 2>"$work/$b.aerr"; then
     echo "ASSEMBLE-FAIL $b"
     failed=$((failed + 1))
     continue

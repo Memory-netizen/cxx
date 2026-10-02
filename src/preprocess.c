@@ -5,6 +5,7 @@ struct tm *tm;
 enum {
     P_INCLUDE,
     P_INCLUDE_NEXT,
+    P_EMBED,
     P_IF,
     P_IFDEF,
     P_IFNDEF,
@@ -26,14 +27,34 @@ static struct {
     char *directive;
     uint32_t id;
 } dt[] = {
-    [P_INCLUDE] = {"include", 0}, [P_INCLUDE_NEXT] = {"include_next", 0},
-    [P_IF] = {"if", 0},           [P_IFDEF] = {"ifdef", 0},
-    [P_IFNDEF] = {"ifndef", 0},   [P_ELIF] = {"elif", 0},
-    [P_ELIFDEF] = {"elifdef", 0}, [P_ELIFNDEF] = {"elifndef", 0},
-    [P_ELSE] = {"else", 0},       [P_ENDIF] = {"endif", 0},
-    [P_DEFINE] = {"define", 0},   [P_UNDEF] = {"undef", 0},
-    [P_ERROR] = {"error", 0},     [P_WARNING] = {"warning", 0},
-    [P_LINE] = {"line", 0},       [P_PRAGMA] = {"pragma", 0},
+    [P_INCLUDE] = {"include", 0},   [P_INCLUDE_NEXT] = {"include_next", 0},
+    [P_EMBED] = {"embed", 0},       [P_IF] = {"if", 0},
+    [P_IFDEF] = {"ifdef", 0},       [P_IFNDEF] = {"ifndef", 0},
+    [P_ELIF] = {"elif", 0},         [P_ELIFDEF] = {"elifdef", 0},
+    [P_ELIFNDEF] = {"elifndef", 0}, [P_ELSE] = {"else", 0},
+    [P_ENDIF] = {"endif", 0},       [P_DEFINE] = {"define", 0},
+    [P_UNDEF] = {"undef", 0},       [P_ERROR] = {"error", 0},
+    [P_WARNING] = {"warning", 0},   [P_LINE] = {"line", 0},
+    [P_PRAGMA] = {"pragma", 0},
+};
+
+enum {
+    EMBED_LIMIT = 1 << 0,
+    EMBED_PREFIX = 1 << 1,
+    EMBED_SUFFIX = 1 << 2,
+    EMBED_IF_EMPTY = 1 << 3,
+};
+
+// Embed parameter names. The plain and underscored spellings name the
+// same parameter (6.10.3.1); ids are interned in init_preprocess.
+static struct {
+    char *name;
+    uint32_t id;
+    uint32_t bit;
+} embed_params[] = {
+    {"limit", 0, EMBED_LIMIT},       {"__limit__", 0, EMBED_LIMIT},       {"prefix", 0, EMBED_PREFIX},
+    {"__prefix__", 0, EMBED_PREFIX}, {"suffix", 0, EMBED_SUFFIX},         {"__suffix__", 0, EMBED_SUFFIX},
+    {"if_empty", 0, EMBED_IF_EMPTY}, {"__if_empty__", 0, EMBED_IF_EMPTY},
 };
 
 static uint32_t true_id;
@@ -43,11 +64,19 @@ static uint32_t vaopt_id;
 static uint32_t once_id;
 static uint32_t has_include_id;
 static uint32_t has_include_next_id;
+static uint32_t has_embed_id;
+static uint32_t has_c_attribute_id;
 static uint32_t pragma_op_id;
 
 static Token *expand_macro(Token *dst, Token *list);
 static char *join_tokens(Token *tok);
 static char *search_include_paths(char *filename);
+static char *read_filename(Token **rest, Token *tok, bool *is_dquote, bool to_eol);
+static char *read_embed_filename(Token **rest, Token *tok, bool *is_dquote);
+static Token *read_embed_param(Token **tok, Token *lp);
+static char *resolve_embed_path(Token *tok, char *filename, bool is_dquote);
+static int64_t eval_const_tokens(Token *expr);
+static uint32_t check_embed_param(Token *tok, uint32_t seen, bool err_unknown);
 typedef struct Macro Macro;
 static Macro *find_macro(Token *tok);
 
@@ -299,23 +328,10 @@ static Token *eval_has_include(Token *tok) {
             bool is_next = tok->id == has_include_next_id;
             tok = skip(tok->next, TK_LPAREN);
 
-            bool exists = false;
-            if (tok->kind == TK_STRLIT && tok->enc_prefix == PREFIX_NONE) {
-                char *path = strndup(tok_text(tok) + 1, tok->len - 2);
-                exists = is_next ? exist_include_next(path) : exist_include(start, path, true);
-            } else if (tok->kind == TK_LT) {
-                Token *lt = tok;
-                for (; tok->kind != TK_GT; tok = tok->next)
-                    if (tok->is_sol || tok->kind == TK_EOF) error(lt, "expected '>' to match this '<'");
-                Token *gt = tok;
-                gt->kind = TK_EOF;
-                char *path = join_tokens(lt->next);
-                exists = is_next ? exist_include_next(path) : exist_include(start, path, false);
-            } else {
-                error(tok, "%s expects \"FILENAME\" or <FILENAME>", is_next ? "__has_include_next" : "__has_include");
-            }
-
-            tok = skip(tok->next, TK_RPAREN);
+            bool is_dquote = false;
+            char *path = read_filename(&tok, tok, &is_dquote, false);
+            bool exists = is_next ? exist_include_next(path) : exist_include(start, path, is_dquote);
+            tok = skip(tok, TK_RPAREN);
             cur = cur->next = ident_to_num(start, exists ? 1 : 0);
             continue;
         }
@@ -326,18 +342,128 @@ static Token *eval_has_include(Token *tok) {
     return dummy.next;
 }
 
-// Read and evaluate a constant expression.
-static int64_t eval_const_expr(Token **rest, Token *tok) {
-    Token *start = tok;
-    Token *expr = read_const_expr(rest, tok->next);
+// __has_embed ( resource, params... ): the resource availability as an
+// integer constant: __STDC_EMBED_NOT_FOUND__ (0) if the search fails
+// or a parameter is unsupported, __STDC_EMBED_EMPTY__ (2) if the
+// resource is empty, __STDC_EMBED_FOUND__ (1) otherwise (C23 6.10.1).
+// `tok` must point at the opening '('.
+static int64_t has_embed_result(Token **rest, Token *tok) {
+    Token *lp = tok;
+    tok = tok->next;
+    bool is_dquote = false;
+    char *filename = read_embed_filename(&tok, tok, &is_dquote);
 
-    if (expr->kind == TK_EOF) error(start, "no expression in #%s", str(start->id));
+    int64_t limit = -1;
+    uint32_t seen = 0;
+    bool ok = true;
+    while (ok) {
+        if (tok->kind == TK_RPAREN) break;
+        if (tok->kind == TK_COMMA) {
+            tok = tok->next;
+            continue;
+        }
+        if (tok->kind != TK_IDENT) {
+            ok = false;
+            break;
+        }
+        Token *ptok = tok;
+        uint32_t bit = check_embed_param(tok, seen, false);
+        if (!bit) {
+            ok = false;  // Unsupported parameter: not found.
+            break;
+        }
+        seen |= bit;
+        Token *plp = tok->next;
+        if (!plp || plp->kind != TK_LPAREN) {
+            ok = false;
+            break;
+        }
+        Token *content = read_embed_param(&tok, plp);
+        tok = tok->next;
+        if (bit == EMBED_LIMIT) {
+            limit = eval_const_tokens(content);
+            if (limit < 0) error(ptok, "invalid value '%ld'; must be positive", limit);
+        }
+    }
+    if (!ok) {
+        // Skip the rest of the call, honoring nested parentheses.
+        int depth = 1;
+        for (; tok; tok = tok->next) {
+            if (tok->kind == TK_LPAREN) depth++;
+            if (tok->kind == TK_RPAREN && --depth == 0) break;
+            if (tok->kind == TK_EOF || tok->is_sol) break;
+        }
+        if (tok && tok->kind == TK_RPAREN) tok = tok->next;
+        *rest = tok;
+        return 0;
+    }
+    tok = tok->next;  // the closing ')'
+    *rest = tok;
 
+    char *path = resolve_embed_path(lp, filename, is_dquote);
+    if (!path) return 0;
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    return st.st_size == 0 ? 2 : 1;
+}
+
+static Token *eval_has_embed(Token *tok) {
+    Token dummy = {};
+    Token *cur = &dummy;
+    while (tok) {
+        if (tok->kind == TK_IDENT && tok->id == has_embed_id) {
+            Token *start = tok;
+            if (!tok->next || tok->next->kind != TK_LPAREN) error(tok, "missing '(' after '__has_embed'");
+            int64_t result = has_embed_result(&tok, tok->next);
+            cur = cur->next = ident_to_num(start, result);
+            continue;
+        }
+        cur = cur->next = tok;
+        tok = tok->next;
+    }
+
+    return dummy.next;
+}
+
+// __has_c_attribute ( tokens ): attribute support is not implemented
+// yet, so this stub always yields 0 (C23 6.10.1). The parenthesized
+// token sequence is consumed without evaluation.
+static Token *eval_has_c_attribute(Token *tok) {
+    Token dummy = {};
+    Token *cur = &dummy;
+    while (tok) {
+        if (tok->kind == TK_IDENT && tok->id == has_c_attribute_id) {
+            Token *start = tok;
+            if (!tok->next || tok->next->kind != TK_LPAREN) error(tok, "missing '(' after '__has_c_attribute'");
+            int depth = 1;
+            for (tok = tok->next->next; tok; tok = tok->next) {
+                if (tok->kind == TK_LPAREN) depth++;
+                if (tok->kind == TK_RPAREN && --depth == 0) {
+                    tok = tok->next;
+                    break;
+                }
+                if (tok->kind == TK_EOF || tok->is_sol) error(start, "missing ')' after '__has_c_attribute'");
+            }
+            cur = cur->next = ident_to_num(start, 0);
+            continue;
+        }
+        cur = cur->next = tok;
+        tok = tok->next;
+    }
+
+    return dummy.next;
+}
+
+// Evaluate a constant expression from a NULL-terminated token list
+// (used by #if and by the #embed limit parameter).
+static int64_t eval_const_tokens(Token *expr) {
     Token dummy = {}, *cur = &dummy;
     cur = expand_macro(cur, expr);
     cur->next = new_eof(cur);
     expr = dummy.next;
     expr = eval_has_include(expr);
+    expr = eval_has_embed(expr);
+    expr = eval_has_c_attribute(expr);
 
     // we replace remaining non-macro identifiers with "0"
     Token dummy2 = {};
@@ -369,6 +495,13 @@ static int64_t eval_const_expr(Token **rest, Token *tok) {
     if (rest2->kind != TK_EOF)
         error(rest2, "missing binary operator before token \"%.*s\"", rest2->len, tok_text(rest2));
     return val;
+}
+
+static int64_t eval_const_expr(Token **rest, Token *tok) {
+    Token *start = tok;
+    Token *expr = read_const_expr(rest, tok->next);
+    if (expr->kind == TK_EOF) error(start, "no expression in #%s", str(start->id));
+    return eval_const_tokens(expr);
 }
 
 // check #elif / #else valid
@@ -916,48 +1049,206 @@ static bool exist_include_next(char *filename) {
 }
 
 // Read an #include argument.
-static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
-    // Pattern 1: #include "foo.h"
+// Read a filename/resource: a string literal or a <...> header-name
+// sequence. If to_eol, the directive ends at the newline and *rest is
+// that newline token (extra tokens are diagnosed); otherwise *rest is
+// the token after the filename (embed parameters or a closing ')').
+static char *read_filename(Token **rest, Token *tok, bool *is_dquote, bool to_eol) {
     if (tok->kind == TK_STRLIT && tok->enc_prefix == PREFIX_NONE) {
         *is_dquote = true;
-        *rest = skip_line(tok->next);
+        *rest = to_eol ? skip_line(tok->next) : tok->next;
         return strndup(tok_text(tok) + 1, tok->len - 2);
     }
 
-    // Pattern 2: #include <foo.h>
     if (tok->kind == TK_LT) {
-        // Reconstruct a filename from a sequence of tokens between
-        // "<" and ">".
+        // Reconstruct a filename from the tokens between "<" and ">".
         Token *start = tok;
-
-        // Find closing ">".
         for (; tok->kind != TK_GT; tok = tok->next)
             if (tok->is_sol || tok->kind == TK_EOF) {
                 start->line_delta = line_delta;
                 start->filename = display_name;
                 error(start, "expected '>' to match this '<'");
             }
-
         *is_dquote = false;
-        *rest = skip_line(tok->next);
-        *tok = *new_eof(tok);
+        // In place, so that the token list stays intact for the caller
+        // to continue parsing after the filename.
+        tok->kind = TK_EOF;
+        *rest = to_eol ? skip_line(tok->next) : tok->next;
         return join_tokens(start->next);
-    }
-
-    // Pattern 3: #include FOO
-    // In this case FOO must be macro-expanded to either
-    // a single string token or a sequence of "<" ... ">".
-    if (tok->kind == TK_IDENT) {
-        Token dummy = {}, *cur = &dummy;
-        cur = expand_macro(cur, read_line(rest, tok));
-        cur->next = new_eof(cur);
-        return read_include_filename(&cur, dummy.next, is_dquote);
     }
 
     tok->line_delta = line_delta;
     tok->filename = display_name;
     error(tok, "expected \"FILENAME\" or <FILENAME>");
     return NULL;
+}
+
+static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
+    // #include FOO: FOO must macro-expand to either a single string
+    // token or a sequence of "<" ... ">".
+    if (tok->kind == TK_IDENT) {
+        Token dummy = {}, *cur = &dummy;
+        cur = expand_macro(cur, read_line(rest, tok));
+        cur->next = new_eof(cur);
+        return read_include_filename(&cur, dummy.next, is_dquote);
+    }
+    return read_filename(rest, tok, is_dquote, true);
+}
+
+// #embed resource: "q-char-sequence" or <h-char-sequence>, without
+// consuming the following embed parameters.
+static char *read_embed_filename(Token **rest, Token *tok, bool *is_dquote) {
+    return read_filename(rest, tok, is_dquote, false);
+}
+
+// Collect the tokens inside a parenthesized #embed parameter. *tok must
+// point at the opening '('; on return *tok is the matching ')'.
+static Token *read_embed_param(Token **tok, Token *lp) {
+    int depth = 1;
+    Token dummy = {};
+    Token *cur = &dummy;
+    Token *t = lp->next;
+    for (;;) {
+        if (!t || t->kind == TK_EOF || t->is_sol) error(lp, "expected ')'");
+        if (t->kind == TK_LPAREN) depth++;
+        if (t->kind == TK_RPAREN && --depth == 0) break;
+        cur = cur->next = t;
+        t = t->next;
+    }
+    cur->next = NULL;
+    *tok = t;
+    return dummy.next;
+}
+
+// #embed resource: a string literal or header-name, or the pp-tokens
+// form macro-expanded and retried against the other two. Returns the
+// filename; *rest is the first token after the resource and *eol the
+// directive's newline token (NULL for the direct forms).
+static char *read_embed_resource(Token **rest, Token *tok, bool *is_dquote, Token **eol) {
+    if (tok->kind != TK_STRLIT && tok->kind != TK_LT) {
+        Token *line = read_line(&tok, tok);
+        *eol = tok;
+        Token dummy0 = {}, *c0 = &dummy0;
+        c0 = expand_macro(c0, line);
+        tok = dummy0.next;
+    }
+    return read_embed_filename(rest, tok, is_dquote);
+}
+
+// Map an embed parameter name to its bit, 0 for unknown names.
+static uint32_t embed_param_bit(uint32_t pid) {
+    for (size_t i = 0; i < sizeof(embed_params) / sizeof(embed_params[0]); i++) {
+        if (pid == embed_params[i].id) return embed_params[i].bit;
+    }
+    return 0;
+}
+
+// Validate an embed parameter name: unknown names are diagnosed only if
+// err_unknown (__has_embed treats them as "not found" instead), and
+// duplicates are always diagnosed. Returns the parameter bit.
+static uint32_t check_embed_param(Token *tok, uint32_t seen, bool err_unknown) {
+    uint32_t bit = embed_param_bit(tok->id);
+    if (!bit) {
+        if (err_unknown) error(tok, "unknown embed preprocessor parameter '%s'", str(tok->id));
+        return 0;
+    }
+    if (seen & bit) error(tok, "cannot specify parameter '%s' twice in the same '#embed' directive", str(tok->id));
+    return bit;
+}
+
+// #embed parameters: limit / prefix / suffix / if_empty, each with a
+// parenthesized token list, at most once. *rest is the directive's
+// newline token.
+static void read_embed_params(Token **rest, Token *arg, Token *eol, int64_t *limit, Token **prefix, Token **suffix,
+                              Token **if_empty) {
+    *limit = -1;
+    *prefix = *suffix = *if_empty = NULL;
+    uint32_t seen = 0;
+    while (arg && arg->kind != TK_EOF && !arg->is_sol) {
+        if (arg->kind != TK_IDENT) error(arg, "unknown embed preprocessor parameter");
+        uint32_t bit = check_embed_param(arg, seen, true);
+        seen |= bit;
+        Token *lp = arg->next;
+        if (!lp || lp->kind != TK_LPAREN)
+            error(arg, "embed parameter '%s' requires a parenthesized list", str(arg->id));
+        Token *content = read_embed_param(&arg, lp);
+        arg = arg->next;
+        if (bit == EMBED_LIMIT) {
+            *limit = eval_const_tokens(content);
+            if (*limit < 0) error(lp, "invalid value '%ld'; must be positive", *limit);
+        } else if (bit == EMBED_PREFIX) {
+            *prefix = content;
+        } else if (bit == EMBED_SUFFIX) {
+            *suffix = content;
+        } else {
+            *if_empty = content;
+        }
+    }
+    *rest = eol ? eol : arg;
+}
+
+// Resolve an embed resource path: the quoted form checks the current
+// file's directory first, then the include path. Returns NULL if the
+// resource cannot be found.
+static char *resolve_embed_path(Token *tok, char *filename, bool is_dquote) {
+    if (filename[0] != '/' && is_dquote) {
+        char *path = format("%s/%s", dirname(strdup(tok->file->name)), filename);
+        if (file_exists(path)) return path;
+    }
+    char *path = search_include_paths(filename);
+    if (path) return path;
+    if (file_exists(filename)) return filename;
+    return NULL;
+}
+
+// Resolve and read the #embed resource bytes.
+static unsigned char *read_embed_bytes(Token *tok, char *filename, bool is_dquote, long *fsize) {
+    char *path = resolve_embed_path(tok, filename, is_dquote);
+    if (!path) error(tok, "'%s' file not found", filename);
+
+    FILE *fp = fopen(path, "rb");
+    if (!fp) error(tok, "'%s' file not found", filename);
+    fseek(fp, 0, SEEK_END);
+    *fsize = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    unsigned char *data = emalloc(*fsize > 0 ? *fsize : 1);
+    if (fread(data, 1, *fsize, fp) != (size_t)*fsize) error(tok, "cannot read embed file: %s", filename);
+    fclose(fp);
+    return data;
+}
+
+// Emit the #embed replacement into the output stream: if_empty replaces
+// an empty resource entirely; otherwise prefix, the comma-separated
+// byte values, and suffix (the parameter contents are macro-expanded).
+static void emit_embed(Token **cur, Token *embed_tok, unsigned char *data, long fsize, int64_t limit, Token *prefix,
+                       Token *suffix, Token *if_empty) {
+    Token *start = *cur;
+    Token *out = *cur;
+    if (fsize == 0) {
+        // An empty resource yields only if_empty (clang/gcc emit
+        // nothing at all without it; prefix/suffix do not apply).
+        if (if_empty) out = expand_macro(out, if_empty);
+    } else {
+        if (prefix) out = expand_macro(out, prefix);
+        int64_t n = limit < 0 || limit > fsize ? fsize : limit;
+        for (int64_t i = 0; i < n; i++) {
+            // The replacement is a comma-separated list.
+            if (i > 0) {
+                Token *comma = emalloc(sizeof(Token));
+                comma->kind = TK_COMMA;
+                char *buf = format(",");
+                write_scratch_space(comma, buf);
+                comma->origin = embed_tok;
+                out = out->next = comma;
+            }
+            out = out->next = ident_to_num(embed_tok, data[i]);
+        }
+        if (suffix) out = expand_macro(out, suffix);
+    }
+    // Mark the first emitted token as start-of-line so the -E printer
+    // separates it from the preceding line marker.
+    if (start->next) start->next->is_sol = true;
+    *cur = out;
 }
 
 struct {
@@ -1123,6 +1414,12 @@ static Token *read_line_marker(Token **rest, Token *tok) {
     return new_linemarker(start, line_no, display_name);
 }
 
+static void check_invalid_ident(Token *tok) {
+    if (tok->id == has_include_id || tok->id == has_include_next_id || tok->id == has_embed_id ||
+        tok->id == has_c_attribute_id)
+        error(tok, "'%s' must be used within a preprocessing directive", str(tok->id));
+}
+
 // Visit all tokens in `tok` while evaluating preprocessing
 // macros and directives.
 static Token *preprocess2(Token *tok) {
@@ -1161,9 +1458,7 @@ static Token *preprocess2(Token *tok) {
                     tok->filename = display_name;
                     if (tok->kind == TK_ERR) error(tok, "%s", tok->msg);
                     if (tok->kind == TK_WARN) warning(tok, "%s", tok->msg);
-                    if (tok->id == has_include_id || tok->id == has_include_next_id)
-                        error(tok, "'%s' must be used within a preprocessing directive",
-                              tok->id == has_include_id ? "__has_include" : "__has_include_next");
+                    check_invalid_ident(tok);
                     buf = buf->next = tok;
                 }
                 tok = tok->next;
@@ -1300,6 +1595,23 @@ static Token *preprocess2(Token *tok) {
             char *path = search_include_next(filename);
             Token *tmp = include_file(&tok, tok, path ? path : filename, tk_hash->next->next);
             if (tmp) cur = cur->next = tmp;
+            continue;
+        }
+
+        if (tok->id == dt[P_EMBED].id) {
+            // #embed resource params-opt: the directive is replaced by a
+            // comma-separated list of the resource bytes (C23 6.10.4).
+            Token *embed_tok = tok;
+            tok = tok->next;
+            Token *eol = NULL;
+            bool is_dquote = false;
+            char *filename = read_embed_resource(&tok, tok, &is_dquote, &eol);
+            int64_t limit;
+            Token *prefix, *suffix, *if_empty;
+            read_embed_params(&tok, tok, eol, &limit, &prefix, &suffix, &if_empty);
+            long fsize;
+            unsigned char *data = read_embed_bytes(tk_hash, filename, is_dquote, &fsize);
+            emit_embed(&cur, embed_tok, data, fsize, limit, prefix, suffix, if_empty);
             continue;
         }
 
@@ -1591,7 +1903,11 @@ void init_macros(void) {
     once_id = intern("once", 4);
     has_include_id = intern("__has_include", 13);
     has_include_next_id = intern("__has_include_next", 18);
+    has_embed_id = intern("__has_embed", 11);
+    has_c_attribute_id = intern("__has_c_attribute", 17);
     pragma_op_id = intern("_Pragma", 7);
+    for (size_t i = 0; i < sizeof(embed_params) / sizeof(embed_params[0]); i++)
+        embed_params[i].id = intern(embed_params[i].name, strlen(embed_params[i].name));
 
     prep_builtin();
 

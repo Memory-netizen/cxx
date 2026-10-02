@@ -67,7 +67,10 @@ for t in test/*.c; do
     failed=$((failed + 1))
     continue
   fi
-  if ! $TOOL -march=$march -mabi=$mabi -c "$work/$b.s" -o "$work/$b.o" 2>"$work/$b.aerr"; then
+  # Assemble with the clang integrated assembler: it accepts the
+  # directives clang emits (e.g. newer RISC-V ISA attributes) that older
+  # binutils reject.
+  if ! clang -target riscv32-none-elf -march=$march -mabi=$mabi -x assembler -c "$work/$b.s" -o "$work/$b.o" 2>"$work/$b.aerr"; then
     echo "ASSEMBLE-FAIL $b"
     failed=$((failed + 1))
     continue

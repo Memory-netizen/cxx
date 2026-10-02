@@ -748,9 +748,11 @@ static void compile(char *input, char *output) {
     run_subprocess(cmd);
 }
 
-// Stage 3: .s → .o  (via GNU assembler)
+// Stage 3: .s → .o  (via the clang integrated assembler: it tracks the
+// directives the compiler emits, e.g. .prefalign, which older binutils
+// reject)
 static void assemble(char *input, char *output) {
-    char *cmd[] = {"as", "-c", input, "-o", output, NULL};
+    char *cmd[] = {"clang", "-target", T.triple, "-x", "assembler", "-c", input, "-o", output, NULL};
     run_subprocess(cmd);
 }
 
