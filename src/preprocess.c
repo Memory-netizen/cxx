@@ -1064,16 +1064,28 @@ static char *search_include_paths(char *filename) {
     return NULL;
 }
 
-static char *search_include_next(char *filename) {
+// Search for `filename` starting at the directory *after* the one that
+// provided the current file. On success *idx_out (optional) receives the
+// index of the directory that was hit, so the caller can advance the
+// cursor past it -- without that, a header that unconditionally does
+// `#include_next <same-name>` resolves back to itself and recurses until
+// MAX_INCL_DEPTH (glibc's <limits.h> does exactly this for clang).
+//
+// This function must stay free of side effects: __has_include_next calls
+// it speculatively (via exist_include_next) and must not move the cursor.
+static char *search_include_next(char *filename, int *idx_out) {
     for (int i = cur_path; i < num_include_paths; i++) {
         char *path = format("%s/%s", include_paths[i], filename);
-        if (file_exists(path)) return path;
+        if (file_exists(path)) {
+            if (idx_out) *idx_out = i;
+            return path;
+        }
     }
     return NULL;
 }
 
 static bool exist_include_next(char *filename) {
-    char *path = search_include_next(filename);
+    char *path = search_include_next(filename, NULL);
     return file_exists(path ? path : filename);
 }
 
@@ -1626,7 +1638,12 @@ static Token *preprocess2(Token *tok) {
         if (tok->id == dt[P_INCLUDE_NEXT].id) {
             bool ignore;
             char *filename = read_include_filename(&tok, tok->next, &ignore);
-            char *path = search_include_next(filename);
+            int hit = -1;
+            char *path = search_include_next(filename, &hit);
+            // Advance the cursor past the directory we are about to take
+            // the file from, so a nested `#include_next <same-name>` keeps
+            // moving forward instead of re-entering this same file.
+            next_path = hit >= 0 ? hit + 1 : num_include_paths;
             Token *tmp = include_file(&tok, tok, path ? path : filename, tk_hash->next->next);
             if (tmp) cur = cur->next = tmp;
             continue;
