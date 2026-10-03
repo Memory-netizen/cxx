@@ -489,6 +489,7 @@ Target T_arm64 = {
         "#define __has_include_next __has_include_next\n"
         "#define __inline__ inline\n"
         "#define __signed__ signed\n"
+        "#define __typeof typeof\n"
         "#define __typeof__ typeof\n"
         "#define __volatile__ volatile\n",
 };

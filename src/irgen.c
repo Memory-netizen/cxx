@@ -109,17 +109,39 @@ static Ref bitcast(Ref val, Type *to) {
     return dst;
 }
 
+// True for the type kinds that the IR lowers to `ptr`. nullptr_t is a
+// distinct scalar type (C23 6.2.5: different from all pointer and
+// arithmetic types, with the single value nullptr), not a pointer type
+// -- so this must NOT be used for anything semantic. It exists only to
+// pick the right null constant when comparing an IR `ptr` value.
+static bool is_ir_pointer(Type *ty) { return is_pointer(ty) || ty->kind == TY_NULLPTR; }
+
 static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
     if (target_ty->kind == TY_BOOL) {
         Ref tmp = TMP(tmp_id++, bitint[1][1]);
         Ref zr = INT(0);
-        zr.ty = src_ty;
+        // The null constant must match the operand's IR type: comparing
+        // an IR `ptr` (pointer or nullptr_t) against an integer 0 is
+        // invalid IR. nullptr_t is not a pointer type, but it is
+        // lowered to `ptr`, so it takes the same null constant.
+        if (is_ir_pointer(src_ty))
+            zr = NULLPTR;
+        else
+            zr.ty = src_ty;
         new_ins(IR_CMP_NE, tmp, (Ref[]){val, zr}, 2);
 
         Ref dst = TMP(tmp_id++, target_ty);
         new_ins(IR_EXT, dst, (Ref[]){tmp}, 1);
         return dst;
     }
+    // 6.3.2.4: only a null pointer constant or a nullptr_t may be
+    // converted to nullptr_t, so the result is always the null pointer
+    // value. Emit it directly -- there is nothing to convert at run
+    // time. Falling through to the by-width case below would instead
+    // emit an invalid `sext i32 0 to ptr`, because nullptr_t is not
+    // TY_PTR and is_pointer() is therefore false for it.
+    if (target_ty->kind == TY_NULLPTR) return NULLPTR;
+
     if (is_pointer(src_ty) && is_integer(target_ty)) {
         Ref dst = TMP(tmp_id++, target_ty);
         new_ins(IR_PTRTOINT, dst, (Ref[]){val}, 1);
@@ -710,7 +732,13 @@ static Ref gen_expr(Node *node) {
         case ND_NOT: {
             Ref tmp = TMP(tmp_id++, bitint[1][1]);
             Ref zr = INT(0);
-            zr.ty = node->lhs->ty;
+            // Match the operand's IR type: an IR `ptr` must be compared
+            // against a null constant, not an integer 0. nullptr_t is a
+            // distinct scalar type but is lowered to `ptr`.
+            if (is_ir_pointer(node->lhs->ty))
+                zr = NULLPTR;
+            else
+                zr.ty = node->lhs->ty;
             new_ins(IR_CMP_EQ, tmp, (Ref[]){lr, zr}, 2);
 
             dst = TMP(tmp_id++, node->ty);
