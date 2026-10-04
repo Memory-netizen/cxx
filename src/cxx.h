@@ -720,6 +720,21 @@ enum {
     BUILTIN_VA_ARG,
     BUILTIN_VA_COPY,
 
+    // Bit scanning. Like clz/ctz these return int whatever the operand
+    // width. They differ from that family in having no LLVM intrinsic: each
+    // is a short instruction sequence, which irgen builds directly. The
+    // operand types carry the signedness the expansions need -- ffs and
+    // clrsb take a signed argument, parity an unsigned one.
+    BUILTIN_FFS,
+    BUILTIN_FFSL,
+    BUILTIN_FFSLL,
+    BUILTIN_PARITY,
+    BUILTIN_PARITYL,
+    BUILTIN_PARITYLL,
+    BUILTIN_CLRSB,
+    BUILTIN_CLRSBL,
+    BUILTIN_CLRSBLL,
+
     // One past the last kind: the table's length, so nothing has to keep a
     // separate count in step with the enum. Not a builtin itself.
     NUM_BUILTINFN,
@@ -756,6 +771,12 @@ typedef struct BuiltinDef {
     // property of the builtin rather than a value the call site supplies.
     // It is emitted as a real operand, not spliced into the intrinsic name.
     int extra_arg;
+    // How many operands the intrinsic itself takes: 1 for ctpop and bswap,
+    // 2 for ctlz/cttz, whose second operand is extra_arg above. Kept
+    // separate from extra_arg because 0 is a meaningful immediate (clrsb's
+    // ctlz wants is_zero_undef = false), so extra_arg alone cannot say
+    // whether a second operand is present.
+    int intrinsic_args;
     uint32_t nargs;
     Token *tok;   // spelling token; carries the file for diagnostics
     uint32_t id;  // interned name, filled on first use

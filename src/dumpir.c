@@ -24,6 +24,7 @@ static const char *op_str[][3] = {
     [IR_CMP_NE] = {"icmp ne", "icmp ne", "fcmp une"},
     [IR_CMP_LE] = {"icmp sle", "icmp ule", "fcmp ole"},
     [IR_CMP_LT] = {"icmp slt", "icmp ult", "fcmp olt"},
+    [IR_SELECT] = {"select", "select", NULL},
     [IR_EXT] = {"sext", "zext", "fpext"},
     [IR_TRUNC] = {"trunc", "trunc", "fptrunc"},
     [IR_FPTOINT] = {"fptosi", "fptoui", NULL},
@@ -289,6 +290,10 @@ static void print_operand(Ref r) {
             // operand, not the integer 0.
             if (r.val != 0) fatal("non-zero integer immediate with pointer type");
             fprintf(out_file, "null");
+        } else if ((r.ty->kind & TY_BITINT) == (TY_BITINT | 1) && (r.val == 0 || r.val == 1)) {
+            // A 1-bit value: LLVM writes these true/false, which is also
+            // how clang spells the is_zero_undef immarg.
+            fprintf(out_file, r.val ? "true" : "false");
         } else {
             fprintf(out_file, "%d", r.val);
         }
@@ -466,6 +471,22 @@ void dump_blk(Blk *b) {
                 fprintf(out_file, "call ptr @llvm.threadlocal.address.p0(ptr ");
                 print_operand(ir->args[0]);
                 fprintf(out_file, ")\n");
+                break;
+            case IR_SELECT:
+                // select i1 <cond>, <ty> <t>, <ty> <f>
+                fprintf(out_file, "select ");
+                print_type(ir->args[0].ty);
+                fprintf(out_file, " ");
+                print_operand(ir->args[0]);
+                fprintf(out_file, ", ");
+                print_type(ir->args[1].ty);
+                fprintf(out_file, " ");
+                print_operand(ir->args[1]);
+                fprintf(out_file, ", ");
+                print_type(ir->args[2].ty);
+                fprintf(out_file, " ");
+                print_operand(ir->args[2]);
+                fprintf(out_file, "\n");
                 break;
             case IR_CALL:
                 fprintf(out_file, "call ");

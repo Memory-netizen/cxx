@@ -397,7 +397,7 @@ static Ref gen_intrinsic_call(Node *node, BuiltinDef *d, int kind) {
     // it uses the canonical 1-bit type instead.
     Ref ops[3] = {fn, val, R};
     uint32_t n = 2;
-    if (d->extra_arg >= 0) {
+    if (d->intrinsic_args == 2) {
         ops[2].type = RInt;
         ops[2].val = d->extra_arg;
         ops[2].ty = bitint[1][1];
@@ -594,6 +594,95 @@ static Ref gen_va_arg(Node *node) {
     return load(addr, want, la, NULL);
 }
 
+// Bit-scanning builtins: ffs, parity and clrsb have no LLVM intrinsic, so
+// each is a short instruction sequence. The table's prototype has already
+// converted the argument to the builtin's parameter type, which is exactly
+// the width and signedness the sequences need; a wide result is truncated
+// to int at the end, as clang does.
+// An immediate of a given type. INT() encodes the value in the Ref, which
+// is what makes these free of the constant pool; only its type is fixed at
+// i32, so it is adjusted here to match the operand it goes with.
+static Ref imm_of(int64_t v, Type *ty) {
+    Ref r = INT(v);
+    r.ty = ty;
+    return r;
+}
+
+static Ref gen_scan_call(Node *node, BuiltinDef *d, int kind) {
+    (void)d;
+    Type *param_ty = builtin_type(kind)->params;
+    uint32_t width = param_ty->size * 8;
+    Ref x = gen_expr(node->args);
+
+    bool is_ffs = kind == BUILTIN_FFS || kind == BUILTIN_FFSL || kind == BUILTIN_FFSLL;
+    bool is_parity = kind == BUILTIN_PARITY || kind == BUILTIN_PARITYL || kind == BUILTIN_PARITYLL;
+
+    // Emits one call to the width-parameterised intrinsic named by fmt.
+    // is_zero_undef is -1 when the intrinsic takes only the operand.
+    Ref result = R;
+    if (is_ffs || is_parity) {
+        char *name = format(is_ffs ? "llvm.cttz.i%d" : "llvm.ctpop.i%d", width);
+        uint32_t id = intern(name, strlen(name));
+        register_asm_name(id, name);
+        Ref call = TMP(tmp_id++, param_ty);
+        if (is_ffs) {
+            // ffs's cttz may see zero; the select below handles that case,
+            // which is what is_zero_undef = true declares.
+            Ref imm = imm_of(1, bitint[1][1]);
+            new_ins(IR_CALL, call, (Ref[]){GLB(id, func_type(param_ty)), x, imm}, 3);
+        } else {
+            new_ins(IR_CALL, call, (Ref[]){GLB(id, func_type(param_ty)), x}, 2);
+        }
+        result = call;
+    }
+
+    if (is_ffs) {
+        // ffs(x) = cttz(x, true) + 1, except zero when x is zero.
+        Ref plus = TMP(tmp_id++, param_ty);
+        new_ins(IR_ADD, plus, (Ref[]){result, imm_of(1, param_ty)}, 2);
+        Ref cond = TMP(tmp_id++, bitint[1][1]);
+        new_ins(IR_CMP_EQ, cond, (Ref[]){x, imm_of(0, param_ty)}, 2);
+        Ref sel = TMP(tmp_id++, param_ty);
+        new_ins(IR_SELECT, sel, (Ref[]){cond, imm_of(0, param_ty), plus}, 3);
+        result = sel;
+    } else if (is_parity) {
+        // parity(x) = ctpop(x) & 1
+        Ref one = TMP(tmp_id++, param_ty);
+        new_ins(IR_AND, one, (Ref[]){result, imm_of(1, param_ty)}, 2);
+        result = one;
+    } else {
+        // clrsb(x) counts the bits equal to the sign bit, not counting the
+        // sign bit itself. Flipping a negative operand leaves it with a
+        // zero sign bit, so ctlz then reports one more than the answer.
+        // ctlz here is defined at zero -- is_zero_undef = false -- which
+        // is what makes clrsb(0) and clrsb(-1) answer width - 1.
+        Ref neg = TMP(tmp_id++, bitint[1][1]);
+        new_ins(IR_CMP_LT, neg, (Ref[]){x, imm_of(0, param_ty)}, 2);
+        Ref inv = TMP(tmp_id++, param_ty);
+        new_ins(IR_XOR, inv, (Ref[]){x, imm_of(-1, param_ty)}, 2);
+        Ref sel = TMP(tmp_id++, param_ty);
+        new_ins(IR_SELECT, sel, (Ref[]){neg, inv, x}, 3);
+
+        char *name = format("llvm.ctlz.i%d", width);
+        uint32_t id = intern(name, strlen(name));
+        register_asm_name(id, name);
+        Ref imm = R;
+        imm.type = RInt;
+        imm.val = 0;
+        imm.ty = bitint[1][1];
+        Ref lz = TMP(tmp_id++, param_ty);
+        new_ins(IR_CALL, lz, (Ref[]){GLB(id, func_type(param_ty)), sel, imm}, 3);
+        Ref minus = TMP(tmp_id++, param_ty);
+        new_ins(IR_SUB, minus, (Ref[]){lz, imm_of(1, param_ty)}, 2);
+        result = minus;
+    }
+
+    if (node->ty->size >= param_ty->size) return result;
+    Ref out = TMP(tmp_id++, node->ty);
+    new_ins(IR_TRUNC, out, (Ref[]){result}, 1);
+    return out;
+}
+
 // Identify the builtin and dispatch. Emission lives in the callee so that
 // adding a builtin is a table row plus, at most, one emission routine.
 static Ref gen_builtin_call(Node *node, int kind) {
@@ -602,6 +691,23 @@ static Ref gen_builtin_call(Node *node, int kind) {
 
     // A builtin described by an intrinsic name needs no per-builtin code.
     if (d->intrinsic) return gen_intrinsic_call(node, d, kind);
+
+    // The bit-scanning family is a fixed prototype plus a short instruction
+    // sequence, which is what a row with no intrinsic means here.
+    switch (kind) {
+        case BUILTIN_FFS:
+        case BUILTIN_FFSL:
+        case BUILTIN_FFSLL:
+        case BUILTIN_PARITY:
+        case BUILTIN_PARITYL:
+        case BUILTIN_PARITYLL:
+        case BUILTIN_CLRSB:
+        case BUILTIN_CLRSBL:
+        case BUILTIN_CLRSBLL:
+            return gen_scan_call(node, d, kind);
+        default:
+            break;
+    }
 
     fatal("no IR lowering for builtin ‘%s’", d->name);
     return R;  // unreachable: fatal() exits

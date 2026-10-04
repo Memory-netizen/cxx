@@ -100,6 +100,41 @@ static Node *fold_bitcount(Node *call, int kind) {
     return folded_int(int128_set_i(r), call->ty, call);
 }
 
+// Constant-fold __builtin_ffs, __builtin_parity and __builtin_clrsb. The
+// argument has already been converted to the builtin's parameter type, so
+// its width is the one the sequences count in; the result is always int.
+static Node *fold_scan(Node *call, int kind) {
+    Node *arg = call->args;
+    if (!is_int_const(arg)) return NULL;
+
+    int width = arg->ty->size * 8;
+    bool is_ffs = kind == BUILTIN_FFS || kind == BUILTIN_FFSL || kind == BUILTIN_FFSLL;
+    bool is_parity = kind == BUILTIN_PARITY || kind == BUILTIN_PARITYL || kind == BUILTIN_PARITYLL;
+
+    int r;
+    if (is_ffs) {
+        // ffs counts from the low end, where sign extension makes no
+        // difference, and answers zero for a zero operand.
+        uint64_t v = (uint64_t)int128_to_i64(int128_normalize(arg->ival, width, SIGNED));
+        r = v ? __builtin_ctzll(v) + 1 : 0;
+    } else if (is_parity) {
+        uint64_t v = (uint64_t)int128_to_i64(int128_normalize(arg->ival, width, UNSIGNED));
+        r = __builtin_popcountll(v) & 1;
+    } else {
+        // clrsb counts the bits equal to the sign bit, not counting the
+        // sign bit itself: 31 for both 0 and -1 in a 32-bit operand, 30
+        // for 1, 0 for INT_MIN. Spreading the sign bit across the width
+        // gives a mask agreeing with v exactly on those bits, so the
+        // highest bit where the two differ is one past the count; when
+        // they never differ (0 and -1) the count is the width less one.
+        Int128 v = int128_normalize(arg->ival, width, SIGNED);
+        Int128 sign = int128_ashr(v, width - 1);
+        Int128 differs = int128_xor(v, sign);
+        r = int128_is_zero(differs) ? width - 1 : width - int128_bit_width(differs, UNSIGNED) - 1;
+    }
+    return folded_int(int128_set_i(r), call->ty, call);
+}
+
 // Constant-fold a call to a builtin, or return NULL when it cannot be
 // folded (a non-constant argument, or a builtin with no folder yet).
 // Arguments have already been folded by the caller, so this only has to
@@ -120,6 +155,16 @@ Node *fold_builtin_call(int kind, Node *call) {
         case BUILTIN_POPCOUNTL:
         case BUILTIN_POPCOUNTLL:
             return fold_bitcount(call, kind);
+        case BUILTIN_FFS:
+        case BUILTIN_FFSL:
+        case BUILTIN_FFSLL:
+        case BUILTIN_PARITY:
+        case BUILTIN_PARITYL:
+        case BUILTIN_PARITYLL:
+        case BUILTIN_CLRSB:
+        case BUILTIN_CLRSBL:
+        case BUILTIN_CLRSBLL:
+            return fold_scan(call, kind);
         // The special-class builtins never reach here: they do not produce
         // ND_FUNCALL. Listing them keeps -Wswitch honest.
         case BUILTIN_FN_ALLOCA:

@@ -919,6 +919,64 @@ int probe(int n, ...) {
 int main(void) { return probe(2, 1, 1) - 11; }
 EOF
 
+# ffs / parity / clrsb have no LLVM intrinsic: each is a short instruction
+# sequence, including a select for the two whose zero input is special. The
+# values below are the definitions in the compiler's own documentation of
+# them, with the boundaries -- zero, the sign bit, all ones -- included.
+cat > "$tmp/scan.c" <<'EOF'
+int f0 = __builtin_ffs(0);
+int f1 = __builtin_ffs(8);
+int f2 = __builtin_ffs(-8);
+int p0 = __builtin_parity(0);
+int p1 = __builtin_parity(7);
+int c0 = __builtin_clrsb(0);
+int c1 = __builtin_clrsb(-1);
+int c2 = __builtin_clrsb(1);
+int w1 = __builtin_ffsl(1L << 40);
+int w2 = __builtin_clrsbll(1LL << 62);
+EOF
+if "$compiler" -S -emit-llvm -o "$tmp/scan.ll" "$tmp/scan.c" 2>"$tmp/scan.err" &&
+   grep -qE '^@f0 = .*i32 0' "$tmp/scan.ll" &&
+   grep -qE '^@f1 = .*i32 4' "$tmp/scan.ll" &&
+   grep -qE '^@f2 = .*i32 4' "$tmp/scan.ll" &&
+   grep -qE '^@p0 = .*i32 0' "$tmp/scan.ll" &&
+   grep -qE '^@p1 = .*i32 1' "$tmp/scan.ll" &&
+   grep -qE '^@c0 = .*i32 31' "$tmp/scan.ll" &&
+   grep -qE '^@c1 = .*i32 31' "$tmp/scan.ll" &&
+   grep -qE '^@c2 = .*i32 30' "$tmp/scan.ll" &&
+   grep -qE '^@w1 = .*i32 41' "$tmp/scan.ll" &&
+   grep -qE '^@w2 = .*i32 0' "$tmp/scan.ll"; then
+    echo "testing ffs/parity/clrsb fold ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing ffs/parity/clrsb fold ... FAILED"
+    grep -E '^@[a-z0-9]+ ' "$tmp/scan.ll" 2>/dev/null | sed 's/^/    /'
+    head -3 "$tmp/scan.err" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# The expansions are instruction sequences, so they must still refer to the
+# right intrinsic: cttz for ffs, ctpop for parity, ctlz for clrsb.
+cat > "$tmp/scanir.c" <<'EOF'
+int a(int x)          { return __builtin_ffs(x); }
+int b(unsigned x)     { return __builtin_parity(x); }
+int c(int x)          { return __builtin_clrsb(x); }
+EOF
+"$compiler" -S -emit-llvm -o "$tmp/scanir.ll" "$tmp/scanir.c" 2>"$tmp/scanir.err"
+if [ -f "$tmp/scanir.ll" ] &&
+   grep -q 'llvm.cttz.i32' "$tmp/scanir.ll" &&
+   grep -q 'llvm.ctpop.i32' "$tmp/scanir.ll" &&
+   grep -q 'llvm.ctlz.i32' "$tmp/scanir.ll" &&
+   grep -q 'select i1' "$tmp/scanir.ll"; then
+    echo "testing ffs/parity/clrsb lower to instruction sequences ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing ffs/parity/clrsb lower to instruction sequences ... FAILED"
+    grep -oE '@llvm\.[a-z0-9.]+\([^)]*\)|select [a-z0-9]+' "$tmp/scanir.ll" 2>/dev/null | sed 's/^/    /'
+    head -3 "$tmp/scanir.err" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
 # C23 6.7.7.1 allows a parameter-type-list that is a bare "...", with no
 # parameter-list ahead of it, and 7.16.1.4 then gives va_start the
 # one-operand form because there is no last parameter to name.

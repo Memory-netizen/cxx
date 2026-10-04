@@ -1399,88 +1399,126 @@ static uint32_t id_anon;
 static uint32_t id_func;
 static uint32_t id_function;
 
-// The one place a builtin is described. Rows are grouped by family; a
+// The one place a builtin is described. Every row names its own kind, so
+// the table's order carries no meaning and cannot drift from the enum: a
+// kind indexes its row directly, with BUILTIN_NONE (0) left empty. A
 // BCLASS_SPECIAL row carries BT_NONE and a NULL intrinsic because
-// parse_builtin_fn() builds its shape from the arguments rather than from
-// a prototype.
-// BUILTIN_* order, and NUM_BUILTINFN one past the last kind gives the
-// length, so the two hand-written lists are checked against each other
-// with no separate count to maintain.
-// The one place a builtin is described. Rows are in BUILTIN_* order, so a
-// kind indexes its row; a BCLASS_SPECIAL row carries BT_NONE and a NULL
-// intrinsic because parse_builtin_fn() builds its shape from the arguments
-// rather than from a prototype.
-BuiltinDef builtin_defs[] = {
+// parse_builtin_fn() builds its shape from the arguments rather than from a
+// prototype. For a BCLASS_DECL row the fields after `uniform` are: the
+// literal operand appended to the intrinsic call (-1 for none), how many
+// operands that call takes, and how many parameters the builtin declares.
+BuiltinDef builtin_defs[NUM_BUILTINFN] = {
     // Irreducible: no C prototype expresses these, so parse_builtin_fn()
     // builds their shapes from the arguments.
-    {"__builtin_alloca", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__builtin_alloca_with_align", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__builtin_constant_p", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__builtin_types_compatible_p", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__c11_atomic_store", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__c11_atomic_load", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__c11_atomic_exchange", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__c11_atomic_fetch_add", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__c11_atomic_fetch_sub", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__c11_atomic_fetch_and", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__c11_atomic_fetch_or", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__c11_atomic_fetch_xor", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__c11_atomic_compare_exchange_weak", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__c11_atomic_compare_exchange_strong", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__c11_atomic_thread_fence", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__c11_atomic_signal_fence", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__c11_atomic_is_lock_free", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    [BUILTIN_FN_ALLOCA] = {"__builtin_alloca", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_ALLOCA_WITH_ALIGN] = {"__builtin_alloca_with_align", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0,
+                                   0, NULL, 0},
+    [BUILTIN_CONSTANT_P] = {"__builtin_constant_p", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_TYPES_COMPATIBLE_P] = {"__builtin_types_compatible_p", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1,
+                                    0, 0, NULL, 0},
+    [ATOMIC_STORE] = {"__c11_atomic_store", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [ATOMIC_LOAD] = {"__c11_atomic_load", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [ATOMIC_EXCHANGE] = {"__c11_atomic_exchange", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [ATOMIC_FETCH_ADD] = {"__c11_atomic_fetch_add", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [ATOMIC_FETCH_SUB] = {"__c11_atomic_fetch_sub", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [ATOMIC_FETCH_AND] = {"__c11_atomic_fetch_and", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [ATOMIC_FETCH_OR] = {"__c11_atomic_fetch_or", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [ATOMIC_FETCH_XOR] = {"__c11_atomic_fetch_xor", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [ATOMIC_COMPARE_EXCHANGE_WEAK] = {"__c11_atomic_compare_exchange_weak", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE,
+                                      false, -1, 0, 0, NULL, 0},
+    [ATOMIC_COMPARE_EXCHANGE_STRONG] = {"__c11_atomic_compare_exchange_strong", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE,
+                                        false, -1, 0, 0, NULL, 0},
+    [ATOMIC_THREAD_FENCE] = {"__c11_atomic_thread_fence", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
+                             0},
+    [ATOMIC_SIGNAL_FENCE] = {"__c11_atomic_signal_fence", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
+                             0},
+    [ATOMIC_IS_LOCK_FREE] = {"__c11_atomic_is_lock_free", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
+                             0},
 
     // A byte swap: one intrinsic, one argument whose type is also the
     // result's, so the width comes from either side.
-    {"__builtin_bswap16", BCLASS_DECL, "llvm.bswap.i%d", BT_USHORT, BT_USHORT, true, -1, 1, NULL, 0},
-    {"__builtin_bswap32", BCLASS_DECL, "llvm.bswap.i%d", BT_UINT, BT_UINT, true, -1, 1, NULL, 0},
-    {"__builtin_bswap64", BCLASS_DECL, "llvm.bswap.i%d", BT_ULLONG, BT_ULLONG, true, -1, 1, NULL, 0},
+    [BUILTIN_BSWAP16] = {"__builtin_bswap16", BCLASS_DECL, "llvm.bswap.i%d", BT_USHORT, BT_USHORT, true, -1, 1, 1, NULL,
+                         0},
+    [BUILTIN_BSWAP32] = {"__builtin_bswap32", BCLASS_DECL, "llvm.bswap.i%d", BT_UINT, BT_UINT, true, -1, 1, 1, NULL, 0},
+    [BUILTIN_BSWAP64] = {"__builtin_bswap64", BCLASS_DECL, "llvm.bswap.i%d", BT_ULLONG, BT_ULLONG, true, -1, 1, 1, NULL,
+                         0},
 
     // Bit counting. All return int whatever the operand width, so the
     // prototype is fixed and the width comes from the operand type: the
     // argument converts to the declared parameter type first, which is what
     // makes a narrow operand count within 32 bits. clz/ctz append the
-    // immarg is_zero_undef, true for them and false for clrsb.
-    {"__builtin_clz", BCLASS_DECL, "llvm.ctlz.i%d", BT_INT, BT_UINT, true, 1, 1, NULL, 0},
-    {"__builtin_clzl", BCLASS_DECL, "llvm.ctlz.i%d", BT_INT, BT_ULONG, true, 1, 1, NULL, 0},
-    {"__builtin_clzll", BCLASS_DECL, "llvm.ctlz.i%d", BT_INT, BT_ULLONG, true, 1, 1, NULL, 0},
-    {"__builtin_ctz", BCLASS_DECL, "llvm.cttz.i%d", BT_INT, BT_UINT, true, 1, 1, NULL, 0},
-    {"__builtin_ctzl", BCLASS_DECL, "llvm.cttz.i%d", BT_INT, BT_ULONG, true, 1, 1, NULL, 0},
-    {"__builtin_ctzll", BCLASS_DECL, "llvm.cttz.i%d", BT_INT, BT_ULLONG, true, 1, 1, NULL, 0},
-    {"__builtin_popcount", BCLASS_DECL, "llvm.ctpop.i%d", BT_INT, BT_UINT, true, -1, 1, NULL, 0},
-    {"__builtin_popcountl", BCLASS_DECL, "llvm.ctpop.i%d", BT_INT, BT_ULONG, true, -1, 1, NULL, 0},
-    {"__builtin_popcountll", BCLASS_DECL, "llvm.ctpop.i%d", BT_INT, BT_ULLONG, true, -1, 1, NULL, 0},
+    // immarg is_zero_undef, hence two operands to the intrinsic call.
+    [BUILTIN_CLZ] = {"__builtin_clz", BCLASS_DECL, "llvm.ctlz.i%d", BT_INT, BT_UINT, true, 1, 2, 1, NULL, 0},
+    [BUILTIN_CLZL] = {"__builtin_clzl", BCLASS_DECL, "llvm.ctlz.i%d", BT_INT, BT_ULONG, true, 1, 2, 1, NULL, 0},
+    [BUILTIN_CLZLL] = {"__builtin_clzll", BCLASS_DECL, "llvm.ctlz.i%d", BT_INT, BT_ULLONG, true, 1, 2, 1, NULL, 0},
+    [BUILTIN_CTZ] = {"__builtin_ctz", BCLASS_DECL, "llvm.cttz.i%d", BT_INT, BT_UINT, true, 1, 2, 1, NULL, 0},
+    [BUILTIN_CTZL] = {"__builtin_ctzl", BCLASS_DECL, "llvm.cttz.i%d", BT_INT, BT_ULONG, true, 1, 2, 1, NULL, 0},
+    [BUILTIN_CTZLL] = {"__builtin_ctzll", BCLASS_DECL, "llvm.cttz.i%d", BT_INT, BT_ULLONG, true, 1, 2, 1, NULL, 0},
+    [BUILTIN_POPCOUNT] = {"__builtin_popcount", BCLASS_DECL, "llvm.ctpop.i%d", BT_INT, BT_UINT, true, -1, 1, 1, NULL,
+                          0},
+    [BUILTIN_POPCOUNTL] = {"__builtin_popcountl", BCLASS_DECL, "llvm.ctpop.i%d", BT_INT, BT_ULONG, true, -1, 1, 1, NULL,
+                           0},
+    [BUILTIN_POPCOUNTLL] = {"__builtin_popcountll", BCLASS_DECL, "llvm.ctpop.i%d", BT_INT, BT_ULLONG, true, -1, 1, 1,
+                            NULL, 0},
 
     // Variadic argument access: their shapes come from parse_builtin_fn(),
     // and irgen lowers them to the llvm.va_* intrinsics so the backend
     // expands them for the target's va_list layout.
-    {"__builtin_va_start", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__builtin_va_end", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__builtin_va_arg", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
-    {"__builtin_va_copy", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    [BUILTIN_VA_START] = {"__builtin_va_start", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_VA_END] = {"__builtin_va_end", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_VA_ARG] = {"__builtin_va_arg", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_VA_COPY] = {"__builtin_va_copy", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+
+    // Bit scanning: no intrinsic exists, so irgen expands each one. The
+    // table still describes the prototype, which is what makes the argument
+    // arrive at the right width and signedness for the expansion. ffs and
+    // clrsb declare a signed parameter (their expansions test the sign or
+    // compare against zero), parity an unsigned one.
+    [BUILTIN_FFS] = {"__builtin_ffs", BCLASS_DECL, NULL, BT_INT, BT_INT, true, -1, 0, 1, NULL, 0},
+    [BUILTIN_FFSL] = {"__builtin_ffsl", BCLASS_DECL, NULL, BT_INT, BT_LONG, true, -1, 0, 1, NULL, 0},
+    [BUILTIN_FFSLL] = {"__builtin_ffsll", BCLASS_DECL, NULL, BT_INT, BT_LLONG, true, -1, 0, 1, NULL, 0},
+    [BUILTIN_PARITY] = {"__builtin_parity", BCLASS_DECL, NULL, BT_INT, BT_UINT, true, -1, 0, 1, NULL, 0},
+    [BUILTIN_PARITYL] = {"__builtin_parityl", BCLASS_DECL, NULL, BT_INT, BT_ULONG, true, -1, 0, 1, NULL, 0},
+    [BUILTIN_PARITYLL] = {"__builtin_parityll", BCLASS_DECL, NULL, BT_INT, BT_ULLONG, true, -1, 0, 1, NULL, 0},
+    [BUILTIN_CLRSB] = {"__builtin_clrsb", BCLASS_DECL, NULL, BT_INT, BT_INT, true, -1, 0, 1, NULL, 0},
+    [BUILTIN_CLRSBL] = {"__builtin_clrsbl", BCLASS_DECL, NULL, BT_INT, BT_LONG, true, -1, 0, 1, NULL, 0},
+    [BUILTIN_CLRSBLL] = {"__builtin_clrsbll", BCLASS_DECL, NULL, BT_INT, BT_LLONG, true, -1, 0, 1, NULL, 0},
 };
 
-_Static_assert(NUM_BUILTINFN - 1 == (int)(sizeof(builtin_defs) / sizeof(builtin_defs[0])),
-               "builtin_defs[] must have one row per BUILTIN_* kind, in order");
-_Static_assert(BUILTIN_CLZ - 1 < (int)(sizeof(builtin_defs) / sizeof(builtin_defs[0])), "clz row missing");
-_Static_assert(BUILTIN_POPCOUNTLL - 1 < (int)(sizeof(builtin_defs) / sizeof(builtin_defs[0])),
-               "popcountll row missing");
+// The array is indexed by kind and sized by the enum, so a kind cannot land
+// on the wrong row. What can still go wrong is a kind left without one,
+// which would be a zeroed entry -- silent rather than obvious -- and C's
+// integer constant expressions cannot read an array element, so that is
+// checked once at run time below rather than statically.
+_Static_assert(NUM_BUILTINFN == (int)(sizeof(builtin_defs) / sizeof(builtin_defs[0])),
+               "builtin_defs[] must have one row per BUILTIN_* kind");
 
-// The number of table rows. NUM_BUILTINFN is one more, because BUILTIN_NONE
-// also occupies an enumerator, so iterating the table with it would run one
-// row past the end.
-#define builtin_row_count (NUM_BUILTINFN - 1)
+// The table has one slot per enumerator, kind 0 (BUILTIN_NONE) included and
+// left empty, so iterating it uses the enum's own bound.
+#define builtin_row_count NUM_BUILTINFN
 
 // The definitions live in cxx.h so that every stage shares one table; only
 // the interned ids are filled in here, lazily, because the preprocessor
 // calls is_builtin_fn() for __has_builtin before parse() runs.
+// Every kind's row must be filled in. A missing one is all zeros, so its
+// name is null; the table being indexed by kind means that is the only way
+// a kind can end up unhandled.
+static void check_builtin_rows(void) {
+    static bool done;
+    if (done) return;
+    done = true;
+    for (int k = BUILTIN_NONE + 1; k < NUM_BUILTINFN; k++)
+        if (!builtin_defs[k].name) fatal("builtin_defs[] has no row for kind %d", k);
+}
+
 static bool builtin_ids_ready;
 
 static void intern_builtin_ids(void) {
     if (builtin_ids_ready) return;
-    for (size_t i = 0; i < builtin_row_count; ++i)
+    for (size_t i = 0; i < builtin_row_count; ++i) {
+        if (!builtin_defs[i].name) continue;  // BUILTIN_NONE's empty slot
         builtin_defs[i].id = intern(builtin_defs[i].name, strlen(builtin_defs[i].name));
+    }
     builtin_ids_ready = true;
 }
 
@@ -1489,20 +1527,22 @@ static void intern_builtin_ids(void) {
 static size_t builtin_find(uint32_t id) {
     intern_builtin_ids();
     for (size_t i = 0; i < builtin_row_count; ++i)
-        if (builtin_defs[i].id == id) return i;
+        if (builtin_defs[i].name && builtin_defs[i].id == id) return i;
     return builtin_row_count;  // not a builtin
 }
 
 // The table is written in BUILTIN_* order, so a kind indexes its row.
 BuiltinDef *builtin_def(int kind) {
+    check_builtin_rows();
     intern_builtin_ids();
-    return (kind > 0 && (size_t)kind <= builtin_row_count) ? &builtin_defs[kind - 1] : NULL;
+    return (kind > BUILTIN_NONE && kind < NUM_BUILTINFN && builtin_defs[kind].name) ? &builtin_defs[kind] : NULL;
 }
 
 int is_builtin_fn(uint32_t id) {
     size_t i = builtin_find(id);
-    // A row's kind is its index, offset by one because BUILTIN_NONE is 0.
-    return i < builtin_row_count ? (int)i + 1 : BUILTIN_NONE;
+    // The row's index *is* its kind; the search already rejects the empty
+    // BUILTIN_NONE slot.
+    return i < builtin_row_count ? (int)i : BUILTIN_NONE;
 }
 
 BuiltinClass builtin_class(int kind) {
