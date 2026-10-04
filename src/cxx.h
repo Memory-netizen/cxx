@@ -77,6 +77,10 @@ typedef struct {
     // at it), so the tables can stay static.
     int offset_field;
     Type *offset_ty;
+    // Whether the offset counts down from zero and goes negative once the
+    // named registers are used up (AAPCS64), rather than counting up to a
+    // size bound (SysV AMD64). The two need different tests.
+    bool offset_negative;
     int offset_bound;
     int reg_field;
     int mem_field;

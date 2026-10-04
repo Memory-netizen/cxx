@@ -489,10 +489,31 @@ static Ref gen_va_arg(Node *node) {
     if (!off_ty) fatal("va_arg: the target gave no offset type");
     Ref off_addr = va_field_addr(ap, rec, ops->offset_field);
     Ref off = load(off_addr, off_ty, off_ty->align, NULL);
-    Ref cond = TMP(tmp_id++, bitint[1][1]);
-    // The offset is unsigned, so a non-negative bound is "still has room"
-    // (amd64 counts up to a size bound, arm64 down to zero).
-    new_ins(IR_CMP_LE, cond, (Ref[]){off, INT(ops->offset_bound)}, 2);
+    // Temp ids must increase in the order LLVM first sees them, so an
+    // instruction may not be numbered below an operand it uses; each branch
+    // therefore allocates its result after the values feeding it.
+    bool neg = ops->offset_negative;
+    Ref cond;
+    if (neg) {
+        // The offset counts *down* and turns negative once the named
+        // registers are used up, so the register save area holds the
+        // argument only while the offset is negative and stays negative
+        // after the step. LLVM's icmp here is signed, and the two tests
+        // cannot be collapsed into one unsigned comparison.
+        Ref in_regs = TMP(tmp_id++, bitint[1][1]);
+        new_ins(IR_CMP_LT, in_regs, (Ref[]){off, INT(0)}, 2);
+        Ref next = TMP(tmp_id++, off_ty);
+        new_ins(IR_ADD, next, (Ref[]){off, INT(ops->reg_step)}, 2);
+        Ref still = TMP(tmp_id++, bitint[1][1]);
+        new_ins(IR_CMP_LE, still, (Ref[]){next, INT(0)}, 2);
+        cond = TMP(tmp_id++, bitint[1][1]);
+        new_ins(IR_AND, cond, (Ref[]){in_regs, still}, 2);
+    } else {
+        // The offset counts up from zero, so "still has room" is simply
+        // being within the bound that leaves space for one more slot.
+        cond = TMP(tmp_id++, bitint[1][1]);
+        new_ins(IR_CMP_LE, cond, (Ref[]){off, INT(ops->offset_bound)}, 2);
+    }
     curb->jmp.type = IR_JNZ;
     curb->jmp.arg = cond;
     curb->succ1 = blk_reg;
@@ -510,9 +531,16 @@ static Ref gen_va_arg(Node *node) {
     Ref off64 = cast(off, off_ty, T.ty_long);
     Ref addr_reg = TMP(tmp_id++, reg8.ty);
     new_ins(IR_GEP, addr_reg, (Ref[]){reg8, off64}, 2);
+    // The cursor advances one slot. The condition already computed this
+    // value for the descending form, but it is scoped to that branch, so it
+    // is recomputed here; the duplicate folds away and keeps the numbering
+    // inside this block trivially increasing.
     Ref next_reg = TMP(tmp_id++, off_ty);
     new_ins(IR_ADD, next_reg, (Ref[]){off, INT(ops->reg_step)}, 2);
     store(next_reg, off_addr, off_ty->align, NULL);
+    // The address above uses the offset as the ABI defines it: for the
+    // descending form that is the position of this argument, and the
+    // stored value is where the next one starts.
     curb->jmp.type = IR_JMP;
     curb->succ1 = blk_join;
     add_pred(curb, blk_join);

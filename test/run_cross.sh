@@ -3,9 +3,12 @@
 #   test/run_cross.sh amd64 | arm64 | rv64
 # (rv32 needs the bare-metal harness test/run_rv32.sh instead.)
 #
-# Per test: cxx -target <arch> -S -> cross gcc assembles and links with
-# test/common -> qemu-<arch> -L <sysroot>. tls.c is skipped: it needs
-# pthread.h from a real libc, which the cross toolchains do not ship.
+# Per test: cxx -target <arch> compiles both the test and the shared driver
+# test/common to objects and links them (cxx drives the assembler and the
+# linker itself) -> qemu-<arch> -L <sysroot>. tls.c is skipped: it needs
+# pthread.h from a real libc, which the cross toolchains do not ship. The
+# cross gcc is used only as the linker driver, for its libc and startup
+# files, never to compile C.
 #
 # Missing toolchain/qemu is a SKIP (exit 0), mirroring quadmath's
 # cross_verify.sh; the run summary carries the verdict otherwise.
@@ -18,19 +21,16 @@ case "$target" in
     cc=x86_64-linux-gnu-gcc
     qemu=qemu-x86_64
     sysroot=/usr/x86_64-linux-gnu
-    ctriple=x86_64-linux-gnu
     ;;
   arm64)
     cc=aarch64-linux-gnu-gcc
     qemu=qemu-aarch64
     sysroot=/usr/aarch64-linux-gnu
-    ctriple=aarch64-linux-gnu
     ;;
   rv64)
     cc=riscv64-linux-gnu-gcc
     qemu=qemu-riscv64
     sysroot=/usr/riscv64-linux-gnu
-    ctriple=riscv64-linux-gnu
     ;;
   *)
     echo "usage: run_cross.sh amd64|arm64|rv64"
@@ -73,20 +73,23 @@ for t in test/*.c; do
       continue  # temporarily excluded during the atomics work
       ;;
   esac
-  if ! ./cxx -target "$target" -S -Itest -o "$work/$b.s" "$t" 2>"$work/$b.cerr"; then
+  # cxx compiles and assembles both translation units; test/common has no
+  # .c extension, hence -x c.
+  if ! ./cxx -target "$target" -w -Itest -c -o "$work/$b.o" "$t" 2>"$work/$b.cerr"; then
     echo "COMPILE-FAIL $b"
     failed=$((failed + 1))
     continue
   fi
-  # Assemble with the clang integrated assembler: it accepts the
-  # directives clang emits (e.g. .prefalign, newer RISC-V ISA
-  # attributes) that older binutils reject.
-  if ! clang -target "$ctriple" -x assembler -c "$work/$b.s" -o "$work/$b.o" 2>"$work/$b.aerr"; then
-    echo "ASSEMBLE-FAIL $b"
-    failed=$((failed + 1))
-    continue
+  if [ ! -f "$work/common.o" ]; then
+    if ! ./cxx -target "$target" -w -Itest -c -o "$work/common.o" -x c test/common 2>"$work/common.cerr"; then
+      echo "COMPILE-FAIL test/common"
+      failed=$((failed + 1))
+      break
+    fi
   fi
-  if ! "$cc" -o "$work/$b.elf" "$work/$b.o" -xc test/common 2>"$work/$b.lerr"; then
+  # The cross gcc is only the linker driver here: it supplies libc and the
+  # startup files, which cxx does not ship.
+  if ! "$cc" -o "$work/$b.elf" "$work/$b.o" "$work/common.o" 2>"$work/$b.lerr"; then
     echo "LINK-FAIL $b (see $work/$b.lerr)"
     failed=$((failed + 1))
     continue

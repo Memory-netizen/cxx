@@ -93,9 +93,19 @@ src/config.h: FORCE
 
 .PHONY: test test-amd64 test-arm64 test-rv64 test-rv32 test-all clean linecnt fmt
 
-test/%.out: $(TARGET) test/%.c
-	./$(TARGET) -Itest -c -o test/$*.o test/$*.c
-	$(CC) -o $@ test/$*.o -xc test/common
+# test/common is a source file with no .c extension. It is listed as a
+# prerequisite of the test pattern rule (the recipe passes it with -x c),
+# and Make's built-in "%: %.o" link rule would otherwise match it and try
+# to rebuild the driver from test/common.o -- failing, then deleting the
+# source. An empty rule stops that and marks it up to date.
+test/common: ;
+
+# One cxx invocation compiles the test and the shared driver and links
+# them, so the suite exercises the compiler rather than the host toolchain.
+# cxx compiles each input separately, so -x c applies only to the driver,
+# which has no .c extension to go by.
+test/%.out: $(TARGET) test/%.c test/common
+	./$(TARGET) -w -Itest -o $@ test/$*.c -x c test/common
 
 test: $(TARGET) $(TESTS)
 	@for i in $(TESTS); do echo "Running $$i"; $$i || exit 1; echo; done

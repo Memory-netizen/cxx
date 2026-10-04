@@ -569,6 +569,7 @@ Target T_rv32b = {
     .long_max = 2147483647L,
     .ulong_max = 4294967295UL,
     .llong_max = 9223372036854775807LL,
+    .va_arg_ops = rv32_va_arg,
     .predef =
         "#define _ILP32 1\n"
         "#define __ATOMIC_ACQUIRE 2\n"

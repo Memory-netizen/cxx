@@ -1,3 +1,5 @@
+#include <stdarg.h>
+
 #include "test.h"
 
 int ret3(void) {
@@ -61,6 +63,28 @@ int omit1(int, int);
 int omit(int, int b) { return b + 5; }
 
 int add_all(int n, ...);
+int read_first_int(int n, ...);
+double read_first_double(int n, ...);
+
+/* Checks both properties va_copy must have, encoding each result so that
+ * a violation changes the value:
+ *   first  -- read through the original (1st argument)
+ *   same   -- read through the copy, which must still start where the
+ *             original did, i.e. also yield the 1st argument
+ *   second -- read through the copy again (2nd argument), which must not
+ *             have moved the original
+ */
+static int copy_peek(int n, ...) {
+    va_list ap, aq;
+    va_start(ap, n);
+    va_copy(aq, ap);
+    int first = va_arg(ap, int);
+    int same = va_arg(aq, int);
+    int second = va_arg(aq, int);
+    va_end(aq);
+    va_end(ap);
+    return first * 1000000 + same * 10000 + second;
+}
 
 double add_double(double x, double y);
 float add_float(float x, float y);
@@ -143,6 +167,34 @@ int main() {
 
     ASSERT(6, add_all(3, 1, 2, 3));
     ASSERT(5, add_all(4, 1, 2, 3, -1));
+
+    // === variadic arguments ===
+    // More than the six general-purpose argument registers, so the reader
+    // has to move from the register save area to the overflow area.
+    ASSERT(36, add_all(8, 1, 2, 3, 4, 5, 6, 7, 8));
+    ASSERT(55, add_all(10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10));
+    // The last named parameter still comes from its own register, so the
+    // variadic area starts after it.
+    ASSERT(15, add_all(5, 1, 2, 3, 4, 5));
+
+    // Default argument promotions at the ABI level: the reader asks for
+    // int/double, so a narrower argument must have been promoted by the
+    // caller.
+    ASSERT(7, read_first_int(1, 7));
+    ASSERT(-1, read_first_int(1, -1));
+    ASSERT(65, read_first_int(1, 'A'));
+    // 0.5 is exactly representable, so the comparison is exact.
+    ASSERT(1, read_first_double(1, 0.5) == 0.5);
+    ASSERT(1, read_first_double(1, 2.5) == 2.5);
+    // A float is promoted to double on the way in.
+    ASSERT(1, read_first_double(1, (float)1.25) == 1.25);
+
+    // va_copy must give an independent cursor.
+    // 1*1000000 + 1*10000 + 2: the copy still held the 1st argument when
+    // asked, and then advanced to the 2nd on its own.
+    ASSERT(1010002, copy_peek(3, 1, 2, 3));
+    // Only the first two variadic arguments are read (5 and 5).
+    ASSERT(5050005, copy_peek(4, 5, 5, 6, 7));
 
     ASSERT(0, ({
                char buf[100];
