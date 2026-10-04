@@ -71,7 +71,7 @@ bool opt_werror;
 static void usage(int status) {
     fprintf(stderr,
             "cxx [ -o <path> ] [ -S | -c | -E ] [ -ast-dump ] [ -dump-tokens ]"
-            " [ -raw-dump-tokens ] <file>\n");
+            " [ -raw-dump-tokens | -dump-raw-tokens ] <file>\n");
     exit(status);
 }
 
@@ -500,7 +500,7 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
-        if (!strcmp(argv[i], "-dump-raw-tokens")) {
+        if (!strcmp(argv[i], "-raw-dump-tokens") || !strcmp(argv[i], "-dump-raw-tokens")) {
             opt_dump_raw_tokens = true;
             continue;
         }

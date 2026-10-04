@@ -6,6 +6,16 @@ static void print_indent(void) {
     for (int i = 0; i < depth; i++) fprintf(stdout, "  ");
 }
 
+// Source location of a node's representative token, clang-style. A node
+// synthesised by the parser borrows a token from the construct it came
+// from, so this resolves to something meaningful for every node.
+static void print_loc(Node *node) {
+    if (!node->tok) return;
+    int line, col;
+    get_location(node->tok->file, node->tok->loc, &line, &col);
+    fprintf(stdout, "  Loc=<%s:%d:%d>", str(node->tok->filename), line + node->tok->line_delta, col);
+}
+
 static const char *node_kind_name[] = {
     [ND_NOP] = "NOP",
     [ND_COMMA] = "COMMA",
@@ -78,8 +88,134 @@ static const char *node_kind_name[] = {
     [ND_VAR] = "VAR",
     [ND_NUM] = "NUM",
     [ND_NULLPTR] = "NULLPTR",
+    [ND_SUBACCESS] = "SUBACCESS",
+    [ND_ALLOCA] = "ALLOCA",
+    [ND_ATOMICRMW] = "ATOMICRMW",
+    [ND_CAS] = "CAS",
+    [ND_FENCE] = "FENCE",
+    [ND_SP_SAVE] = "SP_SAVE",
+    [ND_SP_RESTORE] = "SP_RESTORE",
     [ND_BSWAP] = "BSWAP",
 };
+
+// Type qualifiers (6.7.3). They live on the qualified type itself, so the
+// caller must print them where the type is named.
+static void print_qual(uint32_t qual) {
+    if (qual & Q_CONST) fprintf(stdout, "const ");
+    if (qual & Q_VOLATILE) fprintf(stdout, "volatile ");
+    if (qual & Q_RESTRICT) fprintf(stdout, "restrict ");
+    if (qual & Q_ATOMIC) fprintf(stdout, "_Atomic ");
+}
+
+// Array length, recovered from the source. Every array type records the
+// '[' that produced it, so the text between that bracket and its matching
+// ']' is exactly what the programmer wrote -- for a VLA (`int a[n + 1]`)
+// and for a fixed array (`int a[3]`) alike. The tokens are the original
+// ones, so no re-parsing of the expression is needed.
+static void print_array_len(Type *ty);
+static void print_type(Type *ty);
+
+// Print the dimensions of an array type in declarator order. The levels
+// are collected walking down the bases, which is already declarator
+// order: for 'int a[3][4]' the type is TY_ARRAY(len 3) whose base is
+// TY_ARRAY(len 4), and the declaration reads [3][4].
+static void print_array_dimensions(Type *ty) {
+    Type **stack = vnew(4, sizeof(Type *));
+    int n = 0;
+
+    for (; ty->kind == TY_ARRAY || ty->kind == TY_VLA; ty = ty->base) {
+        stack = vgrow(stack, n + 1);
+        stack[n++] = ty;
+    }
+    print_type(ty);
+
+    for (int i = 0; i < n; i++) {
+        fprintf(stdout, "[");
+        print_array_len(stack[i]);
+        fprintf(stdout, "]");
+    }
+}
+
+// ---- Array length recovery -------------------------------------------
+//
+// A dumper should show the length the programmer actually wrote. The Type
+// structure cannot carry the '[' of an array declarator -- Type.name is
+// taken (it holds the declarator identifier until the declaration has been
+// processed) and the union must not gain a member, since vla_len/vla_cnt
+// share it with len/is_static/is_star. So the bracket is kept in a side
+// table here, keyed by the Type pointer, which is stable and unique per
+// array instance.
+//
+// The bracket is recorded by the parser through array_bracket_note() as
+// each dimension is built, because no field of Type identifies which
+// bracket of a declarator belongs to which nesting level.
+typedef struct BracketEntry {
+    struct BracketEntry *next;
+    Type *ty;
+    Token *l_bracket;
+} BracketEntry;
+
+#define BRACKET_BUCKETS 512
+static BracketEntry *bracket_table[BRACKET_BUCKETS];
+
+static uint32_t bracket_hash(Type *ty) { return (uint32_t)(((uintptr_t)ty >> 4) % BRACKET_BUCKETS); }
+
+// The '[' that declared this dimension. The parser records it as the
+// dimension is built, because nothing on the Type identifies which of a
+// declarator's brackets belongs to which level once parsing has finished
+// (Type.name is assigned once, after the whole declarator).
+void array_bracket_note(Type *ty, Token *l_bracket) {
+    if (!ty) return;
+    uint32_t h = bracket_hash(ty);
+    for (BracketEntry *e = bracket_table[h]; e; e = e->next) {
+        if (e->ty == ty) {
+            e->l_bracket = l_bracket;
+            return;
+        }
+    }
+    BracketEntry *e = emalloc(sizeof(BracketEntry));
+    e->ty = ty;
+    e->l_bracket = l_bracket;
+    e->next = bracket_table[h];
+    bracket_table[h] = e;
+}
+
+static Token *bracket_of(Type *ty) {
+    uint32_t h = bracket_hash(ty);
+    for (BracketEntry *e = bracket_table[h]; e; e = e->next)
+        if (e->ty == ty) return e->l_bracket;
+    return NULL;
+}
+
+// Print the length of one array dimension. The text between the declaring
+// '[' and its matching ']' is exactly what was written -- for a VLA
+// (`int a[n + 1]`) and a fixed array (`int a[3]`) alike -- and needs no
+// re-parsing. Nesting is counted so `a[f(x[0])]` works.
+static void print_array_len(Type *ty) {
+    Token *lb = bracket_of(ty);
+    if (lb) {
+        int level = 0;
+        for (Token *t = lb; t && t->kind != TK_EOF; t = t->next) {
+            if (t->kind == TK_LBRACKET) {
+                level++;
+                continue;
+            }
+            if (t->kind == TK_RBRACKET && --level == 0) {
+                char *from = tok_text(lb) + lb->len;
+                uint32_t len = (uint32_t)(tok_text(t) - from);
+                fprintf(stdout, "%.*s", (int)len, from);
+                return;
+            }
+        }
+    }
+    // No bracket could be attributed (a synthesised array type): fall back
+    // to the stored length, which is only meaningful for a fixed array.
+    if (ty->kind == TY_VLA) {
+        fprintf(stdout, "?");
+        return;
+    }
+    fprintf(stdout, "%d", ty->len);
+}
 
 static void print_type(Type *ty) {
     if (!ty) {
@@ -91,33 +227,42 @@ static void print_type(Type *ty) {
             fprintf(stdout, "nullptr_t");
             break;
         case TY_VOID:
+            print_qual(ty->qual);
             fprintf(stdout, "void");
             break;
         case TY_CHAR:
+            print_qual(ty->qual);
             fprintf(stdout, "char");
             break;
         case TY_SCHAR:
+            print_qual(ty->qual);
             fprintf(stdout, "signed char");
             break;
         case TY_UCHAR:
+            print_qual(ty->qual);
             fprintf(stdout, "unsigned char");
             break;
         case TY_BOOL:
+            print_qual(ty->qual);
             fprintf(stdout, "bool");
             break;
         case TY_SHORT:
+            print_qual(ty->qual);
             if (ty->is_unsigned) fprintf(stdout, "unsigned ");
             fprintf(stdout, "short");
             break;
         case TY_INT:
+            print_qual(ty->qual);
             if (ty->is_unsigned) fprintf(stdout, "unsigned ");
             fprintf(stdout, "int");
             break;
         case TY_LONG:
+            print_qual(ty->qual);
             if (ty->is_unsigned) fprintf(stdout, "unsigned ");
             fprintf(stdout, "long");
             break;
         case TY_LLONG:
+            print_qual(ty->qual);
             if (ty->is_unsigned) fprintf(stdout, "unsigned ");
             fprintf(stdout, "llong");
             break;
@@ -147,9 +292,21 @@ static void print_type(Type *ty) {
             break;
         case TY_PTR: {
             Type *base = ty->base;
-            if (base->kind == TY_ARRAY) {
-                print_type(base->base);
-                fprintf(stdout, " (*)[%d]", base->len);
+            // The qualifiers of the pointee belong to the pointed-to type
+            // (`const int *`), while those of the pointer itself are part
+            // of the declarator and are printed after the `*` below.
+            if (base->kind == TY_ARRAY || base->kind == TY_VLA) {
+                // int (*)[3][4]: the base type first, then the declarator
+                // with the dimensions attached to the *.
+                Type *elem = base;
+                while (elem->kind == TY_ARRAY || elem->kind == TY_VLA) elem = elem->base;
+                print_type(elem);
+                fprintf(stdout, " (*)");
+                for (Type *t = base; t->kind == TY_ARRAY || t->kind == TY_VLA; t = t->base) {
+                    fprintf(stdout, "[");
+                    print_array_len(t);
+                    fprintf(stdout, "]");
+                }
             } else if (base->kind == TY_FUNC) {
                 print_type(base->ret);
                 fprintf(stdout, " (*)(");
@@ -164,12 +321,13 @@ static void print_type(Type *ty) {
                 print_type(base);
                 fprintf(stdout, " *");
             }
+            // Qualifiers written after the `*`: `int * const p`.
+            print_qual(ty->qual);
             break;
         }
         case TY_VLA:
         case TY_ARRAY:
-            print_type(ty->base);
-            fprintf(stdout, "[%d]", ty->len);
+            print_array_dimensions(ty);
             break;
         case TY_FUNC:
             print_type(ty->ret);
@@ -199,6 +357,16 @@ static void print_type(Type *ty) {
     }
 }
 
+// Memory order and atomicrmw operation names, for the atomic node kinds.
+static const char *mem_order_name[] = {
+    [0] = "relaxed", [1] = "consume", [2] = "acquire", [3] = "release", [4] = "acq_rel", [5] = "seq_cst",
+};
+
+static const char *armw_op_name[] = {
+    [0] = "xchg", [1] = "add",  [2] = "sub",  [3] = "and",  [4] = "or",
+    [5] = "xor",  [6] = "nand", [7] = "fadd", [8] = "fsub",
+};
+
 static void dump_node(Node *node);
 
 static void dump_node_list(Node *node) {
@@ -213,6 +381,7 @@ static void dump_node(Node *node) {
 
     print_indent();
     fprintf(stdout, "%s", node_kind_name[node->kind]);
+    print_loc(node);
 
     if (node->ty) {
         fprintf(stdout, "  ty=");
@@ -492,26 +661,43 @@ static void dump_node(Node *node) {
             depth--;
             break;
         case ND_SP_SAVE:
-            fprintf(stdout, "stack save\n");
+            fprintf(stdout, "  stack save\n");
             break;
         case ND_SP_RESTORE:
-            fprintf(stdout, "stack restore\n");
+            fprintf(stdout, "  stack restore\n");
             break;
         case ND_CAS:
+            // mem_order / mem_order1 are stored +1, 0 meaning "unspecified
+            // (seq_cst)".
+            fprintf(stdout, "  order=%s  fail_order=%s  weak=%d\n",
+                    mem_order_name[node->mem_order ? node->mem_order - 1 : 5],
+                    mem_order_name[node->mem_order1 ? node->mem_order1 - 1 : 5], (int)node->is_weak);
+            depth++;
+            dump_node(node->lhs);
+            dump_node(node->rhs);
+            dump_node(node->desired);
+            depth--;
+            break;
         case ND_ATOMICRMW:
+            fprintf(stdout, "  op=%s  order=%s\n", armw_op_name[node->armw_op],
+                    mem_order_name[node->mem_order ? node->mem_order - 1 : 5]);
+            depth++;
+            dump_node(node->lhs);
+            dump_node(node->rhs);
+            depth--;
             break;
         case ND_ALLOCA:
-            fprintf(stdout, "alloca\n");
+            fprintf(stdout, "  alloca\n");
             break;
         case ND_BSWAP:
             // The operand is an expression; dump it like a unary node.
-            fprintf(stdout, "bswap\n");
+            fprintf(stdout, "  bswap\n");
             depth++;
             dump_node(node->lhs);
             depth--;
             break;
         case ND_FENCE:
-            fprintf(stdout, "fence\n");
+            fprintf(stdout, "  fence\n");
             break;
     }
 }

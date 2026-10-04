@@ -1020,6 +1020,11 @@ static inline bool tk_is_keyword(Token *tok) { return tok->kind >= TK_KEYWORD &&
 // `name` (GNU `__asm__("name")` declaration label).
 void register_asm_name(uint32_t id, char *name);
 void dump_ast(Module *prog);
+
+// Debug support: record the '[' that declared one array dimension, so a
+// dumper can show the length exactly as written. A no-op unless the AST
+// dumper is in use.
+void array_bracket_note(Type *ty, Token *l_bracket);
 void dump_raw_tokens(Token *tok);
 void dump_tokens(Token *tok);
 

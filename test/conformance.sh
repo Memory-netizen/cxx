@@ -564,6 +564,108 @@ int *p = g.a.a;
 int main(void) { return p[0] == 1 ? 0 : 1; }
 EOF
 
+# --- debug dumpers ----------------------------------------------------
+# These two are the debugging infrastructure, so guard the properties that
+# make them useful rather than their exact text: -raw-dump-tokens was
+# advertised in the usage text but the option was spelled differently in
+# the argument parser, so it never worked, and -ast-dump printed neither
+# source locations nor the newer node kinds.
+cat > "$tmp/dump.c" <<'EOF'
+int f(int n) {
+    int a[2] = {1, 2};
+    return a[n];
+}
+EOF
+
+if "$compiler" -raw-dump-tokens -c -o /dev/null "$tmp/dump.c" > "$tmp/rtok" 2>&1 &&
+   grep -q 'identifier' "$tmp/rtok"; then
+    echo "testing -raw-dump-tokens ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -raw-dump-tokens ... FAILED"
+    sed 's/^/    /' "$tmp/rtok" | head -3
+    n_fail=$((n_fail + 1))
+fi
+
+# -dump-tokens must attribute macro-expanded tokens to their spelling.
+cat > "$tmp/mac.c" <<'EOF'
+#define M(x) ((x) + 1)
+int f(int n) { return M(n); }
+EOF
+if "$compiler" -dump-tokens -c -o /dev/null "$tmp/mac.c" > "$tmp/mtok" 2>&1 &&
+   grep -q 'Spelling=' "$tmp/mtok"; then
+    echo "testing -dump-tokens shows macro spelling ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -dump-tokens shows macro spelling ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
+# Every node kind must have a name and a source location.
+if "$compiler" -ast-dump -c -o /dev/null "$tmp/dump.c" > "$tmp/ast" 2>&1 &&
+   ! grep -q 'unknown' "$tmp/ast" &&
+   grep -q 'SUBACCESS' "$tmp/ast" &&
+   grep -q 'Loc=<' "$tmp/ast"; then
+    echo "testing -ast-dump names, locations and coverage ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -ast-dump names, locations and coverage ... FAILED"
+    grep -c 'unknown' "$tmp/ast" 2>/dev/null | sed 's/^/    unknown nodes: /'
+    n_fail=$((n_fail + 1))
+fi
+
+# Array types print their dimensions in declarator order, and each
+# dimension shows the length as written -- including VLA expressions, whose
+# text comes back from the source rather than from a single AST token.
+cat > "$tmp/arr.c" <<'EOF'
+void f(int n, int m) {
+    int c[3][4];
+    int v[n + 1];
+    int w[n][m];
+    int (*p)[n][m];
+    (void)c; (void)v; (void)w; (void)p; (void)m;
+}
+EOF
+if "$compiler" -ast-dump -c -o /dev/null "$tmp/arr.c" > "$tmp/arr.out" 2>&1 &&
+   grep -q 'c: int\[3\]\[4\]' "$tmp/arr.out" &&
+   grep -q 'v: int\[n + 1\]' "$tmp/arr.out" &&
+   grep -q 'w: int\[n\]\[m\]' "$tmp/arr.out" &&
+   grep -q 'p: int (\*)\[n\]\[m\]' "$tmp/arr.out"; then
+    echo "testing -ast-dump array dimensions in declarator order ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -ast-dump array dimensions in declarator order ... FAILED"
+    grep -E '^    (c|v|w|p):' "$tmp/arr.out" 2>/dev/null | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# Type qualifiers must survive the dump: they were dropped entirely before.
+cat > "$tmp/qual.c" <<'EOF'
+void g(void) {
+    const int a;
+    volatile int b;
+    _Atomic int c;
+    const int *d;
+    int *restrict e;
+    const int f[2];
+    (void)a; (void)b; (void)c; (void)d; (void)e; (void)f;
+}
+EOF
+if "$compiler" -ast-dump -c -o /dev/null "$tmp/qual.c" > "$tmp/qual.out" 2>&1 &&
+   grep -q 'a: const int' "$tmp/qual.out" &&
+   grep -q 'b: volatile int' "$tmp/qual.out" &&
+   grep -q 'c: _Atomic int' "$tmp/qual.out" &&
+   grep -q 'd: const int \*' "$tmp/qual.out" &&
+   grep -q 'e: int \*restrict' "$tmp/qual.out" &&
+   grep -q 'f: const int\[2\]' "$tmp/qual.out"; then
+    echo "testing -ast-dump type qualifiers ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -ast-dump type qualifiers ... FAILED"
+    sed -n '/locals:/,/body:/p' "$tmp/qual.out" 2>/dev/null | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
 # --- known gaps ------------------------------------------------------
 # Listed so the gap shows up in the suite instead of passing silently.
 gap "<stdbit.h> helpers (needs __builtin_clz*)" <<'EOF'

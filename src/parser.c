@@ -5119,6 +5119,7 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
 static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param) {
     Node *len = NULL;
     bool is_star = false;
+    Token *l_bracket = tok;  // for the AST dumper; see array_bracket_note
     tok = skip(tok, TK_LBRACKET);
 
     Token *tmp = tok;
@@ -5160,9 +5161,16 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
         ty = array_of(ty, eval_ice(len));
     }
 
+    array_bracket_note(ty, l_bracket);
     ty->qual = qual;
-    ty->is_static = is_static;
-    ty->is_star = is_star;
+    // is_static / is_star share a union with vla_len / vla_cnt. vla_len is
+    // a pointer, so writing these two bytes would land in its upper half
+    // and truncate it to 32 bits. They only describe an array declarator,
+    // so a VLA must not receive them.
+    if (ty->kind != TY_VLA) {
+        ty->is_static = is_static;
+        ty->is_star = is_star;
+    }
     return ty;
 }
 
