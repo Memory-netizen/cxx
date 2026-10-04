@@ -581,6 +581,14 @@ static Ref gen_va_arg(Node *node) {
     add_phi_arg(phi, blk_mem, addr_mem);
     insert_phi(curb, phi);
 
+    // An aggregate value is represented by its address, so the candidate
+    // already *is* the result: loading it would ask LLVM for a by-value
+    // first-class struct, which its load instruction cannot produce.
+    if (want->kind == TY_STRUCT || want->kind == TY_UNION) {
+        addr.ty = pointer_to(want, 0);
+        return addr;
+    }
+
     int la = want->align;
     if (la > 8) la = 8;
     return load(addr, want, la, NULL);

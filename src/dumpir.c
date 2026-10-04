@@ -974,7 +974,9 @@ void dump_fn(Sym *fn) {
         param = param->next;
         if (param) fprintf(out_file, ", ");
     }
-    if (fn->ty->is_variadic) fprintf(out_file, ", ...");
+    // The separator belongs between the last parameter and the ellipsis,
+    // so a definition with no named parameter (a bare "...") has none.
+    if (fn->ty->is_variadic) fprintf(out_file, "%s...", fn->ty->params ? ", " : "");
     fprintf(out_file, ")");
     if (!fn->is_defined) {
         fprintf(out_file, "\n\n");

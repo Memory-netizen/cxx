@@ -919,6 +919,51 @@ int probe(int n, ...) {
 int main(void) { return probe(2, 1, 1) - 11; }
 EOF
 
+# C23 6.7.7.1 allows a parameter-type-list that is a bare "...", with no
+# parameter-list ahead of it, and 7.16.1.4 then gives va_start the
+# one-operand form because there is no last parameter to name.
+ok "bare ... parameter list" <<'EOF'
+#include <stdarg.h>
+int sum_all(...) {
+    va_list ap;
+    va_start(ap);
+    int a = va_arg(ap, int);
+    int b = va_arg(ap, int);
+    va_end(ap);
+    return a + b;
+}
+int main(void) { return sum_all(3, 4) - 7; }
+EOF
+
+# The bare form is the whole parameter-type-list, so nothing may follow the
+# ellipsis. A second one is the case that matters: the loop's own ellipsis
+# case sits after a comma check that the bare form leaves nothing for.
+bad "reject a second ellipsis" <<'EOF'
+int foo(... ...);
+EOF
+
+bad "reject a parameter after a bare ellipsis" <<'EOF'
+int foo(..., int);
+EOF
+
+# va_arg with an aggregate: the value is produced from the argument area
+# rather than by a scalar load.
+ok "va_arg with a struct" <<'EOF'
+#include <stdarg.h>
+struct S { int a, b; };
+int sum_struct(int n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    struct S s = va_arg(ap, struct S);
+    va_end(ap);
+    return s.a + s.b;
+}
+int main(void) {
+    struct S s = {3, 4};
+    return sum_struct(1, s) - 7;
+}
+EOF
+
 # The variadic builtins only make sense inside a variadic definition.
 bad "reject va_start outside a variadic function" <<'EOF'
 #include <stdarg.h>

@@ -1812,9 +1812,14 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
                       kind == BUILTIN_VA_START ? "__builtin_va_start" : "__builtin_va_end");
             tok = skip(tok->next, TK_LPAREN);
             Node *addr = va_list_addr(&tok, tok);
-            if (kind == BUILTIN_VA_START) {
-                tok = skip(tok, TK_COMMA);
-                assign(&tok, tok);  // the last named parameter; unused
+            if (kind == BUILTIN_VA_START && tok->kind == TK_COMMA) {
+                // The second operand names the last parameter. C23 also
+                // allows va_start(ap) alone, for a definition whose
+                // parameter list is a bare "...": there is no named
+                // parameter to pass, and the operand is only documentation
+                // -- the register save area already covers the named ones.
+                tok = tok->next;
+                assign(&tok, tok);
             }
             *rest = skip(tok, TK_RPAREN);
 
@@ -5330,48 +5335,59 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
     bool is_variadic = false;
     Type dummy = {}, *cur = &dummy;
 
-    while (tok->kind != TK_RPAREN) {
-        if (cur != &dummy) tok = skip(tok, TK_COMMA);
-        if (tok->kind == TK_ELLIPSIS) {
-            is_variadic = true;
-            tok = tok->next;
-            break;
-        }
+    // 6.7.7.1: parameter-type-list is either a parameter-list, that list
+    // followed by ", ...", or a bare "...". The two shapes are disjoint:
+    // the bare form has no parameter ahead of it, so it takes no comma and
+    // nothing may follow it before the ')'.
+    if (tok->kind == TK_ELLIPSIS) {
+        is_variadic = true;
+        tok = tok->next;
+    } else {
+        while (tok->kind != TK_RPAREN) {
+            if (cur != &dummy) tok = skip(tok, TK_COMMA);
+            if (tok->kind == TK_ELLIPSIS) {
+                is_variadic = true;
+                tok = tok->next;
+                break;
+            }
 
-        Token *start = tok;
-        Type *basety = declspecs(&tok, tok, NULL, NULL, NULL, NULL);
-        Type *paramty = abstract_declarator(&tok, tok, basety, true);
-        apply_postdecl_attrs(paramty);
-        if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type");
-        // "array of T" is converted to "pointer to T" in the parameter
-        // context. For example, *argv[] is converted to **argv by this.
+            Token *start = tok;
+            Type *basety = declspecs(&tok, tok, NULL, NULL, NULL, NULL);
+            Type *paramty = abstract_declarator(&tok, tok, basety, true);
+            apply_postdecl_attrs(paramty);
+            if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type");
+            // "array of T" is converted to "pointer to T" in the parameter
+            // context. For example, *argv[] is converted to **argv by this.
 
-        if (paramty->kind == TY_ARRAY || paramty->kind == TY_VLA) {
-            Type *arr = paramty;
-            paramty = pointer_to(paramty->base, paramty->qual);
-            paramty->name = arr->name;
-            paramty->is_star = arr->is_star;
-            paramty->is_static = arr->is_static;
-        }
-        if (paramty->kind == TY_FUNC) {
-            Type *fn = paramty;
-            paramty = pointer_to(paramty, 0);
-            paramty->name = fn->name;
-        }
+            if (paramty->kind == TY_ARRAY || paramty->kind == TY_VLA) {
+                Type *arr = paramty;
+                paramty = pointer_to(paramty->base, paramty->qual);
+                paramty->name = arr->name;
+                paramty->is_star = arr->is_star;
+                paramty->is_static = arr->is_static;
+            }
+            if (paramty->kind == TY_FUNC) {
+                Type *fn = paramty;
+                paramty = pointer_to(paramty, 0);
+                paramty->name = fn->name;
+            }
 
-        if (paramty->size < 0)
-            error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len, tok_text(paramty->name));
-        if (paramty->name) {
-            uint32_t id = get_ident(paramty->name);
-            for (Type *p = dummy.next; p && p->name; p = p->next) {
-                if (id == p->name->id) {
-                    diag("error", paramty->name, "redefinition of parameter ‘%s’", str(id));
-                    diag_exit("note", p->name, "previous definition is here");
+            if (paramty->size < 0)
+                error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len,
+                      tok_text(paramty->name));
+            if (paramty->name) {
+                uint32_t id = get_ident(paramty->name);
+                for (Type *p = dummy.next; p && p->name; p = p->next) {
+                    if (id == p->name->id) {
+                        diag("error", paramty->name, "redefinition of parameter ‘%s’", str(id));
+                        diag_exit("note", p->name, "previous definition is here");
+                    }
                 }
             }
+
+            cur = cur->next = copy_type(paramty);
+            nparam++;
         }
-        cur = cur->next = copy_type(paramty);
-        nparam++;
     }
 
     *rest = skip(tok, TK_RPAREN);
