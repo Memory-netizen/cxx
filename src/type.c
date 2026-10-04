@@ -1130,6 +1130,11 @@ void add_type(Node *node) {
             add_type(node->lhs);
             node->ty = T.ty_void;
             break;
+        case ND_VA_COPY:
+            add_type(node->lhs);
+            add_type(node->rhs);
+            node->ty = T.ty_void;
+            break;
         case ND_VA_ARG:
             add_type(node->lhs);
             // node->ty was set from the type name in the parser.

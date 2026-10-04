@@ -96,6 +96,7 @@ static const char *node_kind_name[] = {
     [ND_VA_START] = "VA_START",
     [ND_VA_END] = "VA_END",
     [ND_VA_ARG] = "VA_ARG",
+    [ND_VA_COPY] = "VA_COPY",
     [ND_SP_SAVE] = "SP_SAVE",
     [ND_SP_RESTORE] = "SP_RESTORE",
 };
@@ -707,6 +708,13 @@ static void dump_node(Node *node) {
             fprintf(stdout, "\n");
             depth++;
             dump_node(node->lhs);
+            depth--;
+            break;
+        case ND_VA_COPY:
+            fprintf(stdout, "\n");
+            depth++;
+            dump_node(node->lhs);
+            dump_node(node->rhs);
             depth--;
             break;
     }

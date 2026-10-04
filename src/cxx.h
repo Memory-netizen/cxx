@@ -486,6 +486,7 @@ typedef enum {
     ND_VA_START,   // lhs: address of the va_list object
     ND_VA_END,     // lhs: address of the va_list object
     ND_VA_ARG,     // lhs: the va_list value, rhs: NULL, ty: requested type
+    ND_VA_COPY,    // lhs: destination va_list address, rhs: source address
     ND_CAS,        // Atomic compare-and-swap
     ND_ATOMICRMW,  // Atomic read-modify-write (atomicrmw)
     ND_ALLOCA,     // __builtin_alloca / __builtin_alloca_with_align
@@ -665,6 +666,7 @@ enum {
     BUILTIN_VA_START,
     BUILTIN_VA_END,
     BUILTIN_VA_ARG,
+    BUILTIN_VA_COPY,
 
     // One past the last kind: the table's length, so nothing has to keep a
     // separate count in step with the enum. Not a builtin itself.

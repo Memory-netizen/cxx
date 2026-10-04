@@ -451,6 +451,23 @@ static Ref gen_expr(Node *node) {
         // expands them against the target's va_list layout, so no ABI
         // knowledge is needed here. The operand is the address of the
         // va_list object, which is also the pointer the intrinsic takes.
+        case ND_VA_COPY: {
+            // llvm.va_copy is a real intrinsic; the backend expands the
+            // copy for the target's va_list layout.
+            const char *name = "llvm.va_copy.p0";
+            uint32_t id = intern((char *)name, strlen(name));
+            register_asm_name(id, (char *)name);
+
+            Type *fty = func_type(T.ty_void);
+            fty->params = T.ty_voidptr;
+            fty->nparam = 1;
+            Ref dst = gen_expr(node->lhs);
+            Ref src = gen_expr(node->rhs);
+            dst.ty = T.ty_voidptr;
+            src.ty = T.ty_voidptr;
+            new_ins(IR_CALL, R, (Ref[]){GLB(id, fty), dst, src}, 3);
+            return R;
+        }
         case ND_VA_START:
         case ND_VA_END: {
             const char *name = node->kind == ND_VA_START ? "llvm.va_start.p0" : "llvm.va_end.p0";

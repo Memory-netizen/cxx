@@ -566,6 +566,9 @@ Node *fold_node(Node *node) {
         case ND_CAS:
         case ND_ATOMICRMW:
         case ND_FENCE:
+        case ND_VA_COPY:
+            // va_copy has no value to fold; its operands are lvalues.
+            return node;
         case ND_VA_START:
         case ND_VA_END:
             // va_start/va_end have no value to fold; their operand is an
