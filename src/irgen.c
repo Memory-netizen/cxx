@@ -608,6 +608,81 @@ static Ref imm_of(int64_t v, Type *ty) {
     return r;
 }
 
+// The { iN, i1 } an overflow builtin returns: the result of the operation
+// and a flag saying whether it wrapped. Built per width and cached, because
+// the IR names the aggregate's type and every use of the same width has to
+// name the same one. Both members are laid out the way LLVM lays out this
+// literal, so the aggregate has the size the backend expects.
+static Type *ovf_pair_type(Type *val_ty) {
+    static Type *cache[129];
+    uint32_t bits = val_ty->size * 8;
+    if (cache[bits]) return cache[bits];
+
+    Type *ty = emalloc(sizeof(Type));
+    ty->kind = TY_STRUCT;
+    ty->size = val_ty->size + val_ty->align;  // value, then the i1 and padding
+    ty->align = val_ty->align;
+    ty->is_unsigned = false;
+    ty->name = val_ty->name;
+
+    Member *flag = emalloc(sizeof(Member));
+    flag->ty = bitint[1][1];
+    flag->align = 1;
+    Member *val = emalloc(sizeof(Member));
+    val->ty = val_ty;
+    val->align = val_ty->align;
+    val->next = flag;
+    val->idx = 0;
+    flag->idx = 1;
+    flag->offset = val_ty->size;
+    ty->members = val;
+
+    // Deliberately unnamed: extractvalue works only on a literal aggregate,
+    // and LLVM rejects a named struct there. print_type spells an unnamed
+    // aggregate inline, so the { iN, i1 } below reaches the IR verbatim.
+    return cache[bits] = ty;
+}
+
+// __builtin_{add,sub,mul}_overflow(a, b, r): llvm.<op>.with.overflow.iN
+// returns the value and the flag, the value is stored through r, and the
+// flag is the call's int result. The signedness of `<op>` follows the
+// operands, since 6.5.2.2p7 requires all three to be compatible.
+static Ref gen_overflow_call(Node *node, int kind) {
+    Node *lhs = node->args;
+    Node *rhs = lhs->next;
+    Node *out = rhs->next;
+
+    Type *val_ty = lhs->ty;
+    uint32_t width = val_ty->size * 8;
+
+    Ref l = gen_expr(lhs);
+    Ref r = gen_expr(rhs);
+    Ref dst_ptr = gen_expr(out);
+
+    char *op = kind == BUILTIN_SUB_OVERFLOW ? "sub" : kind == BUILTIN_MUL_OVERFLOW ? "mul" : "add";
+    char *name = format("llvm.%s%s.with.overflow.i%d", val_ty->is_unsigned ? "u" : "s", op, width);
+
+    uint32_t id = intern(name, strlen(name));
+    register_asm_name(id, name);
+
+    Type *pair = ovf_pair_type(val_ty);
+    Ref fn = GLB(id, func_type(pair));
+    Ref call = TMP(tmp_id++, pair);
+    new_ins(IR_CALL, call, (Ref[]){fn, l, r}, 3);
+
+    Ref val = TMP(tmp_id++, val_ty);
+    new_ins(IR_EXTRACTVAL, val, (Ref[]){call, INT(0)}, 2);
+    store(val, dst_ptr, val_ty->align, NULL);
+
+    Ref flag = TMP(tmp_id++, bitint[1][1]);
+    new_ins(IR_EXTRACTVAL, flag, (Ref[]){call, INT(1)}, 2);
+
+    // The builtin answers int: zero when the operation was exact.
+    Ref out_val = TMP(tmp_id++, T.ty_int);
+    new_ins(IR_EXT, out_val, (Ref[]){flag}, 1);
+    return out_val;
+}
+
 static Ref gen_scan_call(Node *node, BuiltinDef *d, int kind) {
     (void)d;
     Type *param_ty = builtin_type(kind)->params;
@@ -705,6 +780,13 @@ static Ref gen_builtin_call(Node *node, int kind) {
         case BUILTIN_CLRSBL:
         case BUILTIN_CLRSBLL:
             return gen_scan_call(node, d, kind);
+
+        // No intrinsic name in the table: the width and the signedness both
+        // come from the operands, so the name is built at the call site.
+        case BUILTIN_ADD_OVERFLOW:
+        case BUILTIN_SUB_OVERFLOW:
+        case BUILTIN_MUL_OVERFLOW:
+            return gen_overflow_call(node, kind);
         default:
             break;
     }

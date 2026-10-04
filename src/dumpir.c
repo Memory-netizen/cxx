@@ -156,6 +156,18 @@ static void print_type(Type *ty) {
         return;
     }
     if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
+        if (!ty->uid) {
+            // An unnamed aggregate is an internal one -- the { iN, i1 } an
+            // overflow builtin returns. LLVM spells those inline, and
+            // "%0" would not even name a type.
+            fprintf(out_file, "{ ");
+            for (Member *m = ty->members; m; m = m->next) {
+                print_type(m->ty);
+                if (m->next) fprintf(out_file, ", ");
+            }
+            fprintf(out_file, " }");
+            return;
+        }
         fprintf(out_file, "%%");
         print_ident(ty->uid);
         return;
@@ -405,11 +417,20 @@ void dump_blk(Blk *b) {
                 fprintf(out_file, "\n");
                 break;
             case IR_EXTRACTVAL:
-                // The result of a cmpxchg is { T, i1 }; T travels on
-                // the cmpxchg dst Ref. The field type is this dst's ty.
-                fprintf(out_file, "extractvalue { ");
-                print_type(ir->args[0].ty);
-                fprintf(out_file, ", i1 } ");
+                // The field taken is this dst's ty. The aggregate it comes
+                // from is either an aggregate type already -- the { iN, i1 }
+                // an overflow builtin returns -- or a bare compare type,
+                // which is how a cmpxchg carries one; the latter implies
+                // the { T, i1 } the instruction produces.
+                fprintf(out_file, "extractvalue ");
+                if (is_record(ir->args[0].ty)) {
+                    print_type(ir->args[0].ty);
+                } else {
+                    fprintf(out_file, "{ ");
+                    print_type(ir->args[0].ty);
+                    fprintf(out_file, ", i1 }");
+                }
+                fprintf(out_file, " ");
                 print_operand(ir->args[0]);
                 fprintf(out_file, ", ");
                 print_operand(ir->args[1]);

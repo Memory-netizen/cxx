@@ -1088,7 +1088,7 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
     }
 }
 
-static void insert_ty(Type *ty, char *kind) {
+void insert_ty(Type *ty, char *kind) {
     int i = -1;
     Type *t = types;
     while (t) {
@@ -1483,6 +1483,19 @@ BuiltinDef builtin_defs[NUM_BUILTINFN] = {
     [BUILTIN_CLRSB] = {"__builtin_clrsb", BCLASS_DECL, NULL, BT_INT, BT_INT, true, -1, 0, 1, NULL, 0},
     [BUILTIN_CLRSBL] = {"__builtin_clrsbl", BCLASS_DECL, NULL, BT_INT, BT_LONG, true, -1, 0, 1, NULL, 0},
     [BUILTIN_CLRSBLL] = {"__builtin_clrsbll", BCLASS_DECL, NULL, BT_INT, BT_LLONG, true, -1, 0, 1, NULL, 0},
+
+    // Arithmetic with overflow reporting. Special class: the operands must
+    // reach irgen at their own width, so there is no prototype to convert
+    // them to -- a declared parameter would widen a short operand to int
+    // and lose the width the intrinsic name is built from. The IR result is
+    // { iN, i1 }, the value and an overflow flag, which is why these are
+    // the only builtins whose call yields an aggregate.
+    [BUILTIN_ADD_OVERFLOW] = {"__builtin_add_overflow", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
+                              0},
+    [BUILTIN_SUB_OVERFLOW] = {"__builtin_sub_overflow", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
+                              0},
+    [BUILTIN_MUL_OVERFLOW] = {"__builtin_mul_overflow", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
+                              0},
 };
 
 // The array is indexed by kind and sized by the enum, so a kind cannot land
@@ -1556,6 +1569,11 @@ BuiltinClass builtin_class(int kind) {
 int builtin_kind_of(Node *func) {
     while (func && (func->kind == ND_IMCAST || func->kind == ND_LVTOR)) func = func->lhs;
     if (!func || func->kind != ND_VAR) return BUILTIN_NONE;
+    // A builtin with no prototype carries its kind on the type, because
+    // there is no injected symbol of that name to look up: the whole point
+    // of such a builtin is that its arguments keep the types written at
+    // the call site.
+    if (func->ty && func->ty->is_builtin) return (int)func->ty->id;
     Sym *sym = func->var;
     // Both flags matter: a user function declared under a builtin's name is
     // an ordinary function and must not be lowered to the LLVM intrinsic.
@@ -2038,6 +2056,56 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             int64_t size = const_expr(&tok, tok);
             *rest = skip(tok, TK_RPAREN);
             return new_num(size <= T.ty_nullptr->size, start);
+        }
+        case BUILTIN_ADD_OVERFLOW:
+        case BUILTIN_SUB_OVERFLOW:
+        case BUILTIN_MUL_OVERFLOW: {
+            // __builtin_{add,sub,mul}_overflow(a, b, r). The arguments keep
+            // their own types: the LLVM intrinsic is named for the
+            // operand's width, so a declared prototype would be exactly
+            // wrong -- a short operand converted to int would ask for the
+            // i32 form, and the result would be computed at the wrong
+            // width.
+            //
+            // The callee is a variable whose type is marked as this
+            // builtin, which is how the call is recognised downstream; it
+            // is not a scope lookup, so a user declaration of the same
+            // name is unaffected.
+            tok = skip(tok->next, TK_LPAREN);
+            Node dummy, *cur = &dummy;
+            for (int i = 0; i < 3; i++) {
+                if (i) tok = skip(tok, TK_COMMA);
+                Node *arg = assign(&tok, tok);
+                add_type(arg);
+                lvalue_convert(&arg);
+                cur = cur->next = arg;
+            }
+            *rest = skip(tok, TK_RPAREN);
+
+            Node *lhs = dummy.next;
+            Node *rhs = lhs->next;
+            Node *out = rhs->next;
+
+            // The value is written through the third operand, so it has to
+            // point at an object of the operation's type.
+            if (!is_pointer(out->ty) || out->ty->base->kind == TY_VOID)
+                error(out->tok, "third argument of ‘%s’ must be a pointer to an object", builtin_def(kind)->name);
+
+            Type *fty = func_type(T.ty_int);
+            fty->is_builtin = true;
+            fty->id = kind;
+            fty->name = start;
+
+            Sym *sym = new_var(start->id, fty);
+            sym->is_function = true;
+            sym->is_builtin = true;
+
+            Node *node = new_node(ND_FUNCALL, start);
+            node->func = new_var_node(sym, start);
+            node->args = dummy.next;
+            node->narg = 3;
+            node->ty = T.ty_int;
+            return node;
         }
     }
     return NULL;

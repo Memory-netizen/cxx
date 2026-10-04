@@ -1,7 +1,9 @@
 #include "cxx.h"
 
-#define TYPE(kind, size, align, is_unsigned) \
-    &(Type) { kind, 0, size, align, is_unsigned, false, 0, 0, NULL, NULL, NULL, NULL, NULL, {0} }
+// Designated, like the targets' own TYPE macro: a positional initializer
+// here would silently shift every field the day Type gains one.
+#define TYPE(kind_, size_, align_, is_unsigned_) \
+    &(Type) { .kind = kind_, .size = size_, .align = align_, .is_unsigned = is_unsigned_ }
 
 Type *bitint[129][2] = {
     {NULL, NULL},

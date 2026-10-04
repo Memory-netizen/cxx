@@ -735,6 +735,14 @@ enum {
     BUILTIN_CLRSBL,
     BUILTIN_CLRSBLL,
 
+    // Arithmetic with overflow reporting: __builtin_add_overflow and its
+    // siblings, which <stdckdint.h> is written in terms of. Their IR is a
+    // two-value return -- { iN, i1 } -- so they are the one family here
+    // that needs an aggregate in the IR.
+    BUILTIN_ADD_OVERFLOW,
+    BUILTIN_SUB_OVERFLOW,
+    BUILTIN_MUL_OVERFLOW,
+
     // One past the last kind: the table's length, so nothing has to keep a
     // separate count in step with the enum. Not a builtin itself.
     NUM_BUILTINFN,
@@ -890,6 +898,11 @@ struct Type {
     Type *base;
     Type *origin;  // for type compatibility check
     Attr *attrs;   // attributes attached to the type
+    // Set on the synthesised function type of a builtin that has no
+    // prototype -- one whose arguments must keep their own types. `id`
+    // then carries the builtin's kind, which is how a call site is
+    // recognised as that builtin without a scope lookup.
+    bool is_builtin;
 
     // Data
     union {
@@ -980,6 +993,8 @@ Type *vla_of(Type *base, Node *expr);
 Type *struct_type(bool is_union);
 Type *enum_type(void);
 Type *copy_type(Type *ty);
+// Give a type its IR name and add it to the module's type list.
+void insert_ty(Type *ty, char *kind);
 Type *type_qual(Type *ty, uint32_t qual);
 Type *type_unqual(Type *ty);
 void add_type(Node *node);

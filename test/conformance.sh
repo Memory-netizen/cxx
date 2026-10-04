@@ -977,6 +977,77 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# The overflow builtins return { iN, i1 } in the IR -- two values, the
+# result and a flag -- which is the one place a builtin's call yields an
+# aggregate. They also fix the width from the argument, with no integer
+# promotion, so each case below is a distinct intrinsic: a short operand
+# must reach irasm as i16, not widened to i32.
+cat <<'EOF' | ok "__builtin_{add,sub,mul}_overflow"
+int main(void) {
+    int r;
+    unsigned ur;
+    short sr;
+    long long lr;
+
+    if (!__builtin_add_overflow(2147483647, 1, &r) || r != -2147483647 - 1) return 1;
+    if (__builtin_add_overflow(1, 2, &r) || r != 3) return 2;
+    if (!__builtin_sub_overflow(-2147483647 - 1, 1, &r) || r != 2147483647) return 3;
+    if (!__builtin_mul_overflow(65536, 65536, &r) || r != 0) return 4;
+
+    /* unsigned operands select the u-form of the intrinsic */
+    if (!__builtin_add_overflow(4294967295u, 1u, &ur) || ur != 0) return 5;
+
+    /* the width comes from the operand: 16 bits here, not 32 */
+    if (!__builtin_add_overflow((short)32767, (short)1, &sr) || sr != -32768) return 6;
+    if (!__builtin_mul_overflow((short)256, (short)256, &sr) || sr != 0) return 7;
+
+    /* 64-bit operands use the i64 intrinsic */
+    if (!__builtin_mul_overflow(4000000000LL, 4000000000LL, &lr)) return 8;
+    if (__builtin_mul_overflow(1000000LL, 1000000LL, &lr) || lr != 1000000000000LL) return 9;
+    return 0;
+}
+EOF
+
+# The intrinsic names carry both the operation and the signedness, and the
+# width has to be the operand's own. Getting any of those wrong still
+# produces valid IR that computes the wrong thing, so the names are checked
+# directly.
+cat > "$tmp/ovf.c" <<'EOF'
+int a(int x, int y, int *r)          { return __builtin_add_overflow(x, y, r); }
+int s(int x, int y, int *r)          { return __builtin_sub_overflow(x, y, r); }
+int m(int x, int y, int *r)          { return __builtin_mul_overflow(x, y, r); }
+int ua(unsigned x, unsigned y, unsigned *r) { return __builtin_add_overflow(x, y, r); }
+int na(short x, short y, short *r)   { return __builtin_add_overflow(x, y, r); }
+EOF
+"$compiler" -w -S -emit-llvm -o "$tmp/ovf.ll" "$tmp/ovf.c" 2>"$tmp/ovf.err"
+if [ -f "$tmp/ovf.ll" ] &&
+   grep -q 'llvm.sadd.with.overflow.i32' "$tmp/ovf.ll" &&
+   grep -q 'llvm.ssub.with.overflow.i32' "$tmp/ovf.ll" &&
+   grep -q 'llvm.smul.with.overflow.i32' "$tmp/ovf.ll" &&
+   grep -q 'llvm.uadd.with.overflow.i32' "$tmp/ovf.ll" &&
+   grep -q 'llvm.sadd.with.overflow.i16' "$tmp/ovf.ll" &&
+   grep -q 'extractvalue { i32, i1 }' "$tmp/ovf.ll"; then
+    echo "testing overflow builtin intrinsic selection ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing overflow builtin intrinsic selection ... FAILED"
+    grep -oE '@llvm\.[a-z0-9.]+' "$tmp/ovf.ll" 2>/dev/null | sort -u | sed 's/^/    /'
+    head -3 "$tmp/ovf.err" 2>/dev/null | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# <stdckdint.h> (C23 7.20) is written entirely in terms of those builtins,
+# so this is the end-to-end check that they are wired up completely.
+cat <<'EOF' | ok "<stdckdint.h> ckd_add"
+#include <stdckdint.h>
+int main(void) {
+    int r;
+    if (!ckd_add(&r, 2147483647, 1) || r != -2147483647 - 1) return 1;
+    if (ckd_add(&r, 1, 2) || r != 3) return 2;
+    return 0;
+}
+EOF
+
 # C23 6.7.7.1 allows a parameter-type-list that is a bare "...", with no
 # parameter-list ahead of it, and 7.16.1.4 then gives va_start the
 # one-operand form because there is no last parameter to name.
