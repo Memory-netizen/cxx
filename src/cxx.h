@@ -481,6 +481,11 @@ typedef enum {
     ND_COND,     // ?:
     ND_MEMZERO,  // Zero-clear a stack variable
     ND_FENCE,
+    // Variadic argument access. va_arg is an expression; the other two are
+    // statements in effect but appear in expression position.
+    ND_VA_START,   // lhs: address of the va_list object
+    ND_VA_END,     // lhs: address of the va_list object
+    ND_VA_ARG,     // lhs: the va_list value, rhs: NULL, ty: requested type
     ND_CAS,        // Atomic compare-and-swap
     ND_ATOMICRMW,  // Atomic read-modify-write (atomicrmw)
     ND_ALLOCA,     // __builtin_alloca / __builtin_alloca_with_align
@@ -653,6 +658,13 @@ enum {
     BUILTIN_POPCOUNT,
     BUILTIN_POPCOUNTL,
     BUILTIN_POPCOUNTLL,
+
+    // Variadic argument access. These need special parsing (va_arg's second
+    // operand is a type name, not an expression) and per-target expansion,
+    // so they are not declarable.
+    BUILTIN_VA_START,
+    BUILTIN_VA_END,
+    BUILTIN_VA_ARG,
 
     // One past the last kind: the table's length, so nothing has to keep a
     // separate count in step with the enum. Not a builtin itself.

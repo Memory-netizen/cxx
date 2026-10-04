@@ -566,7 +566,14 @@ Node *fold_node(Node *node) {
         case ND_CAS:
         case ND_ATOMICRMW:
         case ND_FENCE:
-            break;
+        case ND_VA_START:
+        case ND_VA_END:
+            // va_start/va_end have no value to fold; their operand is an
+            // lvalue (the va_list), not something to constant-fold.
+            return node;
+        case ND_VA_ARG:
+            // va_arg's result is only known at run time.
+            return node;
         case ND_ALLOCA:
             node->lhs = fold_node(node->lhs);
             return node;

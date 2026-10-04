@@ -447,6 +447,24 @@ static Ref gen_expr(Node *node) {
             dst = gen_expr(node->lhs);
             new_ins(IR_SP_RESTORE, R, (Ref[]){dst}, 1);
             return R;
+        // va_start/va_end map onto real LLVM intrinsics: the backend
+        // expands them against the target's va_list layout, so no ABI
+        // knowledge is needed here. The operand is the address of the
+        // va_list object, which is also the pointer the intrinsic takes.
+        case ND_VA_START:
+        case ND_VA_END: {
+            const char *name = node->kind == ND_VA_START ? "llvm.va_start.p0" : "llvm.va_end.p0";
+            uint32_t id = intern((char *)name, strlen(name));
+            register_asm_name(id, (char *)name);
+
+            Type *fty = func_type(T.ty_void);
+            Ref aptr = gen_expr(node->lhs);
+            aptr.ty = T.ty_voidptr;
+            fty->params = T.ty_voidptr;
+            fty->nparam = 1;
+            new_ins(IR_CALL, R, (Ref[]){GLB(id, fty), aptr}, 2);
+            return R;
+        }
         case ND_NOP:
             return R;
         case ND_NULLPTR:

@@ -1123,6 +1123,17 @@ void add_type(Node *node) {
             lvalue_convert(&node->desired);
             node->ty = type_unqual(node->lhs->ty->base);
             break;
+        // Variadic access. va_start/va_end have no value; va_arg yields the
+        // requested type, which the parser already recorded.
+        case ND_VA_START:
+        case ND_VA_END:
+            add_type(node->lhs);
+            node->ty = T.ty_void;
+            break;
+        case ND_VA_ARG:
+            add_type(node->lhs);
+            // node->ty was set from the type name in the parser.
+            break;
         case ND_ALLOCA:
             add_type(node->lhs);
             lvalue_convert(&node->lhs);

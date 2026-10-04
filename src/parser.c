@@ -1437,6 +1437,13 @@ BuiltinDef builtin_defs[] = {
     {"__builtin_popcount", BCLASS_DECL, "llvm.ctpop.i%d", BT_INT, BT_UINT, true, -1, 1, NULL, 0},
     {"__builtin_popcountl", BCLASS_DECL, "llvm.ctpop.i%d", BT_INT, BT_ULONG, true, -1, 1, NULL, 0},
     {"__builtin_popcountll", BCLASS_DECL, "llvm.ctpop.i%d", BT_INT, BT_ULLONG, true, -1, 1, NULL, 0},
+
+    // Variadic argument access: their shapes come from parse_builtin_fn(),
+    // and irgen lowers them to the llvm.va_* intrinsics so the backend
+    // expands them for the target's va_list layout.
+    {"__builtin_va_start", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__builtin_va_end", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__builtin_va_arg", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
 };
 
 _Static_assert(NUM_BUILTINFN - 1 == (int)(sizeof(builtin_defs) / sizeof(builtin_defs[0])),
@@ -1709,6 +1716,59 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             Node *operand = assign(&tok, tok);
             *rest = skip(tok, TK_RPAREN);
             return new_num(is_const_expr(operand), start);
+        }
+        case BUILTIN_VA_START:
+        case BUILTIN_VA_END: {
+            // __builtin_va_start(ap, last) and __builtin_va_end(ap). The
+            // last parameter is accepted and ignored: the ABI's register
+            // save area already covers the named parameters, and LLVM's
+            // va_start takes only the va_list.
+            if (!cur_fn || !cur_fn->ty->is_variadic)
+                error(tok, "‘%s’ used in a function that is not variadic",
+                      kind == BUILTIN_VA_START ? "__builtin_va_start" : "__builtin_va_end");
+            tok = skip(tok->next, TK_LPAREN);
+            Token *ap_tok = tok;
+            Node *ap = assign(&tok, tok);
+            if (kind == BUILTIN_VA_START) {
+                tok = skip(tok, TK_COMMA);
+                assign(&tok, tok);  // the last named parameter; unused
+            }
+            *rest = skip(tok, TK_RPAREN);
+
+            // The intrinsic wants the address of the va_list object. An
+            // array va_list (amd64) decays to a pointer to its first
+            // element, which is that same address; a struct or scalar one
+            // needs the address taken.
+            add_type(ap);
+            Node *addr = ap;
+            if (addr->ty->kind != TY_PTR || addr->ty->base->kind != TY_STRUCT) {
+                addr = new_unary(ND_ADDR, ap, ap_tok);
+                add_type(addr);  // new_unary leaves the type unset
+            }
+            if (addr->ty->kind != TY_PTR) error(ap_tok, "invalid va_list argument");
+
+            Node *node = new_node(kind == BUILTIN_VA_START ? ND_VA_START : ND_VA_END, start);
+            node->lhs = addr;
+            return node;
+        }
+        case BUILTIN_VA_ARG: {
+            // __builtin_va_arg(ap, type): the second operand is a type name
+            if (!cur_fn || !cur_fn->ty->is_variadic)
+                error(tok, "‘__builtin_va_arg’ used in a function that is not variadic");
+            tok = skip(tok->next, TK_LPAREN);
+            Node *ap = assign(&tok, tok);
+            tok = skip(tok, TK_COMMA);
+            Type *ty = typename(&tok, tok);
+            *rest = skip(tok, TK_RPAREN);
+
+            if (ty->kind == TY_ARRAY || ty->kind == TY_FUNC)
+                error(start, "invalid type ‘%s’ in ‘__builtin_va_arg’", "…");
+            add_type(ap);
+
+            Node *node = new_node(ND_VA_ARG, start);
+            node->lhs = ap;
+            node->ty = ty;
+            return node;
         }
         case BUILTIN_FN_ALLOCA:
         case BUILTIN_ALLOCA_WITH_ALIGN: {

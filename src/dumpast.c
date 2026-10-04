@@ -93,6 +93,9 @@ static const char *node_kind_name[] = {
     [ND_ATOMICRMW] = "ATOMICRMW",
     [ND_CAS] = "CAS",
     [ND_FENCE] = "FENCE",
+    [ND_VA_START] = "VA_START",
+    [ND_VA_END] = "VA_END",
+    [ND_VA_ARG] = "VA_ARG",
     [ND_SP_SAVE] = "SP_SAVE",
     [ND_SP_RESTORE] = "SP_RESTORE",
 };
@@ -690,6 +693,21 @@ static void dump_node(Node *node) {
             break;
         case ND_FENCE:
             fprintf(stdout, "  fence\n");
+            break;
+        case ND_VA_START:
+        case ND_VA_END:
+            fprintf(stdout, "\n");
+            depth++;
+            dump_node(node->lhs);
+            depth--;
+            break;
+        case ND_VA_ARG:
+            fprintf(stdout, "  type=");
+            print_type(node->ty);
+            fprintf(stdout, "\n");
+            depth++;
+            dump_node(node->lhs);
+            depth--;
             break;
     }
 }
