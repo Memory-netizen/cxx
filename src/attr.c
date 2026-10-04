@@ -20,6 +20,22 @@ static AttrInfo attrs[] = {
     {"fallthrough", ATTR_NS_GNU, 1, ATTR_STMT},
     {"maybe_unused", ATTR_NS_GNU, 1, ATTR_DECL | ATTR_TYPE | ATTR_FIELD | ATTR_PARAM | ATTR_LABEL},
     {"nodiscard", ATTR_NS_GNU, 1, ATTR_DECL | ATTR_TYPE},
+    // Function attributes glibc's headers rely on (spelled __const__,
+    // __pure__, __malloc__ in the headers; attr_lookup strips the
+    // surrounding double underscores). They are accepted and otherwise
+    // ignored: cxx does no cross-call optimisation, so they carry no
+    // semantics yet.
+    {"const", ATTR_NS_GNU, 1, ATTR_DECL},
+    {"pure", ATTR_NS_GNU, 1, ATTR_DECL},
+    {"malloc", ATTR_NS_GNU, 1, ATTR_DECL},
+    {"nothrow", ATTR_NS_GNU, 1, ATTR_DECL},
+    {"leaf", ATTR_NS_GNU, 1, ATTR_DECL},
+    {"nonnull", ATTR_NS_GNU, 1, ATTR_DECL | ATTR_PARAM},
+    {"warn_unused_result", ATTR_NS_GNU, 1, ATTR_DECL},
+    {"always_inline", ATTR_NS_GNU, 1, ATTR_DECL},
+    {"noinline", ATTR_NS_GNU, 1, ATTR_DECL},
+    {"format", ATTR_NS_GNU, 1, ATTR_DECL},
+    {"sentinel", ATTR_NS_GNU, 1, ATTR_DECL},
 
     // Clang attributes.
     {"annotate", ATTR_NS_CLANG, 1, ATTR_DECL},

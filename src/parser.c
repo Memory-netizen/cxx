@@ -26,7 +26,10 @@ static const char *sclass_name[] = {
 
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec, Attr **attrs);
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty, bool is_param);
+static Node *new_bswap(Node *arg, int kind, Token *arg_tok, Token *start);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
+static void parse_asm_name(Token **rest, Token *tok, char **name_out);
+static void set_asm_name(Sym *var, char *name);
 static Node *declaration(Token **rest, Token *tok, Type *ty, SClass sclass, int align, int funcspec, Attr *attrs);
 
 static void attr_decl_apply(Attr *attrs, int *funcspec, int *align, bool gnu_only);
@@ -381,6 +384,55 @@ static Sym *new_var(uint32_t id, Type *ty) {
     var->ty = ty;
     var->align = ty->align;
     return var;
+}
+
+// asm-name ::= ("asm" | "__asm" | "__asm__") "(" string-literal ")"
+//
+// GNU extension (and required by glibc's <sys/cdefs.h> __REDIRECT):
+// the declarator keeps the C identifier for name lookup, but the symbol
+// emitted into and referenced from the object file is the given name.
+//
+// glibc spells this as `__asm__ (__ASMNAME ("alias"))`, and __ASMNAME
+// prepends __USER_LABEL_PREFIX__, which is empty on this target, so the
+// argument looks like a run of adjacent string literals:
+//
+//     __asm__ ("" "__isoc23_fscanf")
+//
+// join_adjacent_string_literals() has already merged any such run into a
+// single TK_STRLIT before parse() runs, so the name is just that token's
+// string content: str(tok->id), which is also the decoded form (escape
+// sequences resolved). Do not re-join tokens here -- concatenating the
+// text by hand would bypass the lexer's string handling.
+//
+// The label is parsed before the symbol exists (it can precede a
+// function *definition*, whose Sym is only created inside that branch),
+// so it is returned through *name_out for the caller to attach.
+static void parse_asm_name(Token **rest, Token *tok, char **name_out) {
+    *name_out = NULL;
+    if (tok->kind != TK_ASM) {
+        *rest = tok;
+        return;
+    }
+
+    tok = tok->next;
+    if (tok->kind != TK_LPAREN) error(tok, "expected ‘(’ after ‘asm’");
+    tok = tok->next;
+
+    if (tok->kind != TK_STRLIT) error(tok, "expected string literal in ‘asm’ name");
+    if (tok->enc_prefix != PREFIX_NONE) error(tok, "expected a plain string literal in ‘asm’ name");
+
+    char *name = str(tok->id);
+    if (!name[0]) error(tok, "expected non-empty string in ‘asm’ name");
+
+    *rest = skip(tok->next, TK_RPAREN);
+    *name_out = name;
+}
+
+// Attach a label parsed by parse_asm_name to an already-created symbol.
+static void set_asm_name(Sym *var, char *name) {
+    if (!var || !name) return;
+    var->asm_name = name;
+    register_asm_name(var->id, name);
 }
 
 static Sym *new_lvar(uint32_t id, Type *ty) {
@@ -1336,6 +1388,10 @@ enum {
     ATOMIC_THREAD_FENCE,
     ATOMIC_SIGNAL_FENCE,
     ATOMIC_IS_LOCK_FREE,
+    // __builtin_bswap16/32/64
+    BUILTIN_BSWAP16,
+    BUILTIN_BSWAP32,
+    BUILTIN_BSWAP64,
 };
 
 // Interned once at the top of parse(): the anonymous name for
@@ -1353,6 +1409,9 @@ static struct {
     {"__builtin_alloca_with_align", 0, BUILTIN_ALLOCA_WITH_ALIGN},
     {"__builtin_constant_p", 0, BUILTIN_CONSTANT_P},
     {"__builtin_types_compatible_p", 0, BUILTIN_TYPES_COMPATIBLE_P},
+    {"__builtin_bswap16", 0, BUILTIN_BSWAP16},
+    {"__builtin_bswap32", 0, BUILTIN_BSWAP32},
+    {"__builtin_bswap64", 0, BUILTIN_BSWAP64},
     {"__c11_atomic_store", 0, ATOMIC_STORE},
     {"__c11_atomic_load", 0, ATOMIC_LOAD},
     {"__c11_atomic_exchange", 0, ATOMIC_EXCHANGE},
@@ -1462,6 +1521,28 @@ static Node *atomic_result(Node *operand_init, Node *op_assign, Sym *result, Tok
     return new_binary(ND_COMMA, seq, new_var_node(result, tok), tok);
 }
 
+// __builtin_bswap16/32/64. Written as explicit shift/mask/or on an
+// __builtin_bswap16/32/64 -> ND_BSWAP, which irgen lowers to the
+// llvm.bswap.iN intrinsic. glibc's <bits/byteswap.h> uses these whenever
+// __GNUC_PREREQ (4, 8) holds, which is the case once cxx declares
+// __GNUC__ >= 7.
+static Node *new_bswap(Node *arg, int kind, Token *arg_tok, Token *start) {
+    int bits = kind == BUILTIN_BSWAP16 ? 16 : kind == BUILTIN_BSWAP32 ? 32 : 64;
+
+    Node *v = arg;
+    lvalue_convert(&v);
+    if (!is_integer(v->ty)) error(arg_tok, "argument to ‘__builtin_bswap%d’ must be an integer", bits);
+
+    // The builtin takes and returns an n-bit unsigned integer.
+    Type *uty = bits == 16 ? T.ty_ushort : bits == 32 ? T.ty_uint : T.ty_ulong;
+
+    Node *node = new_node(ND_BSWAP, start);
+    node->lhs = v;
+    node->rhs = new_num(bits, start);
+    node->ty = uty;
+    return node;
+}
+
 // Builtins lower to dedicated node kinds (ND_ATOMICRMW, ND_CAS,
 // ND_ALLOCA, ...) carrying the memory order; arguments are parsed with
 // the normal expression grammar and stored into anonymous temps so they
@@ -1484,6 +1565,15 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             Node *operand = assign(&tok, tok);
             *rest = skip(tok, TK_RPAREN);
             return new_num(is_const_expr(operand), start);
+        }
+        case BUILTIN_BSWAP16:
+        case BUILTIN_BSWAP32:
+        case BUILTIN_BSWAP64: {
+            tok = skip(tok->next, TK_LPAREN);
+            Token *arg_tok = tok;
+            Node *arg = assign(&tok, tok);
+            *rest = skip(tok, TK_RPAREN);
+            return new_bswap(arg, kind, arg_tok, start);
         }
         case BUILTIN_FN_ALLOCA:
         case BUILTIN_ALLOCA_WITH_ALIGN: {
@@ -1952,8 +2042,9 @@ static Node *primary(Token **rest, Token *tok) {
         return node;
     }
     if (tok->kind == TK_CHARLIT) {
+        Type *ty = infer_chartype(tok);
         node = new_num(int128_to_i64(tok->ival), tok);
-        node->ty = infer_chartype(tok);
+        node->ty = ty;
         *rest = tok->next;
         return node;
     }
@@ -2035,9 +2126,17 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
             // to _BitInt; float and _Float32 promote to double;
             // _Float16 and _Float64 stay as they are (gcc/clang both
             // keep _Float16; clang promotes _Float32).
+            //
+            // lvalue conversion must come *first*: integer_promotion()
+            // wraps the operand in ND_IMCAST, which drops the is_lvalue
+            // flag, so converting afterwards is a no-op and the load the
+            // value needs never happens -- the cast is then applied to
+            // the variable's address (an "invalid cast opcode for cast
+            // from 'ptr'" in the backend). The non-variadic branch below
+            // already converts before casting.
+            lvalue_convert(&arg);
             if (is_integer(arg->ty)) integer_promotion(&arg);
             if (arg->ty->kind == TY_FLOAT || arg->ty->kind == TY_F32) new_imcast(&arg, T.ty_double);
-            lvalue_convert(&arg);
         } else {
             error(tok, "too many arguments to function ‘%.*s’; expected %d", ty->name->len, tok_text(ty->name),
                   ty->nparam);
@@ -2200,6 +2299,14 @@ static Node *postfix(Token **rest, Token *tok) {
 //          | "&&" Ident
 // UnaryOp  ::= "+" | "-" | "~" | "!" | "&" | "*"
 static Node *unary(Token **rest, Token *tok) {
+    // GNU `__extension__` is a no-op marker that suppresses pedantic
+    // diagnostics; it may prefix an expression (glibc writes
+    // `__extension__ ({ ... })` for statement expressions).
+    if (tok->kind == TK_EXTENSION) {
+        *rest = tok->next;
+        return unary(rest, tok->next);
+    }
+
     switch (tok->kind) {
         case TK_PLUS:
             return new_unary(ND_PLUS, cast(rest, tok->next), tok);
@@ -2981,6 +3088,17 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         var->align = MAX(align, ty->align);
         var->is_function = is_fn;
         var->funcspec |= fspec;
+        // GNU asm label and/or post-declarator attributes may follow the
+        // declarator in either order; glibc's __REDIRECT_NTH writes
+        // `proto __asm__("...") __attribute__((...))`, so parse the
+        // label first and let decl_attrs() consume any trailing
+        // attributes.
+        {
+            char *a = NULL;
+            parse_asm_name(&tok, tok, &a);
+            ty = decl_attrs(&tok, tok, ty);
+            set_asm_name(var, a);
+        }
         sym_attr_flags(var, attrs, false);
         sym_attr_flags(var, ty->attrs, true);
         if (tok->kind == TK_AS) {
@@ -4228,14 +4346,19 @@ static bool is_attr_start(Token *tok) {
 static Attr *attr_entry(Token **rest, Token *tok, bool is_gnu) {
     Token *start = tok;
     AttrInfo *info = NULL;
-    if (tok->kind == TK_IDENT) {
+    // Attribute names may collide with keywords: glibc spells
+    // __attribute__((__const__)), and `const` is a keyword here. Keyword
+    // tokens keep their interned id (keywordize only rewrites kind), so
+    // the name is str(tok->id) either way; only the acceptance test has
+    // to allow non-identifiers.
+    if (tok->kind == TK_IDENT || tk_is_keyword(tok)) {
         char *ns = NULL;
         char *name = str(tok->id);
         tok = tok->next;
         if (tok->kind == TK_COLONCOLON) {
             ns = name;
             tok = tok->next;
-            if (tok->kind != TK_IDENT) error(tok, "expected attribute name");
+            if (tok->kind != TK_IDENT && !tk_is_keyword(tok)) error(tok, "expected attribute name");
             name = str(tok->id);
             tok = tok->next;
         }
@@ -4428,6 +4551,12 @@ static Token *attr_decl(Token *tok) {
 }
 
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec, Attr **attrs) {
+    // GNU `__extension__`: a no-op marker that suppresses pedantic
+    // diagnostics. cxx has no such diagnostics yet, so it is simply
+    // consumed -- glibc's <stdlib.h>/<wchar.h> write
+    // `__extension__ typedef struct ...`.
+    while (tok->kind == TK_EXTENSION) tok = tok->next;
+
     Type *ty;
     bool seen_auto = false;
     bool is_constexpr = false;
@@ -5018,6 +5147,12 @@ static Token *external_declaration(Token *tok) {
             if (fspec & Q_INLINE) error(tok, "‘inline’ can only appear on functions");
         }
 
+        // GNU asm label, e.g. `int f(void) __asm__("g");` or before a
+        // function definition's body. Parsed here because it applies to
+        // both branches and the Sym may not exist yet.
+        char *asm_name = NULL;
+        parse_asm_name(&tok, tok, &asm_name);
+
         // function-definition
         if (tok->kind == TK_LBRACE) {
             if (cnt || !is_fn) error(tok, "expected ‘=’, ‘,’, ‘;’ before ‘{’ token");
@@ -5047,6 +5182,12 @@ static Token *external_declaration(Token *tok) {
                 var->is_function = true;
                 var->sclass = sclass;
             }
+
+            // asm("name") may follow the declarator of a function
+            // definition, optionally followed by attributes:
+            //   int f(void) __asm__("g") __attribute__((noreturn)) { }
+            ty = decl_attrs(&tok, tok, ty);
+            set_asm_name(var, asm_name);
 
             var->is_defined = true;
             var->funcspec |= fspec;
@@ -5146,6 +5287,13 @@ static Token *external_declaration(Token *tok) {
                 ns->var = var;
                 ns->lnk = sclass & (SC_STATIC | SC_CONSTEXPR) ? LK_INTERN : LK_EXTERN;
             }
+
+            // asm("name") for a file-scope object or function
+            // declaration, optionally followed by attributes:
+            //   extern int fscanf(...) __asm__("__isoc23_fscanf") __wur;
+            //   int x __asm__("y") = 7;
+            ty = decl_attrs(&tok, tok, ty);
+            set_asm_name(var, asm_name);
 
             if (ty->kind == TY_VOID) error(var_name, "variable ‘%s’ declared void", str(var_name->id));
 

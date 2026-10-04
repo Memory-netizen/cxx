@@ -288,6 +288,12 @@ enum {
     TK_STATIC_ASSERT,
     TK_SWITCH,
     TK_WHILE,
+    // GNU `__extension__`: a no-op marker that suppresses pedantic
+    // diagnostics. cxx has no such diagnostics yet, so it is simply
+    // consumed (see the TK_EXTENSION cases in parser.c). It is placed
+    // after TK_WHILE on purpose: the contiguous keyword range that
+    // tk_is_keyword() tests is TK_KEYWORD..TK_WHILE.
+    TK_EXTENSION,
     TK_OTHER,
     TK_ERR,
     TK_WARN,
@@ -381,6 +387,11 @@ struct Sym {
     bool is_function;
     bool is_defined;
     bool is_str;
+
+    // GNU asm-name: `int f(void) __asm__("real_symbol");` declares the
+    // C identifier f but emits/refers to real_symbol in the object file.
+    // NULL when the declaration has no asm label.
+    char *asm_name;
 
     // Attribute flags
     bool is_deprecated;
@@ -497,6 +508,10 @@ typedef enum {
     ND_SUBACCESS,  // E[m] on an array operand (C2y 6.5.3.2)
     ND_SP_SAVE,
     ND_SP_RESTORE,
+    // Byte swap of the integer in lhs, width taken from rhs->ival (16, 32
+    // or 64). Lowered to the llvm.bswap.iN intrinsic; kept as its own node
+    // so no shift/mask tree has to be synthesized (and typed) by hand.
+    ND_BSWAP,
 } NodeKind;
 
 // AST node type
@@ -996,6 +1011,14 @@ struct Module {
 
 Module *irgen(Module *node);
 void dump_module(Module *module, FILE *out);
+// True when tok is in the contiguous keyword range TK_KEYWORD..TK_WHILE.
+// Keyword tokens keep their interned id (keywordize only rewrites kind),
+// so callers needing the spelling (e.g. attribute names such as
+// __const__) can use str(tok->id).
+static inline bool tk_is_keyword(Token *tok) { return tok->kind >= TK_KEYWORD && tok->kind <= TK_WHILE; }
+// Record that identifier `id` is emitted under the object-file symbol
+// `name` (GNU `__asm__("name")` declaration label).
+void register_asm_name(uint32_t id, char *name);
 void dump_ast(Module *prog);
 void dump_raw_tokens(Token *tok);
 void dump_tokens(Token *tok);

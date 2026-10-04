@@ -5,6 +5,10 @@ static Module *curm;
 extern bool opt_fpic;
 extern bool opt_fcommon;
 
+// True when this symbol's object-file name was already emitted (see the
+// definition below dump_str); used to fold asm-name aliases together.
+static bool already_emitted(Sym *sym);
+
 static const char *op_str[][3] = {
     [IR_ADD] = {"add", "add", "fadd"},
     [IR_SUB] = {"sub", "sub", "fsub"},
@@ -90,6 +94,53 @@ static void print_ident(uint32_t id) {
             fprintf(out_file, "\\%02X", c);
     }
     fprintf(out_file, "\"");
+}
+
+// GNU asm labels (`int f(void) __asm__("real");`) rename a symbol in the
+// object file. The IR still refers to it under the C identifier, but
+// every place the symbol is emitted -- definition, declaration, call
+// target, global reference -- must spell the asm name instead. The
+// mapping is keyed by the interned identifier because Ref (RGlb) only
+// carries the id, not the Sym.
+static struct {
+    uint32_t id;
+    char *name;
+} *asm_names;
+static int num_asm_names;
+
+void register_asm_name(uint32_t id, char *name) {
+    for (int i = 0; i < num_asm_names; i++)
+        if (asm_names[i].id == id) {
+            asm_names[i].name = name;
+            return;
+        }
+    if (!asm_names)
+        asm_names = vnew(4, sizeof(asm_names[0]));
+    else
+        asm_names = vgrow(asm_names, num_asm_names + 1);
+    asm_names[num_asm_names].id = id;
+    asm_names[num_asm_names++].name = name;
+}
+
+// Print the object-file name of an identifier, honouring a registered
+// name (an asm label, or an LLVM intrinsic).
+//
+// A registered name is quoted so that it is one verbatim symbol
+// (@"__isoc23_fscanf"). An LLVM intrinsic is the exception: there the
+// overload suffix is part of the identifier, so @"llvm.bswap.i32" would
+// name a different -- and invalid -- symbol, and it must be printed bare.
+// Intrinsics are the only registered name that is not a C identifier,
+// which is what "contains a dot" detects.
+static void print_sym_name(uint32_t id) {
+    for (int i = 0; i < num_asm_names; i++)
+        if (asm_names[i].id == id) {
+            if (strchr(asm_names[i].name, '.'))
+                fprintf(out_file, "%s", asm_names[i].name);
+            else
+                fprintf(out_file, "\"%s\"", asm_names[i].name);
+            return;
+        }
+    print_ident(id);
 }
 
 static void print_type(Type *ty) {
@@ -232,10 +283,10 @@ static void print_operand(Ref r) {
         }
     } else if (r.type == RGlb) {
         fprintf(out_file, "@");
-        print_ident((uint32_t)r.val);
+        print_sym_name((uint32_t)r.val);
     } else if (r.type == RLabel) {
         fprintf(out_file, "blockaddress(@");
-        print_ident(dump_curf->id);
+        print_sym_name(dump_curf->id);
         fprintf(out_file, ", %%%d)", dump_curf->blks[r.val].blk_id);
     } else {
         fprintf(out_file, "%%%d", r.val);
@@ -852,8 +903,9 @@ static const char *sclass_name[] = {
 };
 
 void dump_data(Sym *data) {
+    if (already_emitted(data)) return;
     fprintf(out_file, "@");
-    print_ident(data->id);
+    print_sym_name(data->id);
     fprintf(out_file, " = ");
     if (data->is_str) {
         dump_str(data);
@@ -878,6 +930,7 @@ void dump_data(Sym *data) {
 }
 
 void dump_fn(Sym *fn) {
+    if (already_emitted(fn)) return;
     dump_curf = fn;
     if (!fn->is_defined) {
         fprintf(out_file, "declare ");
@@ -891,7 +944,7 @@ void dump_fn(Sym *fn) {
 
     print_type(fn->ty->ret);
     fprintf(out_file, " @");
-    print_ident(fn->id);
+    print_sym_name(fn->id);
     fprintf(out_file, "(");
 
     Type *param = fn->ty->params;
@@ -918,9 +971,42 @@ void dump_fn(Sym *fn) {
     fprintf(out_file, "}\n\n");
 }
 
+// The name a symbol is emitted under: the asm label when it has one,
+// otherwise the C identifier.
+static char *emitted_name(Sym *sym) {
+    if (sym->asm_name) return sym->asm_name;
+    return str(sym->id);
+}
+
+// Set of names already emitted in this module.
+//
+// Two different C identifiers can denote one object-file symbol: glibc's
+// <stdlib.h> redirects both strtoq and strtoll to the same asm name
+// __isoc23_strtoll. Emitting one declaration per C identifier would
+// declare the same symbol twice, which LLVM rejects with "invalid
+// redefinition of function". Deduplicate on the emitted name; the first
+// declaration for a name wins, which is what an alias means.
+static struct {
+    char *name;
+} *emitted;
+static int num_emitted;
+
+static bool already_emitted(Sym *sym) {
+    char *name = emitted_name(sym);
+    for (int i = 0; i < num_emitted; i++)
+        if (!strcmp(emitted[i].name, name)) return true;
+    if (!emitted)
+        emitted = vnew(8, sizeof(emitted[0]));
+    else
+        emitted = vgrow(emitted, num_emitted + 1);
+    emitted[num_emitted++].name = name;
+    return false;
+}
+
 void dump_module(Module *md, FILE *out) {
     out_file = out;
     curm = md;
+    num_emitted = 0;
     SrcFile **files = get_input_files();
     fprintf(out_file, "; ModuleID = '%s'\n", files[0]->name);
     fprintf(out_file, "source_filename = \"%s\"\n", files[0]->name);
@@ -932,6 +1018,9 @@ void dump_module(Module *md, FILE *out) {
     fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
     fprintf(out_file, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n");
     fprintf(out_file, "declare ptr @llvm.threadlocal.address.p0(ptr)\n");
+    // llvm.bswap.iN is not declared here: it is an overloaded intrinsic,
+    // so relying on "declared on first use" lets LLVM pick the overload
+    // from the call itself.
     if (curm->has_vla) {
         fprintf(out_file, "declare ptr @llvm.stacksave.p0()\n");
         fprintf(out_file, "declare void @llvm.stackrestore.p0(ptr)\n");

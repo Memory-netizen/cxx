@@ -78,6 +78,7 @@ static const char *node_kind_name[] = {
     [ND_VAR] = "VAR",
     [ND_NUM] = "NUM",
     [ND_NULLPTR] = "NULLPTR",
+    [ND_BSWAP] = "BSWAP",
 };
 
 static void print_type(Type *ty) {
@@ -501,6 +502,13 @@ static void dump_node(Node *node) {
             break;
         case ND_ALLOCA:
             fprintf(stdout, "alloca\n");
+            break;
+        case ND_BSWAP:
+            // The operand is an expression; dump it like a unary node.
+            fprintf(stdout, "bswap\n");
+            depth++;
+            dump_node(node->lhs);
+            depth--;
             break;
         case ND_FENCE:
             fprintf(stdout, "fence\n");

@@ -863,6 +863,12 @@ void add_type(Node *node) {
             lvalue_convert(&node->rhs);
             node->ty = node->lhs->ty->base;
             break;
+        case ND_BSWAP:
+            // The parser already fixed this node's type; type the operand
+            // so irgen never walks into an untyped child.
+            add_type(node->lhs);
+            lvalue_convert(&node->lhs);
+            break;
 
         // unary
         case ND_PLUS:

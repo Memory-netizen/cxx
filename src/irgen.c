@@ -140,8 +140,12 @@ static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
     // time. Falling through to the by-width case below would instead
     // emit an invalid `sext i32 0 to ptr`, because nullptr_t is not
     // TY_PTR and is_pointer() is therefore false for it.
-    if (target_ty->kind == TY_NULLPTR) return NULLPTR;
-
+    if (target_ty->kind == TY_NULLPTR) {
+        if (src_ty->kind == TY_NULLPTR) return val;  // no-op
+        Ref n = NULLPTR;
+        n.ty = target_ty;
+        return n;
+    }
     if (is_pointer(src_ty) && is_integer(target_ty)) {
         Ref dst = TMP(tmp_id++, target_ty);
         new_ins(IR_PTRTOINT, dst, (Ref[]){val}, 1);
@@ -341,6 +345,33 @@ static int lvalue_align(Node *node) {
     return node->ty->align;
 }
 
+// ND_BSWAP -> a direct IR_CALL to the llvm.bswap.iN intrinsic, built the
+// same way ND_FUNCALL builds its callee and argument list (see below).
+//
+// The name is looked up through a reserved identifier rather than a Sym:
+// intrinsic names are not C identifiers and the argument list needs no
+// declaration emitted. It starts with "llvm.", so it can never collide
+// with a user function -- C identifiers cannot contain a dot.
+//
+// (opt_ast.c folds a constant operand before irgen sees it, so this only
+// runs for a runtime value.)
+static Ref gen_bswap(Node *node) {
+    Ref val = gen_expr(node->lhs);
+    int bits = (int)int128_to_i64(node->rhs->ival);
+
+    char *name = format("llvm.bswap.i%d", bits);
+    uint32_t id = intern(name, strlen(name));
+    register_asm_name(id, name);
+
+    Ref dst = TMP(tmp_id++, node->ty);
+    // The callee's ty must be the *function* type, not a pointer to it:
+    // the IR_CALL printer reads ir->args[0].ty->is_variadic directly.
+    Type *fty = func_type(node->ty);
+    Ref fn = GLB(id, fty);
+    new_ins(IR_CALL, dst, (Ref[]){fn, val}, 2);
+    return dst;
+}
+
 static Ref gen_expr(Node *node) {
     if (!node) return R;
     Ref dst;
@@ -368,7 +399,14 @@ static Ref gen_expr(Node *node) {
             return R;
         case ND_NULLPTR:
             return NULLPTR;
+        case ND_BSWAP:
+            return gen_bswap(node);
         case ND_NUM:
+            // parse() must hand irgen a fully typed AST: a constant with
+            // no type means the front end failed to propagate one, and
+            // silently treating it as an int here would mask a parser bug
+            // and emit the wrong constant format. Assert instead.
+            if (!node->ty) fatal("ND_NUM reached irgen without a type");
             if (is_fpval(node->ty)) {
                 Con c = {.type = CBits128};
                 switch (node->ty->kind) {

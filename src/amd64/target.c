@@ -348,6 +348,16 @@ Target T_amd64 = {
         "#define __STDC_UTF_16__ 1\n"
         "#define __STDC_UTF_32__ 1\n"
         "#define __STDC_VERSION__ 202311L\n"
+        // GNU compatibility level. glibc's headers branch on __GNUC_PREREQ,
+        // so declaring a GNU version steers them away from writing their own
+        // fallbacks -- notably `typedef float _Float32;` in
+        // bits/floatn-common.h, which would clash with cxx's _FloatN
+        // keywords (C23 H.5.1). __GNUC_MINOR__ must be defined too:
+        // __GNUC_PREREQ is a function-like macro here, so a bare __GNUC__
+        // makes it expand to something non-callable.
+        "#define __GNUC__ 7\n"
+        "#define __GNUC_MINOR__ 0\n"
+        "#define __GNUC_PATCHLEVEL__ 0\n"
         "#define __STDC__ 1\n"
         "#define __UINT16_C(c) c\n"
         "#define __UINT16_C_SUFFIX__ \n"
@@ -478,6 +488,7 @@ Target T_amd64 = {
         "#define __has_embed __has_embed\n"
         "#define __has_include __has_include\n"
         "#define __has_include_next __has_include_next\n"
+        "#define __inline inline\n"
         "#define __inline__ inline\n"
         "#define __signed__ signed\n"
         "#define __typeof typeof\n"

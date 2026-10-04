@@ -804,6 +804,7 @@ void convert_keywords(Token *tok) {
         {"__asm", 0, TK_ASM},
         {"__asm__", 0, TK_ASM},
         {"__attribute__", 0, TK_ATTR},
+        {"__extension__", 0, TK_EXTENSION},
         {"__restrict", 0, TK_RESTRICT},
         {"__restrict__", 0, TK_RESTRICT},
         {"__thread", 0, TK_THREAD},

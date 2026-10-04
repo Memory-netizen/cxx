@@ -37,6 +37,27 @@ static Node *folded_int(Int128 v, Type *ty, Node *tmpl) {
     return node;
 }
 
+// Fold ND_BSWAP when the operand is an integer constant. A byte swap is
+// a pure bit permutation, so the result can be computed here exactly --
+// no need to leave it to the llvm.bswap.iN intrinsic to fold.
+//
+// result = OR over i of ((v >> 8*i) & 0xff) << (8*(bits/8 - 1 - i))
+static Node *fold_bswap(Node *node) {
+    if (!is_int_const(node->lhs)) return NULL;
+
+    int bits = (int)int128_to_i64(node->rhs->ival);
+    int bytes = bits / 8;
+
+    Int128 v = node->lhs->ival;
+    Int128 mask = int128_set_ui(0xff);
+    Int128 acc = int128_set_ui(0);
+    for (int i = 0; i < bytes; i++) {
+        Int128 byte = int128_and(int128_shr(v, 8 * i, UNSIGNED), mask);
+        acc = int128_or(acc, int128_shl(byte, 8 * (bytes - 1 - i)));
+    }
+    return folded_int(acc, node->ty, node);
+}
+
 // Fold a binary integer node. Both operands are Int128 constants of
 // any width; the arithmetic runs in the Int128 domain and folded_int
 // normalizes the result to the declared width.
@@ -411,9 +432,23 @@ Node *fold_node(Node *node) {
             node->lhs = fold_node(node->lhs);
             return node;
 
-        case ND_FUNCALL:
-            for (Node *a = node->args; a; a = a->next) fold_node(a);
+        case ND_FUNCALL: {
+            // Fold each argument and splice the replacement node back into
+            // the list. The previous version called fold_node() and threw
+            // the result away, so no argument of any call was ever folded
+            // (f(2 + 3) kept the add for the backend); every other case
+            // here does write the result back.
+            Node **p = &node->args;
+            while (*p) {
+                Node *folded = fold_node(*p);
+                if (folded && folded != *p) {
+                    folded->next = (*p)->next;
+                    *p = folded;
+                }
+                p = &(*p)->next;
+            }
             return node;
+        }
         case ND_CASE:
         case ND_LABEL:
             node->label_body = fold_node(node->label_body);
@@ -444,6 +479,10 @@ Node *fold_node(Node *node) {
         case ND_ALLOCA:
             node->lhs = fold_node(node->lhs);
             return node;
+        case ND_BSWAP:
+            // Fold the operand, then the swap itself when it is constant.
+            node->lhs = fold_node(node->lhs);
+            return fold_bswap(node) ?: node;
     }
     return node;
 }

@@ -84,11 +84,13 @@ Type *infer_numtype(Token *tok) {
 
 Type *infer_chartype(Token *tok) {
     uint32_t prefix = tok->enc_prefix;
-    return prefix == PREFIX_NONE ? T.ty_int
-           : prefix == PREFIX_L  ? T.ty_wchar
-           : prefix == PREFIX_U  ? T.ty_uint
-           : prefix == PREFIX_u  ? T.ty_ushort
-                                 : T.ty_uchar;
+    Type *ty = prefix == PREFIX_NONE ? T.ty_int
+               : prefix == PREFIX_L  ? T.ty_wchar
+               : prefix == PREFIX_U  ? T.ty_uint
+               : prefix == PREFIX_u  ? T.ty_ushort
+                                     : T.ty_uchar;
+    tok->ival = int128_normalize(tok->ival, ty->size * 8, ty->is_unsigned ? UNSIGNED : SIGNED);
+    return ty;
 }
 
 Type *infer_strtype(Token *tok) {
