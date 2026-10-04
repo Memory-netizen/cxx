@@ -788,10 +788,89 @@ fi
 
 # --- known gaps ------------------------------------------------------
 # Listed so the gap shows up in the suite instead of passing silently.
-gap "<stdbit.h> helpers (needs __builtin_clz*)" <<'EOF'
+# Was a gap until two things landed: the bit-counting builtins, and
+# widening a shift's amount in irgen (6.5.7 promotes the operands
+# separately, so their widths may differ, but LLVM needs one type).
+ok "<stdbit.h> helpers" <<'EOF'
 #include <stdbit.h>
-int main(void) { return (int)stdc_leading_zeros(1u); }
+int main(void) {
+    if (stdc_leading_zeros(1u) != 31) return 1;
+    if (stdc_trailing_zeros(8u) != 3) return 2;
+    if (stdc_count_ones(0xf0f0u) != 8) return 3;
+    return 0;
+}
 EOF
+
+# A shift's operands are promoted separately, so a narrow amount next to a
+# wide left operand has to be widened before the IR shift.
+cat > "$tmp/shiftamt.c" <<'EOF'
+int n(int);
+unsigned long long g(int x) { return 1ull << n(x); }
+int m(unsigned char c) { return 1 << c; }
+EOF
+"$compiler" -S -emit-llvm -o "$tmp/shiftamt.ll" "$tmp/shiftamt.c" 2>"$tmp/shiftamt.err"
+if [ -f "$tmp/shiftamt.ll" ] &&
+   grep -qE 'shl i64' "$tmp/shiftamt.ll" &&
+   grep -qE 'shl i32' "$tmp/shiftamt.ll"; then
+    echo "testing a shift amount is widened for the IR shift ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a shift amount is widened for the IR shift ... FAILED"
+    grep -E 'shl |sext|zext' "$tmp/shiftamt.ll" 2>/dev/null | sed 's/^/    /'
+    head -3 "$tmp/shiftamt.err" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# The bit-counting builtins return int whatever the operand width, so a
+# wide operand computes at its own width and truncates, and a narrow one is
+# promoted first -- both visible in the IR.
+cat > "$tmp/bitcnt.c" <<'EOF'
+int a(unsigned x) { return __builtin_clz(x); }
+int b(unsigned long x) { return __builtin_clzl(x); }
+int c(unsigned long long x) { return __builtin_popcountll(x); }
+int d(unsigned char x) { return __builtin_popcount(x); }
+EOF
+if "$compiler" -S -emit-llvm -o "$tmp/bitcnt.ll" "$tmp/bitcnt.c" 2>"$tmp/bitcnt.err" &&
+   grep -q 'llvm.ctlz.i32' "$tmp/bitcnt.ll" &&
+   grep -q 'llvm.ctlz.i64' "$tmp/bitcnt.ll" &&
+   grep -q 'llvm.ctpop.i64' "$tmp/bitcnt.ll" &&
+   grep -q 'trunc i64' "$tmp/bitcnt.ll" &&
+   grep -q 'zext i8' "$tmp/bitcnt.ll" &&
+   grep -q 'i1 1' "$tmp/bitcnt.ll"; then
+    echo "testing bit-counting builtins lower to llvm.ctlz/cttz/ctpop ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing bit-counting builtins lower to llvm.ctlz/cttz/ctpop ... FAILED"
+    grep -oE '@llvm\.[a-z0-9.]+\([^)]*\)|trunc [a-z0-9]+|zext [a-z0-9]+' "$tmp/bitcnt.ll" 2>/dev/null | sed 's/^/    /'
+    head -3 "$tmp/bitcnt.err" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# Constant folding must agree with the library, including the zero cases
+# that the builtins define (clz(0) == width, ctz(0) == width).
+cat > "$tmp/bitfold.c" <<'EOF'
+int a = __builtin_clz(1);
+int b = __builtin_clz(0);
+int c = __builtin_ctz(0);
+int d = __builtin_popcount(0xf0f0);
+int e = __builtin_popcountll(0x123456789abcdef0ull);
+int f = __builtin_clzl(1ul);
+EOF
+if "$compiler" -S -emit-llvm -o "$tmp/bitfold.ll" "$tmp/bitfold.c" 2>"$tmp/bitfold.err" &&
+   grep -qE '^@a = .*i32 31' "$tmp/bitfold.ll" &&
+   grep -qE '^@b = .*i32 32' "$tmp/bitfold.ll" &&
+   grep -qE '^@c = .*i32 32' "$tmp/bitfold.ll" &&
+   grep -qE '^@d = .*i32 8' "$tmp/bitfold.ll" &&
+   grep -qE '^@e = .*i32 32' "$tmp/bitfold.ll"; then
+    echo "testing bit-counting builtins fold ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing bit-counting builtins fold ... FAILED"
+    grep -E '^@[a-f] ' "$tmp/bitfold.ll" 2>/dev/null | sed 's/^/    /'
+    head -3 "$tmp/bitfold.err" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
 
 gap "variadic function definition (needs va_start/va_arg)" <<'EOF'
 #include <stdarg.h>

@@ -944,6 +944,11 @@ void add_type(Node *node) {
             check_binop(node);
             lvalue_convert(&node->lhs);
             lvalue_convert(&node->rhs);
+            // 6.5.7: each operand is promoted separately and the result has
+            // the promoted left operand's type -- the usual arithmetic
+            // conversions do not apply, so the two may differ in width, and
+            // the front end keeps them that way. Widening the amount to a
+            // common type is an LLVM requirement, so irgen does it.
             integer_promotion(&node->lhs);
             integer_promotion(&node->rhs);
             node->ty = node->lhs->ty;

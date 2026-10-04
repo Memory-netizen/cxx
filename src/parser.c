@@ -1397,34 +1397,53 @@ static uint32_t id_function;
 // intrinsic because parse_builtin_fn() builds its shape from the arguments
 // rather than from a prototype.
 BuiltinDef builtin_defs[] = {
-    // Irreducible: not callable as an ordinary function at all.
-    {"__builtin_alloca", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__builtin_alloca_with_align", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__builtin_constant_p", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__builtin_types_compatible_p", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__c11_atomic_store", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__c11_atomic_load", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__c11_atomic_exchange", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__c11_atomic_fetch_add", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__c11_atomic_fetch_sub", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__c11_atomic_fetch_and", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__c11_atomic_fetch_or", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__c11_atomic_fetch_xor", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__c11_atomic_compare_exchange_weak", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__c11_atomic_compare_exchange_strong", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__c11_atomic_thread_fence", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__c11_atomic_signal_fence", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
-    {"__c11_atomic_is_lock_free", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    // Irreducible: no C prototype expresses these, so parse_builtin_fn()
+    // builds their shapes from the arguments.
+    {"__builtin_alloca", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__builtin_alloca_with_align", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__builtin_constant_p", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__builtin_types_compatible_p", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__c11_atomic_store", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__c11_atomic_load", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__c11_atomic_exchange", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__c11_atomic_fetch_add", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__c11_atomic_fetch_sub", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__c11_atomic_fetch_and", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__c11_atomic_fetch_or", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__c11_atomic_fetch_xor", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__c11_atomic_compare_exchange_weak", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__c11_atomic_compare_exchange_strong", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__c11_atomic_thread_fence", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__c11_atomic_signal_fence", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
+    {"__c11_atomic_is_lock_free", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, NULL, 0},
 
     // A byte swap: one intrinsic, one argument whose type is also the
     // result's, so the width comes from either side.
-    {"__builtin_bswap16", BCLASS_DECL, "llvm.bswap.i%d", BT_USHORT, BT_USHORT, true, 1, NULL, 0},
-    {"__builtin_bswap32", BCLASS_DECL, "llvm.bswap.i%d", BT_UINT, BT_UINT, true, 1, NULL, 0},
-    {"__builtin_bswap64", BCLASS_DECL, "llvm.bswap.i%d", BT_ULLONG, BT_ULLONG, true, 1, NULL, 0},
+    {"__builtin_bswap16", BCLASS_DECL, "llvm.bswap.i%d", BT_USHORT, BT_USHORT, true, -1, 1, NULL, 0},
+    {"__builtin_bswap32", BCLASS_DECL, "llvm.bswap.i%d", BT_UINT, BT_UINT, true, -1, 1, NULL, 0},
+    {"__builtin_bswap64", BCLASS_DECL, "llvm.bswap.i%d", BT_ULLONG, BT_ULLONG, true, -1, 1, NULL, 0},
+
+    // Bit counting. All return int whatever the operand width, so the
+    // prototype is fixed and the width comes from the operand type: the
+    // argument converts to the declared parameter type first, which is what
+    // makes a narrow operand count within 32 bits. clz/ctz append the
+    // immarg is_zero_undef, true for them and false for clrsb.
+    {"__builtin_clz", BCLASS_DECL, "llvm.ctlz.i%d", BT_INT, BT_UINT, true, 1, 1, NULL, 0},
+    {"__builtin_clzl", BCLASS_DECL, "llvm.ctlz.i%d", BT_INT, BT_ULONG, true, 1, 1, NULL, 0},
+    {"__builtin_clzll", BCLASS_DECL, "llvm.ctlz.i%d", BT_INT, BT_ULLONG, true, 1, 1, NULL, 0},
+    {"__builtin_ctz", BCLASS_DECL, "llvm.cttz.i%d", BT_INT, BT_UINT, true, 1, 1, NULL, 0},
+    {"__builtin_ctzl", BCLASS_DECL, "llvm.cttz.i%d", BT_INT, BT_ULONG, true, 1, 1, NULL, 0},
+    {"__builtin_ctzll", BCLASS_DECL, "llvm.cttz.i%d", BT_INT, BT_ULLONG, true, 1, 1, NULL, 0},
+    {"__builtin_popcount", BCLASS_DECL, "llvm.ctpop.i%d", BT_INT, BT_UINT, true, -1, 1, NULL, 0},
+    {"__builtin_popcountl", BCLASS_DECL, "llvm.ctpop.i%d", BT_INT, BT_ULONG, true, -1, 1, NULL, 0},
+    {"__builtin_popcountll", BCLASS_DECL, "llvm.ctpop.i%d", BT_INT, BT_ULLONG, true, -1, 1, NULL, 0},
 };
 
 _Static_assert(NUM_BUILTINFN - 1 == (int)(sizeof(builtin_defs) / sizeof(builtin_defs[0])),
                "builtin_defs[] must have one row per BUILTIN_* kind, in order");
+_Static_assert(BUILTIN_CLZ - 1 < (int)(sizeof(builtin_defs) / sizeof(builtin_defs[0])), "clz row missing");
+_Static_assert(BUILTIN_POPCOUNTLL - 1 < (int)(sizeof(builtin_defs) / sizeof(builtin_defs[0])),
+               "popcountll row missing");
 
 // The number of table rows. NUM_BUILTINFN is one more, because BUILTIN_NONE
 // also occupies an enumerator, so iterating the table with it would run one

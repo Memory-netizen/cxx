@@ -370,19 +370,45 @@ static int lvalue_align(Node *node) {
 // contain, so it can never collide with a user function. The symbol stays
 // out of the module's function list, so LLVM auto-declares it on first use
 // and derives the overload from the call site.
-static Ref gen_intrinsic_call(Node *node, BuiltinDef *d) {
+static Ref gen_intrinsic_call(Node *node, BuiltinDef *d, int kind) {
+    // The intrinsic's width is the builtin's *parameter* type, not the
+    // argument's: a narrow argument arrives already converted to that
+    // parameter type, and the clz family's parameter is wider than its
+    // result, so the intrinsic computes wide and truncates below.
+    Type *param_ty = builtin_type(kind)->params;
+    uint32_t width = param_ty->size * 8;
     Ref val = gen_expr(node->args);
-    char *name = format(d->intrinsic, node->ty->size * 8);
+    char *name = format(d->intrinsic, width);
     uint32_t id = intern(name, strlen(name));
     register_asm_name(id, name);
 
-    Ref dst = TMP(tmp_id++, node->ty);
+    // The result comes back at the parameter's width; a narrower declared
+    // result (int, for clz and friends) is obtained by truncating.
+    bool truncate = node->ty->size < param_ty->size;
+    Type *call_ty = truncate ? param_ty : node->ty;
+    Ref dst = TMP(tmp_id++, call_ty);
     // The callee's ty must be the *function* type, not a pointer to it:
     // the IR_CALL printer reads ir->args[0].ty->is_variadic directly.
-    Type *fty = func_type(node->ty);
-    Ref fn = GLB(id, fty);
-    new_ins(IR_CALL, dst, (Ref[]){fn, val}, 2);
-    return dst;
+    Ref fn = GLB(id, func_type(call_ty));
+
+    // clz/ctz take a second, immediate argument (is_zero_undef). It belongs
+    // to the builtin rather than to the call site, so the table carries it.
+    // The immediate is i1, which ty_str prints for bool in memory (i8), so
+    // it uses the canonical 1-bit type instead.
+    Ref ops[3] = {fn, val, R};
+    uint32_t n = 2;
+    if (d->extra_arg >= 0) {
+        ops[2].type = RInt;
+        ops[2].val = d->extra_arg;
+        ops[2].ty = bitint[1][1];
+        n = 3;
+    }
+    new_ins(IR_CALL, dst, ops, n);
+
+    if (!truncate) return dst;
+    Ref out = TMP(tmp_id++, node->ty);
+    new_ins(IR_TRUNC, out, (Ref[]){dst}, 1);
+    return out;
 }
 
 // Identify the builtin and dispatch. Emission lives in the callee so that
@@ -392,7 +418,7 @@ static Ref gen_builtin_call(Node *node, int kind) {
     if (!d) fatal("unknown builtin kind %d in irgen", kind);
 
     // A builtin described by an intrinsic name needs no per-builtin code.
-    if (d->intrinsic) return gen_intrinsic_call(node, d);
+    if (d->intrinsic) return gen_intrinsic_call(node, d, kind);
 
     fatal("no IR lowering for builtin ‘%s’", d->name);
     return R;  // unreachable: fatal() exits
@@ -847,6 +873,10 @@ static Ref gen_expr(Node *node) {
                 [ND_ADD] = IR_ADD,  [ND_SUB] = IR_SUB,   [ND_MUL] = IR_MUL,  [ND_DIV] = IR_DIV, [ND_MOD] = IR_REM,
                 [ND_LEFT] = IR_SHL, [ND_RIGHT] = IR_SHR, [ND_BAND] = IR_AND, [ND_BOR] = IR_OR,  [ND_XOR] = IR_XOR,
             };
+            if (node->kind == ND_LEFT || node->kind == ND_RIGHT) {
+                int width = is_bitint128(lr.ty) ? bitint_width(lr.ty) : lr.ty->size * 8;
+                rr = cast(rr, rr.ty, bitint[width][1]);
+            }
             dst = TMP(tmp_id++, node->ty);
             new_ins(bin_op[node->kind], dst, (Ref[]){lr, rr}, 2);
             return dst;

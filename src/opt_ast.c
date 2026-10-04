@@ -59,6 +59,47 @@ static Node *fold_bswap(Node *call) {
     return folded_int(acc, call->ty, call);
 }
 
+// Fold __builtin_clz/ctz/popcount and the l/ll variants. All return int.
+// The argument has already been converted to the declared parameter type,
+// so that type's width says how many bits are counted.
+static Node *fold_bitcount(Node *call, int kind) {
+    Node *arg = call->args;
+    if (!is_int_const(arg)) return NULL;
+
+    int width = arg->ty->size * 8;
+    // The operand is an unsigned n-bit value; clear anything above it so a
+    // negative argument does not count bits the type does not have.
+    Int128 v = int128_normalize(arg->ival, width, UNSIGNED);
+
+    int r;
+    switch (kind) {
+        case BUILTIN_CLZ:
+        case BUILTIN_CLZL:
+        case BUILTIN_CLZLL:
+            // bit_width() has no zero case (it reports 1), and the builtin
+            // specifies clz(0) == width, so zero is answered directly.
+            r = int128_is_zero(v) ? width : width - int128_bit_width(v, UNSIGNED);
+            break;
+        case BUILTIN_CTZ:
+        case BUILTIN_CTZL:
+        case BUILTIN_CTZLL:
+            r = width;
+            for (int i = 0; i < width; i++)
+                if (int128_and(int128_lshr(v, i), int128_one).limb[0] & 1u) {
+                    r = i;
+                    break;
+                }
+            break;
+        default: {
+            int n = 0;
+            for (int limb = 0; limb < 4; limb++) n += __builtin_popcount(v.limb[limb]);
+            r = n;
+            break;
+        }
+    }
+    return folded_int(int128_set_i(r), call->ty, call);
+}
+
 // Constant-fold a call to a builtin, or return NULL when it cannot be
 // folded (a non-constant argument, or a builtin with no folder yet).
 // Arguments have already been folded by the caller, so this only has to
@@ -69,6 +110,16 @@ Node *fold_builtin_call(int kind, Node *call) {
         case BUILTIN_BSWAP32:
         case BUILTIN_BSWAP64:
             return fold_bswap(call);
+        case BUILTIN_CLZ:
+        case BUILTIN_CLZL:
+        case BUILTIN_CLZLL:
+        case BUILTIN_CTZ:
+        case BUILTIN_CTZL:
+        case BUILTIN_CTZLL:
+        case BUILTIN_POPCOUNT:
+        case BUILTIN_POPCOUNTL:
+        case BUILTIN_POPCOUNTLL:
+            return fold_bitcount(call, kind);
         // The special-class builtins never reach here: they do not produce
         // ND_FUNCALL. Listing them keeps -Wswitch honest.
         case BUILTIN_FN_ALLOCA:

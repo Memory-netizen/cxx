@@ -640,6 +640,20 @@ enum {
     BUILTIN_BSWAP32,
     BUILTIN_BSWAP64,
 
+    // Bit counting. All return int whatever the operand width, so the
+    // prototype is fixed and the width comes from the operand type: the
+    // argument is converted to the declared parameter type first, which is
+    // what makes a narrow operand count within 32 bits.
+    BUILTIN_CLZ,
+    BUILTIN_CLZL,
+    BUILTIN_CLZLL,
+    BUILTIN_CTZ,
+    BUILTIN_CTZL,
+    BUILTIN_CTZLL,
+    BUILTIN_POPCOUNT,
+    BUILTIN_POPCOUNTL,
+    BUILTIN_POPCOUNTLL,
+
     // One past the last kind: the table's length, so nothing has to keep a
     // separate count in step with the enum. Not a builtin itself.
     NUM_BUILTINFN,
@@ -670,6 +684,12 @@ typedef struct BuiltinDef {
     int ret;          // BuiltinTargetType selector for the result
     int args;         // BuiltinTargetType selector for the parameters
     bool uniform;     // every parameter has the type above
+    // A literal i1 argument appended after the operands, or -1 for none.
+    // llvm.ctlz/cttz are the reason: their second argument (is_zero_undef,
+    // an immarg) is true for clz/ctz and false for clrsb, so it is a
+    // property of the builtin rather than a value the call site supplies.
+    // It is emitted as a real operand, not spliced into the intrinsic name.
+    int extra_arg;
     uint32_t nargs;
     Token *tok;   // spelling token; carries the file for diagnostics
     uint32_t id;  // interned name, filled on first use
