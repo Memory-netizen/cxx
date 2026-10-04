@@ -2891,6 +2891,30 @@ static int64_t eval2(Node *node, uint32_t *sym) {
             return eval_rval(node->lhs, sym);
         case ND_SUBACCESS:
         case ND_MEMBER: {
+            // An element read of a string literal: its bytes are known
+            // here, so the subscript folds directly. clang accepts this
+            // in a static initializer (int t[1] = { L"ab"[1] };) even
+            // though a subscript of a non-constexpr array is rejected,
+            // because a string literal is an object the translator
+            // already knows the value of.
+            if (node->kind == ND_SUBACCESS) {
+                Node *base = node->lhs;
+                if (base->kind == ND_LVTOR) base = base->lhs;
+                if (base->kind == ND_VAR && base->var->is_str) {
+                    int64_t idx = eval(node->rhs);
+                    Type *elem = base->var->ty->base;
+                    if (idx < 0 || idx >= base->var->ty->len - 1)
+                        error(node->rhs->tok, "index %lld is out of range for a string literal", (long long)idx);
+                    char *bytes = str(base->var->init_data) + idx * elem->size;
+                    int64_t v = elem->size == 1 ? (int64_t)(uint8_t)bytes[0]
+                                : elem->size == 2
+                                    ? (int64_t)(uint16_t)((uint8_t)bytes[0] | (uint16_t)(uint8_t)bytes[1] << 8)
+                                    : (int64_t)(uint32_t)((uint8_t)bytes[0] | (uint32_t)(uint8_t)bytes[1] << 8 |
+                                                          (uint32_t)(uint8_t)bytes[2] << 16 |
+                                                          (uint32_t)(uint8_t)bytes[3] << 24);
+                    return eval_ty(v, node->ty);
+                }
+            }
             // An element read of a constexpr aggregate folds through
             // the initializer tree (as in clang).
             Node *root = elem_root(node->lhs);
