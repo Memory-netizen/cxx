@@ -258,6 +258,11 @@ static void copy_struct_type(Type *dst, Type *src) {
 Type *copy_type(Type *ty) {
     Type *ret = emalloc(sizeof(Type));
     *ret = *ty;
+    // A copy is a fresh node, so it starts out unlinked: the source's next
+    // belongs to whichever list that type is already on (the module's type
+    // list, or a chain of parameters), and carrying it over would splice
+    // this copy into that list.
+    ret->next = NULL;
     if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) copy_struct_type(ret, ty);
     ret->origin = ty->origin ? ty->origin : ty;
     return ret;

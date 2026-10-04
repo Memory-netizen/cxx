@@ -762,8 +762,18 @@ static Ref gen_expr(Node *node) {
         }
         case ND_VAR:
         case ND_MEMBER:
-        case ND_SUBACCESS:
-            return gen_addr(node);
+        case ND_SUBACCESS: {
+            Ref addr = gen_addr(node);
+            // An lvalue is left as its address; the load happens when the
+            // value is needed, which the front end marks with ND_LVTOR.
+            // A member of an rvalue aggregate -- f().b, where f returns a
+            // record -- is never marked that way, because it is not an
+            // lvalue to begin with, so the load has to happen here.
+            if (node->is_lvalue || is_array(node->ty)) return addr;
+            if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) return addr;
+            atomic_order = node_mem_order(node);
+            return load(addr, node->ty, lvalue_align(node), node->kind == ND_MEMBER ? node->member : NULL);
+        }
         case ND_ADDR:
             return gen_addr(node->lhs);
         case ND_DEREF:
@@ -933,16 +943,59 @@ static Ref gen_expr(Node *node) {
             if (bkind) return gen_builtin_call(node, bkind);
 
             int nargs = node->narg;
+
+            // A record comes back by value, but every other part of the
+            // compiler represents a record value by its address. The slot
+            // that materializes it is allocated before the arguments so
+            // that temp ids, and hence the IR's numbering, stay in the
+            // order the instructions are emitted.
+            bool is_record = node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION;
+            Ref slot = R;
+            if (is_record) {
+                slot = TMP(tmp_id++, pointer_to(node->ty, 0));
+                new_ins(IR_ALLOCA, slot, (Ref[]){INT(node->ty->align)}, 1);
+            }
+
             Ref *call_ops = emalloc((nargs + 1) * sizeof(Ref));
             call_ops[0] = gen_expr(node->func);
 
             int idx = 1;
-            for (Node *arg = node->args; arg; arg = arg->next) call_ops[idx++] = gen_expr(arg);
+            for (Node *arg = node->args; arg; arg = arg->next) {
+                Ref a = gen_expr(arg);
+                // A record argument is passed by value. Whether the
+                // operand already is that value depends on its shape: the
+                // front end wraps a record lvalue in ND_LVTOR, which yields
+                // the value, while a compound literal or the slot a
+                // record-returning call was materialized in is an address.
+                // load() cannot be used to read one: for an aggregate it
+                // hands the address back, that being how a record value is
+                // represented everywhere else.
+                if (arg->ty->kind == TY_STRUCT || arg->ty->kind == TY_UNION) {
+                    if (a.ty && a.ty->kind == TY_PTR) {
+                        Ref val = TMP(tmp_id++, arg->ty);
+                        new_ins(IR_LORD, val, (Ref[]){a, INT(arg->ty->align)}, 2);
+                        a = val;
+                    }
+                }
+                call_ops[idx++] = a;
+            }
 
-            if (node->ty->kind == TY_VOID)
-                dst = R;
-            else
-                dst = TMP(tmp_id++, node->ty);
+            if (node->ty->kind == TY_VOID) {
+                new_ins(IR_CALL, R, call_ops, nargs + 1);
+                return R;
+            }
+
+            // Materialize the returned record in the slot allocated above
+            // and hand out its address, so an assignment copies from it and
+            // a member access reads through it.
+            if (is_record) {
+                Ref val = TMP(tmp_id++, node->ty);
+                new_ins(IR_CALL, val, call_ops, nargs + 1);
+                store(val, slot, node->ty->align, NULL);
+                return slot;
+            }
+
+            dst = TMP(tmp_id++, node->ty);
             new_ins(IR_CALL, dst, call_ops, nargs + 1);
             return dst;
         }

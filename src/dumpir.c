@@ -348,22 +348,28 @@ void dump_blk(Blk *b) {
                 print_operand(ir->args[ir->narg - 1]);
                 fprintf(out_file, "\n");
                 break;
-            case IR_LORD:
+            case IR_LORD: {
+                // The address operand is not always a pointer: a record
+                // value is a first-class IR value here, so loading one has a
+                // record type and no base to inspect.
+                Type *at = ir->args[0].ty->kind == TY_PTR ? ir->args[0].ty : NULL;
                 fprintf(out_file, "load ");
-                if (ir->args[0].ty->base->qual & Q_ATOMIC) fprintf(out_file, "atomic ");
-                if (ir->args[0].ty->base->qual & Q_VOLATILE) fprintf(out_file, "volatile ");
+                if (at && (at->base->qual & Q_ATOMIC)) fprintf(out_file, "atomic ");
+                if (at && (at->base->qual & Q_VOLATILE)) fprintf(out_file, "volatile ");
                 print_type(ir->dst.ty);
                 fprintf(out_file, ", ptr ");
                 print_operand(ir->args[0]);
-                if (ir->args[0].ty->base->qual & Q_ATOMIC) fprintf(out_file, " %s", mem_order_str[ir->mem_order]);
+                if (at && (at->base->qual & Q_ATOMIC)) fprintf(out_file, " %s", mem_order_str[ir->mem_order]);
                 fprintf(out_file, ", align ");
                 print_operand(ir->args[1]);
                 fprintf(out_file, "\n");
                 break;
-            case IR_STR:
+            }
+            case IR_STR: {
                 fprintf(out_file, "store ");
-                if (ir->args[1].ty->base->qual & Q_ATOMIC) fprintf(out_file, "atomic ");
-                if (ir->args[1].ty->base->qual & Q_VOLATILE) fprintf(out_file, "volatile ");
+                Type *dt = ir->args[1].ty->kind == TY_PTR ? ir->args[1].ty : NULL;
+                if (dt && (dt->base->qual & Q_ATOMIC)) fprintf(out_file, "atomic ");
+                if (dt && (dt->base->qual & Q_VOLATILE)) fprintf(out_file, "volatile ");
                 print_type(ir->args[0].ty);
                 fprintf(out_file, " ");
                 print_operand(ir->args[0]);
@@ -374,6 +380,7 @@ void dump_blk(Blk *b) {
                 print_operand(ir->args[2]);
                 fprintf(out_file, "\n");
                 break;
+            }
             case IR_FENCE:
                 fprintf(out_file, "fence");
                 if (ir->is_signal) fprintf(out_file, " syncscope(\"singlethread\")");

@@ -2370,9 +2370,12 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
     do {
         Node *arg = assign(&tok, tok);
         if (param_ty) {
-            if (param_ty->kind == TY_STRUCT || param_ty->kind == TY_UNION)
-                error(arg->tok, "passing struct or union is not supported yet");
             check_asop(param_ty, arg, CTX_CALL);
+            // lvalue conversion must come before the cast: it wraps the
+            // operand in ND_LVTOR, and integer_promotion() would otherwise
+            // hide the lvalue and the load would never happen. For a record
+            // it produces no load -- the caller's value *is* its address --
+            // which irgen turns into a by-value argument.
             lvalue_convert(&arg);
             new_imcast(&arg, param_ty);
             param_ty = param_ty->next;
