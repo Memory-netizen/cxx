@@ -37,25 +37,61 @@ static Node *folded_int(Int128 v, Type *ty, Node *tmpl) {
     return node;
 }
 
-// Fold ND_BSWAP when the operand is an integer constant. A byte swap is
-// a pure bit permutation, so the result can be computed here exactly --
-// no need to leave it to the llvm.bswap.iN intrinsic to fold.
+// Fold __builtin_bswapN when the argument is an integer constant. A byte
+// swap is a pure bit permutation, so the result is computed exactly here
+// rather than left to the llvm.bswap.iN intrinsic.
 //
-// result = OR over i of ((v >> 8*i) & 0xff) << (8*(bits/8 - 1 - i))
-static Node *fold_bswap(Node *node) {
-    if (!is_int_const(node->lhs)) return NULL;
+// result = OR over i of ((v >> 8*i) & 0xff) << (8*(bytes - 1 - i))
+static Node *fold_bswap(Node *call) {
+    Node *arg = call->args;
+    if (!is_int_const(arg)) return NULL;
 
-    int bits = (int)int128_to_i64(node->rhs->ival);
+    int bits = call->ty->size * 8;
     int bytes = bits / 8;
 
-    Int128 v = node->lhs->ival;
+    Int128 v = arg->ival;
     Int128 mask = int128_set_ui(0xff);
     Int128 acc = int128_set_ui(0);
     for (int i = 0; i < bytes; i++) {
         Int128 byte = int128_and(int128_shr(v, 8 * i, UNSIGNED), mask);
         acc = int128_or(acc, int128_shl(byte, 8 * (bytes - 1 - i)));
     }
-    return folded_int(acc, node->ty, node);
+    return folded_int(acc, call->ty, call);
+}
+
+// Constant-fold a call to a builtin, or return NULL when it cannot be
+// folded (a non-constant argument, or a builtin with no folder yet).
+// Arguments have already been folded by the caller, so this only has to
+// look at their values.
+Node *fold_builtin_call(int kind, Node *call) {
+    switch (kind) {
+        case BUILTIN_BSWAP16:
+        case BUILTIN_BSWAP32:
+        case BUILTIN_BSWAP64:
+            return fold_bswap(call);
+        // The special-class builtins never reach here: they do not produce
+        // ND_FUNCALL. Listing them keeps -Wswitch honest.
+        case BUILTIN_FN_ALLOCA:
+        case BUILTIN_ALLOCA_WITH_ALIGN:
+        case BUILTIN_CONSTANT_P:
+        case BUILTIN_TYPES_COMPATIBLE_P:
+        case ATOMIC_STORE:
+        case ATOMIC_LOAD:
+        case ATOMIC_EXCHANGE:
+        case ATOMIC_FETCH_ADD:
+        case ATOMIC_FETCH_SUB:
+        case ATOMIC_FETCH_AND:
+        case ATOMIC_FETCH_OR:
+        case ATOMIC_FETCH_XOR:
+        case ATOMIC_COMPARE_EXCHANGE_WEAK:
+        case ATOMIC_COMPARE_EXCHANGE_STRONG:
+        case ATOMIC_THREAD_FENCE:
+        case ATOMIC_SIGNAL_FENCE:
+        case ATOMIC_IS_LOCK_FREE:
+        case BUILTIN_NONE:
+            return NULL;
+    }
+    return NULL;
 }
 
 // Fold a binary integer node. Both operands are Int128 constants of
@@ -447,6 +483,10 @@ Node *fold_node(Node *node) {
                 }
                 p = &(*p)->next;
             }
+            // A builtin call folds through its own routine; anything else
+            // is left as an ordinary call.
+            int kind = builtin_kind_of(node->func);
+            if (kind) return fold_builtin_call(kind, node) ?: node;
             return node;
         }
         case ND_CASE:
@@ -479,10 +519,6 @@ Node *fold_node(Node *node) {
         case ND_ALLOCA:
             node->lhs = fold_node(node->lhs);
             return node;
-        case ND_BSWAP:
-            // Fold the operand, then the swap itself when it is constant.
-            node->lhs = fold_node(node->lhs);
-            return fold_bswap(node) ?: node;
     }
     return node;
 }

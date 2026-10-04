@@ -386,6 +386,11 @@ struct Sym {
 
     // Global variable or function
     bool is_function;
+    // Set only on the symbols the parser injects for A-class builtins. A
+    // user declaration of the same name leaves it false, so the folder and
+    // irgen can tell "the compiler's builtin" from "a user function that
+    // happens to carry a builtin's name".
+    bool is_builtin;
     bool is_defined;
     bool is_str;
 
@@ -512,7 +517,6 @@ typedef enum {
     // Byte swap of the integer in lhs, width taken from rhs->ival (16, 32
     // or 64). Lowered to the llvm.bswap.iN intrinsic; kept as its own node
     // so no shift/mask tree has to be synthesized (and typed) by hand.
-    ND_BSWAP,
 } NodeKind;
 
 // AST node type
@@ -607,7 +611,105 @@ int64_t const_expr(Token **rest, Token *tok);
 bool constexpr_fold(Sym *var, int64_t *val, uint32_t *sym);
 Fp128 eval_fp128(Node *node);
 Node *new_node(NodeKind kind, Token *tok);
+// Builtin identifiers, shared by every stage that dispatches on them: the
+// parser (implicit declaration), opt_ast.c (constant folding), irgen.c (IR
+// lowering) and the preprocessor (__has_builtin). One enum means those
+// four stay in step, and -Wswitch on the dispatches forces a new builtin
+// to be handled everywhere.
+enum {
+    BUILTIN_NONE = 0,  // is_builtin_fn() reports "not a builtin" with this
+    BUILTIN_FN_ALLOCA = 1,
+    BUILTIN_ALLOCA_WITH_ALIGN,
+    BUILTIN_CONSTANT_P,
+    BUILTIN_TYPES_COMPATIBLE_P,
+    ATOMIC_STORE,
+    ATOMIC_LOAD,
+    ATOMIC_EXCHANGE,
+    ATOMIC_FETCH_ADD,
+    ATOMIC_FETCH_SUB,
+    ATOMIC_FETCH_AND,
+    ATOMIC_FETCH_OR,
+    ATOMIC_FETCH_XOR,
+    ATOMIC_COMPARE_EXCHANGE_WEAK,
+    ATOMIC_COMPARE_EXCHANGE_STRONG,
+    ATOMIC_THREAD_FENCE,
+    ATOMIC_SIGNAL_FENCE,
+    ATOMIC_IS_LOCK_FREE,
+    // __builtin_bswap16/32/64
+    BUILTIN_BSWAP16,
+    BUILTIN_BSWAP32,
+    BUILTIN_BSWAP64,
+
+    // One past the last kind: the table's length, so nothing has to keep a
+    // separate count in step with the enum. Not a builtin itself.
+    NUM_BUILTINFN,
+};
+
+// How a builtin is handled. The distinction is whether it can be written
+// as an ordinary C function prototype: if so the parser injects a real
+// declaration and everything downstream sees a normal call, which gives
+// the builtin a type, an address and a place in overload resolution.
+typedef enum {
+    BCLASS_DECL,     // implicit `extern` declaration; ordinary ND_FUNCALL
+    BCLASS_SPECIAL,  // needs parse_builtin_fn: no prototype can express it
+} BuiltinClass;
+
+// Everything one builtin needs, in one row; defined in parser.c so that
+// every stage shares a single table. Adding a builtin that is a plain
+// intrinsic over a fixed prototype -- the common case -- is one entry.
+//
+// `intrinsic` is a printf format taking the operand width in bits, or NULL
+// when irgen handles the builtin by kind instead.
+typedef struct BuiltinDef {
+    char *name;  // the C spelling, e.g. "__builtin_bswap32"
+    // No kind field: builtin_defs[] is written in BUILTIN_* order, so a
+    // row's kind is its index + 1. Storing it too would be a second
+    // source of truth. parser.c asserts the table covers every kind.
+    BuiltinClass cls;
+    char *intrinsic;  // e.g. "llvm.bswap.i%d", or NULL
+    int ret;          // BuiltinTargetType selector for the result
+    int args;         // BuiltinTargetType selector for the parameters
+    bool uniform;     // every parameter has the type above
+    uint32_t nargs;
+    Token *tok;   // spelling token; carries the file for diagnostics
+    uint32_t id;  // interned name, filled on first use
+} BuiltinDef;
+
+// Selects a Type out of Target; used by BuiltinDef.ret/args.
+typedef enum {
+    BT_VOID,
+    BT_BOOL,
+    BT_SHORT,
+    BT_USHORT,
+    BT_INT,
+    BT_UINT,
+    BT_LONG,
+    BT_ULONG,
+    BT_LLONG,
+    BT_ULLONG,
+    BT_VOIDPTR,
+    BT_NONE,  // BCLASS_SPECIAL: the shape comes from parser code
+} BuiltinTargetType;
+
+extern BuiltinDef builtin_defs[];
+#define BUILTIN_ROW(kind) (builtin_def(kind))
+BuiltinDef *builtin_def(int kind);
+// The declared type of a builtin: a function type with its parameters
+// attached (func_type() alone sets only the return type, and fncall()
+// walks params and reports arity with nparam).
+Type *builtin_type(int kind);
+// Constant-fold a builtin call; NULL when it cannot be folded. Shared with
+// the parser, because global initialisers go through eval2(), which never
+// runs fold_ast().
+Node *fold_builtin_call(int kind, Node *call);
+// Record the '[' that declared one array dimension, for the AST dumper.
+void array_bracket_note(Type *ty, Token *l_bracket);
+
 int is_builtin_fn(uint32_t id);
+BuiltinClass builtin_class(int kind);
+// The builtin kind of a call's callee, or BUILTIN_NONE. Accepts the shapes a
+// callee takes after postfix() decayed a function designator.
+int builtin_kind_of(Node *func);
 Node *new_unary(NodeKind kind, Node *expr, Token *tok);
 void new_imcast(Node **expr, Type *ty);
 void lvalue_convert(Node **expr);

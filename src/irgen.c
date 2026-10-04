@@ -345,21 +345,34 @@ static int lvalue_align(Node *node) {
     return node->ty->align;
 }
 
-// ND_BSWAP -> a direct IR_CALL to the llvm.bswap.iN intrinsic, built the
-// same way ND_FUNCALL builds its callee and argument list (see below).
+// A call to a builtin -> a direct IR_CALL to the matching LLVM intrinsic,
+// built the same way a normal call builds its callee and argument list.
 //
-// The name is looked up through a reserved identifier rather than a Sym:
-// intrinsic names are not C identifiers and the argument list needs no
-// declaration emitted. It starts with "llvm.", so it can never collide
-// with a user function -- C identifiers cannot contain a dot.
+// The name goes through a reserved identifier rather than a Sym: intrinsic
+// names are not C identifiers and no declaration may be emitted for them.
+// Every intrinsic name starts with "llvm.", which a C identifier cannot
+// contain, so it can never collide with a user function.
 //
-// (opt_ast.c folds a constant operand before irgen sees it, so this only
+// The symbol is deliberately absent from the module's function list, so
+// LLVM auto-declares it on first use and derives the overload from the
+// call site -- which is what keeps the signature right.
+//
+// (opt_ast.c folds a constant argument before irgen sees it, so this only
 // runs for a runtime value.)
-static Ref gen_bswap(Node *node) {
-    Ref val = gen_expr(node->lhs);
-    int bits = (int)int128_to_i64(node->rhs->ival);
-
-    char *name = format("llvm.bswap.i%d", bits);
+// Emit a call to an LLVM intrinsic: one argument, one result, the width
+// taken from the operand. This is the shared emission for every builtin
+// whose table row names an intrinsic, so adding one of those needs no new
+// code here.
+//
+// The name goes through a reserved identifier rather than a Sym: intrinsic
+// names are not C identifiers and no declaration may be emitted for them.
+// Every intrinsic name starts with "llvm.", which a C identifier cannot
+// contain, so it can never collide with a user function. The symbol stays
+// out of the module's function list, so LLVM auto-declares it on first use
+// and derives the overload from the call site.
+static Ref gen_intrinsic_call(Node *node, BuiltinDef *d) {
+    Ref val = gen_expr(node->args);
+    char *name = format(d->intrinsic, node->ty->size * 8);
     uint32_t id = intern(name, strlen(name));
     register_asm_name(id, name);
 
@@ -370,6 +383,19 @@ static Ref gen_bswap(Node *node) {
     Ref fn = GLB(id, fty);
     new_ins(IR_CALL, dst, (Ref[]){fn, val}, 2);
     return dst;
+}
+
+// Identify the builtin and dispatch. Emission lives in the callee so that
+// adding a builtin is a table row plus, at most, one emission routine.
+static Ref gen_builtin_call(Node *node, int kind) {
+    BuiltinDef *d = builtin_def(kind);
+    if (!d) fatal("unknown builtin kind %d in irgen", kind);
+
+    // A builtin described by an intrinsic name needs no per-builtin code.
+    if (d->intrinsic) return gen_intrinsic_call(node, d);
+
+    fatal("no IR lowering for builtin ‘%s’", d->name);
+    return R;  // unreachable: fatal() exits
 }
 
 static Ref gen_expr(Node *node) {
@@ -399,8 +425,6 @@ static Ref gen_expr(Node *node) {
             return R;
         case ND_NULLPTR:
             return NULLPTR;
-        case ND_BSWAP:
-            return gen_bswap(node);
         case ND_NUM:
             // parse() must hand irgen a fully typed AST: a constant with
             // no type means the front end failed to propagate one, and
@@ -659,6 +683,9 @@ static Ref gen_expr(Node *node) {
         case ND_COND:
             return gen_cond(node);
         case ND_FUNCALL: {
+            int bkind = builtin_kind_of(node->func);
+            if (bkind) return gen_builtin_call(node, bkind);
+
             int nargs = node->narg;
             Ref *call_ops = emalloc((nargs + 1) * sizeof(Ref));
             call_ops[0] = gen_expr(node->func);

@@ -95,7 +95,6 @@ static const char *node_kind_name[] = {
     [ND_FENCE] = "FENCE",
     [ND_SP_SAVE] = "SP_SAVE",
     [ND_SP_RESTORE] = "SP_RESTORE",
-    [ND_BSWAP] = "BSWAP",
 };
 
 // Type qualifiers (6.7.3). They live on the qualified type itself, so the
@@ -688,13 +687,6 @@ static void dump_node(Node *node) {
             break;
         case ND_ALLOCA:
             fprintf(stdout, "  alloca\n");
-            break;
-        case ND_BSWAP:
-            // The operand is an expression; dump it like a unary node.
-            fprintf(stdout, "  bswap\n");
-            depth++;
-            dump_node(node->lhs);
-            depth--;
             break;
         case ND_FENCE:
             fprintf(stdout, "  fence\n");

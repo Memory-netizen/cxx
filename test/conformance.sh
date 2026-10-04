@@ -666,6 +666,126 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# --- builtins: declaration mode ---------------------------------------
+# bswap was previously lowered at parse time to a dedicated ND_BSWAP node,
+# which left it without a type or an address. It is now an ordinary
+# implicitly declared function, so the whole normal call path applies.
+cat > "$tmp/bs.c" <<'EOF'
+int a = __builtin_bswap32(0x11223344);
+int f(unsigned x) { return __builtin_bswap32(x); }
+EOF
+if "$compiler" -S -emit-llvm -o "$tmp/bs.ll" "$tmp/bs.c" 2>"$tmp/bs.err" &&
+   grep -q 'llvm.bswap.i32' "$tmp/bs.ll"; then
+    echo "testing __builtin_bswap32 lowers to llvm.bswap.i32 ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __builtin_bswap32 lowers to llvm.bswap.i32 ... FAILED"
+    head -3 "$tmp/bs.err" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# A constant argument is folded, including one written through the
+# implicit conversion the parameter type triggers.
+if grep -qE '^@a = .*i32 1144201745' "$tmp/bs.ll"; then
+    echo "testing __builtin_bswap32 folds a constant argument ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __builtin_bswap32 folds a constant argument ... FAILED"
+    grep -E '^@a ' "$tmp/bs.ll" 2>/dev/null | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# The declaration mode gives a builtin an address, which the old dedicated
+# node could not.
+cat > "$tmp/bsp.c" <<'EOF'
+int (*p)(unsigned) = __builtin_bswap32;
+int f(unsigned x) { return p(x); }
+EOF
+if "$compiler" -w -S -emit-llvm -o "$tmp/bsp.ll" "$tmp/bsp.c" 2>"$tmp/bsp.err"; then
+    echo "testing a builtin has an address ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a builtin has an address ... FAILED"
+    head -3 "$tmp/bsp.err" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# A user declaration wins over the injected one.
+cat > "$tmp/bsu.c" <<'EOF'
+unsigned __builtin_bswap32(unsigned x) { return x; }
+int f(void) { return (int)__builtin_bswap32(1); }
+EOF
+if "$compiler" -w -S -emit-llvm -o "$tmp/bsu.ll" "$tmp/bsu.c" 2>"$tmp/bsu.err"; then
+    echo "testing a user declaration overrides a builtin ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a user declaration overrides a builtin ... FAILED"
+    head -3 "$tmp/bsu.err" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# The implicit declaration goes to file scope and is looked up through
+# enclosing scopes, so repeated use inside nested blocks must not declare
+# again or conflict with itself.
+cat > "$tmp/bss.c" <<'EOF'
+int f(unsigned x) {
+    int r = __builtin_bswap32(x);
+    { int y = __builtin_bswap32(x); r += y; }
+    for (int i = 0; i < 1; i++) r += __builtin_bswap32(x);
+    return r;
+}
+int g(unsigned x) { return __builtin_bswap32(x) + 1; }
+EOF
+if "$compiler" -w -S -emit-llvm -o "$tmp/bss.ll" "$tmp/bss.c" 2>"$tmp/bss.err" &&
+   [ "$(grep -c 'llvm.bswap.i32' "$tmp/bss.ll")" = "4" ]; then
+    echo "testing a builtin resolves across nested scopes ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a builtin resolves across nested scopes ... FAILED"
+    head -3 "$tmp/bss.err" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# A user declaration under a builtin's name makes it an ordinary function.
+# Identification must be "is this the Sym we injected", not "does the name
+# look like a builtin", or the call is lowered to the LLVM intrinsic even
+# though the user declared a function.
+cat > "$tmp/bsd.c" <<'EOF'
+unsigned __builtin_bswap32(unsigned);
+int f(unsigned x) { return (int)__builtin_bswap32(x); }
+EOF
+if "$compiler" -S -emit-llvm -o "$tmp/bsd.ll" "$tmp/bsd.c" 2>"$tmp/bsd.err" &&
+   ! grep -q 'llvm.bswap' "$tmp/bsd.ll" &&
+   grep -q 'call i32 @__builtin_bswap32' "$tmp/bsd.ll"; then
+    echo "testing a same-named user declaration is not a builtin ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a same-named user declaration is not a builtin ... FAILED"
+    grep -E 'llvm.bswap|call i32 @__builtin' "$tmp/bsd.ll" 2>/dev/null | sed 's/^/    /'
+    head -3 "$tmp/bsd.err" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# Defining a function under a builtin's name is a redefinition, not a
+# silent replacement of the builtin's body. (clang rejects it as
+# "definition of builtin function"; matching that diagnostic is better
+# than accepting the program and discarding the definition.)
+cat > "$tmp/bsdf.c" <<'EOF'
+int f(unsigned x) { return (int)__builtin_bswap32(x); }
+unsigned __builtin_bswap32(unsigned x) { return x; }
+EOF
+if "$compiler" -c -o /dev/null "$tmp/bsdf.c" > "$tmp/bsdf.err" 2>&1; then
+    echo "testing redefining a builtin is rejected ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+elif grep -q 'definition of builtin function' "$tmp/bsdf.err"; then
+    echo "testing redefining a builtin is rejected ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing redefining a builtin is rejected ... FAILED (wrong diagnostic)"
+    head -2 "$tmp/bsdf.err" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
 # --- known gaps ------------------------------------------------------
 # Listed so the gap shows up in the suite instead of passing silently.
 gap "<stdbit.h> helpers (needs __builtin_clz*)" <<'EOF'

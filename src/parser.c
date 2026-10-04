@@ -26,7 +26,6 @@ static const char *sclass_name[] = {
 
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec, Attr **attrs);
 static Type *decl_suffix(Token **rest, Token *tok, Type *ty, bool is_param);
-static Node *new_bswap(Node *arg, int kind, Token *arg_tok, Token *start);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
 static void parse_asm_name(Token **rest, Token *tok, char **name_out);
 static void set_asm_name(Sym *var, char *name);
@@ -298,25 +297,25 @@ static TagNameSpace *find_tag(Token *tok, bool search_par) {
     return NULL;
 }
 
-static NameSpace *push_namespace(uint32_t id, SymKind kind, Type *ty, Token *loc) {
+static NameSpace *push_namespace(Scope *sc, uint32_t id, SymKind kind, Type *ty, Token *loc) {
     NameSpace *ns = emalloc(sizeof(NameSpace));
     ns->id = id;
     ns->kind = kind;
     ns->ty = ty;
     ns->loc = loc;
-    ns->next = scope->vars;
-    scope->vars = ns;
+    ns->next = sc->vars;
+    sc->vars = ns;
 
-    if (!scope->ht) {
-        scope->ht_cap = 64;
-        scope->ht = vnew(scope->ht_cap, sizeof(NameSpace *));
-    } else if (scope->ht_n >= scope->ht_cap * 2) {
-        int cap = scope->ht_cap * 2;
+    if (!sc->ht) {
+        sc->ht_cap = 64;
+        sc->ht = vnew(sc->ht_cap, sizeof(NameSpace *));
+    } else if (sc->ht_n >= sc->ht_cap * 2) {
+        int cap = sc->ht_cap * 2;
         NameSpace **ht = vnew(cap, sizeof(NameSpace *));
         NameSpace **tail = vnew(cap, sizeof(NameSpace *));
         for (int i = 0; i < cap; i++) ht[i] = tail[i] = NULL;
-        for (int i = 0; i < scope->ht_cap; i++)
-            for (NameSpace *x = scope->ht[i]; x;) {
+        for (int i = 0; i < sc->ht_cap; i++)
+            for (NameSpace *x = sc->ht[i]; x;) {
                 NameSpace *next = x->hnext;  // saved before the link is rewired
                 int h = x->id & (cap - 1);
                 // tail-insert keeps the chain order (newest declaration
@@ -329,13 +328,13 @@ static NameSpace *push_namespace(uint32_t id, SymKind kind, Type *ty, Token *loc
                 tail[h] = x;
                 x = next;
             }
-        scope->ht = ht;
-        scope->ht_cap = cap;
+        sc->ht = ht;
+        sc->ht_cap = cap;
     }
-    int h = id & (scope->ht_cap - 1);
-    ns->hnext = scope->ht[h];
-    scope->ht[h] = ns;
-    scope->ht_n++;
+    int h = id & (sc->ht_cap - 1);
+    ns->hnext = sc->ht[h];
+    sc->ht[h] = ns;
+    sc->ht_n++;
     return ns;
 }
 
@@ -1380,73 +1379,107 @@ static uint32_t get_ident(Token *tok) {
     return tok->id;
 }
 
-enum {
-    BUILTIN_FN_ALLOCA = 1,
-    BUILTIN_ALLOCA_WITH_ALIGN,
-    BUILTIN_CONSTANT_P,
-    BUILTIN_TYPES_COMPATIBLE_P,
-    ATOMIC_STORE,
-    ATOMIC_LOAD,
-    ATOMIC_EXCHANGE,
-    ATOMIC_FETCH_ADD,
-    ATOMIC_FETCH_SUB,
-    ATOMIC_FETCH_AND,
-    ATOMIC_FETCH_OR,
-    ATOMIC_FETCH_XOR,
-    ATOMIC_COMPARE_EXCHANGE_WEAK,
-    ATOMIC_COMPARE_EXCHANGE_STRONG,
-    ATOMIC_THREAD_FENCE,
-    ATOMIC_SIGNAL_FENCE,
-    ATOMIC_IS_LOCK_FREE,
-    // __builtin_bswap16/32/64
-    BUILTIN_BSWAP16,
-    BUILTIN_BSWAP32,
-    BUILTIN_BSWAP64,
-};
-
 // Interned once at the top of parse(): the anonymous name for
 // compiler-generated temporaries and __func__/__FUNCTION__.
 static uint32_t id_anon;
 static uint32_t id_func;
 static uint32_t id_function;
 
-static struct {
-    char *name;
-    uint32_t id;
-    int kind;
-} builtin_fn[] = {
-    {"__builtin_alloca", 0, BUILTIN_FN_ALLOCA},
-    {"__builtin_alloca_with_align", 0, BUILTIN_ALLOCA_WITH_ALIGN},
-    {"__builtin_constant_p", 0, BUILTIN_CONSTANT_P},
-    {"__builtin_types_compatible_p", 0, BUILTIN_TYPES_COMPATIBLE_P},
-    {"__builtin_bswap16", 0, BUILTIN_BSWAP16},
-    {"__builtin_bswap32", 0, BUILTIN_BSWAP32},
-    {"__builtin_bswap64", 0, BUILTIN_BSWAP64},
-    {"__c11_atomic_store", 0, ATOMIC_STORE},
-    {"__c11_atomic_load", 0, ATOMIC_LOAD},
-    {"__c11_atomic_exchange", 0, ATOMIC_EXCHANGE},
-    {"__c11_atomic_fetch_add", 0, ATOMIC_FETCH_ADD},
-    {"__c11_atomic_fetch_sub", 0, ATOMIC_FETCH_SUB},
-    {"__c11_atomic_fetch_and", 0, ATOMIC_FETCH_AND},
-    {"__c11_atomic_fetch_or", 0, ATOMIC_FETCH_OR},
-    {"__c11_atomic_fetch_xor", 0, ATOMIC_FETCH_XOR},
-    {"__c11_atomic_compare_exchange_weak", 0, ATOMIC_COMPARE_EXCHANGE_WEAK},
-    {"__c11_atomic_compare_exchange_strong", 0, ATOMIC_COMPARE_EXCHANGE_STRONG},
-    {"__c11_atomic_thread_fence", 0, ATOMIC_THREAD_FENCE},
-    {"__c11_atomic_signal_fence", 0, ATOMIC_SIGNAL_FENCE},
-    {"__c11_atomic_is_lock_free", 0, ATOMIC_IS_LOCK_FREE},
+// The one place a builtin is described. Rows are grouped by family; a
+// BCLASS_SPECIAL row carries BT_NONE and a NULL intrinsic because
+// parse_builtin_fn() builds its shape from the arguments rather than from
+// a prototype.
+// BUILTIN_* order, and NUM_BUILTINFN one past the last kind gives the
+// length, so the two hand-written lists are checked against each other
+// with no separate count to maintain.
+// The one place a builtin is described. Rows are in BUILTIN_* order, so a
+// kind indexes its row; a BCLASS_SPECIAL row carries BT_NONE and a NULL
+// intrinsic because parse_builtin_fn() builds its shape from the arguments
+// rather than from a prototype.
+BuiltinDef builtin_defs[] = {
+    // Irreducible: not callable as an ordinary function at all.
+    {"__builtin_alloca", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__builtin_alloca_with_align", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__builtin_constant_p", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__builtin_types_compatible_p", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__c11_atomic_store", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__c11_atomic_load", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__c11_atomic_exchange", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__c11_atomic_fetch_add", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__c11_atomic_fetch_sub", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__c11_atomic_fetch_and", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__c11_atomic_fetch_or", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__c11_atomic_fetch_xor", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__c11_atomic_compare_exchange_weak", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__c11_atomic_compare_exchange_strong", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__c11_atomic_thread_fence", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__c11_atomic_signal_fence", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+    {"__c11_atomic_is_lock_free", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, 0, NULL, 0},
+
+    // A byte swap: one intrinsic, one argument whose type is also the
+    // result's, so the width comes from either side.
+    {"__builtin_bswap16", BCLASS_DECL, "llvm.bswap.i%d", BT_USHORT, BT_USHORT, true, 1, NULL, 0},
+    {"__builtin_bswap32", BCLASS_DECL, "llvm.bswap.i%d", BT_UINT, BT_UINT, true, 1, NULL, 0},
+    {"__builtin_bswap64", BCLASS_DECL, "llvm.bswap.i%d", BT_ULLONG, BT_ULLONG, true, 1, NULL, 0},
 };
 
-// The table ids are interned lazily on first use: the preprocessor
-// calls this for __has_builtin before parse() runs.
+_Static_assert(NUM_BUILTINFN - 1 == (int)(sizeof(builtin_defs) / sizeof(builtin_defs[0])),
+               "builtin_defs[] must have one row per BUILTIN_* kind, in order");
+
+// The number of table rows. NUM_BUILTINFN is one more, because BUILTIN_NONE
+// also occupies an enumerator, so iterating the table with it would run one
+// row past the end.
+#define builtin_row_count (NUM_BUILTINFN - 1)
+
+// The definitions live in cxx.h so that every stage shares one table; only
+// the interned ids are filled in here, lazily, because the preprocessor
+// calls is_builtin_fn() for __has_builtin before parse() runs.
+static bool builtin_ids_ready;
+
+static void intern_builtin_ids(void) {
+    if (builtin_ids_ready) return;
+    for (size_t i = 0; i < builtin_row_count; ++i)
+        builtin_defs[i].id = intern(builtin_defs[i].name, strlen(builtin_defs[i].name));
+    builtin_ids_ready = true;
+}
+
+// The single scan over the table. Everything else is a projection of it,
+// so a new lookup cannot drift from the others.
+static size_t builtin_find(uint32_t id) {
+    intern_builtin_ids();
+    for (size_t i = 0; i < builtin_row_count; ++i)
+        if (builtin_defs[i].id == id) return i;
+    return builtin_row_count;  // not a builtin
+}
+
+// The table is written in BUILTIN_* order, so a kind indexes its row.
+BuiltinDef *builtin_def(int kind) {
+    intern_builtin_ids();
+    return (kind > 0 && (size_t)kind <= builtin_row_count) ? &builtin_defs[kind - 1] : NULL;
+}
+
 int is_builtin_fn(uint32_t id) {
-    if (!builtin_fn[0].id) {
-        for (size_t i = 0; i < sizeof(builtin_fn) / sizeof(builtin_fn[0]); ++i)
-            builtin_fn[i].id = intern(builtin_fn[i].name, strlen(builtin_fn[i].name));
-    }
-    for (size_t i = 0; i < sizeof(builtin_fn) / sizeof(builtin_fn[0]); ++i)
-        if (id == builtin_fn[i].id) return builtin_fn[i].kind;
-    return 0;
+    size_t i = builtin_find(id);
+    // A row's kind is its index, offset by one because BUILTIN_NONE is 0.
+    return i < builtin_row_count ? (int)i + 1 : BUILTIN_NONE;
+}
+
+BuiltinClass builtin_class(int kind) {
+    BuiltinDef *d = builtin_def(kind);
+    return d ? d->cls : BCLASS_SPECIAL;
+}
+
+// The builtin kind of a callee, or BUILTIN_NONE. postfix() decays a
+// function designator to a pointer, so the callee arrives as
+// ND_IMCAST(ND_VAR) in practice; a bare ND_VAR is accepted too.
+int builtin_kind_of(Node *func) {
+    while (func && (func->kind == ND_IMCAST || func->kind == ND_LVTOR)) func = func->lhs;
+    if (!func || func->kind != ND_VAR) return BUILTIN_NONE;
+    Sym *sym = func->var;
+    // Both flags matter: a user function declared under a builtin's name is
+    // an ordinary function and must not be lowered to the LLVM intrinsic.
+    if (!sym || !sym->is_function || !sym->is_builtin) return BUILTIN_NONE;
+    return is_builtin_fn(sym->id);
 }
 
 static bool is_const_expr(Node *node) {
@@ -1531,26 +1564,108 @@ static Node *atomic_result(Node *operand_init, Node *op_assign, Sym *result, Tok
     return new_binary(ND_COMMA, seq, new_var_node(result, tok), tok);
 }
 
-// __builtin_bswap16/32/64. Written as explicit shift/mask/or on an
-// __builtin_bswap16/32/64 -> ND_BSWAP, which irgen lowers to the
-// llvm.bswap.iN intrinsic. glibc's <bits/byteswap.h> uses these whenever
-// __GNUC_PREREQ (4, 8) holds, which is the case once cxx declares
-// __GNUC__ >= 7.
-static Node *new_bswap(Node *arg, int kind, Token *arg_tok, Token *start) {
-    int bits = kind == BUILTIN_BSWAP16 ? 16 : kind == BUILTIN_BSWAP32 ? 32 : 64;
+// The prototypes of the A-class builtins, i.e. the ones a user could
+// write by hand. Because they become ordinary declarations, everything
+// downstream -- argument conversion, the address-of operator, assigning
+// to a function pointer, calling through that pointer -- works with no
+// builtin-specific code at all.
+//
+// The bswap family takes and returns an N-bit unsigned integer. clang
+// promotes nothing here, so the parameter type is what performs the
+// conversion for `__builtin_bswap16(short)`.
+// Turn a BuiltinDef selector into the target's canonical Type.
+static Type *builtin_target_type(int sel) {
+    switch (sel) {
+        case BT_VOID:
+            return T.ty_void;
+        case BT_BOOL:
+            return T.ty_bool;
+        case BT_SHORT:
+            return T.ty_short;
+        case BT_USHORT:
+            return T.ty_ushort;
+        case BT_INT:
+            return T.ty_int;
+        case BT_UINT:
+            return T.ty_uint;
+        case BT_LONG:
+            return T.ty_long;
+        case BT_ULONG:
+            return T.ty_ulong;
+        case BT_LLONG:
+            return T.ty_llong;
+        case BT_ULLONG:
+            return T.ty_ullong;
+        case BT_VOIDPTR:
+            return T.ty_voidptr;
+        default:
+            return NULL;
+    }
+}
 
-    Node *v = arg;
-    lvalue_convert(&v);
-    if (!is_integer(v->ty)) error(arg_tok, "argument to ‘__builtin_bswap%d’ must be an integer", bits);
+// The declared type of an A-class builtin, built from its row: the return
+// type, then `nargs` parameters. func_type() alone sets only the return
+// type, and fncall() walks params and reports arity with nparam, so both
+// have to be attached here.
+Type *builtin_type(int kind) {
+    BuiltinDef *d = builtin_def(kind);
+    if (!d || d->ret == BT_NONE) return NULL;
 
-    // The builtin takes and returns an n-bit unsigned integer.
-    Type *uty = bits == 16 ? T.ty_ushort : bits == 32 ? T.ty_uint : T.ty_ulong;
+    Type *fty = func_type(builtin_target_type(d->ret));
 
-    Node *node = new_node(ND_BSWAP, start);
-    node->lhs = v;
-    node->rhs = new_num(bits, start);
-    node->ty = uty;
-    return node;
+    Type *tail = NULL;
+    for (uint32_t i = 0; i < d->nargs; i++) {
+        Type *pt = copy_type(builtin_target_type(d->args));
+        if (tail)
+            tail = tail->next = pt;
+        else
+            fty->params = tail = pt;
+    }
+    fty->nparam = d->nargs;
+    return fty;
+}
+
+// Inject a declaration for every A-class builtin into the file scope, once
+// per parse(). Doing it up front avoids any dependence on where the name
+// is first mentioned. The injection only happens when the identifier is
+// not already declared, so a user declaration wins -- which is how C
+// looks up a name, and the opposite of the old behaviour where a builtin
+// always beat a user declaration.
+//
+// The symbols are deliberately not added to `globals`: they must not
+// reach the module's function list, or dump_module() would emit a
+// `declare` built from cxx's Type, whose signature need not match the
+// real LLVM intrinsic. Letting LLVM auto-declare on first use yields the
+// overload the call site actually needs.
+static void declare_builtin(Token *tok, int kind) {
+    Type *fty = builtin_type(kind);
+    if (!fty) return;
+
+    // Search enclosing scopes: a declaration made at file scope must be
+    // found from inside a function, or every occurrence would inject
+    // another copy into the current block.
+    if (find_ident(tok, true, false)) return;  // the user declared it
+
+    // The identifier at the use site is exactly the token to record: it
+    // spells the builtin's name and points into the source, so a diagnostic
+    // that goes through ty->name lands on the call rather than on a
+    // synthesised location.
+    fty->name = tok;
+
+    // Declare it in the file scope, like any other function: a builtin is
+    // not a block-local object, and putting it there keeps one declaration
+    // per translation unit regardless of where it is first mentioned.
+    Sym *sym = new_var(tok->id, fty);
+    sym->is_function = true;
+    sym->is_builtin = true;
+    // The compiler supplies the body, so this counts as a definition: a
+    // later user definition of the same name is diagnosed as a
+    // redefinition instead of silently replacing (or being dropped in
+    // favour of) this one. The symbol never enters the module's function
+    // list, so nothing is emitted for it either way.
+    sym->is_defined = true;
+    push_namespace(file_scope, tok->id, SYM_FUNC, fty, tok)->var = sym;
+    sym->sclass = SC_EXTERN;
 }
 
 // Builtins lower to dedicated node kinds (ND_ATOMICRMW, ND_CAS,
@@ -1575,15 +1690,6 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             Node *operand = assign(&tok, tok);
             *rest = skip(tok, TK_RPAREN);
             return new_num(is_const_expr(operand), start);
-        }
-        case BUILTIN_BSWAP16:
-        case BUILTIN_BSWAP32:
-        case BUILTIN_BSWAP64: {
-            tok = skip(tok->next, TK_LPAREN);
-            Token *arg_tok = tok;
-            Node *arg = assign(&tok, tok);
-            *rest = skip(tok, TK_RPAREN);
-            return new_bswap(arg, kind, arg_tok, start);
         }
         case BUILTIN_FN_ALLOCA:
         case BUILTIN_ALLOCA_WITH_ALIGN: {
@@ -2067,12 +2173,16 @@ static Node *primary(Token **rest, Token *tok) {
         return generic_selection(rest, tok);
     }
     if (tok->kind == TK_IDENT) {
-        // builtin_fnuction
-        int builtin_fn_kind = is_builtin_fn(tok->id);
-        if (builtin_fn_kind) {
-            Node *node = parse_builtin_fn(rest, tok, builtin_fn_kind);
+        int kind = is_builtin_fn(tok->id);
+        if (kind && builtin_class(kind) == BCLASS_SPECIAL) {
+            Node *node = parse_builtin_fn(rest, tok, kind);
             if (node) return node;
         }
+        // An A-class builtin becomes an ordinary declaration, injected here
+        // on first use so the lookup below finds it and the call takes the
+        // normal path. Injecting lazily also means the declaration carries
+        // the identifier token from this occurrence.
+        if (kind) declare_builtin(tok, kind);
         // Variable, function or enum constant
         NameSpace *sc = find_ident(tok, true, false);
         if (!sc) {
@@ -2884,6 +2994,37 @@ static int64_t eval2(Node *node, uint32_t *sym) {
             return int128_to_i64(int128_normalize(eval_int128(node), 64, UNSIGNED));
         case ND_NOT:
             return int128_is_zero(eval_int128(node->lhs)) ? 1 : 0;
+        case ND_FUNCALL: {
+            // A builtin call is a constant expression when its arguments
+            // are: fold it with the same routine the optimiser uses.
+            // Global initialisers reach here directly, without passing
+            // through fold_ast(), so the folding cannot be left to the
+            // optimiser alone.
+            // add_type() below only types the call node itself; the
+            // callee and the arguments need it too before the callee's
+            // shape can be recognised and its argument value read.
+            add_type(node->func);
+            for (Node **p = &node->args; *p;) {
+                Node *a = *p;
+                add_type(a);
+                // The optimiser folds arguments, but it runs over function
+                // bodies only; a global initialiser is evaluated here and
+                // never sees fold_ast(). Fold them now so a constant
+                // argument is recognisable -- it usually arrives wrapped in
+                // an implicit cast. fold_node() returns the replacement, so
+                // it must be written back, keeping the list linked.
+                Node *folded = fold_node(a);
+                if (folded && folded != a) {
+                    folded->next = a->next;
+                    *p = folded;
+                }
+                p = &(*p)->next;
+            }
+            int kind = builtin_kind_of(node->func);
+            Node *folded = kind ? fold_builtin_call(kind, node) : NULL;
+            if (!folded || folded->kind != ND_NUM) error(node->tok, "not a compile-time constant");
+            return int128_to_i64(folded->ival);
+        }
         case ND_COMMA:
             eval(node->lhs);
             return eval2(node->rhs, sym);
@@ -3210,7 +3351,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         } else {
             var = new_lvar(id, ty);
         }
-        NameSpace *new_ns = push_namespace(id, symkind, ty, var_name);
+        NameSpace *new_ns = push_namespace(scope, id, symkind, ty, var_name);
         new_ns->var = var;
         new_ns->prev = ns;
         if (is_extern) {
@@ -3901,7 +4042,7 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
                     error(tok,
                           "illegal initializer (only variables can be "
                           "initialized)");
-                push_namespace(get_ident(ty->name), SYM_TYNAME, ty, ty->name);
+                push_namespace(scope, get_ident(ty->name), SYM_TYNAME, ty, ty->name);
             } else {
                 cur = cur->next = declaration(&tok, tok, basety, sclass, align, funcspec, attrs);
             }
@@ -4041,7 +4182,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
 
         if (tok->kind == TK_AS) val = const_expr(&tok, tok->next);
 
-        push_namespace(name, SYM_ENUM, ty, enm_name)->enum_val = val;
+        push_namespace(scope, name, SYM_ENUM, ty, enm_name)->enum_val = val;
         EnumVal *enm = emalloc(sizeof(EnumVal));
         enm->name = enm_name;
         enm->val = val++;
@@ -5309,7 +5450,10 @@ static Token *external_declaration(Token *tok) {
                 check_decl_compatile(ns, SYM_FUNC, ty);
                 var = ns->var;
                 if (var->is_defined) {
-                    diag("error", var_name, "redefinition of ‘%s’", str(var_name->id));
+                    if (is_builtin_fn(var_name->id))
+                        diag("error", var_name, "definition of builtin function ‘%s’", str(var_name->id));
+                    else
+                        diag("error", var_name, "redefinition of ‘%s’", str(var_name->id));
                     goto note;
                 }
                 if (sclass == SC_STATIC && var->sclass != SC_STATIC) {
@@ -5319,7 +5463,7 @@ static Token *external_declaration(Token *tok) {
                 }
             } else {
                 var = new_gvar(get_ident(var_name), ty);
-                ns = push_namespace(var->id, SYM_FUNC, ty, var_name);
+                ns = push_namespace(scope, var->id, SYM_FUNC, ty, var_name);
                 ns->var = var;
                 ns->lnk = sclass == SC_STATIC ? LK_INTERN : LK_EXTERN;
                 var->is_function = true;
@@ -5350,7 +5494,7 @@ static Token *external_declaration(Token *tok) {
                 if (param->name) id = get_ident(param->name);
                 Sym *pvar = new_lvar(id, param);
                 sym_attr_flags(pvar, param->attrs, true);
-                push_namespace(id, SYM_VAR, ty, param->name)->var = pvar;
+                push_namespace(scope, id, SYM_VAR, ty, param->name)->var = pvar;
                 param = param->next;
             }
 
@@ -5359,8 +5503,8 @@ static Token *external_declaration(Token *tok) {
             // [GNU] "__FUNCTION__" is yet another name of "__func__".
             Type *fn_name = array_of(T.ty_char, str_len(var->id) + 1);
 
-            NameSpace *tmp = push_namespace(id_func, SYM_VAR, fn_name, var_name);
-            NameSpace *tmp2 = push_namespace(id_function, SYM_VAR, fn_name, var_name);
+            NameSpace *tmp = push_namespace(scope, id_func, SYM_VAR, fn_name, var_name);
+            NameSpace *tmp2 = push_namespace(scope, id_function, SYM_VAR, fn_name, var_name);
 
             tmp2->var = tmp->var = new_string_literal(var->id, fn_name);
 
@@ -5398,7 +5542,7 @@ static Token *external_declaration(Token *tok) {
             if (ns)
                 check_decl_compatile(ns, SYM_TYNAME, ty);
             else
-                push_namespace(get_ident(var_name), SYM_TYNAME, ty, var_name);
+                push_namespace(scope, get_ident(var_name), SYM_TYNAME, ty, var_name);
         } else {
             if (ns) {
                 check_decl_compatile(ns, symkind, ty);
@@ -5426,7 +5570,7 @@ static Token *external_declaration(Token *tok) {
                 var->is_function = is_fn;
                 var->sclass = sclass;
                 var->align = MAX(align, ty->align);
-                ns = push_namespace(var->id, symkind, ty, var_name);
+                ns = push_namespace(scope, var->id, symkind, ty, var_name);
                 ns->var = var;
                 ns->lnk = sclass & (SC_STATIC | SC_CONSTEXPR) ? LK_INTERN : LK_EXTERN;
             }
