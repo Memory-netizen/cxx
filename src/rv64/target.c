@@ -50,6 +50,21 @@ static Type ty_float_ = TYPE(TY_FLOAT, 4, 4, false);
 static Type ty_double_ = TYPE(TY_DOUBLE, 8, 8, false);
 static Type ty_ldouble_ = TYPE(TY_LDOUBLE, 16, 16, false);
 
+// The RISC-V va_list is a single pointer walking the argument area.
+static Type *rv64_va_list_type(void) {
+    static Type ptr;
+    static bool done;
+    if (!done) {
+        ptr.kind = TY_PTR;
+        ptr.base = &ty_void_;
+        ptr.size = 8;
+        ptr.align = 8;
+        ptr.is_unsigned = true;
+        done = true;
+    }
+    return &ptr;
+}
+
 #undef TYPE
 
 Target T_rv64 = {
@@ -87,6 +102,7 @@ Target T_rv64 = {
     .long_max = 9223372036854775807L,
     .ulong_max = 18446744073709551615UL,
     .llong_max = 9223372036854775807LL,
+    .va_list_type = rv64_va_list_type,
     .va_arg_ops = rv64_va_arg,
     .predef =
         "#define _LP64 1\n"

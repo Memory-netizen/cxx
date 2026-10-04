@@ -90,6 +90,58 @@ static VaArgOps *amd64_va_arg(Type *want) {
     return &va_arg_gp;
 }
 
+// stdarg.h declares `typedef __builtin_va_list va_list;` and nothing more.
+// The layout is the ABI's: a register save area, the offsets into it, and
+// the overflow area. It is an array of one so that passing a va_list
+// passes a pointer to the element, exactly as the ABI requires.
+static Type *amd64_va_list_type(void) {
+    static Type elem;
+    static Type arr;
+    static bool done;
+    if (!done) {
+        elem.kind = TY_STRUCT;
+        elem.size = 24;
+        elem.align = 8;
+        elem.is_unsigned = true;
+        Member *m;
+
+        m = emalloc(sizeof(Member));
+        m->ty = &ty_uint_;
+        m->offset = 0;
+        m->align = 4;
+        m->name = NULL;
+        elem.members = m;
+
+        m->next = emalloc(sizeof(Member));
+        m = m->next;
+        m->ty = &ty_uint_;
+        m->offset = 4;
+        m->align = 4;
+
+        m->next = emalloc(sizeof(Member));
+        m = m->next;
+        m->ty = &ty_voidptr_;
+        m->offset = 8;
+        m->align = 8;
+
+        m->next = emalloc(sizeof(Member));
+        m = m->next;
+        m->ty = &ty_voidptr_;
+        m->offset = 16;
+        m->align = 8;
+        m->next = NULL;
+
+        arr.kind = TY_ARRAY;
+        arr.base = &elem;
+        arr.len = 1;
+        arr.size = elem.size;
+        arr.align = elem.align;
+
+        done = true;
+    }
+    return &arr;
+}
+
 #undef TYPE
 
 Target T_amd64 = {
@@ -125,6 +177,7 @@ Target T_amd64 = {
     .long_max = 9223372036854775807L,
     .ulong_max = 18446744073709551615UL,
     .llong_max = 9223372036854775807LL,
+    .va_list_type = amd64_va_list_type,
     .va_arg_ops = amd64_va_arg,
     .predef =
         "#define _LP64 1\n"

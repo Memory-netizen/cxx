@@ -132,6 +132,13 @@ struct Target {
     // target.c. It is per-type because an ABI with separate general-purpose
     // and SIMD argument registers decides between them on the type.
     VaArgOps *(*va_arg_ops)(Type *want);
+
+    // The type of this target's va_list as stdarg.h would declare it --
+    // an array of one on amd64, a structure on arm64, a pointer on
+    // RISC-V. The parser injects it as __builtin_va_list, so the layout
+    // stays out of the headers and the variadic builtins check their
+    // operand by ordinary type compatibility.
+    Type *(*va_list_type)(void);
 };
 
 extern Target T;

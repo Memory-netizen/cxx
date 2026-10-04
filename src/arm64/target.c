@@ -74,6 +74,54 @@ static VaArgOps *arm64_va_arg(Type *want) {
     return &va_arg_gp;
 }
 
+// The AAPCS64 va_list: the stack area, the two register save area tops and
+// the two running offsets. Passed by reference, so it is a plain structure.
+static Type *arm64_va_list_type(void) {
+    static Type elem;
+    static bool done;
+    if (!done) {
+        elem.kind = TY_STRUCT;
+        elem.size = 32;
+        elem.align = 8;
+        elem.is_unsigned = true;
+        Member *m;
+
+        m = emalloc(sizeof(Member));
+        m->ty = &ty_voidptr_;
+        m->offset = 0;
+        m->align = 8;
+        elem.members = m;
+
+        m->next = emalloc(sizeof(Member));
+        m = m->next;
+        m->ty = &ty_voidptr_;
+        m->offset = 8;
+        m->align = 8;
+
+        m->next = emalloc(sizeof(Member));
+        m = m->next;
+        m->ty = &ty_voidptr_;
+        m->offset = 16;
+        m->align = 8;
+
+        m->next = emalloc(sizeof(Member));
+        m = m->next;
+        m->ty = &ty_int_;
+        m->offset = 24;
+        m->align = 4;
+
+        m->next = emalloc(sizeof(Member));
+        m = m->next;
+        m->ty = &ty_int_;
+        m->offset = 28;
+        m->align = 4;
+        m->next = NULL;
+
+        done = true;
+    }
+    return &elem;
+}
+
 #undef TYPE
 
 Target T_arm64 = {
@@ -111,6 +159,7 @@ Target T_arm64 = {
     .long_max = 9223372036854775807L,
     .ulong_max = 18446744073709551615UL,
     .llong_max = 9223372036854775807LL,
+    .va_list_type = arm64_va_list_type,
     .va_arg_ops = arm64_va_arg,
     .predef =
         "#define _LP64 1\n"

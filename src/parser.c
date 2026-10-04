@@ -205,6 +205,9 @@ struct Scope {
 static Scope *scope;
 static Scope *file_scope;
 
+// The target's canonical va_list type, published as __builtin_va_list.
+static Type *va_list_ty;
+
 static void enter_scope(void) {
     Scope *sc = emalloc(sizeof(Scope));
     sc->vla_expr = vnew(2, sizeof(Node *));
@@ -1103,6 +1106,17 @@ static void insert_ty(Type *ty, char *kind) {
     types = ty;
 }
 
+// A target builds its va_list type itself, so nothing has registered the
+// records it contains. They have to go through the same list every other
+// record does, or the IR would name a type it never defines.
+static void publish_records(Type *ty) {
+    if (!ty) return;
+    if (ty->kind == TY_ARRAY) ty = ty->base;
+    if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
+        if (!ty->uid) insert_ty(ty, ty->kind == TY_STRUCT ? "struct" : "union");
+    }
+}
+
 static Initializer *initializer(Token **rest, Token *tok, Type *ty, Type **new_ty) {
     if (ty->kind == TY_NONE) {
         Token *dummy;
@@ -1706,12 +1720,21 @@ static void declare_builtin(Token *tok, int kind) {
 static Node *va_list_addr(Token **rest, Token *tok) {
     Node *ap = assign(rest, tok);
     add_type(ap);
-    Node *addr = ap;
-    if (addr->ty->kind != TY_PTR || addr->ty->base->kind != TY_STRUCT) {
-        addr = new_unary(ND_ADDR, ap, tok);
-        add_type(addr);  // new_unary leaves the type unset
-    }
-    if (addr->ty->kind != TY_PTR) error(tok, "invalid va_list argument");
+
+    // The operand may arrive already decayed (an array va_list, as on
+    // amd64, converts to a pointer on the way in), so it is checked against
+    // both the declared type and the type that conversion yields.
+    Type *want = type_unqual(va_list_ty);
+    Type *got = type_unqual(ap->ty);
+    Type *decayed = want->kind == TY_ARRAY ? pointer_to(want->base, 0) : want;
+    if (!is_compatible(got, want) && !is_compatible(got, decayed)) error(tok, "expected a va_list argument");
+
+    // The intrinsics take the address of the va_list object. When that
+    // object is an array or a pointer, the operand already *is* that
+    // address; only a structure or scalar operand needs it taken.
+    if (want->kind == TY_ARRAY || want->kind == TY_PTR) return ap;
+    Node *addr = new_unary(ND_ADDR, ap, tok);
+    add_type(addr);
     return addr;
 }
 
@@ -5741,6 +5764,16 @@ Module *parse(Token *tok) {
 
     enter_scope();
     file_scope = scope;
+
+    // Publish the target's va_list under the name stdarg.h uses. The
+    // layout itself stays in the target: the header only says
+    // `typedef __builtin_va_list va_list;`, and the variadic builtins
+    // check their operand against this type by ordinary compatibility.
+    va_list_ty = T.va_list_type();
+    publish_records(va_list_ty);
+    // The name has no source spelling, so the location carried by the entry
+    // is used for diagnostics that mention it.
+    push_namespace(file_scope, intern("__builtin_va_list", 17), SYM_TYNAME, va_list_ty, tok);
 
     while (tok->kind != TK_EOF) tok = external_declaration(tok);
     leave_scope(tok);

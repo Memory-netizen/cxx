@@ -50,6 +50,22 @@ static Type ty_float_ = TYPE(TY_FLOAT, 4, 4, false);
 static Type ty_double_ = TYPE(TY_DOUBLE, 8, 8, false);
 static Type ty_ldouble_ = TYPE(TY_LDOUBLE, 16, 16, false);
 
+// The RISC-V ILP32 va_list is a single 4-byte pointer walking the argument
+// area, so unlike the 64-bit targets it is not pointer-width.
+static Type *rv32_va_list_type(void) {
+    static Type ptr;
+    static bool done;
+    if (!done) {
+        ptr.kind = TY_PTR;
+        ptr.base = &ty_void_;
+        ptr.size = 4;
+        ptr.align = 4;
+        ptr.is_unsigned = true;
+        done = true;
+    }
+    return &ptr;
+}
+
 #undef TYPE
 
 Target T_rv32 = {
@@ -87,6 +103,7 @@ Target T_rv32 = {
     .long_max = 2147483647L,
     .ulong_max = 4294967295UL,
     .llong_max = 9223372036854775807LL,
+    .va_list_type = rv32_va_list_type,
     .va_arg_ops = rv32_va_arg,
     .predef =
         "#define _ILP32 1\n"
@@ -569,6 +586,7 @@ Target T_rv32b = {
     .long_max = 2147483647L,
     .ulong_max = 4294967295UL,
     .llong_max = 9223372036854775807LL,
+    .va_list_type = rv32_va_list_type,
     .va_arg_ops = rv32_va_arg,
     .predef =
         "#define _ILP32 1\n"
