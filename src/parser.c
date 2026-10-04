@@ -3270,7 +3270,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
                 Node *save = new_node(ND_SP_SAVE, tok);
                 save->ty = sp->ty;
                 Node *save_expr = new_binary(ND_AS, sp, save, tok);
-                save_expr->ty = pointer_to(T.ty_void, 0);
+                save_expr->ty = T.ty_voidptr;
                 cur = cur->next = save_expr;
             }
             Node *size = scope->vla_expr[0];
@@ -5151,7 +5151,7 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
         ty = array_of(ty, -1);
     } else if (ty->kind == TY_VLA || !is_const_expr(len)) {
         ty = vla_of(ty, len);
-        if (!scope->stack_top) scope->stack_top = new_lvar(id_anon, pointer_to(T.ty_void, 0));
+        if (!scope->stack_top) scope->stack_top = new_lvar(id_anon, T.ty_voidptr);
         ty->vla_cnt = new_lvar(id_anon, T.ty_ulong);
         ty->vla_len = len;
         Node *expr = new_binary(ND_AS, new_var_node(ty->vla_cnt, tok), len, tok);

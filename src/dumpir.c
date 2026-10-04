@@ -283,6 +283,12 @@ static void print_operand(Ref r) {
             double d = (double)r.val;
             memcpy(&b, &d, 8);
             fprintf(out_file, "0x%016" PRIx64, b);
+        } else if (is_pointer(r.ty) || r.ty->kind == TY_NULLPTR) {
+            // A null pointer is the immediate zero typed as a pointer, the
+            // same as (void *)0. LLVM wants the literal null for a pointer
+            // operand, not the integer 0.
+            if (r.val != 0) fatal("non-zero integer immediate with pointer type");
+            fprintf(out_file, "null");
         } else {
             fprintf(out_file, "%d", r.val);
         }
@@ -853,16 +859,25 @@ static void dump_init(Initializer *init, Type *ty) {
         fprintf(out_file, "zeroinitializer");
         return;
     }
-    if (init->ty->kind == TY_PTR && init->val->type == CBits) {
-        fprintf(out_file, "inttoptr (i%d ", T.ty_nullptr->size * 8);
+    // nullptr_t is pointer-sized and pointer-valued, so it takes the same
+    // spelling as a pointer.
+    bool is_ptr_init = init->ty->kind == TY_PTR || init->ty->kind == TY_NULLPTR;
+    if (is_ptr_init && init->val->type == CBits) {
+        // A zero value is the null pointer, whose LLVM literal is simply
+        // ; only a non-zero integer needs inttoptr.
+        if (init->val->bits.i == 0) {
+            fprintf(out_file, "null");
+            return;
+        }
+        fprintf(out_file, "inttoptr (i%d ", T.ty_voidptr->size * 8);
         printcon(init->val, init->ty);
         fprintf(out_file, " to ptr)");
         return;
     }
-    if (init->ty->kind != TY_PTR && init->val->type == CAddr) {
+    if (!is_ptr_init && init->val->type == CAddr) {
         fprintf(out_file, "ptrtoint (ptr ");
         printcon(init->val, init->ty);
-        fprintf(out_file, " to i%d)", T.ty_nullptr->size * 8);
+        fprintf(out_file, " to i%d)", T.ty_voidptr->size * 8);
         return;
     }
     printcon(init->val, init->ty);

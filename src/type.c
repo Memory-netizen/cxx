@@ -267,8 +267,8 @@ Type *pointer_to(Type *base, uint32_t qual) {
     Type *ty = emalloc(sizeof(Type));
     ty->kind = TY_PTR;
     ty->qual = qual;
-    ty->size = T.ty_nullptr->size;
-    ty->align = T.ty_nullptr->align;
+    ty->size = T.ty_voidptr->size;
+    ty->align = T.ty_voidptr->align;
     ty->is_unsigned = true;
     ty->base = base;
     return ty;
@@ -1101,7 +1101,7 @@ void add_type(Node *node) {
             break;
         }
         case ND_LABEL_VAL:
-            node->ty = pointer_to(T.ty_void, 0);
+            node->ty = T.ty_voidptr;
             break;
         case ND_CAS:
             add_type(node->lhs);
@@ -1124,7 +1124,7 @@ void add_type(Node *node) {
             lvalue_convert(&node->lhs);
             // The C type is void *, like the old declared prototype; the
             // alloca element type (base_ty ?: char) is only for the IR.
-            node->ty = pointer_to(T.ty_void, 0);
+            node->ty = T.ty_voidptr;
             break;
         // other
         case ND_NOP:

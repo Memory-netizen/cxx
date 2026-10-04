@@ -60,6 +60,7 @@ struct Target {
     char *sysroot;
     Type *ty_none;
     Type *ty_void;
+    Type *ty_voidptr;  // void *, shared by every site needing one
     Type *ty_nullptr;
     Type *ty_bool;
     Type *ty_char;
@@ -933,11 +934,15 @@ enum {
         tmp.ty = T.ty_ldouble;     \
         tmp;                       \
     })
-#define NULLPTR                                           \
-    ({                                                    \
-        Ref tmp = newcon(&(Con){0, CAddr, 0, {0}}, curm); \
-        tmp.ty = T.ty_nullptr;                            \
-        tmp;                                              \
+// A null pointer constant: the integer 0, typed void * -- the same thing
+// as (void *)0. It needs no nullptr-specific machinery, so it is an RInt
+// immediate (zero is always representable) rather than a constant-pool
+// entry, and every site that needs a null pointer shares this one form.
+#define NULLPTR                \
+    ({                         \
+        Ref tmp = INT(0);      \
+        tmp.ty = T.ty_voidptr; \
+        tmp;                   \
     })
 
 // 16 bytes on 64-bit hosts: passed/returned in two registers, while a

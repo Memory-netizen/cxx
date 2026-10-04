@@ -11,6 +11,16 @@
 static Type ty_none_ = TYPE(TY_NONE, -1, 1, false);
 static Type ty_void_ = TYPE(TY_VOID, 1, 1, false);
 static Type ty_nullptr_ = TYPE(TY_NULLPTR, 8, 8, true);
+// void *, the type of NULLPTR. Spelled once here so that the many places
+// needing a void pointer share one Type instead of building one with
+// pointer_to(T.ty_void, 0) each time.
+static Type ty_voidptr_ = {
+    .kind = TY_PTR,
+    .size = 8,
+    .align = 8,
+    .is_unsigned = true,
+    .base = &ty_void_,
+};
 static Type ty_bool_ = TYPE(TY_BOOL, 1, 1, true);
 static Type ty_char_ = TYPE(TY_CHAR, 1, 1, true);
 static Type ty_schar_ = TYPE(TY_SCHAR, 1, 1, false);
@@ -41,6 +51,7 @@ Target T_rv64 = {
     .sysroot = NULL,
     .ty_none = &ty_none_,
     .ty_void = &ty_void_,
+    .ty_voidptr = &ty_voidptr_,
     .ty_nullptr = &ty_nullptr_,
     .ty_bool = &ty_bool_,
     .ty_char = &ty_char_,
