@@ -1147,7 +1147,17 @@ static Node *init_desg_expr(InitDesg *desg, Token *tok) {
 
     Node *lhs = init_desg_expr(desg->next, tok);
     add_type(lhs);
-    if (lhs->ty->kind == TY_ARRAY) new_imcast(&lhs, pointer_to(lhs->ty->base, 0));
+    // Mirror the subscript rule the parser applies (postfix `[`): an array
+    // operand is subscripted directly and its pointer decay is suppressed,
+    // while a pointer operand is rewritten as *(p + i). Building the
+    // decay form here as well would contradict that and lose the
+    // "array is the subscripted object" shape that the constant
+    // evaluator relies on.
+    if (lhs->ty->kind == TY_ARRAY) {
+        Node *sub = new_binary(ND_SUBACCESS, lhs, new_num(desg->idx, tok), tok);
+        sub->is_lvalue = lhs->is_lvalue;
+        return sub;
+    }
     Node *rhs = new_num(desg->idx, tok);
     return new_unary(ND_DEREF, new_add(lhs, rhs, tok), tok);
 }
@@ -2748,6 +2758,97 @@ bool constexpr_fold(Sym *var, int64_t *val, uint32_t *sym) {
     return true;
 }
 
+// Outcome of const_array_elem, so the caller can tell "not an element read
+// of a const object" from "a constant", and, within the latter, a value
+// that is zero because the initializer left the subobject implicit -- which
+// is still a constant: 6.6 takes the object's value, and an omitted
+// initialiser means zero.
+typedef enum {
+    BCE_NOT_CONST,  // the root is not a const object: the caller decides
+    BCE_CONST,      // *out is the element's constant initializer
+    BCE_ZERO,       // the element is implicitly initialised -> 0
+} BuiltinConstElem;
+
+// Fold an element read of a const-qualified object whose initializer is
+// known, for use in a constant expression. clang folds any such object,
+// not only a `constexpr` one.
+//
+// The access chain is collected from the outside in -- `m[1][0]` parses as
+// (m[1])[0], so the collected order is outer-first while the initializer
+// tree descends inner-first -- and replayed in reverse. The chain lives in
+// a dynamically grown array, so its length is bounded only by memory and
+// not by a fixed path buffer.
+//
+// *out is set for BCE_CONST only; *offset_out, when given, receives the
+// byte offset from the root variable. An access that cannot be resolved
+// once the root is known to be const is definitely not a constant, so it
+// is diagnosed here.
+static BuiltinConstElem const_array_elem(Node *node, Node **out, int64_t *offset_out) {
+    struct Access {
+        Node *sub;    // the ND_SUBACCESS / ND_MEMBER node
+        Node *index;  // its subscript index, or NULL for a member
+        Member *member;
+    };
+
+    struct Access *path = vnew(8, sizeof(struct Access));
+    int depth = 0;
+
+    for (;;) {
+        if (node->kind != ND_MEMBER && node->kind != ND_SUBACCESS) break;
+        path = vgrow(path, depth + 1);
+        path[depth].sub = node;
+        if (node->kind == ND_MEMBER) {
+            path[depth].index = NULL;
+            path[depth].member = node->member;
+        } else {
+            path[depth].index = node->rhs;
+            path[depth].member = NULL;
+        }
+        depth++;
+        node = node->lhs;
+    }
+    while (node->kind == ND_LVTOR) node = node->lhs;
+    if (node->kind != ND_VAR || !node->var->init) return BCE_NOT_CONST;
+
+    // Only a const-qualified object (or a constexpr one) may be read as a
+    // constant. The qualifier of an array sits on its innermost element
+    // type, not on the array type itself -- `const int a[3]` gives
+    // a->qual == 0 while a->base->qual holds Q_CONST -- so walk down to it.
+    // A string literal has its own path in the caller and never reaches
+    // here.
+    Type *elem = node->var->ty;
+    while (elem->kind == TY_ARRAY) elem = elem->base;
+    if (!(elem->qual & Q_CONST) && !(node->var->sclass & SC_CONSTEXPR)) return BCE_NOT_CONST;
+
+    // Replay inner-first.
+    Initializer *init = node->var->init;
+    int64_t offset = 0;
+    for (int i = depth - 1; i >= 0; i--) {
+        // A subobject that is not inited at all is implicitly zero.
+        if (!init->is_inited) return BCE_ZERO;
+        if (path[i].index) {
+            int64_t idx = eval(path[i].index);
+            Type *arr = init->ty;
+            if (arr->kind != TY_ARRAY || idx < 0 || idx >= arr->len)
+                error(path[i].sub->tok, "initializer element is not a compile-time constant");
+            init = init->child[idx];
+            offset += idx * arr->base->size;
+        } else {
+            offset += path[i].member->offset;
+            init = init->child[path[i].member->idx];
+        }
+    }
+
+    if (offset_out) *offset_out = offset;
+    // Inited but with no expression of its own: left implicit inside an
+    // initializer that is otherwise present.
+    if (!init->is_inited || !init->expr) return BCE_ZERO;
+    if (!is_integer(init->expr->ty) && !is_flonum(init->expr->ty)) return BCE_NOT_CONST;
+
+    *out = init->expr;
+    return BCE_CONST;
+}
+
 static int64_t eval2(Node *node, uint32_t *sym) {
     add_type(node);
     if (is_flonum(node->ty)) {
@@ -2915,20 +3016,30 @@ static int64_t eval2(Node *node, uint32_t *sym) {
                     return eval_ty(v, node->ty);
                 }
             }
-            // An element read of a constexpr aggregate folds through
-            // the initializer tree (as in clang).
-            Node *root = elem_root(node->lhs);
-            if (root->kind == ND_VAR && (root->var->sclass & SC_CONSTEXPR) && root->var->init) {
-                Initializer *leaf = constexpr_elem(node, root->var->init);
-                if (leaf && leaf->expr && (is_integer(leaf->expr->ty) || is_flonum(leaf->expr->ty))) {
+            // An element read of a const-qualified object whose
+            // initializer is known folds through the initializer tree, as
+            // clang does: this is not limited to `constexpr` aggregates,
+            // so a `const int a[]` subscript is a constant too.
+            Node *elem = NULL;
+            switch (const_array_elem(node, &elem, NULL)) {
+                case BCE_CONST: {
                     uint32_t s = 0;
-                    int64_t v = eval2(leaf->expr, &s);
+                    int64_t v = eval2(elem, &s);
                     if (s && sym) *sym = s;
                     return v;
                 }
-                return 0;  // zero-filled part
+                case BCE_ZERO:
+                    // A subobject left implicitly initialised has value
+                    // zero, which is a constant (6.6).
+                    return 0;
+                case BCE_NOT_CONST:
+                    break;
             }
-            if (!sym) error(node->tok, "not a compile-time constant");
+            // Reaching here, the read is not a constant. An address is
+            // only accepted when the result type is what array-to-pointer
+            // decay produced -- a scalar member (`s.a`) is not an address,
+            // and keeping this test also preserves the accepted form
+            // `int *p = g.a.a;` where the member is an array.
             if (node->ty->kind != TY_ARRAY) error(node->tok, "invalid initializer");
             return eval_rval(node->lhs, sym) + node->member->offset;
         }

@@ -205,6 +205,11 @@ static void printcon(Con *c, Type *ty) {
         if (is_flonum(ty)) {
             fprintf(out_file, "0x%016" PRIx64, c->bits.i);
         } else {
+            // Constants reach here already normalised to their declared
+            // type and width, so the stored value is printed as-is. The
+            // type is int64_t, which is not `long` on ILP32 targets
+            // (rv32: long is 32 bits), so use the int64 format macro
+            // rather than "%ld".
             fprintf(out_file, "%" PRIi64, c->bits.i);
         }
     } else if (c->type == CBits128) {

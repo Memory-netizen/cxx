@@ -86,7 +86,40 @@ for h in stdio.h stdlib.h math.h string.h limits.h stdint.h inttypes.h \
 EOF
 done
 
-# <limits.h> is reached through clang's own limits.h, which does
+# <stddef.h> must spell wchar_t with the target's character type. It used
+# to hard-code `typedef unsigned int wchar_t;`, which is a different type
+# from the one the compiler uses for L"..." on every signed-wchar_t target
+# (amd64/rv64/rv32), so a wide string initialiser was rejected as
+# "array of inappropriate type".
+cat <<'EOF' | ok "wchar_t from <stddef.h> matches L\"...\""
+#include <stddef.h>
+wchar_t w[] = L"abc";
+int main(void) { return w[1] == 'b' ? 0 : 1; }
+EOF
+
+cat <<'EOF' | ok "wchar_t from <stddef.h> matches L'...'"
+#include <stddef.h>
+wchar_t c = L'x';
+int main(void) { return c == 'x' ? 0 : 1; }
+EOF
+
+# stddef.h took its fundamental types from hard-coded LP64 spellings, which
+# broke both size and alignment: on ILP32 (rv32) `unsigned long size_t`
+# and `long ptrdiff_t` must be 4 bytes, not 8, and `max_align_t` must have
+# the alignment of long double (16) rather than that of long.
+cat <<'EOF' | ok "size_t and ptrdiff_t have the target's width"
+#include <stddef.h>
+int main(void) {
+    return (sizeof(size_t) == sizeof(void *) &&
+            sizeof(ptrdiff_t) == sizeof(void *)) ? 0 : 1;
+}
+EOF
+
+cat <<'EOF' | ok "max_align_t has the greatest alignment"
+#include <stddef.h>
+int main(void) { return _Alignof(max_align_t) >= _Alignof(long double) ? 0 : 1; }
+EOF
+
 # `#include_next <limits.h>` while its guard sits *outside* the guard it
 # re-enters. The search cursor must advance past the directory it just
 # took the header from, or the include recurses to MAX_INCL_DEPTH.
@@ -432,6 +465,103 @@ EOF
 
 cat <<'EOF' | bad "reject an out-of-range string subscript"
 int t = "ab"[2];
+EOF
+
+# A const-qualified object may be read as a constant (clang accepts it);
+# only an *unqualified* array stays rejected. The qualifier of an array
+# lives on its innermost element type, not on the array type.
+cat <<'EOF' | ok "accept a const array subscript as a constant"
+const int arr[2] = {7, 8};
+int t = arr[1];
+int main(void) { return t == 8 ? 0 : 1; }
+EOF
+
+cat <<'EOF' | bad "reject an unqualified array subscript as a constant"
+int arr[2] = {7, 8};
+int t = arr[1];
+EOF
+
+cat <<'EOF' | ok "accept a constexpr array subscript as a constant"
+constexpr int arr[2] = {7, 8};
+int t = arr[1];
+int main(void) { return t == 8 ? 0 : 1; }
+EOF
+
+# Multi-dimensional subscripts and member chains: the access chain is
+# collected outer-first (m[1][0] parses as (m[1])[0]) but the initializer
+# tree descends inner-first, so the indices must be replayed in reverse.
+cat <<'EOF' | ok "fold a multi-dimensional const array subscript"
+const int m[2][2] = {{1, 2}, {3, 4}};
+const int c[2][2][2] = {{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}};
+int a = m[1][0];
+int b = c[1][0][1];
+int main(void) { return (a == 3 && b == 6) ? 0 : 1; }
+EOF
+
+cat <<'EOF' | ok "fold a const member chain"
+struct T { int a[3]; };
+const struct T g = {{4, 5, 6}};
+struct S { int a; };
+const struct S s[2] = {{71}, {82}};
+int x = g.a[2];
+int y = s[1].a;
+int main(void) { return (x == 6 && y == 82) ? 0 : 1; }
+EOF
+
+# The access chain is held in a dynamically grown array, so nesting is
+# bounded by memory rather than by a fixed path buffer.
+cat <<'EOF' | ok "fold a deeply nested const access chain"
+struct L0 { int v; };
+struct L1 { struct L0 a; };
+struct L2 { struct L1 a; };
+struct L3 { struct L2 a; };
+struct L4 { struct L3 a; };
+struct L5 { struct L4 a; };
+struct L6 { struct L5 a; };
+struct L7 { struct L6 a; };
+struct L8 { struct L7 a; };
+const struct L8 g = {{{{{{{{42}}}}}}}};
+const int m[2][2][2][2][2][2] = {{{{{{7}}}}}};
+int x = g.a.a.a.a.a.a.a.a.v;
+int y = m[1][1][1][1][1][0];
+int main(void) { return (x == 42 && y == 0) ? 0 : 1; }
+EOF
+
+# An implicitly initialised subobject of a const object is still a
+# constant: 6.6 needs the object's value, and an omitted initialiser
+# leaves it zero. Rejecting it would be wrong (clang accepts and folds 0).
+cat <<'EOF' | ok "fold implicitly zero-initialised const members"
+const int a[4] = {1, 2};
+struct S { int x, y; };
+const struct S s = {5};
+const int m[2][2] = {{7}};
+int t1 = a[3];
+int t2 = s.y;
+int t3 = m[1][1];
+int main(void) { return (t1 == 0 && t2 == 0 && t3 == 0) ? 0 : 1; }
+EOF
+
+# const struct / union members, including nesting.
+cat <<'EOF' | ok "fold const struct and union members"
+struct S { int a[3]; };
+const struct S s = {{1, 2, 3}};
+union U { int a; char b; };
+const union U u = {42};
+struct O { struct I { int x; } i; };
+const struct O o = {{9}};
+int x = s.a[1];
+int y = u.a;
+int z = o.i.x;
+int main(void) { return (x == 2 && y == 42 && z == 9) ? 0 : 1; }
+EOF
+
+# Regression: an address taken through a member that *is* an array was
+# accepted before and must stay accepted (test/initializer.c relies on it).
+cat <<'EOF' | ok "accept an address through an array member"
+struct T { struct S { int a[3]; } a; };
+struct T g = {{{1, 2, 3}}};
+int *p = g.a.a;
+int main(void) { return p[0] == 1 ? 0 : 1; }
 EOF
 
 # --- known gaps ------------------------------------------------------
