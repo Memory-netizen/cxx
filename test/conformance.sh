@@ -872,10 +872,67 @@ else
 fi
 
 
-gap "variadic function definition (needs va_start/va_arg)" <<'EOF'
+# Was a gap until va_start/va_arg/va_end/va_copy landed. The behaviour is
+# checked at run time by test/function.c and test/f32.c, which call
+# test/common's variadic fixtures; this asserts that it compiles.
+ok "variadic function definition" <<'EOF'
 #include <stdarg.h>
-int sum(int n, ...) { va_list ap; va_start(ap, n); int s = va_arg(ap, int); va_end(ap); return s; }
-int main(void) { return sum(1, 5) - 5; }
+int sum(int n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    int s = 0;
+    for (int i = 0; i < n; i++) s += va_arg(ap, int);
+    va_end(ap);
+    return s;
+}
+double first_d(int n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    double d = va_arg(ap, double);
+    va_end(ap);
+    return d;
+}
+int main(void) {
+    if (sum(3, 1, 2, 3) != 6) return 1;
+    /* beyond the six general-purpose argument registers, so the reader
+     * falls through to the overflow area */
+    if (sum(8, 1, 2, 3, 4, 5, 6, 7, 8) != 36) return 2;
+    if (first_d(1, 2.5) != 2.5) return 3;
+    return 0;
+}
+EOF
+
+# va_copy must yield an independent cursor: reading through the copy must
+# leave the original positioned where it was.
+ok "va_copy gives an independent cursor" <<'EOF'
+#include <stdarg.h>
+int probe(int n, ...) {
+    va_list ap, aq;
+    va_start(ap, n);
+    va_copy(aq, ap);
+    int from_copy = va_arg(aq, int);
+    int from_orig = va_arg(ap, int);
+    va_end(aq);
+    va_end(ap);
+    return from_copy * 10 + from_orig;
+}
+int main(void) { return probe(2, 1, 1) - 11; }
+EOF
+
+# The variadic builtins only make sense inside a variadic definition.
+bad "reject va_start outside a variadic function" <<'EOF'
+#include <stdarg.h>
+int f(int n) { va_list ap; va_start(ap, n); return 0; }
+EOF
+
+bad "reject va_arg outside a variadic function" <<'EOF'
+#include <stdarg.h>
+int f(int n) { va_list ap; va_start(ap, n); return va_arg(ap, int); }
+EOF
+
+bad "reject va_copy outside a variadic function" <<'EOF'
+#include <stdarg.h>
+void f(void) { va_list ap, aq; va_copy(aq, ap); }
 EOF
 
 # --- summary ---------------------------------------------------------

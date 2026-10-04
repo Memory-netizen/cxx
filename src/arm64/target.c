@@ -37,6 +37,41 @@ static Type ty_float_ = TYPE(TY_FLOAT, 4, 4, false);
 static Type ty_double_ = TYPE(TY_DOUBLE, 8, 8, false);
 static Type ty_ldouble_ = TYPE(TY_LDOUBLE, 16, 16, false);
 
+// AAPCS64: stdarg.h declares
+//   { void *__stack; void *__gr_top; void *__vr_top;
+//     int __gr_offs; int __vr_offs; }
+// A negative offset means the named registers are used up, so the argument
+// comes from the stack area. While it is non-negative it indexes the
+// general-purpose or SIMD save area, and one step of 8 or 16 bytes is
+// taken there.
+static VaArgOps va_arg_gp = {
+    .kind = VA_MEM_REGS,
+    .offset_ty = &ty_int_,
+    .offset_field = 3,
+    .offset_bound = 0,
+    .reg_field = 1,
+    .mem_field = 0,
+    .reg_step = 8,
+    .mem_step = 8,
+};
+
+static VaArgOps va_arg_fp = {
+    .kind = VA_MEM_REGS,
+    .offset_ty = &ty_int_,
+    .offset_field = 4,
+    .offset_bound = 0,
+    .reg_field = 2,
+    .mem_field = 0,
+    .reg_step = 16,
+    .mem_step = 16,
+};
+
+// Which register class a requested type is passed in.
+static VaArgOps *arm64_va_arg(Type *want) {
+    if (is_flonum(want)) return &va_arg_fp;
+    return &va_arg_gp;
+}
+
 #undef TYPE
 
 Target T_arm64 = {
@@ -74,6 +109,7 @@ Target T_arm64 = {
     .long_max = 9223372036854775807L,
     .ulong_max = 18446744073709551615UL,
     .llong_max = 9223372036854775807LL,
+    .va_arg_ops = arm64_va_arg,
     .predef =
         "#define _LP64 1\n"
         "#define __AARCH64EL__ 1\n"

@@ -411,6 +411,153 @@ static Ref gen_intrinsic_call(Node *node, BuiltinDef *d, int kind) {
     return out;
 }
 
+// Address of a field of the va_list record. The expansion only moves
+// within the object, so clang's byte-offset addressing is what the ABI
+// expects.
+static Ref va_field_addr(Ref ap, Type *rec, int idx) {
+    int off = 0, i = 0;
+    for (Member *m = rec->members; m; m = m->next, i++)
+        if (i == idx) {
+            off = m->offset;
+            break;
+        }
+    Ref base = ap;
+    base.ty = pointer_to(T.ty_char, 0);
+    Ref dst = TMP(tmp_id++, base.ty);
+    new_ins(IR_GEP, dst, (Ref[]){base, INT(off)}, 2);
+    return dst;
+}
+
+// __builtin_va_arg. The shape -- test, two candidate addresses, join -- is
+// the same for every ABI; what the target supplies through T.va_arg_ops is
+// which field holds the cursor, how much room is left, and how far the
+// cursor moves.
+static Ref gen_va_arg(Node *node) {
+    VaArgOps *ops = T.va_arg_ops(node->ty);
+    Type *addr_ty = node->lhs->ty;  // pointer to the va_list object
+    Ref ap = gen_expr(node->lhs);
+    Type *want = node->ty;
+
+    if (ops->kind == VA_MEM_LINEAR) {
+        // The va_list is one pointer walking the argument area: read it,
+        // align it for this type, take the value, then advance.
+        Type *aptr_ty = is_ir_pointer(ap.ty) && ap.ty->base ? ap.ty->base : T.ty_voidptr;
+        Ref cursor = load(ap, aptr_ty, aptr_ty->align, NULL);
+
+        int step = ops->mem_step;
+        int align = want->align > step ? want->align : step;
+        Ref aligned = cursor;
+        if (align > step) {
+            // Types wider than a slot keep their natural alignment, which
+            // cxx models with a round-down mask.
+            Ref c8 = cursor;
+            c8.ty = pointer_to(T.ty_char, 0);
+            Ref bits = TMP(tmp_id++, T.ty_ulong);
+            new_ins(IR_PTRTOINT, bits, (Ref[]){c8}, 1);
+            Ref mask = TMP(tmp_id++, T.ty_ulong);
+            new_ins(IR_AND, mask, (Ref[]){bits, LONG(-align)}, 2);
+            Ref back = TMP(tmp_id++, c8.ty);
+            new_ins(IR_INTTOPTR, back, (Ref[]){mask}, 1);
+            aligned = back;
+        }
+
+        int size = want->size;
+        int taken = (size + align - 1) / align * align;
+        Ref next = aligned;
+        Ref n8 = aligned;
+        n8.ty = pointer_to(T.ty_char, 0);
+        Ref adv = TMP(tmp_id++, n8.ty);
+        new_ins(IR_GEP, adv, (Ref[]){n8, INT(taken)}, 2);
+        next = adv;
+        store(next, ap, aptr_ty->align, NULL);
+
+        int la = want->align;
+        if (la > step) la = step;
+        return load(aligned, want, la, NULL);
+    }
+
+    if (ops->kind != VA_MEM_REGS) fatal("unknown va_arg kind %d", ops->kind);
+
+    Type *rec = addr_ty->base;
+    if (rec->kind != TY_STRUCT) fatal("va_arg: va_list is not a struct");
+
+    Blk *blk_reg = new_blk();
+    Blk *blk_mem = new_blk();
+    Blk *blk_join = new_blk();
+
+    Type *off_ty = ops->offset_ty;
+    if (!off_ty) fatal("va_arg: the target gave no offset type");
+    Ref off_addr = va_field_addr(ap, rec, ops->offset_field);
+    Ref off = load(off_addr, off_ty, off_ty->align, NULL);
+    Ref cond = TMP(tmp_id++, bitint[1][1]);
+    // The offset is unsigned, so a non-negative bound is "still has room"
+    // (amd64 counts up to a size bound, arm64 down to zero).
+    new_ins(IR_CMP_LE, cond, (Ref[]){off, INT(ops->offset_bound)}, 2);
+    curb->jmp.type = IR_JNZ;
+    curb->jmp.arg = cond;
+    curb->succ1 = blk_reg;
+    curb->succ2 = blk_mem;
+    add_pred(curb, blk_reg);
+    add_pred(curb, blk_mem);
+
+    // Register save area: the argument sits at the running offset, which
+    // then advances by one step.
+    curb = blk_reg;
+    insert_blk(curb);
+    Ref reg = load(va_field_addr(ap, rec, ops->reg_field), T.ty_voidptr, 8, NULL);
+    Ref reg8 = reg;
+    reg8.ty = pointer_to(T.ty_char, 0);
+    Ref off64 = cast(off, off_ty, T.ty_long);
+    Ref addr_reg = TMP(tmp_id++, reg8.ty);
+    new_ins(IR_GEP, addr_reg, (Ref[]){reg8, off64}, 2);
+    Ref next_reg = TMP(tmp_id++, off_ty);
+    new_ins(IR_ADD, next_reg, (Ref[]){off, INT(ops->reg_step)}, 2);
+    store(next_reg, off_addr, off_ty->align, NULL);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = blk_join;
+    add_pred(curb, blk_join);
+
+    // Overflow area: read there and advance that cursor instead.
+    curb = blk_mem;
+    insert_blk(curb);
+    Ref over_addr = va_field_addr(ap, rec, ops->mem_field);
+    Ref over = load(over_addr, T.ty_voidptr, 8, NULL);
+    Ref addr_mem = over;
+    if (ops->mem_align > 8) {
+        // A type more aligned than the stack's slot granularity: raise the
+        // cursor to that alignment before reading, as clang does.
+        Ref bits = TMP(tmp_id++, T.ty_ulong);
+        new_ins(IR_PTRTOINT, bits, (Ref[]){over}, 1);
+        Ref mask = TMP(tmp_id++, T.ty_ulong);
+        new_ins(IR_AND, mask, (Ref[]){bits, LONG(-ops->mem_align)}, 2);
+        Ref up = TMP(tmp_id++, T.ty_voidptr);
+        new_ins(IR_INTTOPTR, up, (Ref[]){mask}, 1);
+        addr_mem = up;
+    }
+    Ref over8 = addr_mem;
+    over8.ty = pointer_to(T.ty_char, 0);
+    Ref next_mem = TMP(tmp_id++, over8.ty);
+    new_ins(IR_GEP, next_mem, (Ref[]){over8, INT(ops->mem_step)}, 2);
+    next_mem.ty = T.ty_voidptr;
+    store(next_mem, over_addr, 8, NULL);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = blk_join;
+    add_pred(curb, blk_join);
+
+    // Join: both candidates are plain addresses by now.
+    curb = blk_join;
+    insert_blk(curb);
+    Ref addr = TMP(tmp_id++, T.ty_voidptr);
+    Phi *phi = new_phi(addr);
+    add_phi_arg(phi, blk_reg, addr_reg);
+    add_phi_arg(phi, blk_mem, addr_mem);
+    insert_phi(curb, phi);
+
+    int la = want->align;
+    if (la > 8) la = 8;
+    return load(addr, want, la, NULL);
+}
+
 // Identify the builtin and dispatch. Emission lives in the callee so that
 // adding a builtin is a table row plus, at most, one emission routine.
 static Ref gen_builtin_call(Node *node, int kind) {
@@ -451,6 +598,8 @@ static Ref gen_expr(Node *node) {
         // expands them against the target's va_list layout, so no ABI
         // knowledge is needed here. The operand is the address of the
         // va_list object, which is also the pointer the intrinsic takes.
+        case ND_VA_ARG:
+            return gen_va_arg(node);
         case ND_VA_COPY: {
             // llvm.va_copy is a real intrinsic; the backend expands the
             // copy for the target's va_list layout.

@@ -37,6 +37,59 @@ static Type ty_float_ = TYPE(TY_FLOAT, 4, 4, false);
 static Type ty_double_ = TYPE(TY_DOUBLE, 8, 8, false);
 static Type ty_ldouble_ = TYPE(TY_LDOUBLE, 16, 16, false);
 
+// System V AMD64: stdarg.h declares
+//   { unsigned gp_offset; unsigned fp_offset; void *overflow_arg_area;
+//     void *reg_save_area; }
+// The offsets are byte positions into a 176-byte register save area where
+// the general-purpose registers occupy 0..47 and the SSE registers 48..175.
+// A class is exhausted once its next slot would run past the area, which
+// is an offset bound of 40 for a general-purpose argument and 160 for an
+// SSE one; the steps are 8 and 16 bytes.
+static VaArgOps va_arg_gp = {
+    .kind = VA_MEM_REGS,
+    .offset_ty = &ty_uint_,
+    .offset_field = 0,
+    .offset_bound = 40,
+    .reg_field = 3,
+    .mem_field = 2,
+    .reg_step = 8,
+    .mem_step = 8,
+};
+
+static VaArgOps va_arg_fp = {
+    .kind = VA_MEM_REGS,
+    .offset_ty = &ty_uint_,
+    .offset_field = 1,
+    .offset_bound = 160,
+    .reg_field = 3,
+    .mem_field = 2,
+    .reg_step = 16,
+    .mem_step = 16,
+};
+
+// A long double is 16-byte aligned while the overflow area advances 8 bytes
+// at a time, so its cursor is raised to that alignment before reading; the
+// register class is still the general-purpose one, which is where an
+// argument of this size never fits.
+static VaArgOps va_arg_mem16 = {
+    .kind = VA_MEM_REGS,
+    .offset_ty = &ty_uint_,
+    .offset_field = 0,
+    .offset_bound = 40,
+    .reg_field = 3,
+    .mem_field = 2,
+    .reg_step = 8,
+    .mem_step = 8,
+    .mem_align = 16,
+};
+
+// Which register class a requested type is passed in.
+static VaArgOps *amd64_va_arg(Type *want) {
+    if (is_flonum(want)) return &va_arg_fp;
+    if (want->align > 8) return &va_arg_mem16;
+    return &va_arg_gp;
+}
+
 #undef TYPE
 
 Target T_amd64 = {
@@ -72,6 +125,7 @@ Target T_amd64 = {
     .long_max = 9223372036854775807L,
     .ulong_max = 18446744073709551615UL,
     .llong_max = 9223372036854775807LL,
+    .va_arg_ops = amd64_va_arg,
     .predef =
         "#define _LP64 1\n"
         "#define __ATOMIC_ACQUIRE 2\n"

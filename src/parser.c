@@ -1734,6 +1734,34 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             *rest = skip(tok, TK_RPAREN);
             return new_num(is_const_expr(operand), start);
         }
+        case BUILTIN_VA_ARG: {
+            // __builtin_va_arg(ap, type): the second operand is a type
+            // name, not an expression.
+            if (!cur_fn || !cur_fn->ty->is_variadic)
+                error(tok, "‘__builtin_va_arg’ used in a function that is not variadic");
+            tok = skip(tok->next, TK_LPAREN);
+            // Same operand handling as the other variadic builtins: the
+            // address of the va_list object, which is what the expansion
+            // walks. gen_expr() of that address is a pointer to the
+            // structure even for an array va_list, whose decay is this
+            // very pointer.
+            Node *ap = va_list_addr(&tok, tok);
+            tok = skip(tok, TK_COMMA);
+            Type *ty = typename(&tok, tok);
+            *rest = skip(tok, TK_RPAREN);
+
+            if (ty->kind == TY_ARRAY || ty->kind == TY_FUNC || ty->kind == TY_VOID)
+                error(start, "invalid type in ‘__builtin_va_arg’");
+
+            // irgen expands va_arg with three blocks (register path,
+            // overflow path, join), and the block totals must agree.
+            cnt_blk(3);  // ND_VA_ARG: register / overflow / join
+
+            Node *node = new_node(ND_VA_ARG, start);
+            node->lhs = ap;
+            node->ty = ty;
+            return node;
+        }
         case BUILTIN_VA_COPY: {
             // __builtin_va_copy(dst, src). LLVM has a real intrinsic for
             // this, so the copy itself is left to the backend.

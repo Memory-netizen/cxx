@@ -1,5 +1,12 @@
 #include "cxx.h"
 
+// RISC-V: va_list is a single pointer that walks the argument area, where
+// every value occupies one 8-byte slot.
+static VaArgOps va_arg_linear = {
+    .kind = VA_MEM_LINEAR,
+    .mem_step = 8,
+};
+
 #define TYPE(a, b, c, d)  \
     {                     \
         .kind = a,        \
@@ -7,6 +14,12 @@
         .align = c,       \
         .is_unsigned = d, \
     }
+
+// RISC-V has one linear cursor, so the type does not change the strategy.
+static VaArgOps *rv64_va_arg(Type *want) {
+    (void)want;
+    return &va_arg_linear;
+}
 
 static Type ty_none_ = TYPE(TY_NONE, -1, 1, false);
 static Type ty_void_ = TYPE(TY_VOID, 1, 1, false);
@@ -74,6 +87,7 @@ Target T_rv64 = {
     .long_max = 9223372036854775807L,
     .ulong_max = 18446744073709551615UL,
     .llong_max = 9223372036854775807LL,
+    .va_arg_ops = rv64_va_arg,
     .predef =
         "#define _LP64 1\n"
         "#define __ATOMIC_ACQUIRE 2\n"

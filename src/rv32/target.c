@@ -1,5 +1,12 @@
 #include "cxx.h"
 
+// RISC-V ILP32: as rv64, but a slot is one 4-byte word; a 64-bit argument
+// still occupies one slot in the integer register pairs the ABI uses.
+static VaArgOps va_arg_linear = {
+    .kind = VA_MEM_LINEAR,
+    .mem_step = 4,
+};
+
 #define TYPE(a, b, c, d)  \
     {                     \
         .kind = a,        \
@@ -7,6 +14,12 @@
         .align = c,       \
         .is_unsigned = d, \
     }
+
+// RISC-V has one linear cursor, so the type does not change the strategy.
+static VaArgOps *rv32_va_arg(Type *want) {
+    (void)want;
+    return &va_arg_linear;
+}
 
 static Type ty_none_ = TYPE(TY_NONE, -1, 1, false);
 static Type ty_void_ = TYPE(TY_VOID, 1, 1, false);
@@ -74,6 +87,7 @@ Target T_rv32 = {
     .long_max = 2147483647L,
     .ulong_max = 4294967295UL,
     .llong_max = 9223372036854775807LL,
+    .va_arg_ops = rv32_va_arg,
     .predef =
         "#define _ILP32 1\n"
         "#define __ATOMIC_ACQUIRE 2\n"

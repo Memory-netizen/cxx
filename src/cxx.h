@@ -53,6 +53,42 @@ typedef struct EnumVal EnumVal;
 typedef struct Initializer Initializer;
 typedef struct Target Target;
 
+// How a target's __builtin_va_arg walks its va_list. The control flow --
+// test, two candidate addresses, join -- is the same everywhere and lives
+// in irgen; what differs per ABI is which field holds the cursor, how much
+// room is left, and how far the cursor moves, so that is what a target
+// describes here.
+typedef enum {
+    VA_MEM_REGS,    // separate register save and overflow areas, chosen by a
+                    // running offset (amd64, arm64)
+    VA_MEM_LINEAR,  // the va_list is a single pointer that walks the
+                    // argument area (rv64, rv32)
+} VaArgKind;
+
+typedef struct {
+    VaArgKind kind;
+
+    // VA_MEM_REGS: index and type of the running offset field within the
+    // va_list structure, the largest offset that still has room for one
+    // more argument of this class, the fields naming the area to read and
+    // the area to exhaust, and how far each cursor advances.
+    // The type is the target's own static Type object (its address is a
+    // compile-time constant, unlike the run-time Target field that points
+    // at it), so the tables can stay static.
+    int offset_field;
+    Type *offset_ty;
+    int offset_bound;
+    int reg_field;
+    int mem_field;
+    int reg_step;  // register save area: all classes
+    int mem_step;  // overflow area
+
+    // The alignment the overflow cursor is first raised to, for a type
+    // that needs more than the ABI's stack alignment. Zero when the
+    // type's alignment never exceeds it.
+    int mem_align;
+} VaArgOps;
+
 struct Target {
     char *name;
     char *triple;
@@ -87,6 +123,11 @@ struct Target {
     char *clang_mabi;      // -mabi driver flag matching llvm_abi (bare metal)
     char *clang_march;     // -march driver flag matching llvm_features
     char *predef;
+
+    // This target's va_arg policy (va_arg_ops) for a requested type; defined in its
+    // target.c. It is per-type because an ABI with separate general-purpose
+    // and SIMD argument registers decides between them on the type.
+    VaArgOps *(*va_arg_ops)(Type *want);
 };
 
 extern Target T;
