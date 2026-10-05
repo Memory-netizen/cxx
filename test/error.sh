@@ -311,3 +311,32 @@ int *f(void) { return atomic_fetch_or(&ap, 1); }' \
 check 'fetch_or on pointer'
 
 echo OK
+
+# Named loops (C2y N3355): the operand of break/continue names a label, so
+# it is a different lookup from a plain break. The positive cases live in
+# test/control.c; what follows are the constraint violations.
+echo 'int main(void){ foo: { } continue foo; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'continue statement not within a loop'
+check 'continue naming a label that is not on a loop'
+
+echo 'int main(void){ foo: { } break foo; }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'break statement not within loop or switch'
+check 'break naming a label that is not on a loop'
+
+echo 'int main(void){ for(;;){ break nope; } }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'does not refer to a named loop or .switch.'
+check 'break naming an undefined label'
+
+echo 'int main(void){ for(;;){ continue nope; } }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'does not refer to a named loop'
+check 'continue naming an undefined label'
+
+echo 'int main(void){ a: for(;;){ break a; } a: for(;;){ break a; } }' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'redefinition of label'
+check 'redefinition of a loop label'
+
+# A label lives in its own name space, so sharing a name with an object is
+# legal -- gcc accepts this too (clang only rejects it as a C2y feature).
+echo 'int main(void){ int x = 0; x: for(;;){ break x; } return x; }' \
+  | $compiler -S -o /dev/null -xc - > /dev/null 2>&1
+check 'a loop label may share a name with an object'

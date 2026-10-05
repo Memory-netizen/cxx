@@ -171,6 +171,64 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# -Wno-* grouping is plan item D1 (out of this round's scope): the driver
+# accepts every -W* and discards it (main.c), so a -Wno-<group> is accepted
+# but has no effect. Asserted as it behaves today; when D1 makes the switch
+# real, this entry must be replaced by one that checks the warning is gone.
+# TODO(D1): -Wno-deprecated-declarations must silence the diagnostic below.
+cat > "$tmp/wno.c" <<'EOF'
+__attribute__((deprecated)) void old_fn(void);
+int main(void) { old_fn(); return 0; }
+EOF
+warned=$("$compiler" -S -o /dev/null "$tmp/wno.c" 2>&1 | grep -c deprecated)
+quiet=$("$compiler" -Wno-deprecated-declarations -S -o /dev/null "$tmp/wno.c" 2>&1 | grep -c deprecated)
+if [ "$warned" -eq 1 ] && [ "$quiet" -eq 1 ]; then
+    echo "testing -Wno-* accepted but not yet effective (D1 pending) ... known gap"
+    n_gaps=$((n_gaps + 1))
+elif [ "$warned" -eq 1 ] && [ "$quiet" -eq 0 ]; then
+    echo "testing -Wno-* accepted but not yet effective (D1 pending) ... GAP CLOSED (update this entry)"
+    n_fail=$((n_fail + 1))
+else
+    echo "testing -Wno-* accepted but not yet effective (D1 pending) ... FAILED"
+    echo "    deprecated warnings without the flag: $warned, with it: $quiet"
+    n_fail=$((n_fail + 1))
+fi
+
+# Unknown -W* options are silently accepted, which is what D1 will fix
+# (gcc/clang diagnose them). Asserted as it behaves today, with the same
+# TODO: once D1 lands this must become "the driver rejects it".
+# TODO(D1): an unknown -W<group> must be diagnosed.
+if "$compiler" -Wno-bogus-option -S -o /dev/null "$tmp/wno.c" > /dev/null 2>&1; then
+    echo "testing unknown -W* silently accepted (D1 pending) ... known gap"
+    n_gaps=$((n_gaps + 1))
+else
+    echo "testing unknown -W* silently accepted (D1 pending) ... GAP CLOSED (update this entry)"
+    n_fail=$((n_fail + 1))
+fi
+
+# `$` in identifiers is a GNU extension: cxx accepts it in the default mode,
+# and D3 will make -pedantic reject it. Until then -pedantic is not even a
+# recognised option, so only the default-mode behaviour is asserted.
+# TODO(D3): `-pedantic` must reject `$` in an identifier.
+cat > "$tmp/dollar.c" <<'EOF'
+int main(void) { int a$b = 1; return a$b - 1; }
+EOF
+if "$compiler" -w -o "$tmp/dollar" "$tmp/dollar.c" > "$tmp/log" 2>&1 && "$tmp/dollar"; then
+    echo "testing \$ in an identifier accepted by default ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing \$ in an identifier accepted by default ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+if "$compiler" -pedantic -S -o /dev/null "$tmp/dollar.c" > /dev/null 2>&1; then
+    echo "testing -pedantic rejects \$ (D3 pending) ... GAP CLOSED (update this entry)"
+    n_fail=$((n_fail + 1))
+else
+    echo "testing -pedantic rejects \$ (D3 pending) ... known gap"
+    n_gaps=$((n_gaps + 1))
+fi
+
 # __extension__ is a no-op marker for pedantic diagnostics cxx does not
 # have yet; glibc's <stdlib.h>/<wchar.h> prefix declarations with it.
 ok "__extension__ before a declaration" <<'EOF'
@@ -330,6 +388,28 @@ if "$compiler" -w -c -o /dev/null "$tmp/emb.c" > "$tmp/log" 2>&1; then
     n_pass=$((n_pass + 1))
 else
     echo "testing #embed of a resource ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
+# #embed prefix/suffix join directly onto the bytes, and the bytes are
+# spelled in decimal, so a prefix only forms a usable constant when
+# something separates it from them -- `prefix(0x)` would need `0x` followed
+# by a decimal byte, which no compiler accepts (gcc, clang and cxx all
+# reject `0x 99` as C). The forms that must work are the ones whose prefix
+# ends in a separator or an operator.
+printf 'c' > "$tmp/pfx.bin"
+cat > "$tmp/pfx.c" <<'EOF'
+static const unsigned char d[] = {
+#embed "pfx.bin" prefix(0x63 + 0,) suffix()
+};
+int main(void) { return d[0] == 0x63 ? 0 : 1; }
+EOF
+if "$compiler" -w -o "$tmp/pfx" "$tmp/pfx.c" > "$tmp/log" 2>&1 && "$tmp/pfx"; then
+    echo "testing #embed prefix that ends in a separator ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing #embed prefix that ends in a separator ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
     n_fail=$((n_fail + 1))
 fi
 

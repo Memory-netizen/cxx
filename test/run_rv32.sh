@@ -13,12 +13,19 @@
 set -u
 cd "$(dirname "$0")/.."
 
-if command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then
+# Prefer the bare-metal toolchain: it ships the full rv32 multilib, so its
+# libgcc.a carries the soft-float routines this target needs (__adddf3,
+# __mulsf3, ...). The Linux cross toolchain resolves -mabi=ilp32 happily but
+# its libgcc.a is a single rv64 hard-float build with none of them, which
+# only shows up at link time.
+if command -v riscv64-unknown-elf-gcc >/dev/null 2>&1; then
+  TOOL=riscv64-unknown-elf-gcc
+elif command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then
   TOOL=riscv64-linux-gnu-gcc
 elif command -v gcc >/dev/null 2>&1 && [ "$(uname -m)" = "riscv64" ]; then
   TOOL=gcc
 else
-  echo "== rv32 bare-metal SKIPPED (no riscv64 cross gcc) =="
+  echo "== rv32 bare-metal SKIPPED (no riscv cross gcc) =="
   exit 0
 fi
 if ! command -v qemu-system-riscv32 >/dev/null 2>&1; then
@@ -26,8 +33,8 @@ if ! command -v qemu-system-riscv32 >/dev/null 2>&1; then
   exit 0
 fi
 
-march=rv32imafdc
-mabi=ilp32d
+march=rv32imac_zicsr
+mabi=ilp32
 
 work=$(mktemp -d /tmp/cxx-rv32.XXXXXX)
 trap 'rm -rf "$work"' EXIT
@@ -36,6 +43,13 @@ trap 'rm -rf "$work"' EXIT
 # freestanding headers (stdint.h, stdbool.h, stddef.h, stdarg.h).
 gccinc="$("$TOOL" -print-file-name=include)"
 common_flags="-std=c11 -O2 -ffreestanding -fno-stack-protector -fno-pie -fno-pic -mcmodel=medany -march=$march -mabi=$mabi -nostdlib -nostdinc -I. -Itest -I$gccinc"
+
+# The soft-float helpers must come from this toolchain's libgcc; say so
+# plainly when they are missing instead of failing later with a wall of
+# undefined references.
+libgcc="$("$TOOL" -march=$march -mabi=$mabi -print-libgcc-file-name 2>/dev/null)"
+echo "== rv32 bare-metal: $TOOL ($march/$mabi) =="
+echo "   libgcc: ${libgcc:-<none>}"
 
 echo "== building freestanding support =="
 for src in test/rv32_common.c test/rv32_tf3.c src/support/fp128.c src/support/int128.c; do
@@ -77,7 +91,8 @@ for t in test/*.c; do
   fi
   if ! $TOOL -march=$march -mabi=$mabi -nostdlib -no-pie -Wl,--build-id=none \
        -T test/rv32_link.ld "$work/rv32_common.o" "$work/rv32_tf3.o" \
-       "$work/fp128.o" "$work/int128.o" "$work/$b.o" -o "$work/$b.elf" \
+       "$work/fp128.o" "$work/int128.o" "$work/$b.o" \
+       "$($TOOL -march=$march -mabi=$mabi -print-libgcc-file-name)" -o "$work/$b.elf" \
        2>"$work/$b.lerr"; then
     echo "LINK-FAIL $b (see $work/$b.lerr)"
     failed=$((failed + 1))

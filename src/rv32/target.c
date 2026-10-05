@@ -552,10 +552,10 @@ Target T_rv32 = {
 };
 
 Target T_rv32b = {
-    .llvm_features = "\"+m,+a,+f,+d,+c\"",
-    .llvm_abi = "\"ilp32d\"",
-    .clang_mabi = "ilp32d",
-    .clang_march = "rv32imafdc",
+    .llvm_features = "\"+m,+a,+c\"",
+    .llvm_abi = "\"ilp32\"",
+    .clang_mabi = "ilp32",
+    .clang_march = "rv32imac_zicsr",
     .ldouble_is_fp80 = false,
     .name = "rv32b",
     .triple = "riscv32-none-elf",
@@ -984,6 +984,10 @@ Target T_rv32b = {
         "#define __riscv_cmodel_medlow 1\n"
         "#define __riscv_compressed 1\n"
         "#define __riscv_div 1\n"
+        // Soft float, matching llvm_features/llvm_abi above: this target is
+        // for hardware without an FPU. The bare-metal harness is built with
+        // -march=rv32imac -mabi=ilp32 to agree, and links libgcc.a for the
+        // software floating-point routines.
         "#define __riscv_float_abi_soft 1\n"
         "#define __riscv_i 2001000\n"
         "#define __riscv_m 2000000\n"

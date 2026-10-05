@@ -448,14 +448,19 @@ static Ref gen_va_arg(Node *node) {
         int align = want->align > step ? want->align : step;
         Ref aligned = cursor;
         if (align > step) {
-            // Types wider than a slot keep their natural alignment, which
-            // cxx models with a round-down mask.
+            // A type wider than a slot sits at its natural alignment, and
+            // the cursor is raised to it: (ptr + align - 1) & -align, the
+            // same round-up clang emits. Rounding *down* would land on the
+            // slot below, which no argument occupies -- a double after an
+            // odd number of slots then read as zero.
             Ref c8 = cursor;
             c8.ty = pointer_to(T.ty_char, 0);
             Ref bits = TMP(tmp_id++, T.ty_ulong);
             new_ins(IR_PTRTOINT, bits, (Ref[]){c8}, 1);
+            Ref bias = TMP(tmp_id++, T.ty_ulong);
+            new_ins(IR_ADD, bias, (Ref[]){bits, LONG(align - 1)}, 2);
             Ref mask = TMP(tmp_id++, T.ty_ulong);
-            new_ins(IR_AND, mask, (Ref[]){bits, LONG(-align)}, 2);
+            new_ins(IR_AND, mask, (Ref[]){bias, LONG(-align)}, 2);
             Ref back = TMP(tmp_id++, c8.ty);
             new_ins(IR_INTTOPTR, back, (Ref[]){mask}, 1);
             aligned = back;
@@ -553,11 +558,16 @@ static Ref gen_va_arg(Node *node) {
     Ref addr_mem = over;
     if (ops->mem_align > 8) {
         // A type more aligned than the stack's slot granularity: raise the
-        // cursor to that alignment before reading, as clang does.
+        // cursor to that alignment before reading, as clang does. The
+        // rounding goes *up* -- (ptr + align - 1) & -align -- because the
+        // argument sits at the next such boundary, not the previous one;
+        // rounding down lands on padding that no argument occupies.
         Ref bits = TMP(tmp_id++, T.ty_ulong);
         new_ins(IR_PTRTOINT, bits, (Ref[]){over}, 1);
+        Ref bias = TMP(tmp_id++, T.ty_ulong);
+        new_ins(IR_ADD, bias, (Ref[]){bits, LONG(ops->mem_align - 1)}, 2);
         Ref mask = TMP(tmp_id++, T.ty_ulong);
-        new_ins(IR_AND, mask, (Ref[]){bits, LONG(-ops->mem_align)}, 2);
+        new_ins(IR_AND, mask, (Ref[]){bias, LONG(-ops->mem_align)}, 2);
         Ref up = TMP(tmp_id++, T.ty_voidptr);
         new_ins(IR_INTTOPTR, up, (Ref[]){mask}, 1);
         addr_mem = up;
