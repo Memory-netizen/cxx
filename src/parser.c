@@ -5904,6 +5904,10 @@ Module *parse(Token *tok) {
     // check their operand against this type by ordinary compatibility.
     va_list_ty = T.va_list_type();
     publish_records(va_list_ty);
+    // The records a variadic call may need to spell an aggregate argument
+    // with. Their set is finite and fixed, so they are built here, next to
+    // va_list, where insert_ty still feeds the list the module dumps.
+    if (T.classify_publish) T.classify_publish();
     // The name has no source spelling, so the location carried by the entry
     // is used for diagnostics that mention it.
     push_namespace(file_scope, intern("__builtin_va_list", 17), SYM_TYNAME, va_list_ty, tok);

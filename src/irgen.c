@@ -6,7 +6,16 @@ static Blk *curb;
 static Blk dummy;
 static Blk *tail;
 static Blk *unreach = &(Blk){};
+static bool abi_lowering(void);
+static bool abi_sret_result(Type *ty);
 static int tmp_id;
+// Block labels live in their own numbering space: the output prefixes them
+// (%blk / %tmp), so a label and a value can never collide.
+static int blk_label;
+// The number the result slot was actually given: every reference uses it
+// rather than recomputing nparam + 1, which stopped agreeing with the
+// allocation once the ABI moved the slots around.
+static uint32_t ret_slot;
 static Blk *brk_blk;
 static Blk *cont_blk;
 static int atomic_order;  // Memory order of the next atomic load/store
@@ -64,7 +73,7 @@ static Blk *new_blk(void) {
 }
 
 static void insert_blk(Blk *b) {
-    b->blk_id = tmp_id++;
+    b->blk_id = blk_label++;
     tail = tail->next = b;
 }
 
@@ -1148,16 +1157,35 @@ static Ref gen_expr(Node *node) {
             // that temp ids, and hence the IR's numbering, stay in the
             // order the instructions are emitted.
             bool is_record = node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION;
+            // The callee's result may be replaced by the ABI: a memory-class
+            // aggregate is written through a pointer the caller supplies, a
+            // register-class one comes back flattened.
+            bool sret = is_record && abi_sret_result(node->ty);
+            Type *ret_abi = node->ty;
+            if (is_record && !sret && abi_lowering()) {
+                AggClass c;
+                T.classify_aggregate(node->ty, &c);
+                if (c.npiece == 1)
+                    ret_abi = c.piece[0].ty;
+                else if (T.pieces_type) {
+                    Type *rec = T.pieces_type(node->ty);
+                    if (rec) ret_abi = rec;
+                }
+            }
             Ref slot = R;
             if (is_record) {
                 slot = TMP(tmp_id++, pointer_to(node->ty, 0));
                 new_ins(IR_ALLOCA, slot, (Ref[]){INT(node->ty->align)}, 1);
             }
 
-            Ref *call_ops = emalloc((nargs + 1) * sizeof(Ref));
+            // One extra operand for the hidden pointer when there is one, and
+            // room for a flattened aggregate to become several.
+            Ref *call_ops = emalloc((nargs * MAX_AGG_PIECES + 2) * sizeof(Ref));
             call_ops[0] = gen_expr(node->func);
 
             int idx = 1;
+            int byval_slot = 0;
+            if (sret) call_ops[idx++] = slot;
             for (Node *arg = node->args; arg; arg = arg->next) {
                 Ref a = gen_expr(arg);
                 // A record argument is passed by value. Whether the
@@ -1168,7 +1196,50 @@ static Ref gen_expr(Node *node) {
                 // load() cannot be used to read one: for an aggregate it
                 // hands the address back, that being how a record value is
                 // represented everywhere else.
+                if (abi_lowering() && (arg->ty->kind == TY_STRUCT || arg->ty->kind == TY_UNION)) {
+                    // An aggregate argument is classified like any other: the
+                    // ABI decides whether it travels in memory or in the
+                    // registers, and a callee reading it with va_arg has to
+                    // land on the same bytes. Flattening it here is what makes
+                    // the two agree.
+                    AggClass c;
+                    T.classify_aggregate(arg->ty, &c);
+                    Ref addr = a;
+                    if (!(addr.ty && addr.ty->kind == TY_PTR)) {
+                        // A record value is an address, but one that came
+                        // back from a load is not, so give it a home.
+                        Ref home = TMP(tmp_id++, pointer_to(arg->ty, 0));
+                        new_ins(IR_ALLOCA, home, (Ref[]){INT(arg->ty->align)}, 1);
+                        Ref hv = home;
+                        hv.ty = pointer_to(arg->ty, 0);
+                        store(a, hv, arg->ty->align, NULL);
+                        addr = hv;
+                    }
+                    if (c.npiece == 0) {
+                        // Too big for the registers: a pointer to the copy,
+                        // which LLVM spells byval in the signature. Which
+                        // operand that is has to be recorded: a plain pointer
+                        // to a record looks identical at print time.
+                        byval_slot = idx;
+                        call_ops[idx++] = addr;
+                    } else {
+                        for (int k = 0; k < c.npiece; k++) {
+                            Ref from = addr;
+                            from.ty = pointer_to(T.ty_char, 0);
+                            Ref gep = TMP(tmp_id++, pointer_to(c.piece[k].ty, 0));
+                            new_ins(IR_GEP, gep, (Ref[]){from, INT(c.piece[k].off)}, 2);
+                            Ref piece = TMP(tmp_id++, c.piece[k].ty);
+                            new_ins(IR_LORD, piece, (Ref[]){gep, INT(c.piece[k].ty->align)}, 2);
+                            call_ops[idx++] = piece;
+                        }
+                    }
+                    continue;
+                }
                 if (arg->ty->kind == TY_STRUCT || arg->ty->kind == TY_UNION) {
+                    // No classifier for this target: pass the record as it is.
+                    // A record value is normally represented by its address,
+                    // but the callee's parameter is the record itself, so an
+                    // address operand has to be turned back into a value.
                     if (a.ty && a.ty->kind == TY_PTR) {
                         Ref val = TMP(tmp_id++, arg->ty);
                         new_ins(IR_LORD, val, (Ref[]){a, INT(arg->ty->align)}, 2);
@@ -1179,7 +1250,9 @@ static Ref gen_expr(Node *node) {
             }
 
             if (node->ty->kind == TY_VOID) {
-                new_ins(IR_CALL, R, call_ops, nargs + 1);
+                Ir *ci = new_ins(IR_CALL, R, call_ops, idx);
+                ci->is_sret = sret;
+                ci->byval_at = byval_slot;
                 return R;
             }
 
@@ -1187,14 +1260,34 @@ static Ref gen_expr(Node *node) {
             // and hand out its address, so an assignment copies from it and
             // a member access reads through it.
             if (is_record) {
-                Ref val = TMP(tmp_id++, node->ty);
-                new_ins(IR_CALL, val, call_ops, nargs + 1);
-                store(val, slot, node->ty->align, NULL);
+                if (sret) {
+                    // The callee wrote the result through the pointer, so
+                    // the slot already holds it and nothing comes back.
+                    Ir *ci = new_ins(IR_CALL, R, call_ops, idx);
+                    ci->is_sret = sret;
+                    ci->byval_at = byval_slot;
+                    return slot;
+                }
+                // Register class: receive the flattened value and store it
+                // back into the slot, so the rest of the compiler keeps
+                // seeing a record at an address.
+                Ref val = TMP(tmp_id++, ret_abi);
+                Ir *ci = new_ins(IR_CALL, val, call_ops, idx);
+                ci->is_sret = sret;
+                ci->byval_at = byval_slot;
+                Ref sv = slot;
+                sv.ty = pointer_to(ret_abi, 0);
+                store(val, sv, ret_abi->align, NULL);
                 return slot;
             }
 
             dst = TMP(tmp_id++, node->ty);
-            new_ins(IR_CALL, dst, call_ops, nargs + 1);
+            if (getenv("CXX_GEN_DEBUG"))
+                fprintf(stderr, "[GEN] normal call: sret=%d node->ty->kind=%d is_record=%d\n", sret, node->ty->kind,
+                        is_record);
+            Ir *ci = new_ins(IR_CALL, dst, call_ops, idx);
+            ci->is_sret = sret;
+            ci->byval_at = byval_slot;
             return dst;
         }
         case ND_CAS: {
@@ -1814,11 +1907,125 @@ static void gen_continue(Node *n) {
     curb = unreach;
 }
 
+// Whether `ty` is returned through a hidden pointer (the ABI memory class).
+static bool abi_lowering(void) { return T.classify_aggregate != NULL; }
+
+static bool abi_sret_result(Type *ty) {
+    if (!abi_lowering()) return false;
+    if (ty->kind != TY_STRUCT && ty->kind != TY_UNION) return false;
+    AggClass c;
+    T.classify_aggregate(ty, &c);
+    return c.npiece == 0;
+}
+
+// The ABI's flattened view of an aggregate: one value per register piece,
+// built in a fresh slot. `agg` is the aggregate -- an address, that being how
+// a record value is represented here -- and `pieces` is the record whose
+// members are the piece types at the piece offsets.
+static Ref coerce_aggregate(Ref agg, Type *pieces) {
+    // Reading bytes needs an address; a value that came back from a load is
+    // not one, so spill it first in that case.
+    Type *agg_ty = agg.ty;
+    if (!(agg_ty && agg_ty->kind == TY_PTR)) {
+        Ref home = TMP(tmp_id++, pointer_to(agg_ty, 0));
+        new_ins(IR_ALLOCA, home, (Ref[]){INT(agg_ty->align)}, 1);
+        Ref hv = home;
+        hv.ty = pointer_to(agg_ty, 0);
+        store(agg, hv, agg_ty->align, NULL);
+        agg = hv;
+    }
+    Ref at = TMP(tmp_id++, pointer_to(pieces, 0));
+    new_ins(IR_ALLOCA, at, (Ref[]){INT(pieces->align)}, 1);
+    for (Member *m = pieces->members; m; m = m->next) {
+        Ref from = agg;
+        from.ty = pointer_to(T.ty_char, 0);
+        Ref fgep = TMP(tmp_id++, pointer_to(m->ty, 0));
+        new_ins(IR_GEP, fgep, (Ref[]){from, INT(m->offset)}, 2);
+        Ref piece = TMP(tmp_id++, m->ty);
+        new_ins(IR_LORD, piece, (Ref[]){fgep, INT(m->align)}, 2);
+
+        Ref to = at;
+        to.ty = pointer_to(T.ty_char, 0);
+        Ref tgep = TMP(tmp_id++, pointer_to(m->ty, 0));
+        new_ins(IR_GEP, tgep, (Ref[]){to, INT(m->offset)}, 2);
+        store(piece, tgep, m->align, NULL);
+    }
+    Ref val = TMP(tmp_id++, pieces);
+    new_ins(IR_LORD, val, (Ref[]){at, INT(pieces->align)}, 2);
+    return val;
+}
+
+// The aggregate converted to the single value the signature says it is:
+// the bare piece for a one-piece class, the assembled record for a pair.
+static Ref abi_piece_value(Ref agg, Type *agg_ty, Type *abi_ty, AggClass *c) {
+    if (c->npiece == 1) {
+        Ref from = agg;
+        if (!(from.ty && from.ty->kind == TY_PTR)) {
+            Ref home = TMP(tmp_id++, pointer_to(agg_ty, 0));
+            new_ins(IR_ALLOCA, home, (Ref[]){INT(agg_ty->align)}, 1);
+            Ref hv = home;
+            hv.ty = pointer_to(agg_ty, 0);
+            store(agg, hv, agg_ty->align, NULL);
+            from = hv;
+        }
+        from.ty = pointer_to(T.ty_char, 0);
+        Ref gep = TMP(tmp_id++, pointer_to(c->piece[0].ty, 0));
+        new_ins(IR_GEP, gep, (Ref[]){from, INT(c->piece[0].off)}, 2);
+        Ref v = TMP(tmp_id++, c->piece[0].ty);
+        new_ins(IR_LORD, v, (Ref[]){gep, INT(c->piece[0].ty->align)}, 2);
+        return v;
+    }
+    return coerce_aggregate(agg, abi_ty);
+}
+
 static void gen_ret(Node *n) {
     Ref result = gen_expr(n->lhs);
     if (!refeq(result, R)) {
         Type *ty = curf->ty;
-        store(result, SLOT(ty->nparam + 1, pointer_to(ty->ret, 0)), ty->ret->align, NULL);
+        Type *rt = ty->ret;
+        if (abi_sret_result(rt)) {
+            // The caller's pointer to the result is the hidden leading
+            // parameter; copy the value there, the function returns nothing.
+            Ref dst = TMP(0, pointer_to(pointer_to(rt, 0), 0));
+            // memcpy needs the object, and the operand may be the loaded
+            // value rather than its address, so take the address of the
+            // returned expression.
+            Ref src = result;
+            if (!(src.ty && src.ty->kind == TY_PTR)) {
+                // The operand may be the loaded value rather than the object
+                // itself, so give it a home first.
+                Ref home = TMP(tmp_id++, pointer_to(rt, 0));
+                new_ins(IR_ALLOCA, home, (Ref[]){INT(rt->align)}, 1);
+                Ref hv = home;
+                hv.ty = pointer_to(rt, 0);
+                store(result, hv, rt->align, NULL);
+                src = hv;
+            }
+            src.ty = pointer_to(T.ty_char, 0);
+            new_ins(IR_MEMCPY, R, (Ref[]){dst, src, INT(rt->size)}, 3);
+            curb->jmp.type = IR_JMP;
+            curb->succ1 = curf->end;
+            add_pred(curb, curb->succ1);
+            curb = unreach;
+            return;
+        }
+        if (abi_lowering() && (rt->kind == TY_STRUCT || rt->kind == TY_UNION)) {
+            AggClass c;
+            T.classify_aggregate(rt, &c);
+            Type *rec = c.npiece == 1 ? c.piece[0].ty : (T.pieces_type ? T.pieces_type(rt) : NULL);
+            if (rec) {
+                // Register class: the caller receives the flattened pieces,
+                // so that is what the result slot holds.
+                Ref val = abi_piece_value(result, rt, rec, &c);
+                store(val, SLOT(ret_slot, pointer_to(rec, 0)), rec->align, NULL);
+                curb->jmp.type = IR_JMP;
+                curb->succ1 = curf->end;
+                add_pred(curb, curb->succ1);
+                curb = unreach;
+                return;
+            }
+        }
+        store(result, SLOT(ret_slot, pointer_to(rt, 0)), rt->align, NULL);
     }
 
     curb->jmp.type = IR_JMP;
@@ -1883,7 +2090,32 @@ Module *irgen(Module *md) {
         if (!fn->is_defined) continue;
 
         curf = fn;
-        uint32_t nparam = tmp_id = fn->ty->nparam;
+        // A result returned through a hidden pointer adds one to the
+        // parameter count as far as the IR numbering is concerned: the
+        // pointer takes the slot just above the declared parameters. That
+        bool has_sret = abi_sret_result(fn->ty->ret);
+        // The parameters as the ABI leaves them: an aggregate may arrive
+        // flattened, occupying one number per register piece, so this is not
+        // the C parameter count. Every later number derives from it.
+        uint32_t nparam_abi = 0;
+        for (Type *pt = fn->ty->params; pt; pt = pt->next)
+            nparam_abi +=
+                (abi_lowering() && T.abi_param_slots && pt->kind != TY_VOID) ? (uint32_t)T.abi_param_slots(pt) : 1;
+        // The entry block takes the next number, and the printer will not
+        // accept a label below 2, so the counting starts no lower than 1.
+        // The printer will not accept a label below 2, so counting starts at
+        // 1 and the entry block, which is numbered first, takes 2.
+        // Where the numbering starts: the parameters keep 0..nparam-1, and
+        // the first block is numbered next -- 2 or more, which is what the
+        // printer requires of a label.
+        // Values start above the parameters; the entry block, numbered in its own
+        // space, takes 2.
+        // Values start after the parameters. The entry block is numbered in
+        // its own space, so it costs no value number.
+        tmp_id = nparam_abi + (has_sret ? 1 : 0) + 1;
+        if (tmp_id < 3) tmp_id = 3;
+        // A label below 2 is not accepted by the printer.
+        blk_label = 2;
         tail = &dummy;
         // The parser counted every block (labels at parse time, the
         // rest per construct); allocate the array once and fill it in
@@ -1904,13 +2136,39 @@ Module *irgen(Module *md) {
         }
         brk_blk = cont_blk = NULL;
 
+        Type *ty = fn->ty->ret;
+        bool is_valid = ty->kind != TY_VOID;
+        // The ABI may replace the result type: a memory-class aggregate is
+        // written through the hidden pointer and the function returns
+        // nothing; a register-class one comes back as its pieces.
+        bool ret_sret = is_valid && abi_sret_result(ty);
+        curf->abi_sret = ret_sret;
+        Type *ret_abi = ty;
+        if (is_valid && !ret_sret && abi_lowering() && (ty->kind == TY_STRUCT || ty->kind == TY_UNION)) {
+            AggClass c;
+            T.classify_aggregate(ty, &c);
+            // A single piece is handed back as the bare integer, which is
+            // what the signature says; only a pair needs a record.
+            if (c.npiece == 1)
+                ret_abi = c.piece[0].ty;
+            else if (T.pieces_type) {
+                Type *rec = T.pieces_type(ty);
+                if (rec) ret_abi = rec;
+            }
+        }
+        // One numbering space, laid out once here: the parameters, then a
+        // number held for the hidden pointer, then the entry block's label,
+        // then the result slot, then the locals. Labels and values share the
+        // space, so every value sorts above the label of its own block.
+        if (has_sret) tmp_id++;
         curb = fn->start;
         insert_blk(curb);
 
-        Type *ty = fn->ty->ret;
-        bool is_valid = ty->kind != TY_VOID;
         // Entry
-        if (is_valid) new_ins(IR_ALLOCA, TMP(tmp_id++, pointer_to(ty, 0)), (Ref[]){INT(ty->align)}, 1);
+        if (is_valid) {
+            ret_slot = tmp_id++;
+            new_ins(IR_ALLOCA, TMP(ret_slot, pointer_to(ret_abi, 0)), (Ref[]){INT(ret_abi->align)}, 1);
+        }
 
         for (Sym *var = fn->locals; var; var = var->next) {
             if (var->ty->kind == TY_VLA) continue;
@@ -1922,22 +2180,61 @@ Module *irgen(Module *md) {
         //  even though the behavior is undefined for the other functions.
         uint32_t main_id = 0;
         if (main_id == 0) main_id = intern("main", 4);
-        if (curf->id == main_id) store(INT(0), TMP(nparam + 1, pointer_to(ty, 0)), ty->align, NULL);
+        if (curf->id == main_id && !ret_sret)
+            store(INT(0), TMP(ret_slot, pointer_to(ret_abi, 0)), ret_abi->align, NULL);
 
         Sym *var = fn->locals;
-        for (uint32_t i = 0; i < nparam; ++i, var = var->next)
-            store(TMP(i, var->ty), TMP(var->vreg, pointer_to(var->ty, 0)), var->align, NULL);
+        // The hidden pointer takes number 0, so the declared parameters start
+        // at 1 in that case; either way they run on from there, and an
+        // aggregate among them consumes as many numbers as it has pieces.
+        // With a hidden pointer the parameters begin at 1, the pointer having
+        // taken 0.
+        uint32_t pn = has_sret ? 1 : 0;
+        for (uint32_t i = 0; i < fn->ty->nparam; ++i, var = var->next) {
+            Type *pt = var->ty;
+            Ref home = TMP(var->vreg, pointer_to(pt, 0));
+            if (abi_lowering() && (pt->kind == TY_STRUCT || pt->kind == TY_UNION)) {
+                AggClass c;
+                T.classify_aggregate(pt, &c);
+                if (c.npiece == 0) {
+                    // Too big for the registers: the parameter is a pointer to
+                    // a copy, so the body copies it into the slot.
+                    Ref src = TMP(pn, pointer_to(pt, 0));
+                    new_ins(IR_MEMCPY, R, (Ref[]){home, src, INT(pt->size)}, 3);
+                    pn++;
+                } else {
+                    // Otherwise it arrives flattened, one parameter per piece:
+                    // put the pieces back together at their offsets.
+                    for (int k = 0; k < c.npiece; k++) {
+                        // The store's type comes from the destination's base,
+                        // so the source has to carry that type, not the
+                        // piece's own.
+                        Type *gt = c.piece[k].ty;
+                        Ref d = home;
+                        d.ty = pointer_to(T.ty_char, 0);
+                        Ref gep = TMP(tmp_id++, pointer_to(gt, 0));
+                        new_ins(IR_GEP, gep, (Ref[]){d, INT(c.piece[k].off)}, 2);
+                        Ref v = TMP(pn + k, gt);
+                        store(v, gep, gt->align, NULL);
+                    }
+                    pn += c.npiece;
+                }
+                continue;
+            }
+            store(TMP(pn, pt), home, var->align, NULL);
+            pn++;
+        }
 
         // Body
         gen_stmt(fn->body);
 
-        // End
         curb->jmp.type = IR_JMP;
         curb = curb->succ1 = fn->end;
         insert_blk(curb);
 
         Ref ret_val = R;
-        if (is_valid) ret_val = load(SLOT(nparam + 1, pointer_to(ty, 0)), ty, ty->align, NULL);
+        if (is_valid && !ret_sret)
+            ret_val = load(SLOT(ret_slot, pointer_to(ret_abi, 0)), ret_abi, ret_abi->align, NULL);
         curb->jmp.type = IR_RET;
         curb->jmp.arg = ret_val;
 

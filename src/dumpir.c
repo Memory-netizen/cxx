@@ -144,6 +144,13 @@ static void print_sym_name(uint32_t id) {
     print_ident(id);
 }
 
+static bool is_agg(Type *ty);
+
+// The ABI lowering is per target: it is enabled only where the target
+// supplies a classifier, so a target that has none keeps the plain
+// signature it had.
+static bool abi_lowering(void) { return T.classify_aggregate != NULL; }
+
 static void print_type(Type *ty) {
     if (!ty) {
         fprintf(out_file, "void");
@@ -209,7 +216,7 @@ static void print_label(Con *c, char *sym, char *dot) {
     if (c->bits.i) fprintf(out_file, "getelementptr (i8, ptr ");
     fprintf(out_file, "blockaddress(@");
     print_ident(fn_id);
-    fprintf(out_file, ", %%%d)", get_blkid(fn_id, lbl_id));
+    fprintf(out_file, ", %%blk%d)", get_blkid(fn_id, lbl_id));
     if (c->bits.i) fprintf(out_file, ", i64 %" PRIi64 ")", c->bits.i);
 }
 
@@ -315,30 +322,42 @@ static void print_operand(Ref r) {
     } else if (r.type == RLabel) {
         fprintf(out_file, "blockaddress(@");
         print_sym_name(dump_curf->id);
-        fprintf(out_file, ", %%%d)", dump_curf->blks[r.val].blk_id);
+        fprintf(out_file, ", %%blk%d)", dump_curf->blks[r.val].blk_id);
     } else {
-        fprintf(out_file, "%%%d", r.val);
+        fprintf(out_file, "%%tmp%d", r.val);
     }
 }
 
+// A block with no instructions and no successors has no terminator to print,
+// and LLVM rejects that. It is reachable only in the sense that branches name
+// it, so it never runs: an explicit unreachable says so.
+// Whether the block has no terminator to print: either nothing at all, or
+// instructions that the generator left without a branch. LLVM requires every
+// block to end in a terminator, so these get an explicit unreachable.
+// static bool blk_has_no_terminator(Blk *b) {
+//     if (b->succ1 || b->succ || b->narg) return false;
+//     return b->jmp.type == IR_NOP || b->jmp.type == IR_JMP;
+// }
+
 void dump_blk(Blk *b) {
-    int indent = fprintf(out_file, "%d:", b->blk_id);
+    // A label definition is `blkN:` with no %; % marks a reference.
+    int indent = fprintf(out_file, "blk%d:", b->blk_id);
     if (b->num_pred) {
         fprintf(out_file, "%*.s; preds = ", 48 - indent, "");
         for (uint32_t i = 0; i < b->num_pred; i++) {
-            fprintf(out_file, "%%%d", b->pred[i]->blk_id);
+            fprintf(out_file, "%%blk%d", b->pred[i]->blk_id);
             if (i < b->num_pred - 1) fprintf(out_file, ", ");
         }
     }
     fprintf(out_file, "\n");
     Phi *p = b->phi;
     while (p) {
-        fprintf(out_file, "  %%%d = phi ", p->result.val);
+        fprintf(out_file, "  %%tmp%d = phi ", p->result.val);
         print_type(p->result.ty);
         for (int i = p->num_arg - 1; i >= 0; i--) {
             fprintf(out_file, " [ ");
             print_operand(p->arg[i]);
-            fprintf(out_file, ", %%%d ]", p->blk[i]->blk_id);
+            fprintf(out_file, ", %%blk%d ]", p->blk[i]->blk_id);
             if (i) fprintf(out_file, ", ");
         }
         fprintf(out_file, "\n");
@@ -348,7 +367,7 @@ void dump_blk(Blk *b) {
     Ir *ir = b->head;
     while (ir) {
         fprintf(out_file, "  ");
-        if (!refeq(ir->dst, R)) fprintf(out_file, "%%%d = ", ir->dst.val);
+        if (!refeq(ir->dst, R)) fprintf(out_file, "%%tmp%d = ", ir->dst.val);
 
         switch (ir->op) {
             // memmory
@@ -535,9 +554,38 @@ void dump_blk(Blk *b) {
                 }
                 print_operand(ir->args[0]);
                 fprintf(out_file, "(");
+                // A pointer at the head of the list carries the result of a
+                // memory-class aggregate; a pointer to one further along is a
+                // copy the callee may not write back. Both are spelled out,
+                // exactly as the definition does.
+                // The first argument is the result pointer when the callee returns
+                // an aggregate in memory and the function itself returns nothing.
+                // The generator marks whether this call passes a hidden result
+                // pointer; only then is the leading pointer an sret.
+                // Recorded when the call was built: printing happens after all
+                // generation, so a flag set during generation would have been
+                // overwritten many times over by then.
+                bool sret = ir->is_sret && ir->narg > 1 && ir->args[1].ty->kind == TY_PTR;
+                if (getenv("CXX_CALL_DEBUG"))
+                    fprintf(stderr, "[CALL] is_sret=%d narg=%u -> sret=%d\n", ir->is_sret, ir->narg, sret);
                 for (uint32_t i = 1; i < ir->narg; i++) {
-                    print_type(ir->args[i].ty);
-                    fprintf(out_file, " ");
+                    Type *at = ir->args[i].ty;
+                    if (sret && i == 1) {
+                        fprintf(out_file, "ptr noalias sret(");
+                        print_type(at->base);
+                        fprintf(out_file, ") align %d ", at->base->align);
+                    } else if (ir->byval_at == i) {
+                        // Only the operand the generator marked is a copy: a
+                        // pointer to a record that the program passed itself
+                        // is an ordinary argument, and reading its pointee as
+                        // a copy would be wrong.
+                        fprintf(out_file, "ptr byval(");
+                        print_type(at->base);
+                        fprintf(out_file, ") align %d ", at->base->align);
+                    } else {
+                        print_type(at);
+                        fprintf(out_file, " ");
+                    }
                     print_operand(ir->args[i]);
                     if (i < ir->narg - 1) fprintf(out_file, ", ");
                 }
@@ -638,26 +686,26 @@ void dump_blk(Blk *b) {
             fprintf(out_file, "\n");
             break;
         case IR_JMP:
-            fprintf(out_file, "br label %%%d\n", b->succ1->blk_id);
+            fprintf(out_file, "br label %%blk%d\n", b->succ1->blk_id);
             break;
         case IR_JNZ:
             fprintf(out_file, "br i1 ");
             print_operand(b->jmp.arg);
-            fprintf(out_file, ", label %%%d, label %%%d\n", b->succ1->blk_id, b->succ2->blk_id);
+            fprintf(out_file, ", label %%blk%d, label %%blk%d\n", b->succ1->blk_id, b->succ2->blk_id);
             break;
         case IR_SWITCH:
             fprintf(out_file, "switch ");
             print_type(b->jmp.arg.ty);
             fprintf(out_file, " ");
             print_operand(b->jmp.arg);
-            fprintf(out_file, ", label %%%d", b->succ1->blk_id);
+            fprintf(out_file, ", label %%blk%d", b->succ1->blk_id);
             if (b->narg) fprintf(out_file, " [\n");
             for (uint32_t i = 0; i < b->narg; i++) {
                 fprintf(out_file, "    ");
                 print_type(b->jmp.args[i].ty);
                 fprintf(out_file, " ");
                 print_operand(b->jmp.args[i]);
-                fprintf(out_file, ", label %%%d\n", b->succ[i]->blk_id);
+                fprintf(out_file, ", label %%blk%d\n", b->succ[i]->blk_id);
             }
             if (b->narg) fprintf(out_file, "  ]\n");
             break;
@@ -669,7 +717,7 @@ void dump_blk(Blk *b) {
             fprintf(out_file, ", [");
             for (uint32_t i = 0; i < b->narg; i++) {
                 if (i) fprintf(out_file, ", ");
-                fprintf(out_file, "label %%%d", b->succ[i]->blk_id);
+                fprintf(out_file, "label %%blk%d", b->succ[i]->blk_id);
             }
             fprintf(out_file, "]\n");
             break;
@@ -998,6 +1046,64 @@ void dump_data(Sym *data) {
     fprintf(out_file, ", align %d\n", data->align);
 }
 
+static bool is_agg(Type *ty) { return ty && (ty->kind == TY_STRUCT || ty->kind == TY_UNION); }
+
+// A register-class aggregate result comes back as its pieces; a memory-class
+// one is written through a pointer the caller supplies, and the function
+// itself returns nothing.
+static void print_ret_type(Type *ty) {
+    if (abi_lowering() && is_agg(ty)) {
+        AggClass c;
+        T.classify_aggregate(ty, &c);
+        if (c.npiece == 0) {
+            fprintf(out_file, "void");
+            return;
+        }
+        // One piece has no record at all: the function hands the bare value
+        // back. A pair needs a record, and it has to be the very type irgen
+        // builds the value with, or the signature and the body would spell
+        // the same thing two different ways.
+        if (c.npiece == 1) {
+            print_type(c.piece[0].ty);
+            return;
+        }
+        if (T.pieces_type) {
+            Type *rec = T.pieces_type(ty);
+            if (rec) {
+                print_type(rec);
+                return;
+            }
+        }
+    }
+    print_type(ty);
+}
+
+// How many IR parameters one C parameter becomes: a memory-class aggregate
+// travels as a single byval pointer, a register-class one is flattened into
+// one parameter per piece, everything else stays as it is.
+static int abi_param_count(Type *ty) {
+    if (!abi_lowering() || !is_agg(ty)) return 1;
+    AggClass c;
+    T.classify_aggregate(ty, &c);
+    return c.npiece == 0 ? 1 : c.npiece;
+}
+
+static void print_param_type(Type *ty, int i) {
+    if (abi_lowering() && is_agg(ty)) {
+        AggClass c;
+        T.classify_aggregate(ty, &c);
+        if (c.npiece == 0) {
+            fprintf(out_file, "ptr byval(");
+            print_type(ty);
+            fprintf(out_file, ") align %d", ty->align);
+            return;
+        }
+        print_type(c.piece[i].ty);
+        return;
+    }
+    print_type(ty);
+}
+
 void dump_fn(Sym *fn) {
     if (already_emitted(fn)) return;
     dump_curf = fn;
@@ -1011,21 +1117,31 @@ void dump_fn(Sym *fn) {
             fprintf(out_file, "dso_local ");
     }
 
-    print_type(fn->ty->ret);
+    print_ret_type(fn->ty->ret);
     fprintf(out_file, " @");
     print_sym_name(fn->id);
     fprintf(out_file, "(");
 
-    Type *param = fn->ty->params;
-    for (uint32_t i = 0; param; i++) {
-        print_type(param);
-        if (fn->is_defined) fprintf(out_file, " %%%d", i);
-        param = param->next;
-        if (param) fprintf(out_file, ", ");
+    uint32_t pi = 0;
+    if (fn->abi_sret) {
+        fprintf(out_file, "ptr noalias sret(");
+        print_type(fn->ty->ret);
+        fprintf(out_file, ") align %d", fn->ty->ret->align);
+        if (fn->is_defined) fprintf(out_file, " %%tmp%d", pi);
+        pi++;
+    }
+    for (Type *param = fn->ty->params; param; param = param->next) {
+        int cntt = abi_param_count(param);
+        for (int k = 0; k < cntt; k++) {
+            if (pi) fprintf(out_file, ", ");
+            print_param_type(param, k);
+            if (fn->is_defined) fprintf(out_file, " %%tmp%d", pi);
+            pi++;
+        }
     }
     // The separator belongs between the last parameter and the ellipsis,
     // so a definition with no named parameter (a bare "...") has none.
-    if (fn->ty->is_variadic) fprintf(out_file, "%s...", fn->ty->params ? ", " : "");
+    if (fn->ty->is_variadic) fprintf(out_file, "%s...", pi ? ", " : "");
     fprintf(out_file, ")");
     if (!fn->is_defined) {
         fprintf(out_file, "\n\n");

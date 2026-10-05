@@ -96,7 +96,7 @@ check 'invalid store order warning'
 echo '#include <stdatomic.h>
 _Atomic int x;
 void f(void) { __c11_atomic_store(&x, 1, __ATOMIC_ACQUIRE); }' \
-  | $compiler -S -emit-llvm -o - -xc - 2>/dev/null | grep -q 'store atomic i32 %2, ptr @x seq_cst'
+  | $compiler -S -emit-llvm -o - -xc - 2>/dev/null | grep -qE 'store atomic i32 %tmp[0-9]+, ptr @x seq_cst'
 check 'invalid order falls back to seq_cst'
 echo '#include <stdatomic.h>
 _Atomic int x;

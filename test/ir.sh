@@ -86,7 +86,7 @@ echo '#include <stdatomic.h>
 _Atomic int x, y;
 void f(void) { x += __c11_atomic_load(&y, __ATOMIC_RELAXED); }' \
   | $compiler -S -emit-llvm -o - -xc - > $tmp/nest.ll
-grep -q 'ptr @y monotonic, align 4' $tmp/nest.ll && grep -q 'atomicrmw add ptr %[0-9]*, i32 %[0-9]* seq_cst' $tmp/nest.ll
+grep -q 'ptr @y monotonic, align 4' $tmp/nest.ll && grep -qE 'atomicrmw add ptr %tmp[0-9]+, i32 %tmp[0-9]+ seq_cst' $tmp/nest.ll
 check 'nested atomic order'
 
 # compare_exchange: weak keyword, both orders, non-i32 types.
@@ -94,7 +94,7 @@ echo '#include <stdatomic.h>
 _Atomic long x; long e;
 int f(void) { return __c11_atomic_compare_exchange_weak(&x, &e, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED); }' \
   | $compiler -S -emit-llvm -o - -xc - > $tmp/cas.ll
-grep -q 'cmpxchg weak ptr @x, i64 %' $tmp/cas.ll
+grep -q 'cmpxchg weak ptr @x, i64 %tmp' $tmp/cas.ll
 check 'cmpxchg weak i64'
 grep -q 'acquire monotonic, align 8' $tmp/cas.ll
 check 'cmpxchg success/failure orders'
@@ -107,7 +107,7 @@ check 'cmpxchg result zext to bool'
 echo '#include <stdatomic.h>
 _Atomic int x; int e;
 int f(void) { return __c11_atomic_compare_exchange_strong(&x, &e, 1, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }' \
-  | $compiler -S -emit-llvm -o - -xc - | grep -q 'store i32 %[0-9]*, ptr @e, align 4'
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'store i32 %tmp[0-9]*, ptr @e, align 4'
 check 'cas failure writes back expected'
 
 # _Atomic volatile: cmpxchg takes the volatile keyword.
@@ -191,7 +191,7 @@ _Atomic int x;
 int f(void) { x += 3; return x; }
 int g(void) { x++; return x; }' \
   | $compiler -S -emit-llvm -o - -xc - > $tmp/casgn.ll
-[ $(grep -c 'atomicrmw add ptr %[0-9]*, i32 %' $tmp/casgn.ll) -eq 2 ]
+[ $(grep -c 'atomicrmw add ptr %tmp[0-9]*, i32 %' $tmp/casgn.ll) -eq 2 ]
 check 'compound assign atomicrmw'
 [ $(grep -c 'add i32 %' $tmp/casgn.ll) -eq 1 ]
 check 'compound recompute only for +='
@@ -201,18 +201,18 @@ echo '#include <stdatomic.h>
 _Atomic int x;
 int f(void) { x *= 2; return x; }' \
   | $compiler -S -emit-llvm -o - -xc - > $tmp/casloop.ll
-grep -q 'cmpxchg ptr %[0-9]*, i32 %' $tmp/casloop.ll
+grep -q 'cmpxchg ptr %tmp[0-9]*, i32 %' $tmp/casloop.ll
 check 'compound assign cas loop'
 grep -q 'extractvalue { i32, i1 } %' $tmp/casloop.ll
 check 'cas loop extractvalue'
-grep -q 'load atomic i32, ptr %[0-9]* seq_cst' $tmp/casloop.ll
+grep -q 'load atomic i32, ptr %tmp[0-9]* seq_cst' $tmp/casloop.ll
 check 'cas loop atomic load'
 
 # Pointer compound assignment uses a ptr cmpxchg loop.
 echo '#include <stdatomic.h>
 _Atomic(int *) ap;
 int *f(void) { ap += 1; return ap; }' \
-  | $compiler -S -emit-llvm -o - -xc - | grep -q 'cmpxchg ptr %[0-9]*, ptr %'
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'cmpxchg ptr %tmp[0-9]*, ptr %'
 check 'pointer compound cas loop'
 
 # Float += / -= use atomicrmw fadd/fsub.

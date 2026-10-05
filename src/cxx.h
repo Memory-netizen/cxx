@@ -93,6 +93,24 @@ typedef struct {
     int mem_align;
 } VaArgOps;
 
+// How the ABI passes an aggregate. `npiece` is 0 for the memory class,
+// which travels through a pointer: byval as an argument, sret as the result.
+// Otherwise each piece is one register wide and `piece` gives the type to
+// load it as -- an integer type for a piece that is INTEGER class, a floating
+// type for one that is SSE class. `off` is the piece's offset in the
+// aggregate, so it can be read straight out of the object.
+#define MAX_AGG_PIECES 2
+
+typedef struct {
+    int npiece;  // 0 => memory class (pointer), else number of pieces
+    int size;    // size of the aggregate in bytes
+    struct {
+        int off;
+        int size;
+        Type *ty;
+    } piece[MAX_AGG_PIECES];
+} AggClass;
+
 struct Target {
     char *name;
     char *triple;
@@ -132,6 +150,22 @@ struct Target {
     // target.c. It is per-type because an ABI with separate general-purpose
     // and SIMD argument registers decides between them on the type.
     VaArgOps *(*va_arg_ops)(Type *want);
+    // How this target passes an aggregate (see AggClass). A variadic call has
+    // no prototype to classify against, and a call or definition has to agree
+    // with the other compiler's idea of the ABI, so the split has to be
+    // written into the IR rather than left to the backend.
+    void (*classify_aggregate)(Type *agg, AggClass *out);
+    // Builds the records that carry flattened pieces, one shape per
+    // combination of integer/floating pieces. Finite and fixed, so all of
+    // them are built up front and looked up afterwards. They must go through
+    // insert_ty(), the same list every other record goes through, or the IR
+    // would name a type it never defines.
+    void (*classify_publish)(void);
+    Type *(*pieces_type)(Type *agg);
+    // How many IR parameters one C parameter of this type becomes once the
+    // ABI has lowered it: an aggregate may arrive flattened, one parameter
+    // per register piece. The numbering of every slot depends on this count.
+    int (*abi_param_slots)(Type *ty);
 
     // The type of this target's va_list as stdarg.h would declare it --
     // an array of one on amd64, a structure on arm64, a pointer on
@@ -444,6 +478,9 @@ struct Sym {
     // happens to carry a builtin's name".
     bool is_builtin;
     bool is_defined;
+    // Set by irgen: the aggregate result is written through a hidden leading
+    // pointer (the ABI memory class), so the IR signature has to name it.
+    bool abi_sret;
     bool is_str;
 
     // GNU asm-name: `int f(void) __asm__("real_symbol");` declares the
@@ -1190,6 +1227,15 @@ struct Ir {
     uint8_t mem_order1;  // cmpxchg failure order
     uint8_t is_weak;     // cmpxchg weak
     uint8_t is_signal;
+    // IR_CALL: the call passes a hidden result pointer as its first operand,
+    // which the printer has to mark sret rather than byval. Recorded on the
+    // instruction because printing happens long after generation.
+    uint8_t is_sret;
+    // IR_CALL: the operand index (1-based) carrying a byval aggregate copy,
+    // or 0 when there is none. A pointer to a record is not by itself a
+    // byval argument -- the user may simply have passed such a pointer -- so
+    // which operand is a copy is recorded where it is decided.
+    uint8_t byval_at;
     Ref args[];
 };
 

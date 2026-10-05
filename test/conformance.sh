@@ -347,7 +347,7 @@ int f(int, int, int);
 int g(int x) { return f(2 + 3, x, 4 * 5); }
 EOF
 if "$compiler" -w -emit-llvm -S -o "$tmp/argfold.ll" "$tmp/argfold.c" > "$tmp/log" 2>&1 &&
-   grep -q 'call i32 @f(i32 5, i32 %[0-9]*, i32 20)' "$tmp/argfold.ll" &&
+   grep -q 'call i32 @f(i32 5, i32 %tmp[0-9]*, i32 20)' "$tmp/argfold.ll" &&
    ! grep -q 'mul i32' "$tmp/argfold.ll"; then
     echo "testing folding of call arguments ... passed"
     n_pass=$((n_pass + 1))
@@ -365,7 +365,7 @@ int f(int, int, int, int, int);
 int g(int a) { return f(1 + 1, a, 3 + 3, a, 5 + 5); }
 EOF
 if "$compiler" -w -emit-llvm -S -o "$tmp/argkeep.ll" "$tmp/argkeep.c" > "$tmp/log" 2>&1 &&
-   grep -qE 'call i32 @f\(i32 2, i32 %[0-9]+, i32 6, i32 %[0-9]+, i32 10\)' "$tmp/argkeep.ll"; then
+   grep -qE 'call i32 @f\(i32 2, i32 %tmp[0-9]+, i32 6, i32 %tmp[0-9]+, i32 10\)' "$tmp/argkeep.ll"; then
     echo "testing call arguments survive folding ... passed"
     n_pass=$((n_pass + 1))
 else

@@ -69,8 +69,27 @@ static VaArgOps va_arg_fp = {
 };
 
 // Which register class a requested type is passed in.
+// As va_arg_gp, but for a type that occupies two eightbytes in the
+// general-purpose registers (_BitInt(> 64), __int128). Both the register
+// and the stack cursor must move a whole 16 bytes, or the next argument is
+// read from the wrong slot.
+static VaArgOps va_arg_gp16 = {
+    .kind = VA_MEM_REGS,
+    .offset_ty = &ty_int_,
+    .offset_field = 3,
+    .offset_bound = 0,
+    .offset_negative = true,
+    .reg_field = 1,
+    .mem_field = 0,
+    .reg_step = 16,
+    .mem_step = 16,
+};
+
 static VaArgOps *arm64_va_arg(Type *want) {
     if (is_flonum(want)) return &va_arg_fp;
+    // An integer wider than one eightbyte takes two GP registers. Its
+    // alignment is still 8, so size is what distinguishes it.
+    if (want->size > 8) return &va_arg_gp16;
     return &va_arg_gp;
 }
 

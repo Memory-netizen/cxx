@@ -102,6 +102,116 @@ static VaArgOps va_arg_mem16 = {
     .mem_align = 16,
 };
 
+// One piece is SSE class when every scalar in it is a floating type; any
+// integer member makes the whole piece INTEGER (SysV AMD64 3.2.3).
+static bool piece_is_sse(Type *agg, int lo, int hi) {
+    for (Member *m = agg->members; m; m = m->next) {
+        int mlo = m->offset;
+        int mhi = m->offset + m->ty->size;
+        if (mhi <= lo || mlo >= hi) continue;
+        if (m->ty->kind == TY_STRUCT || m->ty->kind == TY_UNION) return piece_is_sse(m->ty, lo - mlo, hi - mlo);
+        if (!is_flonum(m->ty)) return false;
+    }
+    return true;
+}
+
+static bool amd64_is_memory_class(Type *agg) {
+    if (agg->size <= 0 || agg->size > 16) return true;
+    for (Member *m = agg->members; m; m = m->next)
+        if (m->ty->align > 8) return true;
+    return false;
+}
+
+static void amd64_classify_aggregate(Type *agg, AggClass *out) {
+    out->npiece = 0;
+    out->size = agg->size;
+    // Only a record is classified: a pointer, however it is spelled, is one
+    // value and must never be expanded into the pieces of what it points at.
+    if (!agg || (agg->kind != TY_STRUCT && agg->kind != TY_UNION)) return;
+    if (amd64_is_memory_class(agg)) return;
+
+    int n = (agg->size + 7) / 8;
+    out->npiece = n;
+    for (int i = 0; i < n; i++) {
+        int lo = i * 8;
+        int hi = lo + 8 < agg->size ? lo + 8 : agg->size;
+        // Width is that of the last member ending inside this piece.
+        int end = 0;
+        bool sse = piece_is_sse(agg, lo, hi);
+        for (Member *m = agg->members; m; m = m->next) {
+            int mhi = m->offset + m->ty->size;
+            if (mhi <= lo || m->offset >= hi) continue;
+            if (mhi > end) end = mhi;
+        }
+        if (!end) end = hi;
+        int sz = end - lo;
+        Type *ty;
+        if (sse)
+            ty = sz > 4 ? &ty_double_ : &ty_float_;
+        else if (sz > 4)
+            ty = &ty_long_;
+        else if (sz > 2)
+            ty = &ty_int_;
+        else if (sz > 1)
+            ty = &ty_short_;
+        else
+            ty = &ty_schar_;
+        out->piece[i].off = lo;
+        out->piece[i].size = sz;
+        out->piece[i].ty = ty;
+    }
+}
+
+static Type *pieces_cache[8];
+static int pieces_key[8];
+static int pieces_cache_n;
+
+static void classify_publish(void) { pieces_cache_n = 0; }
+
+static Type *amd64_pieces_type(Type *agg) {
+    if (!agg || (agg->kind != TY_STRUCT && agg->kind != TY_UNION)) return NULL;
+    AggClass c;
+    amd64_classify_aggregate(agg, &c);
+    if (c.npiece == 0) return NULL;
+
+    int key = c.npiece;
+    for (int i = 0; i < c.npiece; i++) key = key * 31 + (is_flonum(c.piece[i].ty) ? 1 : 0) * 16 + c.piece[i].size;
+    for (int i = 0; i < pieces_cache_n; i++)
+        if (pieces_key[i] == key) return pieces_cache[i];
+
+    Type *ty = emalloc(sizeof(Type));
+    ty->kind = TY_STRUCT;
+    ty->size = c.npiece * 8;
+    ty->align = 8;
+    Member *tail = NULL;
+    for (int i = 0; i < c.npiece; i++) {
+        Member *m = emalloc(sizeof(Member));
+        m->ty = c.piece[i].ty;
+        m->offset = i * 8;
+        m->align = m->ty->align;
+        m->idx = i;
+        if (tail)
+            tail = tail->next = m;
+        else
+            ty->members = tail = m;
+    }
+    ty->uid = 0;
+    if (pieces_cache_n < 8) {
+        pieces_key[pieces_cache_n] = key;
+        pieces_cache[pieces_cache_n++] = ty;
+    }
+    return ty;
+}
+
+// One C parameter becomes one IR parameter, unless the ABI flattens an
+// aggregate into one per register piece. A pointer is never flattened.
+static int amd64_param_slots(Type *ty) {
+    if (!ty || (ty->kind != TY_STRUCT && ty->kind != TY_UNION)) return 1;
+    AggClass c;
+    amd64_classify_aggregate(ty, &c);
+    return c.npiece == 0 ? 1 : c.npiece;
+}
+
 // Which register class a requested type is passed in.
 static VaArgOps *amd64_va_arg(Type *want) {
     // An integer type wider than one eightbyte takes two integer
@@ -208,6 +318,10 @@ Target T_amd64 = {
     .llong_max = 9223372036854775807LL,
     .va_list_type = amd64_va_list_type,
     .va_arg_ops = amd64_va_arg,
+    .classify_aggregate = amd64_classify_aggregate,
+    .classify_publish = classify_publish,
+    .pieces_type = amd64_pieces_type,
+    .abi_param_slots = amd64_param_slots,
     .predef =
         "#define _LP64 1\n"
         "#define __ATOMIC_ACQUIRE 2\n"
