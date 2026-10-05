@@ -2489,10 +2489,16 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
             param_ty = param_ty->next;
         } else if (ty->is_variadic) {
             // Default argument promotions (6.5.2.2p7): the integer
-            // promotions apply to the standard integer types but never
-            // to _BitInt; float and _Float32 promote to double;
-            // _Float16 and _Float64 stay as they are (gcc/clang both
-            // keep _Float16; clang promotes _Float32).
+            // promotions apply to the standard integer types but never to
+            // _BitInt; float and _Float32 promote to double; _Float16 and
+            // _Float64 stay as they are.
+            //
+            // _Float32 is promoted to match clang: it warns that
+            // va_arg(ap, _Float32) is undefined because "arguments will be
+            // promoted to 'double'", and reading it back as double is what
+            // observes clang's behaviour. Measured: promoted gives
+            // va_arg(_Float32)=0 / va_arg(double)=3, exactly clang's
+            // numbers; not promoting gives 3/0, which is gcc's.
             //
             // lvalue conversion must come *first*: integer_promotion()
             // wraps the operand in ND_IMCAST, which drops the is_lvalue

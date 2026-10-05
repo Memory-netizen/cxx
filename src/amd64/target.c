@@ -71,22 +71,51 @@ static VaArgOps va_arg_fp = {
 // at a time, so its cursor is raised to that alignment before reading; the
 // register class is still the general-purpose one, which is where an
 // argument of this size never fits.
-static VaArgOps va_arg_mem16 = {
+// As va_arg_gp, but for a type that occupies two eightbytes in the
+// integer registers (_BitInt(> 64), __int128). The cursor must move a
+// whole 16 bytes or the next argument is read from the wrong slot.
+static VaArgOps va_arg_gp16 = {
     .kind = VA_MEM_REGS,
     .offset_ty = &ty_uint_,
     .offset_field = 0,
     .offset_bound = 40,
     .reg_field = 3,
     .mem_field = 2,
+    .reg_step = 16,
+    .mem_step = 16,
+};
+
+static VaArgOps va_arg_mem16 = {
+    .kind = VA_MEM_REGS,
+    .offset_ty = &ty_uint_,
+    .offset_field = 0,
+    // Always the overflow area: gp_offset is at least 8 after va_start,
+    // so "still has room in a register" is never true for this class.
+    .offset_bound = 0,
+    .reg_field = 3,
+    .mem_field = 2,
     .reg_step = 8,
-    .mem_step = 8,
+    // long double and _Float128 are 16 bytes wide on the stack, and
+    // belong to the MEMORY class, so the cursor always moves a whole
+    // one of them -- never the 8 that va_arg_gp uses.
+    .mem_step = 16,
     .mem_align = 16,
 };
 
 // Which register class a requested type is passed in.
 static VaArgOps *amd64_va_arg(Type *want) {
-    if (is_flonum(want)) return &va_arg_fp;
+    // An integer type wider than one eightbyte takes two integer
+    // registers, so the running offset steps by 16 rather than 8. Its
+    // alignment is still 8, which is why the align test below does not
+    // already cover it.
+    if (want->size > 8 && !is_flonum(want)) return &va_arg_gp16;
+    // Order matters: long double and _Float128 are floating types *and*
+    // 16-byte aligned, and SysV AMD64 puts both in the X87/SSEUP class,
+    // which is always passed in memory -- never in the SSE register save
+    // area. Testing is_flonum() first sent them to the fp path, which read
+    // the wrong area (and made the mem16 entry unreachable).
     if (want->align > 8) return &va_arg_mem16;
+    if (is_flonum(want)) return &va_arg_fp;
     return &va_arg_gp;
 }
 
