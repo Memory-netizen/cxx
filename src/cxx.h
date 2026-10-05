@@ -63,6 +63,16 @@ typedef enum {
                     // running offset (amd64, arm64)
     VA_MEM_LINEAR,  // the va_list is a single pointer that walks the
                     // argument area (rv64, rv32)
+    // One aggregate whose pieces travel in different register files: each
+    // piece is read from its own save area and each cursor advances on its
+    // own. struct { int; double } arrives with the int in a general-purpose
+    // register and the double in an SSE one, and the two areas are separate
+    // blocks of memory.
+    VA_MEM_MIXED,
+    // The argument is always in the overflow area -- a record too large for
+    // the registers -- and its cursor advances by the argument's own
+    // rounded-up size, which a fixed table cannot express.
+    VA_MEM_OVERFLOW,
 } VaArgKind;
 
 typedef struct {
@@ -84,6 +94,11 @@ typedef struct {
     int offset_bound;
     int reg_field;
     int mem_field;
+    // VA_MEM_MIXED: the floating-point running offset and its save-area
+    // field, used alongside the integer pair above.
+    int fp_offset_field;
+    int fp_reg_field;
+    int fp_offset_bound;
     int reg_step;  // register save area: all classes
     int mem_step;  // overflow area
 
@@ -162,6 +177,11 @@ struct Target {
     // would name a type it never defines.
     void (*classify_publish)(void);
     Type *(*pieces_type)(Type *agg);
+    // The va_arg policy for an aggregate whose pieces travel in different
+    // register files, or NULL when the target has none: such a type needs a
+    // second cursor and a second save area, which the single-file tables do
+    // not carry.
+    VaArgOps *(*va_arg_ops_for_mixed)(void);
     // How many IR parameters one C parameter of this type becomes once the
     // ABI has lowered it: an aggregate may arrive flattened, one parameter
     // per register piece. The numbering of every slot depends on this count.

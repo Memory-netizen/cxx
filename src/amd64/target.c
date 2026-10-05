@@ -173,6 +173,11 @@ static Type *amd64_pieces_type(Type *agg) {
     AggClass c;
     amd64_classify_aggregate(agg, &c);
     if (c.npiece == 0) return NULL;
+    // One piece is not a record: the value travels as the piece itself, so
+    // an all-floating piece must reach the SSE registers and an integer one
+    // the general-purpose registers. Wrapping it in a record would send the
+    // floating case to the wrong file.
+    if (c.npiece == 1) return c.piece[0].ty;
 
     int key = c.npiece;
     for (int i = 0; i < c.npiece; i++) key = key * 31 + (is_flonum(c.piece[i].ty) ? 1 : 0) * 16 + c.piece[i].size;
@@ -212,12 +217,83 @@ static int amd64_param_slots(Type *ty) {
     return c.npiece == 0 ? 1 : c.npiece;
 }
 
+// An aggregate whose pieces split between the two register files. The
+// general-purpose offset lives at field 0 (bounded by 40) and the
+// floating-point one at field 4 (bounded by 304, the end of the SSE area);
+// reg_field 3 and fp_reg_field 4 name the two save areas.
+static VaArgOps va_arg_mixed = {
+    .kind = VA_MEM_MIXED,
+    .offset_ty = &ty_uint_,
+    .offset_field = 0,
+    .offset_bound = 40,
+    .reg_field = 3,
+    .mem_field = 2,
+    // Both register files save into one block: reg_save_area holds the
+    // general-purpose registers and then the SSE ones, so the two cursors
+    // read the same field with different offsets. fp_offset is the second
+    // field of the va_list, gp_offset the first.
+    .fp_offset_field = 1,
+    .fp_reg_field = 3,
+    .fp_offset_bound = 304,
+    .reg_step = 8,
+    .mem_step = 8,
+};
+
+static VaArgOps *amd64_va_arg_mixed(void) { return &va_arg_mixed; }
+
+// A record larger than two eightbytes is MEMORY class: it is always passed
+// on the stack, so the register save area never holds it and the offset test
+// the other classes use would pick the wrong branch.
+static VaArgOps va_arg_overflow = {
+    .kind = VA_MEM_OVERFLOW,
+    .offset_ty = &ty_uint_,
+    .offset_field = 0,
+    .reg_field = 3,
+    .mem_field = 2,
+    .mem_align = 8,
+};
+
 // Which register class a requested type is passed in.
+// Two SSE pieces: both eightbytes come from the floating-point area and the
+// cursor steps by the record's whole width. struct { double; double } is the
+// common case.
+static VaArgOps va_arg_fp16 = {
+    .kind = VA_MEM_REGS,
+    .offset_ty = &ty_uint_,
+    .offset_field = 1,
+    .offset_bound = 304,
+    .reg_field = 3,
+    .mem_field = 2,
+    .reg_step = 16,
+    .mem_step = 16,
+    .mem_align = 8,
+};
+
 static VaArgOps *amd64_va_arg(Type *want) {
-    // An integer type wider than one eightbyte takes two integer
-    // registers, so the running offset steps by 16 rather than 8. Its
-    // alignment is still 8, which is why the align test below does not
-    // already cover it.
+    // Records come first. The scalar rules below would otherwise claim a
+    // record wider than one eightbyte and read it as an integer pair, and a
+    // record larger than two eightbytes is MEMORY class -- always on the
+    // stack -- so the offset test the register classes use would send it to
+    // the register save area, where it never is.
+    if (want->kind == TY_STRUCT || want->kind == TY_UNION) {
+        AggClass c;
+        amd64_classify_aggregate(want, &c);
+        if (c.npiece == 0) return &va_arg_overflow;
+        // A single floating-point piece travels in the SSE registers exactly
+        // as a scalar of that type does: struct { double } arrives as a
+        // double, so it has to be read from the same save area.
+        if (c.npiece == 1 && is_flonum(c.piece[0].ty)) return &va_arg_fp;
+        // Two pieces in different register files need both cursors, and the
+        // two cursors live in different fields of the va_list.
+        if (c.npiece == 2 && is_flonum(c.piece[0].ty) != is_flonum(c.piece[1].ty)) return &va_arg_mixed;
+        // Both pieces integer, or both floating: one file, and the offset
+        // steps by the record's whole width.
+        if (c.npiece == 2) return is_flonum(c.piece[0].ty) ? &va_arg_fp16 : &va_arg_gp16;
+        return &va_arg_gp;
+    }
+    // An integer type wider than one eightbyte takes two integer registers,
+    // so the running offset steps by 16 rather than 8. Its alignment is
+    // still 8, which is why the align test below does not already cover it.
     if (want->size > 8 && !is_flonum(want)) return &va_arg_gp16;
     // Order matters: long double and _Float128 are floating types *and*
     // 16-byte aligned, and SysV AMD64 puts both in the X87/SSEUP class,
@@ -321,6 +397,7 @@ Target T_amd64 = {
     .classify_aggregate = amd64_classify_aggregate,
     .classify_publish = classify_publish,
     .pieces_type = amd64_pieces_type,
+    .va_arg_ops_for_mixed = amd64_va_arg_mixed,
     .abi_param_slots = amd64_param_slots,
     .predef =
         "#define _LP64 1\n"

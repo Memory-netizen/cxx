@@ -441,6 +441,109 @@ static Ref va_field_addr(Ref ap, Type *rec, int idx) {
 // the same for every ABI; what the target supplies through T.va_arg_ops is
 // which field holds the cursor, how much room is left, and how far the
 // cursor moves.
+// An aggregate whose pieces sit in different register files: read each piece
+// from its own save area, advancing that file's cursor, and put them back
+// together in a slot. The two areas are separate blocks of memory, so a
+// single cursor cannot describe the argument at all.
+static Ref gen_va_arg_mixed(Ref ap, Type *aptr_ty, Type *want, VaArgOps *ops) {
+    Type *rec = aptr_ty->base;
+    if (rec->kind != TY_STRUCT) fatal("va_arg: va_list is not a struct");
+
+    // Read both cursors and both save areas up front, before branching.
+    Type *off_ty = ops->offset_ty;
+    Ref int_addr = va_field_addr(ap, rec, ops->offset_field);
+    Ref int_off = load(int_addr, off_ty, off_ty->align, NULL);
+    Ref fp_addr = va_field_addr(ap, rec, ops->fp_offset_field);
+    Ref fp_off = load(fp_addr, off_ty, off_ty->align, NULL);
+    Ref gp_area = load(va_field_addr(ap, rec, ops->reg_field), T.ty_voidptr, 8, NULL);
+    Ref fp_area = load(va_field_addr(ap, rec, ops->fp_reg_field), T.ty_voidptr, 8, NULL);
+    Ref over = load(va_field_addr(ap, rec, ops->mem_field), T.ty_voidptr, 8, NULL);
+
+    // The whole aggregate comes from the overflow area once either file has
+    // run out; otherwise each piece comes from its own file.
+    Ref gp_ok = TMP(tmp_id++, bitint[1][1]);
+    new_ins(IR_CMP_LE, gp_ok, (Ref[]){int_off, INT(ops->offset_bound)}, 2);
+    Ref fp_ok = TMP(tmp_id++, bitint[1][1]);
+    new_ins(IR_CMP_LE, fp_ok, (Ref[]){fp_off, INT(ops->fp_offset_bound)}, 2);
+    Ref both = TMP(tmp_id++, bitint[1][1]);
+    new_ins(IR_AND, both, (Ref[]){gp_ok, fp_ok}, 2);
+
+    Blk *blk_reg = new_blk();
+    Blk *blk_mem = new_blk();
+    Blk *blk_join = new_blk();
+    curb->jmp.type = IR_JNZ;
+    curb->jmp.arg = both;
+    curb->succ1 = blk_reg;
+    curb->succ2 = blk_mem;
+    add_pred(curb, blk_reg);
+    add_pred(curb, blk_mem);
+
+    // The slot the pieces are assembled in, and the cursor for whichever
+    // path is taken.
+    Type *slot_ty = pointer_to(want, 0);
+    Ref slot = TMP(tmp_id++, slot_ty);
+    new_ins(IR_ALLOCA, slot, (Ref[]){INT(want->align)}, 1);
+
+    AggClass c;
+    T.classify_aggregate(want, &c);
+
+    curb = blk_reg;
+    insert_blk(curb);
+    for (int i = 0; i < c.npiece; i++) {
+        bool fp = is_flonum(c.piece[i].ty);
+        Ref base = fp ? fp_area : gp_area;
+        Ref off = fp ? fp_off : int_off;
+        Ref b8 = base;
+        b8.ty = pointer_to(T.ty_char, 0);
+        Ref off64 = cast(off, off_ty, T.ty_long);
+        Ref src = TMP(tmp_id++, b8.ty);
+        new_ins(IR_GEP, src, (Ref[]){b8, off64}, 2);
+        Ref piece = TMP(tmp_id++, c.piece[i].ty);
+        new_ins(IR_LORD, piece, (Ref[]){src, INT(c.piece[i].ty->align)}, 2);
+
+        Ref d = slot;
+        d.ty = pointer_to(T.ty_char, 0);
+        Ref dgep = TMP(tmp_id++, pointer_to(c.piece[i].ty, 0));
+        new_ins(IR_GEP, dgep, (Ref[]){d, INT(c.piece[i].off)}, 2);
+        store(piece, dgep, c.piece[i].ty->align, NULL);
+    }
+    // Each file advances its own cursor by one slot per piece taken from it.
+    Ref int_next = TMP(tmp_id++, off_ty);
+    new_ins(IR_ADD, int_next, (Ref[]){int_off, INT(ops->reg_step)}, 2);
+    store(int_next, int_addr, off_ty->align, NULL);
+    Ref fp_next = TMP(tmp_id++, off_ty);
+    new_ins(IR_ADD, fp_next, (Ref[]){fp_off, INT(ops->reg_step)}, 2);
+    store(fp_next, fp_addr, off_ty->align, NULL);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = blk_join;
+    add_pred(curb, blk_join);
+
+    // Overflow area: the whole aggregate is there, copied in one go.
+    curb = blk_mem;
+    insert_blk(curb);
+    Ref o8 = over;
+    o8.ty = pointer_to(T.ty_char, 0);
+    Ref dst8 = slot;
+    dst8.ty = pointer_to(T.ty_char, 0);
+    new_ins(IR_MEMCPY, R, (Ref[]){dst8, o8, INT(want->size)}, 3);
+    // Advance the overflow cursor by the rounded-up size and store the new
+    // pointer back into the va_list field.
+    Ref over_next = TMP(tmp_id++, o8.ty);
+    new_ins(IR_GEP, over_next, (Ref[]){o8, INT((want->size + 7) / 8 * 8)}, 2);
+    Ref over_slot = over_next;
+    over_slot.ty = T.ty_voidptr;
+    store(over_slot, va_field_addr(ap, rec, ops->mem_field), 8, NULL);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = blk_join;
+    add_pred(curb, blk_join);
+
+    curb = blk_join;
+    insert_blk(curb);
+    // Hand back the slot, as the other kinds do: the caller loads it as the
+    // requested type, and the record value it is after is that slot.
+    return slot;
+}
+
 static Ref gen_va_arg(Node *node) {
     VaArgOps *ops = T.va_arg_ops(node->ty);
     Type *addr_ty = node->lhs->ty;  // pointer to the va_list object
@@ -485,11 +588,48 @@ static Ref gen_va_arg(Node *node) {
         next = adv;
         store(next, ap, aptr_ty->align, NULL);
 
+        // An aggregate is returned as its address, the same contract the
+        // register paths follow: the caller loads it as the requested type,
+        // and for a record that load hands the address back.
+        if (want->kind == TY_STRUCT || want->kind == TY_UNION) return aligned;
         int la = want->align;
         if (la > step) la = step;
         return load(aligned, want, la, NULL);
     }
 
+    // An aggregate whose pieces travel in different register files cannot be
+    // read through either single-cursor table: the two areas are separate
+    // blocks of memory. Decide it here from the type itself.
+    if (ops->kind == VA_MEM_REGS && T.classify_aggregate && (want->kind == TY_STRUCT || want->kind == TY_UNION)) {
+        AggClass mc;
+        T.classify_aggregate(want, &mc);
+        if (mc.npiece == 2 && is_flonum(mc.piece[0].ty) != is_flonum(mc.piece[1].ty)) {
+            // The mixed strategy needs the second cursor and save-area
+            // fields, which the table handed in does not carry (it describes
+            // a single register file), so ask the target for that table.
+            VaArgOps *mixed = T.va_arg_ops_for_mixed ? T.va_arg_ops_for_mixed() : NULL;
+            if (mixed) return gen_va_arg_mixed(ap, addr_ty, want, mixed);
+        }
+    }
+    if (ops->kind == VA_MEM_MIXED) return gen_va_arg_mixed(ap, addr_ty, want, ops);
+    if (ops->kind == VA_MEM_OVERFLOW) {
+        // MEMORY class: the argument is always in the overflow area, and the
+        // cursor advances by this argument's own size rounded up to the slot
+        // granularity -- a constant table cannot carry that.
+        Type *orec = addr_ty->base;
+        if (orec->kind != TY_STRUCT) fatal("va_arg: va_list is not a struct");
+        Ref oaddr = va_field_addr(ap, orec, ops->mem_field);
+        Ref over = load(oaddr, T.ty_voidptr, 8, NULL);
+        int step = (want->size + 7) / 8 * 8;
+        Ref o8 = over;
+        o8.ty = pointer_to(T.ty_char, 0);
+        Ref onext = TMP(tmp_id++, o8.ty);
+        new_ins(IR_GEP, onext, (Ref[]){o8, INT(step)}, 2);
+        Ref oslot = onext;
+        oslot.ty = T.ty_voidptr;
+        store(oslot, oaddr, 8, NULL);
+        return over;
+    }
     if (ops->kind != VA_MEM_REGS) fatal("unknown va_arg kind %d", ops->kind);
 
     Type *rec = addr_ty->base;
@@ -1215,11 +1355,23 @@ static Ref gen_expr(Node *node) {
                         store(a, hv, arg->ty->align, NULL);
                         addr = hv;
                     }
-                    if (c.npiece == 0) {
-                        // Too big for the registers: a pointer to the copy,
-                        // which LLVM spells byval in the signature. Which
-                        // operand that is has to be recorded: a plain pointer
-                        // to a record looks identical at print time.
+                    Type *cfnty = node->func->ty;
+                    if (cfnty && cfnty->kind == TY_PTR) cfnty = cfnty->base;
+                    bool variadic_call = cfnty && cfnty->kind == TY_FUNC && cfnty->is_variadic;
+                    if (c.npiece == 0 && !variadic_call) {
+                        // Too big for the registers, and the callee has a
+                        // prototype: a pointer to the copy, which LLVM spells
+                        // byval in the signature. Which operand that is has to
+                        // be recorded: a plain pointer to a record looks
+                        // identical at print time.
+                        byval_slot = idx;
+                        call_ops[idx++] = addr;
+                    } else if (c.npiece == 0) {
+                        // MEMORY class in a variadic call: the argument is a
+                        // copy on the stack, which LLVM spells byval here as
+                        // well. A record handed over "by value" in the IR is
+                        // not laid out that way -- the backend would pass it
+                        // the way a prototype says, and there is none.
                         byval_slot = idx;
                         call_ops[idx++] = addr;
                     } else {
