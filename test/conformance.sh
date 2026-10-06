@@ -242,11 +242,34 @@ else
     n_fail=$((n_fail + 1))
 fi
 if "$compiler" -pedantic -S -o /dev/null "$tmp/dollar.c" > /dev/null 2>&1; then
-    echo "testing -pedantic rejects \$ (D3 pending) ... GAP CLOSED (update this entry)"
+    echo "testing -pedantic rejects \$ ... FAILED (accepted)"
     n_fail=$((n_fail + 1))
 else
-    echo "testing -pedantic rejects \$ (D3 pending) ... known gap"
-    n_gaps=$((n_gaps + 1))
+    echo "testing -pedantic rejects \$ ... passed"
+    n_pass=$((n_pass + 1))
+fi
+
+# -pedantic also warns on the GNU constructs cxx accepts, and
+# -pedantic-errors stops on them. Labels-as-values is the one wired so far.
+cat > "$tmp/gnu.c" <<'EOF'
+int f(void) { void *p = &&lab; goto *p; lab: return 0; }
+int main(void) { return f(); }
+EOF
+if "$compiler" -w -pedantic -S -o /dev/null "$tmp/gnu.c" 2>&1 | grep -q 'ISO C forbids'; then
+    echo "testing -pedantic warns on a GNU construct ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -pedantic warns on a GNU construct ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
+# Without -pedantic the same program must stay silent.
+if "$compiler" -w -S -o /dev/null "$tmp/gnu.c" 2>&1 | grep -q 'ISO C forbids'; then
+    echo "testing no pedantic diagnostic without -pedantic ... FAILED"
+    n_fail=$((n_fail + 1))
+else
+    echo "testing no pedantic diagnostic without -pedantic ... passed"
+    n_pass=$((n_pass + 1))
 fi
 
 # __extension__ is a no-op marker for pedantic diagnostics cxx does not

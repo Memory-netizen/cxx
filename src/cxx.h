@@ -1537,6 +1537,12 @@ enum {
 
 bool wg_enabled(int group);
 void warning(int group, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));
+
+// -pedantic: diagnose the constructs ISO C forbids and cxx accepts as GNU
+// extensions. -pedantic-errors makes them errors instead of warnings.
+extern bool opt_pedantic;
+extern bool opt_pedantic_errors;
+void pedantic(Token *tok, const char *msg, ...) __attribute__((format(printf, 2, 3)));
 void diag(char *level, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 void diag_exit(char *level, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 

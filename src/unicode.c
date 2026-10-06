@@ -102,7 +102,10 @@ static bool in_range(uint32_t *range, size_t num_intervals, uint32_t c) {
 bool is_ident1(uint32_t c) {
     if ('a' <= c && c <= 'z') return true;
     if ('A' <= c && c <= 'Z') return true;
-    if (c == '_' || c == '$') return true;
+    if (c == '_') return true;
+    // `$` is a GNU extension: accepted by default, rejected by -pedantic,
+    // as in gcc and clang.
+    if (c == '$') return !opt_pedantic;
     return in_range(xid_start, XID_START_LEN, c);
 }
 
@@ -111,7 +114,8 @@ bool is_ident1(uint32_t c) {
 bool is_ident2(uint32_t c) {
     if ('a' <= c && c <= 'z') return true;
     if ('A' <= c && c <= 'Z') return true;
-    if (c == '_' || c == '$') return true;
+    if (c == '_') return true;
+    if (c == '$') return !opt_pedantic;
     if ('0' <= c && c <= '9') return true;
     return in_range(xid_continue, XID_CONTINUE_LEN, c);
 }

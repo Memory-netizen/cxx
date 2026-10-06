@@ -113,6 +113,22 @@ bool wg_enabled(int group) {
     return (opt_wgroups & (uint32_t)group) != 0;
 }
 
+// A construct ISO C forbids that cxx accepts as a GNU extension. Silent
+// unless -pedantic, and fatal under -pedantic-errors. Not part of the
+// warning-group machinery: -pedantic is a mode, not a group, which is how
+// gcc and clang treat it too.
+void pedantic(Token *tok, const char *msg, ...) {
+    if (!opt_pedantic) return;
+    va_list ap;
+    va_start(ap, msg);
+    Token *orig = tok;
+    while (orig->origin) orig = orig->origin;
+    emit_diag(opt_pedantic_errors ? "error" : "warning", orig->filename, orig->line_delta, orig->file, orig->loc, msg,
+              ap);
+    va_end(ap);
+    if (opt_pedantic_errors) exit(1);
+}
+
 void warning(int group, Token *tok, const char *msg, ...) {
     if (!wg_enabled(group)) return;
     va_list ap;

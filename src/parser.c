@@ -3066,6 +3066,7 @@ static Node *unary(Token **rest, Token *tok) {
         }
         // [GNU] labels-as-values
         case TK_AND: {
+            pedantic(tok, "ISO C forbids taking the address of a label");
             Node *node = new_node(ND_LABEL_VAL, tok);
             node->label = get_ident(tok->next);
 

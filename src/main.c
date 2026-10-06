@@ -76,6 +76,8 @@ bool opt_nowarn;
 // Every group on to start with; see the enum in cxx.h.
 uint32_t opt_wgroups = WG_ALL;
 bool opt_werror;
+bool opt_pedantic;
+bool opt_pedantic_errors;
 
 static void usage(int status) {
     fprintf(stderr,
@@ -553,7 +555,14 @@ static void parse_args(int argc, char **argv) {
             const char *name = argv[i] + 2;
             bool off = !strncmp(name, "no-", 3);
             if (off) name += 3;
-            // -Werror is handled below; everything else here is a group.
+            // -Werror and -Wpedantic are handled outside the table;
+            // everything else here is a group.
+            // `off` has already been read off the name, so -Wno-pedantic
+            // clears the mode rather than setting it.
+            if (!strcmp(name, "pedantic")) {
+                opt_pedantic = !off;
+                continue;
+            }
             if (strcmp(name, "error")) {
                 if (!strcmp(name, "all") || !strcmp(name, "extra")) {
                     opt_wgroups = WG_ALL;
@@ -572,6 +581,16 @@ static void parse_args(int argc, char **argv) {
                     opt_wgroups |= (uint32_t)bit;
                 continue;
             }
+        }
+
+        if (!strcmp(argv[i], "-pedantic") || !strcmp(argv[i], "-Wpedantic")) {
+            opt_pedantic = true;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-pedantic-errors")) {
+            opt_pedantic = opt_pedantic_errors = true;
+            continue;
         }
 
         if (!strcmp(argv[i], "-Werror")) {
