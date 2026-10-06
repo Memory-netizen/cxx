@@ -3297,6 +3297,13 @@ static Node *postfix(Token **rest, Token *tok) {
         if (is_file_scope() || sclass & SC_STATIC) {
             uint32_t uid = new_unique_varname(intern(".compoundliteral", 16));
             var = new_gvar(uid, ty);
+            // The object a compound literal names has no linkage, so at file
+            // scope it is emitted as a local symbol: without that, two
+            // translation units that each have one both define
+            // `.compoundliteral` and the link fails -- which is how cxx could
+            // not link against itself (src/type.c and src/irgen.c each have
+            // one).
+            sclass = (sclass & ~SC_EXTERN) | SC_STATIC;
             // This literal is emitted with its initializer, and the
             // initializer runs at load time -- even when the expression that
             // mentions the literal is an unevaluated operand (a sizeof, an
@@ -7656,6 +7663,11 @@ static Token *external_declaration(Token *tok) {
 
         // declaration
         SymKind symkind = is_fn ? SYM_FUNC : SYM_VAR;
+        // 6.9.2p2: a file-scope declaration of an object with no initializer
+        // and no `extern` is a *tentative definition*, and the unit defines
+        // the object unless something else in it does. Whether this
+        // declaration is one is settled here, where the token still says so.
+        bool is_tentative = !is_fn && !(sclass & (SC_EXTERN | SC_TYPEDEF)) && tok->kind != TK_AS;
         if (tok->kind == TK_AS) {
             if (is_fn || sclass & SC_TYPEDEF)
                 error(var_name,
@@ -7710,6 +7722,13 @@ static Token *external_declaration(Token *tok) {
 
             var->tok = var_name;
 
+            // The symbol's storage class is the first declaration's, so a
+            // name first seen as `extern Target T;` carried SC_EXTERN even
+            // after the tentative definition -- LLVM got `@T = external
+            // global` for a unit that defines T, and the link failed with
+            // `undefined reference to T`.
+            if (is_tentative) var->sclass &= ~SC_EXTERN;
+
             // asm("name") for a file-scope object or function
             // declaration, optionally followed by attributes:
             //   extern int fscanf(...) __asm__("__isoc23_fscanf") __wur;
@@ -7740,6 +7759,15 @@ static Token *external_declaration(Token *tok) {
                 gvar_initializer(&tok, tok->next, var);
                 cur_init = outer;
                 var->is_defined = true;
+                // A declaration with an initializer is a definition, whatever
+                // an earlier `extern` declaration said. SC_EXTERN is this
+                // compiler's "no definition here" mark, and it is what the
+                // printer reads to choose between the initializer and a bare
+                // type -- so `const Fp128 FP128_ONE = ...` after the header's
+                // `extern const Fp128 FP128_ONE;` was emitted as a
+                // declaration, and the link failed with `undefined reference
+                // to FP128_ONE`.
+                var->sclass &= ~SC_EXTERN;
                 if (sclass & SC_CONSTEXPR) {
                     // A constexpr initializer must be a constant expression.
                     int64_t v;

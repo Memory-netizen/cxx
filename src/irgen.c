@@ -2083,7 +2083,14 @@ static Ref gen_cond(Node *node) {
     insert_blk(curb);
 
     if (node->ty->kind != TY_VOID) {
-        Ref result = TMP(tmp_id++, node->ty);
+        // A record has no first-class value here: an arm that is one produces
+        // its address, so the phi joins two pointers. Naming the record type
+        // instead made LLVM refuse the module -- "'%tmp6' defined with type
+        // 'ptr' but expected '%struct.anon.1'" -- which is what kept
+        // int128.c, fp128.c, parser.c, irgen.c and opt_ast.c from being
+        // compiled by cxx at all.
+        Type *rty = is_record(node->ty) ? pointer_to(node->ty, 0) : node->ty;
+        Ref result = TMP(tmp_id++, rty);
         Phi *phi = new_phi(result);
         add_phi_arg(phi, t_end, true_r);
         add_phi_arg(phi, f_end, false_r);

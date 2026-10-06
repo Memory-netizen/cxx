@@ -1834,6 +1834,57 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# --- a definition is a definition, wherever an extern came first -----
+
+# 6.9.2p2 and 6.9.2p1: a file-scope declaration with an initializer defines
+# the object, and so does one that is a tentative definition -- even when an
+# `extern` declaration of the same name came first. The symbol's storage
+# class is the first declaration's, so without clearing it the unit emitted
+# `@t = external global` and the link failed with `undefined reference to t`
+# (which is how cxx could not link against itself).
+cat > "$tmp/deflink.c" <<'EOF'
+extern int t1;
+int t1;
+extern int t2;
+int t2 = 5;
+extern int t3[3];
+int t3[3];
+EOF
+cat > "$tmp/defmain.c" <<'EOF'
+extern int t1, t2, t3[];
+int main(void) { return t1 + t2 + t3[0] - 5; }
+EOF
+if "$compiler" -w -o "$tmp/deflink" "$tmp/deflink.c" "$tmp/defmain.c" >/dev/null 2>&1 && "$tmp/deflink"; then
+    echo "testing a definition after an extern declaration links ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a definition after an extern declaration links ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
+# A file-scope compound literal's object has no linkage, so each translation
+# unit gets its own: both used to be emitted as `.compoundliteral` with
+# external linkage, and the link failed with `multiple definition`.
+cat > "$tmp/cl1.c" <<'EOF'
+int *p = &(int){1};
+int one(void) { return *p; }
+EOF
+cat > "$tmp/cl2.c" <<'EOF'
+int *q = &(int){2};
+int two(void) { return *q; }
+EOF
+cat > "$tmp/clmain.c" <<'EOF'
+int one(void), two(void);
+int main(void) { return one() + two() - 3; }
+EOF
+if "$compiler" -w -o "$tmp/cl" "$tmp/cl1.c" "$tmp/cl2.c" "$tmp/clmain.c" >/dev/null 2>&1 && "$tmp/cl"; then
+    echo "testing compound literals do not collide across units ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing compound literals do not collide across units ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then
