@@ -702,8 +702,12 @@ void dump_blk(Blk *b) {
             print_type(b->jmp.arg.ty);
             fprintf(out_file, " ");
             print_operand(b->jmp.arg);
-            fprintf(out_file, ", label %%blk%d", b->succ1->blk_id);
-            if (b->narg) fprintf(out_file, " [\n");
+            // The bracketed case list is part of the syntax even when it is
+            // empty. A `case` range whose bounds are reversed (6.6.2)
+            // contributes no cases, and `switch i32 %x, label %blk` without
+            // the brackets is a parse error for LLVM ("expected '[' with
+            // switch table").
+            fprintf(out_file, ", label %%blk%d [\n", b->succ1->blk_id);
             for (uint32_t i = 0; i < b->narg; i++) {
                 fprintf(out_file, "    ");
                 print_type(b->jmp.args[i].ty);
@@ -711,7 +715,7 @@ void dump_blk(Blk *b) {
                 print_operand(b->jmp.args[i]);
                 fprintf(out_file, ", label %%blk%d\n", b->succ[i]->blk_id);
             }
-            if (b->narg) fprintf(out_file, "  ]\n");
+            fprintf(out_file, "  ]\n");
             break;
         case IR_INDIRECTBR:
             fprintf(out_file, "indirectbr ");

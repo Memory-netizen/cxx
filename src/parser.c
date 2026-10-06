@@ -1504,6 +1504,18 @@ BuiltinDef builtin_defs[NUM_BUILTINFN] = {
                               0},
     [BUILTIN_MUL_OVERFLOW] = {"__builtin_mul_overflow", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
                               0},
+    // The floating constant producers. A call is a constant, so there is
+    // no intrinsic; nan/nans additionally take the payload string, which
+    // parse_math_const() accepts and does not use.
+    [BUILTIN_HUGE_VAL] = {"__builtin_huge_val", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_HUGE_VALF] = {"__builtin_huge_valf", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_HUGE_VALL] = {"__builtin_huge_vall", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_INF] = {"__builtin_inf", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_INFF] = {"__builtin_inff", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_INFL] = {"__builtin_infl", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_NANF] = {"__builtin_nanf", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_NAN] = {"__builtin_nan", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_NANL] = {"__builtin_nanl", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
 };
 
 // The array is indexed by kind and sized by the enum, so a kind cannot land
@@ -1804,6 +1816,63 @@ static Node *va_list_addr(Token **rest, Token *tok) {
     return addr;
 }
 
+// __builtin_huge_val{,f,l}, __builtin_inf{,f,l}, __builtin_nan{,f,l} and
+// __builtin_nans{,f,l} (7.12.11.2, F.10.11). Each names one value of one
+// format, so the call folds to that constant here rather than reaching
+// irgen: `inf` and `huge_val` are the same value reached through two
+// headers, and the two differ only in the row they are declared in.
+//
+// Both values are written as binary128 patterns, which is the library's
+// own storage format and also a valid pattern for every narrower format:
+// the sign and exponent fields sit in the same place, and the payload is
+// zero, so no rounding is needed.
+//
+// The payload string of nan/nans is accepted and not decoded. 7.12.11.2
+// leaves its interpretation implementation-defined, and the headers only
+// ever pass "" (NAN and SNAN are defined as __builtin_nanf("") and
+// friends), so decoding it would add a code path nothing reaches.
+static Node *parse_math_const(Token **rest, Token *tok, int kind) {
+    Token *start = tok;
+    bool is_nan = false;
+    Type *ty;
+    switch (kind) {
+        case BUILTIN_HUGE_VALF:
+        case BUILTIN_INFF:
+            ty = T.ty_float;
+            break;
+        case BUILTIN_HUGE_VALL:
+        case BUILTIN_INFL:
+            ty = T.ty_ldouble;
+            break;
+        case BUILTIN_NANF:
+            ty = T.ty_float, is_nan = true;
+            break;
+        case BUILTIN_NAN:
+            ty = T.ty_double, is_nan = true;
+            break;
+        case BUILTIN_NANL:
+            ty = T.ty_ldouble, is_nan = true;
+            break;
+        default:
+            ty = T.ty_double;
+            break;  // HUGE_VAL and INF
+    }
+
+    tok = skip(tok->next, TK_LPAREN);
+    if (is_nan) {
+        if (tok->kind != TK_STRLIT) error(start, "\u2018%s\u2019 requires a string literal", str(start->id));
+        tok = tok->next;
+    }
+    *rest = skip(tok, TK_RPAREN);
+
+    Fp128 v = is_nan ? FP128_NAN : FP128_INF;
+
+    Node *node = new_node(ND_NUM, start);
+    node->ty = ty;
+    node->fpval = v;
+    return node;
+}
+
 static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
     Token *start = tok;
     bool is_weak = false;
@@ -1823,6 +1892,18 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             *rest = skip(tok, TK_RPAREN);
             return new_num(is_const_expr(operand), start);
         }
+        // The floating constant producers. Each is folded to a constant
+        // right here; see parse_math_const().
+        case BUILTIN_HUGE_VAL:
+        case BUILTIN_HUGE_VALF:
+        case BUILTIN_HUGE_VALL:
+        case BUILTIN_INF:
+        case BUILTIN_INFF:
+        case BUILTIN_INFL:
+        case BUILTIN_NANF:
+        case BUILTIN_NAN:
+        case BUILTIN_NANL:
+            return parse_math_const(rest, tok, kind);
         case BUILTIN_VA_ARG: {
             // __builtin_va_arg(ap, type): the second operand is a type
             // name, not an expression.
@@ -4131,6 +4212,12 @@ static Node *label(Token **rest, Token *tok) {
             tok = skip(tok, TK_ELLIPSIS);
             val2 = const_expr(&tok, tok);
             val2 = eval_ty(val2, cur_sw->cond->ty);
+            // 6.6.2: "The value of the first constant expression shall be
+            // less than or equal to the value of the second." Both gcc
+            // ("empty range specified") and clang ("empty case range
+            // specified") diagnose this and carry on with a case that
+            // matches nothing, so this warns rather than fails.
+            if (val2 < val1) warning(tk_case, "empty case range specified");
             for (int64_t i = val1; i <= val2; i++) {
                 check_case(i, tk_case);
                 Node *node = new_node(ND_CASE, tk_case);

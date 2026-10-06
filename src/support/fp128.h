@@ -1,23 +1,24 @@
 #ifndef FP128_H
 #define FP128_H
 
-#include "int128.h"
 #include <stdint.h>
+
+#include "int128.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct {
-  uint32_t limb[4];
+    uint32_t limb[4];
 } Fp128;
 
 typedef enum {
-  FP16,  // binary16
-  FP32,  // binary32
-  FP64,  // binary64
-  FP80,  // x86 80bits
-  FP128, // binary128
+    FP16,   // binary16
+    FP32,   // binary32
+    FP64,   // binary64
+    FP80,   // x86 80bits
+    FP128,  // binary128
 } FpFormat;
 
 bool fp128_get_sign(Fp128 v);
@@ -74,6 +75,7 @@ extern const Fp128 FP128_ZERO;
 extern const Fp128 FP128_ONE;
 extern const Fp128 FP128_INF;
 extern const Fp128 FP128_NAN;
+extern const Fp128 FP128_SNAN;
 
 #ifdef __cplusplus
 }

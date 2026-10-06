@@ -1030,6 +1030,13 @@ const Fp128 FP128_ZERO = {{0, 0, 0, 0}};
 const Fp128 FP128_ONE = {{0, 0, 0, 0x3FFF0000u}};
 const Fp128 FP128_INF = {{0, 0, 0, 0x7FFF0000u}};
 const Fp128 FP128_NAN = {{0, 0, 0, 0x7FFF8000u}};
+/* The signaling form: the same exponent and payload as FP128_NAN with the
+ * quiet bit (significand bit 111 = limb[3] bit 15) clear. Because Fp128 is
+ * binary128 storage and the sign/exponent fields are common to every
+ * format, this pattern is also a signaling NaN in binary16/32/64 and x87
+ * 80-bit, whose significands all reach bit 110 and whose quiet bits are all
+ * at or above bit 111. */
+const Fp128 FP128_SNAN = {{0, 0, 0, 0x7FFF4000u}};
 
 static Int256 i256_zero(void) {
     Int256 r;

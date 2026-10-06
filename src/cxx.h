@@ -889,6 +889,22 @@ enum {
     BUILTIN_SUB_OVERFLOW,
     BUILTIN_MUL_OVERFLOW,
 
+    // The floating constant producers behind HUGE_VAL, INFINITY and NAN
+    // (7.12.11.2, F.10.11). They have no runtime behaviour: the parser
+    // folds each call to the constant it names, so neither the folder nor
+    // irgen ever sees one. The SNAN* family is deliberately absent: see
+    // doc/cxx-c2y-plan.md P1b -- fp128_to_fp*_bits() canonicalises every
+    // NaN to the quiet form, so a signaling NaN cannot reach the output.
+    BUILTIN_HUGE_VAL,
+    BUILTIN_HUGE_VALF,
+    BUILTIN_HUGE_VALL,
+    BUILTIN_INF,
+    BUILTIN_INFF,
+    BUILTIN_INFL,
+    BUILTIN_NANF,
+    BUILTIN_NAN,
+    BUILTIN_NANL,
+
     // One past the last kind: the table's length, so nothing has to keep a
     // separate count in step with the enum. Not a builtin itself.
     NUM_BUILTINFN,
