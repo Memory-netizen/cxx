@@ -58,8 +58,8 @@ static int64_t eval2(Node *node, uint32_t *sym);
 static int64_t eval_rval(Node *node, uint32_t *sym);
 Fp128 eval_fp128(Node *node);
 static Int128 eval_int128(Node *node);
-static void array_initializer2(Token **rest, Token *tok, Initializer *init, int i);
-static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Member *mem);
+static void array_initializer2(Token **rest, Token *tok, Initializer *init, int i, bool comma);
+static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Member *mem, bool comma);
 static Member *get_struct_member(Member *mem, Token *tok);
 
 Node *new_node(NodeKind kind, Token *tok) {
@@ -1104,12 +1104,20 @@ static Member *struct_designator(Token **rest, Token *tok, Type *ty) {
     if (tok->kind != TK_IDENT) error(tok, "expected a field designator");
 
     for (Member *mem = ty->members; mem; mem = mem->next) {
-        // Anonymous struct member
-        if (mem->ty->kind == TY_STRUCT && !mem->name) {
-            if (get_struct_member(mem, tok)) {
+        // An anonymous struct or union member: its members are members of
+        // this record too (6.7.2.1p13), so the designator may name one of
+        // them. The token is left where it is -- the caller parses it again
+        // against that member's type, which is what walks a nest of them.
+        if (!mem->name) {
+            // Only the member's own members: get_struct_member() walks on
+            // past the end of the list it is given, so handing it the member
+            // rather than that member's list made a name of a later sibling
+            // look like one this member declares.
+            if (is_record(mem->ty) && get_struct_member(mem->ty->members, tok)) {
                 *rest = start;
                 return mem;
             }
+            // An unnamed bit-field declares no name a designator could use.
             continue;
         }
 
@@ -1133,7 +1141,7 @@ static void designation(Token **rest, Token *tok, Initializer *init) {
         Token *tok2;
         for (int i = begin; i <= end; i++) designation(&tok2, tok, init->child[i]);
 
-        array_initializer2(rest, tok2, init, end + 1);
+        array_initializer2(rest, tok2, init, end + 1, true);
         return;
     }
 
@@ -1141,7 +1149,7 @@ static void designation(Token **rest, Token *tok, Initializer *init) {
         Member *mem = struct_designator(&tok, tok, init->ty);
         designation(&tok, tok, init->child[mem->idx]);
         init->expr = NULL;
-        struct_initializer2(rest, tok, init, mem->next);
+        struct_initializer2(rest, tok, init, mem->next, true);
         return;
     }
 
@@ -1212,7 +1220,15 @@ static void array_initializer1(Token **rest, Token *tok, Initializer *init) {
     return;
 }
 
-static void array_initializer2(Token **rest, Token *tok, Initializer *init, int i) {
+// Fill the rest of a brace the caller is already inside: the elements that
+// follow an initializer which did not open one itself. `comma` says whether
+// the token stands in front of a comma the caller has not consumed -- it does
+// for the continuation after a designator, because the comma between two
+// elements belongs to the list -- while a list opened here starts at its
+// first element. When the list stops at another designator, the token handed
+// back is the one before it, comma included: that is what the caller, which
+// owns the list, still has to consume.
+static void array_initializer2(Token **rest, Token *tok, Initializer *init, int i, bool comma) {
     if (init->is_flexible) {
         int len = count_array_init_elements(tok, init->ty);
         *init = *new_initializer(array_of(init->ty->base, len), false);
@@ -1220,7 +1236,8 @@ static void array_initializer2(Token **rest, Token *tok, Initializer *init, int 
 
     for (; i < init->ty->len && !is_end(tok); i++) {
         Token *start = tok;
-        if (i > 0) tok = skip(tok, TK_COMMA);
+        if (comma) tok = skip(tok, TK_COMMA);
+        comma = true;
         if (tok->kind == TK_LBRACKET || tok->kind == TK_DOT) {
             *rest = start;
             return;
@@ -1257,12 +1274,11 @@ static void struct_initializer1(Token **rest, Token *tok, Initializer *init) {
     return;
 }
 
-static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Member *mem) {
-    bool first = true;
+static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Member *mem, bool comma) {
     for (; mem && !is_end(tok); mem = mem->next) {
         Token *start = tok;
-        if (!first) tok = skip(tok, TK_COMMA);
-        first = false;
+        if (comma) tok = skip(tok, TK_COMMA);
+        comma = true;
         if (tok->kind == TK_LBRACKET || tok->kind == TK_DOT) {
             *rest = start;
             return;
@@ -1327,7 +1343,7 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
         if (tok->kind == TK_LBRACE)
             array_initializer1(rest, tok, init);
         else if (!need_brace)
-            array_initializer2(rest, tok, init, 0);
+            array_initializer2(rest, tok, init, 0, false);
         else
             error(tok, "array initializer must be an initializer list");
         return;
@@ -1345,7 +1361,7 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
             return;
         }
         if (!need_brace)
-            struct_initializer2(rest, tok, init, init->ty->members);
+            struct_initializer2(rest, tok, init, init->ty->members, false);
         else
             error(tok, "invalid initializer");
         return;
@@ -1727,10 +1743,11 @@ static uint32_t get_ident(Token *tok) {
 }
 
 // Interned once at the top of parse(): the anonymous name for
-// compiler-generated temporaries and __func__/__FUNCTION__.
+// compiler-generated temporaries and __func__/__FUNCTION__/__PRETTY_FUNCTION__.
 static uint32_t id_anon;
 static uint32_t id_func;
 static uint32_t id_function;
+static uint32_t id_pretty;
 
 // The one place a builtin is described. Every row names its own kind, so
 // the table's order carries no meaning and cannot drift from the enum: a
@@ -3122,10 +3139,13 @@ static Node *primary(Token **rest, Token *tok) {
                     node->ty = et->is_unsigned ? T.ty_ullong : T.ty_llong;
             }
         } else {
-            // [GNU] "__FUNCTION__" is another name of the standard
-            // "__func__"; the name space entry is the one that says which
-            // of the two spelled this use.
+            // [GNU] "__FUNCTION__" and "__PRETTY_FUNCTION__" are further
+            // names of the standard "__func__"; the name space entry is the
+            // one that says which spelling this use came from. gcc's wording
+            // for both is the same, and so is this.
             if (sc->id == id_function) pedantic(tok, "ISO C does not support ‘__FUNCTION__’ predefined identifier");
+            if (sc->id == id_pretty)
+                pedantic(tok, "ISO C does not support ‘__PRETTY_FUNCTION__’ predefined identifier");
             if (sc->var->is_deprecated) warning(WG_DEPRECATED, tok, "‘%s’ is deprecated", str(sc->var->id));
             // -Wunused-variable is the absence of this: an identifier that
             // never resolves to its variable leaves the flag clear.
@@ -6060,9 +6080,19 @@ note:
 
 static void check_anon_mem(Member *mem1, Member *mem2) {
     for (; mem2; mem2 = mem2->next) {
-        // Anonymous struct member
-        if ((mem2->ty->kind == TY_STRUCT || mem2->ty->kind == TY_UNION) && !mem2->name)
+        // An anonymous struct or union member contributes its own members
+        // to the enclosing record, so they are what has to be looked for.
+        // The member itself has no name, and asking for one -- which is what
+        // this used to do, having no `continue` here -- passed a null token
+        // to get_struct_member(), which dereferenced it.
+        if ((mem2->ty->kind == TY_STRUCT || mem2->ty->kind == TY_UNION) && !mem2->name) {
             check_anon_mem(mem1, mem2->ty->members);
+            continue;
+        }
+
+        // An unnamed bit-field is the only other member without a name, and
+        // it declares nothing that could be declared twice.
+        if (!mem2->name) continue;
 
         // Regular struct member
         Member *exist = get_struct_member(mem1, mem2->name);
@@ -7583,13 +7613,18 @@ static Token *external_declaration(Token *tok) {
 
             //  "__func__" is automatically defined as if
             // static const char __func__[] = "function-name";
-            // [GNU] "__FUNCTION__" is yet another name of "__func__".
+            // [GNU] "__FUNCTION__" and "__PRETTY_FUNCTION__" are further
+            // names of "__func__". In C gcc makes the last one the same
+            // string; clang spells the function's type out ("int f(int)"),
+            // which would need a C declarator printer of its own, so cxx
+            // follows gcc here.
             Type *fn_name = array_of(T.ty_char, str_len(var->id) + 1);
 
             NameSpace *tmp = push_namespace(scope, id_func, SYM_VAR, fn_name, var_name);
             NameSpace *tmp2 = push_namespace(scope, id_function, SYM_VAR, fn_name, var_name);
+            NameSpace *tmp3 = push_namespace(scope, id_pretty, SYM_VAR, fn_name, var_name);
 
-            tmp2->var = tmp->var = new_string_literal(var->id, fn_name);
+            tmp3->var = tmp2->var = tmp->var = new_string_literal(var->id, fn_name);
 
             var->body = compound_stmt2(&tok, tok, true);
 
@@ -7877,6 +7912,7 @@ Module *parse(Token *tok) {
     id_anon = intern("", 0);
     id_func = intern("__func__", 8);
     id_function = intern("__FUNCTION__", 12);
+    id_pretty = intern("__PRETTY_FUNCTION__", 19);
 
     cont_depth = 0;
     brk_depth = 0;

@@ -1756,6 +1756,84 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# --- anonymous members, designators, and __PRETTY_FUNCTION__ ---------
+
+# The members of an anonymous struct or union member are members of the
+# enclosing record (6.7.2.1p13), and a designator may name one of them. Three
+# of the shapes below crashed the parser -- the duplicate-name check walked
+# into an anonymous member's own member list with a null name token -- and the
+# chained designators (`.in.x = 9`, `[0].a = 11`) were refused.
+cat > "$tmp/anon.c" <<'EOF'
+struct A { int tag; struct { int a; union { int b; }; }; };
+struct B { int tag; struct { int a; unsigned : 3; }; };
+struct C { int kind; union { struct { int lhs; int rhs; }; struct { int cond; }; }; int tail; };
+struct D { struct { int a; }; int tail; };
+struct E { int kind; struct { int x, y; } in; };
+struct F { int a, b; };
+int main(void) {
+    struct A a = { .tag = 1, .a = 2, .b = 3 };
+    struct B b = { .tag = 4, .a = 5 };
+    struct C c = { .lhs = 6, .tail = 7 };
+    struct D d = { .tail = 8 };
+    struct E e = { .in.x = 9, .in.y = 10 };
+    struct F v[2] = { [0].a = 11, [1].b = 12 };
+    if (a.tag + a.a + a.b != 6) return 1;
+    if (b.tag + b.a != 9) return 2;
+    if (c.lhs + c.tail != 13) return 3;
+    if (d.tail != 8) return 4;
+    if (e.in.x + e.in.y != 19) return 5;
+    if (v[0].a + v[1].b != 23) return 6;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/anon" "$tmp/anon.c" >/dev/null 2>&1 && "$tmp/anon"; then
+    echo "testing anonymous members and designators run ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing anonymous members and designators run ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
+# A designator that names a sibling of an anonymous member is not one of that
+# member's own names, and a name no member has is still refused.
+bad 'a designator naming no member at all' <<'EOF'
+struct S { int a; struct { int b; }; };
+int f(void) { struct S s = { .nope = 1 }; return s.a; }
+EOF
+
+bad 'a member list without a comma' <<'EOF'
+struct S { int a, b; };
+int f(void) { struct S s = { .a = 1 .b = 2 }; return s.a; }
+EOF
+
+# [GNU] __PRETTY_FUNCTION__ is another name of __func__ -- gcc's reading of
+# it in C, clang spells the signature out -- and glibc's <assert.h> uses it.
+cat > "$tmp/pretty.c" <<'EOF'
+#include <assert.h>
+static const char *name(void) { return __PRETTY_FUNCTION__; }
+int main(void) {
+    assert(1);
+    return name()[0] == 'n' && __func__[0] == 'm' ? 0 : 1;
+}
+EOF
+if "$compiler" -w -o "$tmp/pretty" "$tmp/pretty.c" >/dev/null 2>&1 && "$tmp/pretty"; then
+    echo "testing __PRETTY_FUNCTION__ and glibc's assert ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __PRETTY_FUNCTION__ and glibc's assert ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
+n=$("$compiler" -pedantic -S -o /dev/null "$tmp/pretty.c" 2>&1 | grep -c 'does not support ‘__PRETTY_FUNCTION__’ predefined identifier')
+# Two uses, in fact: the one written here and the one glibc's assert expands.
+if [ "$n" -ge 1 ]; then
+    echo "testing __PRETTY_FUNCTION__ is diagnosed as an extension ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __PRETTY_FUNCTION__ is diagnosed as an extension ... FAILED ($n)"
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then

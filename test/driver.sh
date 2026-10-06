@@ -616,4 +616,19 @@ check -w
 echo '#warning warning' | $compiler -Werror -S -o /dev/null -xc - 2>&1 | grep -q 'error'
 check -Werror
 
+# A child killed by a signal is reported rather than folded into a silent
+# exit 1 -- a crashing cc1 used to leave the user with no diagnostic at all.
+# A stand-in clang that kills itself stands in for the crash.
+mkdir -p "$tmp/bin"
+printf '#!/bin/sh\nkill -SEGV $$\n' > "$tmp/bin/clang"
+chmod +x "$tmp/bin/clang"
+echo 'int main() {}' > "$tmp/crash.c"
+PATH="$tmp/bin:$PATH" $compiler -S -o /dev/null "$tmp/crash.c" 2>&1 | grep -q 'internal compiler error'
+check 'a killed subprocess is reported'
+
+# An ordinary diagnostic is not one: the message says internal compiler error
+# only when something died.
+! echo 'int x = ;' | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'internal compiler error'
+check 'a diagnostic is not an internal error'
+
 echo OK

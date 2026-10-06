@@ -716,6 +716,15 @@ static void run_subprocess(char **argv) {
     while (waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) fatal("waitpid failed: %s", strerror(errno));
     }
+    // A child killed by a signal died without a diagnostic of its own: a
+    // crash in cc1, or in the tools a later stage runs. Saying so is the
+    // difference between a bug report and a compiler that silently refuses
+    // to compile the file -- which is how the three crashes this round fixes
+    // went unnoticed.
+    if (WIFSIGNALED(status)) {
+        fprintf(stderr, "cxx: internal compiler error: %s killed by signal %d\n", argv[0], WTERMSIG(status));
+        exit(1);
+    }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) exit(1);
 }
 
