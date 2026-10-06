@@ -5191,12 +5191,15 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
     if (!is_func_body) {
         enter_scope();
     } else {
-        Scope *scp = scope->next;
-        for (int i = 0; i < scp->vla_num; i++) {
-            cur = cur->next = new_unary(ND_EXPR_STMT, scp->vla_expr[i]->rhs, scp->vla_expr[i]->rhs->tok);
+        // The bounds of a variably modified parameter: once per call, at the
+        // top of the body. The whole assignment is emitted, not just the
+        // expression -- the counter the parameter's type reads is what it
+        // writes.
+        for (int i = 0; i < scope->vla_num; i++) {
+            cur = cur->next = new_unary(ND_EXPR_STMT, scope->vla_expr[i], scope->vla_expr[i]->tok);
             add_type(cur);
         }
-        scp->vla_num = 0;
+        scope->vla_num = 0;
     }
 
     tok = tok->next;
@@ -6522,12 +6525,86 @@ loop_end:
     return ty;
 }
 
+// The symbol a function declarator made for a named parameter. Its prototype
+// scope is gone by the time the definition is parsed, so the definition path
+// finds it here and adopts it -- which is what keeps a bound expression that
+// named an earlier parameter pointing at the parameter the body sees.
+typedef struct ParamSym ParamSym;
+struct ParamSym {
+    Type *ty;
+    Sym *var;
+};
+static ParamSym *param_syms;
+static uint32_t num_param_syms;
+
+static void note_param_sym(Type *ty, Sym *var) {
+    if (!param_syms)
+        param_syms = vnew(8, sizeof(ParamSym));
+    else
+        param_syms = vgrow(param_syms, num_param_syms + 8);
+    param_syms[num_param_syms].ty = ty;
+    param_syms[num_param_syms].var = var;
+    num_param_syms++;
+}
+
+static Sym *param_sym_of(Type *ty) {
+    for (uint32_t i = 0; i < num_param_syms; i++)
+        if (param_syms[i].ty == ty) return param_syms[i].var;
+    return NULL;
+}
+
+// The prototype scope the last function declarator opened, or NULL. A
+// definition takes the bounds it registered over into the function's own
+// scope, where they are evaluated once per call, at the top of the body, with
+// every parameter they may name already in scope. A declaration has no body
+// to run them in: 6.7.6.2p5 treats a non-constant size in prototype scope as
+// `[*]`, so there is nothing to evaluate and the entries go away with the
+// scope.
+static Scope *proto_scope;
+
+// The symbols the last function declarator created (a parameter type's
+// counters, the hidden stack pointer). They are unlinked from `locals` while
+// the declarator is parsed -- a prototype keeps none of them, and a definition
+// relinks them *after* the parameters, which irgen reads as the leading
+// entries of that list.
+static Sym *proto_locals;
+
+static void adopt_proto_locals(void) {
+    for (Sym *v = proto_locals; v;) {
+        Sym *next = v->next;
+        v->next = locals;
+        locals = v;
+        v = next;
+    }
+    proto_locals = NULL;
+}
+
+static void adopt_proto_vla_exprs(void) {
+    if (!proto_scope || !proto_scope->vla_num) return;
+    for (int i = 0; i < proto_scope->vla_num; i++) {
+        scope->vla_expr = vgrow(scope->vla_expr, scope->vla_num + 1);
+        scope->vla_expr[scope->vla_num++] = proto_scope->vla_expr[i];
+    }
+    proto_scope->vla_num = 0;
+}
+
 static Type *func_param(Token **rest, Token *tok, Type *ty) {
     tok = skip(tok, TK_LPAREN);
     if (tok->kind == TK_VOID && tok->next->kind == TK_RPAREN) {
+        // No parameter list, so nothing for a definition to take over either.
+        proto_scope = NULL;
+        proto_locals = NULL;
         *rest = tok->next->next;
         return func_type(ty);
     }
+
+    // 6.2.1p7: a parameter name is in scope from its declaration to the end
+    // of the function declarator. That is this scope, and it ends here.
+    enter_scope();
+    Scope *proto = scope;
+    Sym *saved_locals = locals;
+    proto_scope = NULL;
+    proto_locals = NULL;
 
     uint32_t nparam = 0;
     bool is_variadic = false;
@@ -6574,8 +6651,14 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
                 Type *arr = paramty;
                 paramty = pointer_to(paramty->base, paramty->qual);
                 paramty->name = arr->name;
-                paramty->is_star = arr->is_star;
-                paramty->is_static = arr->is_static;
+                // is_static / is_star share their storage with a VLA's
+                // vla_len / vla_cnt, so reading them off one compares the low
+                // half of a pointer; they only describe a fixed array
+                // declarator anyway.
+                if (arr->kind != TY_VLA) {
+                    paramty->is_star = arr->is_star;
+                    paramty->is_static = arr->is_static;
+                }
             }
             if (paramty->kind == TY_FUNC) {
                 Type *fn = paramty;
@@ -6596,12 +6679,37 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
                 }
             }
 
-            cur = cur->next = copy_type(paramty);
+            Type *copy = copy_type(paramty);
+            // The name is pushed as it is parsed, so that the bounds of the
+            // parameters after it can use it. The symbol is the one a
+            // definition will use for this parameter (the definition path
+            // adopts it), and a declaration simply never adopts it: it is not
+            // linked into any function's locals, so no prototype leaves a
+            // slot behind either.
+            if (copy->name) {
+                uint32_t id = get_ident(copy->name);
+                Sym *pvar = new_var(id, copy);
+                pvar->is_local = true;
+                note_param_sym(copy, pvar);
+                push_namespace(scope, id, SYM_VAR, copy, copy->name)->var = pvar;
+            }
+            cur = cur->next = copy;
             nparam++;
         }
     }
 
     *rest = skip(tok, TK_RPAREN);
+    leave_scope(tok);
+    // What the parameter types made belongs to no function yet; the
+    // definition that follows is the one that can take it over. `locals` goes
+    // back to what it was: a prototype keeps no symbols of its own.
+    if (locals != saved_locals) {
+        proto_locals = locals;
+        locals = saved_locals;
+    }
+    // The outermost declarator finishes last, so this is the parameter list a
+    // definition that follows belongs to.
+    proto_scope = proto;
 
     ty = func_type(ty);
     ty->is_variadic = is_variadic;
@@ -6857,6 +6965,9 @@ static Token *external_declaration(Token *tok) {
             cur_fn->num_lbl = 0;
             locals = NULL;
             enter_scope();
+            // The parameter bounds belong to this function now; the body puts
+            // them at its top, where the parameters they name are in scope.
+            adopt_proto_vla_exprs();
 
             Type *param = ty->params;
             while (param) {
@@ -6867,11 +6978,26 @@ static Token *external_declaration(Token *tok) {
                 // No token: the unused-variable walk keys on one, and a
                 // parameter is -Wunused-parameter's business, not
                 // -Wunused-variable's.
-                Sym *pvar = new_lvar(id, param);
+                // The declarator's own symbol is taken over when it made one,
+                // so a bound that named this parameter refers to the object
+                // the body sees; an unnamed parameter gets a fresh one.
+                Sym *pvar = param_sym_of(param);
+                if (pvar) {
+                    pvar->next = locals;
+                    locals = pvar;
+                } else {
+                    pvar = new_lvar(id, param);
+                }
                 sym_attr_flags(pvar, param->attrs, true);
                 push_namespace(scope, id, SYM_VAR, ty, param->name)->var = pvar;
                 param = param->next;
             }
+            // The declarator's own symbols (a parameter type's counters, the
+            // hidden stack pointer) go in *under* the parameters: `locals` is
+            // reversed once the body is parsed, so what is prepended last
+            // comes out first, and irgen reads the leading entries as the
+            // parameters.
+            adopt_proto_locals();
 
             //  "__func__" is automatically defined as if
             // static const char __func__[] = "function-name";
