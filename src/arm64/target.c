@@ -143,7 +143,7 @@ static int hfa_collect(Type *ty, Type **elem) {
         for (Member *m = ty->members; m; m = m->next) {
             int k = hfa_collect(m->ty, elem);
             if (k < 0) return -1;
-            if (!*elem) *elem = m->ty->kind == TY_FLOAT || m->ty->kind == TY_DOUBLE ? m->ty : NULL;
+            if (!*elem) *elem = is_fp_leaf(m->ty) ? m->ty : NULL;
             n += k;
         }
         return n;
@@ -156,9 +156,12 @@ static int hfa_collect(Type *ty, Type **elem) {
         }
         return n;
     }
-    if (ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE) {
+    if (is_fp_leaf(ty)) {
         if (!*elem) *elem = ty;
-        return ty == *elem ? 1 : -1;
+        // Homogeneous means the same representation, so float and _Float32
+        // count as one element type: they are the same width and the same IR
+        // type, and only their spelling differs.
+        return ty->size == (*elem)->size ? 1 : -1;
     }
     return -1;
 }
@@ -300,6 +303,10 @@ Target T_arm64 = {
     .clang_mabi = NULL,
     .clang_march = NULL,
     .ldouble_is_fp80 = false,
+    .bitint_align = 16,
+    .fp_reg_bits = 128,
+    // AAPCS64 leaves the upper bits of a narrow argument undefined.
+    .ext_bits = 0,
     .name = "arm64",
     .triple = "aarch64-linux-gnu",
     .datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32",

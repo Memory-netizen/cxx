@@ -117,8 +117,12 @@ static bool piece_is_sse(Type *agg, int lo, int hi) {
 
 static bool amd64_is_memory_class(Type *agg) {
     if (agg->size <= 0 || agg->size > 16) return true;
+    // Being aligned to sixteen bytes does not by itself mean memory: __float128
+    // has that alignment and is class SSE, so struct { __float128 } travels in
+    // a pair of XMM registers. An x87 long double is the one such member that
+    // does mean memory, being class X87.
     for (Member *m = agg->members; m; m = m->next)
-        if (m->ty->align > 8) return true;
+        if (m->ty->kind == TY_LDOUBLE && T.ldouble_is_fp80) return true;
     return false;
 }
 
@@ -131,6 +135,22 @@ static void amd64_classify_aggregate(Type *agg, AggClass *out) {
     // value and must never be expanded into the pieces of what it points at.
     if (!agg || (agg->kind != TY_STRUCT && agg->kind != TY_UNION)) return;
     if (amd64_is_memory_class(agg)) return;
+
+    // A lone 128-bit float fills both eightbytes and travels as one value of
+    // its own type -- class SSE,SSEUP, which is how SysV passes anything that
+    // needs a register pair. Spelled as a pair of doubles it would reach the
+    // same registers, but the signature would not say fp128.
+    if (agg->size == 16 && agg->members && !agg->members->next) {
+        Type *mt = agg->members->ty;
+        bool lone128 = is_flonum(mt) && mt->size == 16 && !(mt->kind == TY_LDOUBLE && T.ldouble_is_fp80);
+        if (agg->members->offset == 0 && lone128) {
+            out->npiece = 1;
+            out->piece[0].off = 0;
+            out->piece[0].size = 16;
+            out->piece[0].ty = mt;
+            return;
+        }
+    }
 
     int n = (agg->size + 7) / 8;
     out->npiece = n;
@@ -162,6 +182,17 @@ static void amd64_classify_aggregate(Type *agg, AggClass *out) {
         out->piece[i].size = sz;
         out->piece[i].ty = ty;
     }
+}
+
+// SysV AMD64: a struct holding nothing but an x87 long double is passed in
+// memory and returned in st(0), as an x86_fp80. The class is the same either
+// way -- X87 -- but the two sides of a call read it differently.
+static Type *amd64_agg_ret_value(Type *agg) {
+    if (agg->size != 16 || !agg->members || agg->members->next) return NULL;
+    Type *mt = agg->members->ty;
+    if (agg->members->offset != 0) return NULL;
+    if (mt->kind != TY_LDOUBLE || !T.ldouble_is_fp80) return NULL;
+    return mt;
 }
 
 static void classify_publish(void) {}
@@ -334,6 +365,11 @@ Target T_amd64 = {
     .llvm_features = NULL,
     .llvm_abi = NULL,
     .ldouble_is_fp80 = true,
+    .bitint_align = 8,
+    // An SSE register is 128 bits wide, but a 128-bit float takes a pair.
+    .fp_reg_bits = 64,
+    // SysV AMD64 extends everything narrower than int.
+    .ext_bits = 32,
     .name = "amd64",
     .triple = "x86_64-linux-gnu",
     .datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
@@ -368,6 +404,7 @@ Target T_amd64 = {
     .classify_aggregate = amd64_classify_aggregate,
     .classify_publish = classify_publish,
     .pieces_type = amd64_pieces_type,
+    .agg_ret_value = amd64_agg_ret_value,
     .va_arg_ops_for_mixed = amd64_va_arg_mixed,
     .abi_param_slots = amd64_param_slots,
     .agg_byval_param = true,

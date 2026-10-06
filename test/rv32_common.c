@@ -298,16 +298,20 @@ int ext3 = 7;
 int ext_fn1(int x) { return x; }
 int ext_fn2(int x) { return x; }
 
-int false_fn() { return 512; }
-int true_fn() { return 513; }
-int char_fn() { return (2 << 8) + 3; }
-int short_fn() { return (2 << 16) + 5; }
+/* These return the types function.c declares them with, so the calls are well
+ * defined and the truncation is the one the return type asks for rather than
+ * whatever a backend makes of a declaration that disagrees with the
+ * definition. */
+_Bool false_fn() { return 0; }
+_Bool true_fn() { return 513; }
+char char_fn() { return (2 << 8) + 3; }
+short short_fn() { return (2 << 16) + 5; }
 
-int uchar_fn() { return (2 << 10) - 1 - 4; }
-int ushort_fn() { return (2 << 20) - 1 - 7; }
+unsigned char uchar_fn() { return (2 << 10) - 1 - 4; }
+unsigned short ushort_fn() { return (2 << 20) - 1 - 7; }
 
-int schar_fn() { return (2 << 10) - 1 - 4; }
-int sshort_fn() { return (2 << 20) - 1 - 7; }
+signed char schar_fn() { return (2 << 10) - 1 - 4; }
+short sshort_fn() { return (2 << 20) - 1 - 7; }
 
 int add_all(int n, ...) {
   va_list ap;

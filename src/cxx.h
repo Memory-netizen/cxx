@@ -190,10 +190,29 @@ struct Target {
     uint64_t long_max, ulong_max;
     uint64_t llong_max;
     bool ldouble_is_fp80;  // x87 80-bit (amd64) vs binary128 (others)
-    char *llvm_features;   // target-features attribute for LLVM codegen
-    char *llvm_abi;        // "target-abi" module flag (e.g. "lp64d")
-    char *clang_mabi;      // -mabi driver flag matching llvm_abi (bare metal)
-    char *clang_march;     // -march driver flag matching llvm_features
+    // The alignment of _BitInt(N) for N above 64 bits. Such a type is sixteen
+    // bytes everywhere, but AAPCS64 aligns it to sixteen and the other targets
+    // to eight, which decides whether a struct holding one is 24 bytes or 32.
+    int bitint_align;
+    // The width of one floating-point register, in bits: the widest floating
+    // type a single register can carry, and so the widest one an ABI can hand
+    // over as a leaf. AAPCS64 has 128-bit SIMD registers, SysV AMD64's SSE
+    // registers are 128 bits but a 128-bit float takes a register pair, and
+    // RISC-V's are 64.
+    int fp_reg_bits;
+    // How this ABI extends a narrow integer argument or result. The IR marks
+    // such a value signext or zeroext so that the caller and the callee agree
+    // on what the upper bits hold; leaving the mark off where the ABI defines
+    // them makes each side extend defensively instead.
+    //   ext_bits  -- plain integers narrower than this many bits are marked
+    //   ext_bitint -- every _BitInt is marked whatever its width
+    // Zero and false mean the ABI leaves the upper bits undefined (AAPCS64).
+    int ext_bits;
+    bool ext_bitint;
+    char *llvm_features;  // target-features attribute for LLVM codegen
+    char *llvm_abi;       // "target-abi" module flag (e.g. "lp64d")
+    char *clang_mabi;     // -mabi driver flag matching llvm_abi (bare metal)
+    char *clang_march;    // -march driver flag matching llvm_features
     char *predef;
 
     // This target's va_arg policy (va_arg_ops) for a requested type; defined in its
@@ -218,6 +237,12 @@ struct Target {
     // would name a type it never defines.
     void (*classify_publish)(void);
     Type *(*pieces_type)(Type *agg);
+    // The single value an aggregate is *returned* as, when the ABI hands it
+    // back in a register even though an argument of the same type goes in
+    // memory. SysV AMD64 is the reason: an x87 long double comes back in
+    // st(0) as x86_fp80. NULL when the classifier's answer covers returns
+    // too, which is every other case.
+    Type *(*agg_ret_value)(Type *agg);
     // The va_arg policy for an aggregate whose pieces travel in different
     // register files, or NULL when the target has none: such a type needs a
     // second cursor and a second save area, which the single-file tables do
@@ -261,6 +286,9 @@ extern Type *f128;
 // Helpers for the new arithmetic types (type.c)
 FpFormat fmt_of(Type *ty);
 int bitint_width(Type *ty);
+// The _BitInt table is shared and statically built, so the one field that
+// depends on the target is corrected once the target has been chosen.
+void bitint_align_wide(int align);
 bool is_bitint128(Type *ty);
 int64_t norm_bits(int64_t v, int width, bool is_unsigned);
 
@@ -1086,6 +1114,15 @@ bool is_bool(Type *ty);
 bool is_char(Type *ty);
 bool is_integer(Type *ty);
 bool is_flonum(Type *ty);
+// A floating type that one floating-point register can carry, and so one an
+// ABI can hand over as a leaf in a register of its own. The IEC 60559
+// interchange types are the same widths under other names, so they qualify
+// exactly where float and double do; a 128-bit float needs a 128-bit
+// register, and an x87 long double is not in a register file at all.
+bool is_fp_leaf(Type *ty);
+// The extension mark an integer argument or result carries in the IR, or NULL
+// when this ABI leaves the upper bits undefined.
+char *ext_attr(Type *ty);
 bool is_interchange(Type *ty);
 bool is_fpval(Type *ty);
 bool is_arith(Type *ty);

@@ -88,6 +88,11 @@ Target T_rv32 = {
     .clang_mabi = "ilp32d",
     .clang_march = "rv32imafdc",
     .ldouble_is_fp80 = false,
+    .bitint_align = 8,
+    .fp_reg_bits = 64,
+    // RISC-V extends everything narrower than XLEN, and every _BitInt.
+    .ext_bits = 32,
+    .ext_bitint = true,
     .name = "rv32",
     .triple = "riscv32-linux-gnu",
     .datalayout = "e-m:e-p:32:32-i64:64-n32-S128",
@@ -580,6 +585,11 @@ Target T_rv32b = {
     .clang_mabi = "ilp32",
     .clang_march = "rv32imac_zicsr",
     .ldouble_is_fp80 = false,
+    .bitint_align = 8,
+    .fp_reg_bits = 64,
+    // RISC-V extends everything narrower than XLEN, and every _BitInt.
+    .ext_bits = 32,
+    .ext_bitint = true,
     .name = "rv32b",
     .triple = "riscv32-none-elf",
     .datalayout = "e-m:e-p:32:32-i64:64-n32-S128",

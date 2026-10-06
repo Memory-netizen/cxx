@@ -68,7 +68,7 @@ static void rv_collect(Type *ty, int off, RvLeaves *acc) {
         acc->leaf[acc->n].ty = ty;
     }
     acc->n++;
-    if (ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE) acc->fp = true;
+    if (is_fp_leaf(ty)) acc->fp = true;
 }
 
 // An integer type `bytes` wide that prints as iN. The widths are not all
@@ -103,7 +103,7 @@ static void rv_classify(Type *agg, AggClass *out, bool int_only) {
         bool ok = true;
         for (int i = 0; i < lv.n; i++) {
             Type *lt = lv.leaf[i].ty;
-            bool fp = lt->kind == TY_FLOAT || lt->kind == TY_DOUBLE;
+            bool fp = is_fp_leaf(lt);
             // A soft-float ABI has no FP registers to send a float to, and an
             // integer leaf has to fit the one register it would take.
             if (fp && T.agg_no_fp) ok = false;

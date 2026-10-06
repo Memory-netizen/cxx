@@ -1050,7 +1050,17 @@ static bool is_agg(Type *ty) { return ty && (ty->kind == TY_STRUCT || ty->kind =
 // one is written through a pointer the caller supplies, and the function
 // itself returns nothing.
 static void print_ret_type(Type *ty) {
+    // A return value carries its mark before the type: signext i8.
+    char *ext = ext_attr(ty);
+    if (ext) fprintf(out_file, "%s ", ext);
     if (abi_lowering() && is_agg(ty)) {
+        // A value the ABI returns in a register, though an argument of the
+        // same type goes in memory.
+        Type *scalar = T.agg_ret_value ? T.agg_ret_value(ty) : NULL;
+        if (scalar) {
+            print_type(scalar);
+            return;
+        }
         AggClass c;
         T.classify_aggregate(ty, &c);
         if (c.npiece == 0) {
@@ -1137,6 +1147,9 @@ static void print_param_type(Type *ty, int i) {
         return;
     }
     print_type(ty);
+    // A scalar parameter carries its mark after the type: i8 signext %0.
+    char *ext = ext_attr(ty);
+    if (ext) fprintf(out_file, " %s", ext);
 }
 
 void dump_fn(Sym *fn) {

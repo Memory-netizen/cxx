@@ -181,6 +181,27 @@ bool is_flonum(Type *ty) {
            ty->kind == TY_F32 || ty->kind == TY_F64 || ty->kind == TY_F128;
 }
 
+char *ext_attr(Type *ty) {
+    if (!is_integer(ty)) return NULL;
+    // The IR names a _BitInt by its declared width, so that is the width the
+    // rule is about; for every other integer the printed type is the storage.
+    bool bitint = (ty->kind & TY_BITINT) != 0;
+    if (bitint && T.ext_bitint) return ty->is_unsigned ? "zeroext" : "signext";
+    // A _BitInt is named by its declared width and every other integer by its
+    // storage, but both are the width the printed type says.
+    int bits = bitint ? bitint_width(ty) : ty->size * 8;
+    if (bits >= T.ext_bits) return NULL;
+    return ty->is_unsigned ? "zeroext" : "signext";
+}
+
+bool is_fp_leaf(Type *ty) {
+    if (!is_flonum(ty)) return false;
+    // An x87 long double is passed in memory, not in a register file, however
+    // wide it is.
+    if (ty->kind == TY_LDOUBLE && T.ldouble_is_fp80) return false;
+    return ty->size * 8 <= T.fp_reg_bits;
+}
+
 // The IEC 60559 interchange types (_Float16/32/64/128) — distinct,
 // incompatible types (C23 6.2.5). Excludes long double.
 bool is_interchange(Type *ty) {
@@ -213,6 +234,13 @@ FpFormat fmt_of(Type *ty) {
 }
 
 int bitint_width(Type *ty) { return ty->kind & 0xFFF; }
+
+void bitint_align_wide(int align) {
+    for (int w = 65; w <= 128; w++) {
+        bitint[w][0]->align = align;
+        bitint[w][1]->align = align;
+    }
+}
 
 bool is_bitint128(Type *ty) { return (ty->kind & TY_BITINT) && bitint_width(ty) > 64; }
 

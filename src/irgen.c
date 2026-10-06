@@ -7,6 +7,7 @@ static Blk dummy;
 static Blk *tail;
 static Blk *unreach = &(Blk){};
 static bool abi_lowering(void);
+static Type *abi_ret_scalar(Type *ty);
 static bool abi_sret_result(Type *ty);
 static int tmp_id;
 // Block labels live in their own numbering space: the output prefixes them
@@ -1425,13 +1426,18 @@ static Ref gen_expr(Node *node) {
             bool sret = is_record && abi_sret_result(node->ty);
             Type *ret_abi = node->ty;
             if (is_record && !sret && abi_lowering()) {
+                Type *scalar = abi_ret_scalar(node->ty);
                 AggClass c;
-                T.classify_aggregate(node->ty, &c);
-                if (c.npiece == 1)
-                    ret_abi = c.piece[0].ty;
-                else if (T.pieces_type) {
-                    Type *rec = T.pieces_type(node->ty);
-                    if (rec) ret_abi = rec;
+                if (scalar)
+                    ret_abi = scalar;
+                else {
+                    T.classify_aggregate(node->ty, &c);
+                    if (c.npiece == 1)
+                        ret_abi = c.piece[0].ty;
+                    else if (T.pieces_type) {
+                        Type *rec = T.pieces_type(node->ty);
+                        if (rec) ret_abi = rec;
+                    }
                 }
             }
             Ref slot = R;
@@ -2197,9 +2203,20 @@ static void gen_continue(Node *n) {
 // Whether `ty` is returned through a hidden pointer (the ABI memory class).
 static bool abi_lowering(void) { return T.classify_aggregate != NULL; }
 
+// The single value an aggregate comes back as, or NULL when the classifier's
+// answer already says how it is returned.
+static Type *abi_ret_scalar(Type *ty) {
+    if (!abi_lowering() || !T.agg_ret_value) return NULL;
+    if (ty->kind != TY_STRUCT && ty->kind != TY_UNION) return NULL;
+    return T.agg_ret_value(ty);
+}
+
 static bool abi_sret_result(Type *ty) {
     if (!abi_lowering()) return false;
     if (ty->kind != TY_STRUCT && ty->kind != TY_UNION) return false;
+    // A value returned in a register is not written through a pointer, whatever
+    // the class the same type has as an argument.
+    if (abi_ret_scalar(ty)) return false;
     AggClass c;
     T.classify_aggregate(ty, &c);
     return c.npiece == 0;
@@ -2318,6 +2335,16 @@ static void gen_ret(Node *n) {
                 rec = rt;
             else
                 rec = c.npiece == 1 ? c.piece[0].ty : (T.pieces_type ? T.pieces_type(rt) : NULL);
+            // A value the ABI returns in a register is the aggregate read
+            // whole, which the one-piece path already does once told the type.
+            Type *scalar = abi_ret_scalar(rt);
+            if (scalar) {
+                rec = scalar;
+                c.npiece = 1;
+                c.piece[0].off = 0;
+                c.piece[0].size = rt->size;
+                c.piece[0].ty = scalar;
+            }
             if (rec) {
                 // Register class: the caller receives the flattened pieces,
                 // so that is what the result slot holds.
@@ -2449,7 +2476,10 @@ Module *irgen(Module *md) {
         bool ret_sret = is_valid && abi_sret_result(ty);
         curf->abi_sret = ret_sret;
         Type *ret_abi = ty;
-        if (is_valid && !ret_sret && abi_lowering() && (ty->kind == TY_STRUCT || ty->kind == TY_UNION)) {
+        Type *ret_scalar = is_valid ? abi_ret_scalar(ty) : NULL;
+        if (ret_scalar) {
+            ret_abi = ret_scalar;
+        } else if (is_valid && !ret_sret && abi_lowering() && (ty->kind == TY_STRUCT || ty->kind == TY_UNION)) {
             AggClass c;
             T.classify_aggregate(ty, &c);
             // The type the signature prints, so the two agree: a

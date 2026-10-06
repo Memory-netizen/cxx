@@ -8,6 +8,13 @@ extern Target T_rv64;
 extern Target T_rv32;
 extern Target T_rv32b;
 
+// Choosing a target fixes more than the target table itself: a couple of
+// types take a field from it, and they are process-wide.
+static void select_target(Target *t) {
+    T = *t;
+    bitint_align_wide(T.bitint_align);
+}
+
 typedef enum {
     FILE_NONE,
     FILE_C,
@@ -471,7 +478,7 @@ static void parse_args(int argc, char **argv) {
                 fprintf(stderr, "unknown target '%s'\n", t_name);
                 exit(1);
             }
-            T = *t;
+            select_target(t);
             continue;
         }
 
@@ -798,7 +805,7 @@ static FileType get_file_type(char *filename) {
 
 int main(int argc, char **argv) {
     atexit(cleanup);
-    T = Deftgt;
+    select_target(&Deftgt);
 
     input_paths = emalloc(argc * sizeof(char *));
     tmpfiles = emalloc(argc * 4 * sizeof(char *));

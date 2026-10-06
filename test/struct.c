@@ -1,5 +1,16 @@
 #include "test.h"
 
+// The alignment of a _BitInt wider than one word. AAPCS64 gives such a type
+// sixteen-byte alignment; SysV AMD64 and RISC-V cap it at the long long
+// alignment, as clang did everywhere before LLVM 105dd60 ("[Clang][AArch64]
+// Fixed incorrect _BitInt alignment", #90602). The size is sixteen either
+// way, so this one number decides the layout of any struct holding one.
+#ifdef __aarch64__
+#define WIDE_BITINT_ALIGN 16
+#else
+#define WIDE_BITINT_ALIGN 8
+#endif
+
 int main() {
     ASSERT(1, ({
                struct {
@@ -390,7 +401,7 @@ int main() {
 
     // === structs with wide _BitInt and interchange float members ===
     ASSERT(16, sizeof(struct { _BitInt(77) x; }));
-    ASSERT(24, sizeof(struct {
+    ASSERT(16 + WIDE_BITINT_ALIGN, sizeof(struct {
                _BitInt(77) x;
                char y;
            }));
@@ -411,7 +422,7 @@ int main() {
     ASSERT(2, _Alignof(struct { _Float16 h; }));
     ASSERT(1, _Alignof(struct { _BitInt(3) b; }));
     ASSERT(2, _Alignof(struct { _BitInt(9) b; }));
-    ASSERT(8, _Alignof(struct { _BitInt(77) b; }));
+    ASSERT(WIDE_BITINT_ALIGN, _Alignof(struct { _BitInt(77) b; }));
 
     printf("OK\n");
     return 0;
