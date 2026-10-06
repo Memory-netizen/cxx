@@ -102,15 +102,46 @@ static VaArgOps va_arg_mem16 = {
     .mem_align = 16,
 };
 
+// A scalar an aggregate is made of, with the offset it sits at.
+typedef struct {
+    int off;
+    Type *ty;
+} Amd64Leaf;
+
+// Flatten an aggregate into its scalars. An array contributes its elements and
+// a nested record its members: the classification never sees the array itself,
+// only what it holds. A union contributes every member, which is what makes an
+// eightbyte holding one integer member INTEGER.
+static void amd64_leaves(Type *ty, int off, Amd64Leaf *out, int *n, int max) {
+    switch (ty->kind) {
+    case TY_STRUCT:
+    case TY_UNION:
+        for (Member *m = ty->members; m; m = m->next) amd64_leaves(m->ty, off + m->offset, out, n, max);
+        return;
+    case TY_ARRAY: {
+        int esz = ty->base->size;
+        if (esz <= 0) return;
+        for (int o = 0; o < ty->size; o += esz) amd64_leaves(ty->base, off + o, out, n, max);
+        return;
+    }
+    default:
+        if (*n < max) {
+            out[*n].off = off;
+            out[*n].ty = ty;
+            (*n)++;
+        }
+        return;
+    }
+}
+
 // One piece is SSE class when every scalar in it is a floating type; any
 // integer member makes the whole piece INTEGER (SysV AMD64 3.2.3).
-static bool piece_is_sse(Type *agg, int lo, int hi) {
-    for (Member *m = agg->members; m; m = m->next) {
-        int mlo = m->offset;
-        int mhi = m->offset + m->ty->size;
-        if (mhi <= lo || mlo >= hi) continue;
-        if (m->ty->kind == TY_STRUCT || m->ty->kind == TY_UNION) return piece_is_sse(m->ty, lo - mlo, hi - mlo);
-        if (!is_flonum(m->ty)) return false;
+static bool piece_is_sse(Amd64Leaf *leaves, int n, int lo, int hi) {
+    for (int i = 0; i < n; i++) {
+        int llo = leaves[i].off;
+        int lhi = llo + leaves[i].ty->size;
+        if (lhi <= lo || llo >= hi) continue;
+        if (!is_flonum(leaves[i].ty)) return false;
     }
     return true;
 }
@@ -152,18 +183,24 @@ static void amd64_classify_aggregate(Type *agg, AggClass *out) {
         }
     }
 
+    // At most sixteen bytes are classified here, so there is a scalar for
+    // every byte of them and never more.
+    Amd64Leaf leaves[16];
+    int nleave = 0;
+    amd64_leaves(agg, 0, leaves, &nleave, 16);
+
     int n = (agg->size + 7) / 8;
     out->npiece = n;
     for (int i = 0; i < n; i++) {
         int lo = i * 8;
         int hi = lo + 8 < agg->size ? lo + 8 : agg->size;
-        // Width is that of the last member ending inside this piece.
+        // Width is that of the last scalar ending inside this piece.
         int end = 0;
-        bool sse = piece_is_sse(agg, lo, hi);
-        for (Member *m = agg->members; m; m = m->next) {
-            int mhi = m->offset + m->ty->size;
-            if (mhi <= lo || m->offset >= hi) continue;
-            if (mhi > end) end = mhi;
+        bool sse = piece_is_sse(leaves, nleave, lo, hi);
+        for (int k = 0; k < nleave; k++) {
+            int lhi = leaves[k].off + leaves[k].ty->size;
+            if (lhi <= lo || leaves[k].off >= hi) continue;
+            if (lhi > end) end = lhi;
         }
         if (!end) end = hi;
         int sz = end - lo;

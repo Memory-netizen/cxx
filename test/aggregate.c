@@ -199,6 +199,37 @@ static int va_hasptr(int n, ...) {
     return v.p->a * 1 + v.p->b * 2 + v.k * 4;
 }
 
+struct ARD {
+    double a[2];
+};
+struct ARI {
+    int a[3];
+};
+
+static struct ARD mk_ard(double x, double y) {
+    struct ARD v;
+    v.a[0] = x;
+    v.a[1] = y;
+    return v;
+}
+
+static int sum_ard(struct ARD v) { return (int)(v.a[0] * 1 + v.a[1] * 10); }
+
+/* Both directions: the record goes out and comes back. */
+static int agg_ard(double x, double y) { return sum_ard(mk_ard(x, y)); }
+
+static int agg_ard2(double x, double y) {
+    struct ARD v = mk_ard(x, y);
+    struct ARD w = v;
+    return sum_ard(w);
+}
+
+static int agg_ari(void) {
+    struct ARI v = {{1, 2, 3}};
+    struct ARI w = v;
+    return w.a[0] + w.a[1] + w.a[2];
+}
+
 int main() {
     struct S8i s8 = {1, 2};
     struct S16d s16d = {3.0, 4.0};
@@ -249,6 +280,17 @@ int main() {
     ASSERT(1 * 3 + 2 * 5, p_void(&s8));
     ASSERT(1 + 4 + 20, hp(h));
     ASSERT(1 + 4 + 20, va_hasptr(1, h));
+
+    /* ---- array members ----
+     * The classification sees the elements, never the array: a pair of
+     * doubles is SSE on amd64, not one integer eightbyte. */
+    ASSERT(21, ({
+               struct { double a[2]; } v = {{1.0, 2.0}};
+               (int)(v.a[0] * 1 + v.a[1] * 10);
+           }));
+    ASSERT(21, agg_ard(1.0, 2.0));
+    ASSERT(21, agg_ard2(1.0, 2.0));
+    ASSERT(6, agg_ari());
 
     printf("OK\n");
     return 0;
