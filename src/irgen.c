@@ -256,6 +256,15 @@ static Ref gen_addr(Node *node) {
             Ref addr = gen_addr(node->lhs);
             addr.ty = pointer_to(node->ty, 0);
             Ref idx = gen_expr(node->rhs);
+            // A subscript means the pointer arithmetic `*(E1 + E2)`, and the
+            // index has to reach LLVM as a pointer-sized value: a GEP index
+            // *narrower* than the pointer is sign-extended, so an
+            // `unsigned char` index of 200 becomes an offset of -56 elements
+            // and the access lands before the array. cxx's own
+            // `op_table[tok->kind]` has exactly that shape -- `Token.kind` is
+            // a uint8_t, and every kind that matters is >= 128 -- which is why
+            // the compiler cxx built could not parse `&&` or `static`.
+            if (node->rhs->ty->size < T.ty_long->size) idx = cast(idx, node->rhs->ty, T.ty_long);
             Ref gep_ops[] = {addr, idx};
             Ref dst = TMP(tmp_id++, pointer_to(node->ty, 0));
             new_ins(IR_GEP, dst, gep_ops, 2);

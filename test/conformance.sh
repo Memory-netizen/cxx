@@ -1885,6 +1885,41 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# --- a subscript's index is pointer-sized -----------------------------
+
+# C2y 6.5.3.2 makes `E1[E2]` designate the element `*(E1 + E2)` would, so the
+# index takes part in the address computation at the pointer's width. It did
+# not: the index kept its own type, and an `unsigned char` index of 200 reached
+# LLVM as an i8 GEP index -- which LLVM *sign*-extends, so the access landed
+# 224 bytes before the array. That is the shape of cxx's own
+# `op_table[tok->kind]` (`Token.kind` is a uint8_t and every kind that matters
+# is >= 128), which is why the compiler cxx built could not parse `&&`, `==`,
+# `static`, or a single system header.
+cat > "$tmp/subidx.c" <<'EOF'
+int tbl[256];
+int get(unsigned char i) { return tbl[i]; }
+int viaptr(unsigned char i) { return *(tbl + i); }
+int main(void) {
+    unsigned char i = 200;
+    unsigned int big = 3000000000u;
+    tbl[200] = 7;
+    if (get(200) != 7) return 1;
+    if (get(i) != 7) return 2;
+    if (tbl[i] != 7) return 3;
+    if (tbl[(unsigned char)200] != 7) return 4;
+    if (viaptr(i) != 7) return 5;
+    if (tbl[big - 3000000000u + 200u] != 7) return 6;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/subidx" "$tmp/subidx.c" >/dev/null 2>&1 && "$tmp/subidx"; then
+    echo "testing a narrow unsigned subscript reaches its element ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a narrow unsigned subscript reaches its element ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then
