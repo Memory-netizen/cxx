@@ -270,6 +270,7 @@ static const struct {
     {"unused-function", WG_UNUSED_FUNCTION},
     {"unused-const-variable", WG_UNUSED_CONST_VARIABLE},
     {"static-local-in-inline", WG_STATIC_LOCAL_IN_INLINE},
+    {"tentative-definition-array", WG_TENTATIVE_DEFINITION_ARRAY},
     {"implicit-function-declaration", WG_IMPLICIT_FUNCTION_DECLARATION},
 };
 

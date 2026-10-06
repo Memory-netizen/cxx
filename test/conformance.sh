@@ -1361,6 +1361,82 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# --- 6.9.2p2: arrays left without a length ----------------------------
+
+# A tentative definition whose type is still an array of unknown size at the
+# end of the unit has one element, and the object is emitted with that
+# length: the second unit declares extern int arr[1] and both agree.
+cat > "$tmp/tent_def.c" <<'EOF'
+int arr[];
+int *p = arr;
+EOF
+cat > "$tmp/tent_use.c" <<'EOF'
+extern int arr[1];
+int main(void) { arr[0] = 7; return arr[0] - 7; }
+EOF
+if "$compiler" -w -o "$tmp/tent" "$tmp/tent_def.c" "$tmp/tent_use.c" > "$tmp/log" 2>&1 && "$tmp/tent"; then
+    echo "testing a tentative array definition holds one element ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a tentative array definition holds one element ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# The assumption is announced once per such array -- and only for those: an
+# initializer, an explicit length, or a later declaration that completes the
+# type all leave the type known by the end of the unit.
+cat > "$tmp/tent_warn.c" <<'EOF'
+int arr[];
+int done[] = {1, 2, 3};
+int sized[4];
+int late[];
+int late[10];
+EOF
+w=$("$compiler" -S -o /dev/null "$tmp/tent_warn.c" 2>&1 | grep -c 'assumed to have one element')
+n=$("$compiler" -Wno-tentative-definition-array -S -o /dev/null "$tmp/tent_warn.c" 2>&1 | grep -c 'assumed to have one element')
+if [ "$w" -eq 1 ] && [ "$n" -eq 0 ]; then
+    echo "testing the one-element assumption is diagnosed ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the one-element assumption is diagnosed ... FAILED ($w warnings, $n with -Wno)"
+    n_fail=$((n_fail + 1))
+fi
+
+# An extern declaration is not a definition, so there is no length to
+# assume. LLVM has no global of unknown size, so it is declared with the
+# length zero -- the one clang writes there too.
+cat > "$tmp/tent_decl.c" <<'EOF'
+extern int arr[];
+int main(void) { return 0; }
+EOF
+if "$compiler" -w -S -emit-llvm -o "$tmp/tent_decl.ll" "$tmp/tent_decl.c" > "$tmp/log" 2>&1 &&
+    grep -q 'external global \[0 x i32\]' "$tmp/tent_decl.ll"; then
+    echo "testing an extern array declaration is emitted with no length ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing an extern array declaration is emitted with no length ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# A block scope definition has no tentative rule to lean on: it needs a size
+# or an initializer (6.7.9), which both references diagnose.
+bad "an array definition in a block needs a size" <<'EOF'
+int main(void) { int arr[]; return 0; }
+EOF
+
+bad "a static array in a block needs a size" <<'EOF'
+int main(void) { static int arr[]; return 0; }
+EOF
+
+# 6.7.6.2p1: an array's element type has to be complete.
+bad "an array of incomplete element type" <<'EOF'
+struct S;
+struct S arr[];
+int main(void) { return 0; }
+EOF
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then

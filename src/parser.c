@@ -4088,6 +4088,14 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             cur = cur->next = expr;
         }
         scope->vla_num = 0;
+        // 6.7.6.2p1: the element type of an array shall be complete.
+        if (var->ty->kind == TY_ARRAY && var->ty->base->size < 0) error(var_name, "array has incomplete element type");
+        // A definition of an array of unknown size needs an initializer to
+        // give it one (6.7.9); 6.9.2p2's one-element assumption is for
+        // tentative definitions, which only file scope has. Both references
+        // diagnose the bare form here.
+        if (!is_extern && var->ty->kind == TY_ARRAY && var->ty->len < 0)
+            error(var_name, "definition of variable with array type needs an explicit size or an initializer");
         if (var->ty->size < 0 && (var->ty->kind != TY_ARRAY && var->ty->kind != TY_VLA))
             error(var_name, "variable ‘%s’ has incomplete type", str(var_name->id));
     } while (match(&tok, tok, TK_COMMA));
@@ -6466,6 +6474,8 @@ static Token *external_declaration(Token *tok) {
             if (is_fn) note_inline_decl(var, fspec, sclass);
             sym_attr_flags(var, attrs, false);
             sym_attr_flags(var, ty->attrs, true);
+            if (var->ty->kind == TY_ARRAY && var->ty->base->size < 0)
+                error(var_name, "array has incomplete element type");
             if (var->ty->size < 0 && (var->ty->kind != TY_ARRAY && var->ty->kind != TY_VLA))
                 error(var_name, "variable ‘%s’ has incomplete type", str(var_name->id));
         }
@@ -6477,6 +6487,24 @@ static Token *external_declaration(Token *tok) {
             error(tok, "expected ‘;’ after top level declarator");
     note:
         diag_exit("note", ns->loc, "previous definition is here");
+    }
+}
+
+// 6.9.2p2: the type of a tentative definition is the composite type of
+// its declarations as of the end of the translation unit. When that is
+// still an array of unknown size, gcc and clang assume one element and say
+// so -- and the object has to be emitted with some length, because a global
+// of unknown size cannot be written down in LLVM IR at all.
+static void complete_tentative_arrays(void) {
+    for (Sym *sym = globals; sym; sym = sym->next) {
+        if (sym->is_function || !is_user_global(sym)) continue;
+        // An extern declaration is not a definition, so there is nothing to
+        // complete; it is emitted as an array of length zero instead.
+        if (sym->sclass & SC_EXTERN) continue;
+        if (sym->ty->kind != TY_ARRAY || sym->ty->len >= 0) continue;
+
+        sym->ty = array_of(sym->ty->base, 1);
+        warning(WG_TENTATIVE_DEFINITION_ARRAY, sym->tok, "tentative array definition assumed to have one element");
     }
 }
 
@@ -6630,6 +6658,7 @@ Module *parse(Token *tok) {
 
     // Every symbol now has its edges, so the reachable set can be computed
     // once, before the module is split into functions and objects.
+    complete_tentative_arrays();
     check_unused_statics();
     check_inline_definitions();
 

@@ -1603,7 +1603,10 @@ enum {
     // own. clang is silent about the other half of p3, a reference to an
     // identifier with internal linkage, and gcc warns about that one.
     WG_STATIC_LOCAL_IN_INLINE = 1u << 16,
-    WG_ALL = (1u << 17) - 1,
+    // clang's name for 6.9.2p2's assumption that an array left without a
+    // length holds one element; gcc warns about it with no name of its own.
+    WG_TENTATIVE_DEFINITION_ARRAY = 1u << 17,
+    WG_ALL = (1u << 18) - 1,
     // Groups that -Wall does not enable.
     WG_OFF_DEFAULT = WG_IMPLICIT_FALLTHROUGH,
 };

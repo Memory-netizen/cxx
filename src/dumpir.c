@@ -159,7 +159,10 @@ static void print_type(Type *ty) {
         return;
     }
     if (ty->kind == TY_ARRAY) {
-        fprintf(out_file, "[%d x ", ty->len);
+        // A declaration of an array of unknown size -- `extern int arr[];`
+        // -- has no length to print; clang writes zero there, and zero is
+        // the one length LLVM accepts for a global that is never allocated.
+        fprintf(out_file, "[%d x ", ty->len < 0 ? 0 : ty->len);
         print_type(ty->base);
         fprintf(out_file, "]");
         return;
