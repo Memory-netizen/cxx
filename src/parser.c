@@ -355,11 +355,70 @@ static Node *cleanup_scope_chain(Scope *scp, Token *tok) {
     return chain;
 }
 
+// An identifier with a variably modified type. Its size expression is
+// evaluated where its declaration is reached, so a jump that lands inside its
+// scope without passing that point leaves the object's type without a value:
+// 6.8.6.1p1 forbids that for goto, and 6.8.5.3p2 for the labels a switch
+// dispatches to.
+typedef struct VmDecl VmDecl;
+struct VmDecl {
+    VmDecl *next;
+    Scope *scp;    // the scope the identifier belongs to
+    uint32_t seq;  // its position among such declarations in this function
+    Token *tok;    // the declared name, for the note
+    bool is_typedef;
+};
+static VmDecl *vm_decls;
+static uint32_t vm_seq;
+
+// 6.7.6.2p? : a type derived from a variably modified type is itself variably
+// modified, so a pointer to a variable length array counts as much as the
+// array does.
+static bool is_vm_type(Type *ty) {
+    for (; ty; ty = ty->base) {
+        if (ty->kind == TY_VLA) return true;
+        if (ty->kind != TY_PTR && ty->kind != TY_ARRAY) return false;
+    }
+    return false;
+}
+
+static void note_vm_decl(Token *tok, bool is_typedef) {
+    VmDecl *v = emalloc(sizeof(VmDecl));
+    v->scp = scope;
+    v->seq = vm_seq++;
+    v->tok = tok;
+    v->is_typedef = is_typedef;
+    v->next = vm_decls;
+    vm_decls = v;
+}
+
 // Is `outer` one of the scopes that enclose `inner` (or `inner` itself)?
 static bool scope_encloses(Scope *outer, Scope *inner) {
     for (Scope *sc = inner; sc; sc = sc->next)
         if (sc == outer) return true;
     return false;
+}
+
+// 6.8.6.1p1 for a goto, 6.8.5.3p2 for a label a switch dispatches to: the jump
+// may not land inside the scope of an identifier with a variably modified type
+// from a point that has not initialized it. A jump that starts outside that
+// scope has not; one that starts inside it has not when it starts before the
+// declaration. Jumping back over such a declaration is fine -- the size
+// expression ran on the way in.
+static void check_vm_jump(Token *tok, char *what, Scope *from, uint32_t from_seq, Scope *to, uint32_t to_seq) {
+    for (VmDecl *v = vm_decls; v; v = v->next) {
+        // The label is inside the identifier's scope ...
+        if (!scope_encloses(v->scp, to)) continue;
+        // ... and the jump has not passed its declaration: either it starts
+        // outside that scope, or it starts before the declaration inside it.
+        if (scope_encloses(v->scp, from) && from_seq > v->seq) continue;
+        // A label the jump reaches before the declaration skips nothing.
+        if (to_seq <= v->seq) continue;
+        diag("error", tok, "%s", what);
+        if (v->is_typedef)
+            diag_exit("note", v->tok, "jump bypasses initialization of VLA typedef ‘%s’", str(v->tok->id));
+        diag_exit("note", v->tok, "jump bypasses initialization of variable length array ‘%s’", str(v->tok->id));
+    }
 }
 
 // Every handler a jump leaves behind: the scopes from `from` outwards, up to
@@ -4336,6 +4395,8 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         }
         sym_attr_flags(var, attrs, false);
         sym_attr_flags(var, ty->attrs, true);
+        // 6.8.6.1p1 / 6.8.5.3p2: a jump may not pass this declaration.
+        if (is_vm_type(var->ty)) note_vm_decl(var_name, false);
         // __attribute__((cleanup(f))): an automatic object has a scope to be
         // left; a static, an extern or a function declared here has not, and
         // both references ignore the attribute on those.
@@ -4546,6 +4607,7 @@ typedef struct JumpScope JumpScope;
 struct JumpScope {
     Node *node;
     Scope *scp;
+    uint32_t seq;  // variably modified declarations seen before this point
 };
 static JumpScope *jump_scopes;
 static uint32_t num_jump_scopes;
@@ -4557,7 +4619,14 @@ static void note_jump_scope(Node *node, Scope *scp) {
         jump_scopes = vgrow(jump_scopes, num_jump_scopes + 8);
     jump_scopes[num_jump_scopes].node = node;
     jump_scopes[num_jump_scopes].scp = scp;
+    jump_scopes[num_jump_scopes].seq = vm_seq;
     num_jump_scopes++;
+}
+
+static uint32_t jump_seq_of(Node *node) {
+    for (uint32_t i = 0; i < num_jump_scopes; i++)
+        if (jump_scopes[i].node == node) return jump_scopes[i].seq;
+    return 0;
 }
 
 static Scope *jump_scope_of(Node *node) {
@@ -4633,6 +4702,11 @@ static Node *switch_stmt(Token **rest, Token *tok) {
     add_type(node);
     tok = skip(tok, TK_RPAREN);
 
+    // The dispatch is a jump to every case and default label in the body, so
+    // 6.8.5.3p2 asks the same question of it that 6.8.6.1p1 asks of a goto.
+    Scope *sw_scope = scope;
+    uint32_t sw_seq = vm_seq;
+
     // body. The first label of a switch is entered by the dispatch, not by
     // falling out of anything, so the bit starts clear and the body's own
     // statements fill it in from there.
@@ -4652,6 +4726,9 @@ static Node *switch_stmt(Token **rest, Token *tok) {
     brk_depth--;
     cur_sw = sw;
     node->case_next = reverse_list(Node, node->case_next, case_next);
+    for (Node *c = node->case_next; c; c = c->case_next)
+        check_vm_jump(c->tok, "cannot jump from switch statement to this case label", sw_scope, sw_seq,
+                      jump_scope_of(c), jump_seq_of(c));
 
     Node *restore = leave_scope(tok);
     if (restore) node = new_binary(ND_COMMA, node, restore, tok);
@@ -4972,6 +5049,7 @@ static Node *label(Token **rest, Token *tok) {
             }
             check_fallthrough(tok);
             Node *node = new_node(ND_CASE, tok);
+            note_jump_scope(node, scope);
             tok = skip(tok->next, TK_COLON);
             cur_sw->default_case = node;
             if (idx < 0 && cur_fn) {
@@ -4992,6 +5070,7 @@ static Node *label(Token **rest, Token *tok) {
             if (tok->kind == TK_COLON) {
                 check_case(val1, tk_case);
                 Node *node = new_node(ND_CASE, tk_case);
+                note_jump_scope(node, scope);
                 node->ival = int128_set_i(val1);
                 if (idx < 0 && cur_fn) {
                     idx = cur_fn->num_lbl++;
@@ -5019,6 +5098,7 @@ static Node *label(Token **rest, Token *tok) {
             for (int64_t i = val1; i <= val2; i++) {
                 check_case(i, tk_case);
                 Node *node = new_node(ND_CASE, tk_case);
+                note_jump_scope(node, scope);
                 node->ival = int128_set_i(i);
                 if (idx < 0 && cur_fn) {
                     idx = cur_fn->num_lbl++;
@@ -5240,6 +5320,7 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
                 apply_postdecl_attrs(ty);
                 warn_cleanup_attrs(attrs);
                 strip_cleanup_attr(ty);
+                if (is_vm_type(ty)) note_vm_decl(ty->name, true);
                 if (tok->kind == TK_AS)
                     error(tok,
                           "illegal initializer (only variables can be "
@@ -6847,10 +6928,15 @@ static void resolve_goto_labels(void) {
                 x->target = y;
                 y->is_ref = true;
                 if (x->kind == ND_LABEL_VAL) y->is_addr = true;
+                // 6.8.6.1p1: the jump may not land inside the scope of an
+                // identifier with a variably modified type.
+                Scope *from = jump_scope_of(x);
+                Scope *to = jump_scope_of(y);
+                check_vm_jump(x->tok, "cannot jump from this goto statement to its label", from, jump_seq_of(x), to,
+                              jump_seq_of(y));
                 // The handlers of the scopes this jump leaves run before it:
                 // the label's own scope is still live where it lands.
-                Scope *from = jump_scope_of(x);
-                if (from) x->unwind = cleanup_leaving(from, jump_scope_of(y), x->tok);
+                if (from) x->unwind = cleanup_leaving(from, to, x->tok);
                 break;
             }
 
@@ -6964,6 +7050,8 @@ static Token *external_declaration(Token *tok) {
             cur_fn->num_blk = 2;  // fn->start + fn->end
             cur_fn->num_lbl = 0;
             locals = NULL;
+            vm_decls = NULL;
+            vm_seq = 0;
             enter_scope();
             // The parameter bounds belong to this function now; the body puts
             // them at its top, where the parameters they name are in scope.
