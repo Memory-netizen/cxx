@@ -1514,7 +1514,29 @@ int display_width(char *p, int len);
 void fatal(char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void error_at(SrcFile *file, uint32_t loc, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 void error(Token *tok, const char *msg, ...) __attribute__((format(printf, 2, 3)));
-void warning(Token *tok, const char *msg, ...) __attribute__((format(printf, 2, 3)));
+// Warning groups. Bit flags so that -w, -Wall and -Wno-<group> compose,
+// and every group starts out enabled -- which is what cxx did before the
+// flags existed, where the only control was -w for all of them.
+enum {
+    // A diagnostic with no group of its own: on unless -w. Used where no
+    // gcc or clang group name fits the message.
+    WG_DEFAULT = 0,
+    WG_DEPRECATED = 1u << 0,
+    WG_UNUSED_RESULT = 1u << 1,  // [[nodiscard]], as in gcc and clang
+    WG_ATTRIBUTES = 1u << 2,
+    WG_RETURN_TYPE = 1u << 3,
+    WG_CPP = 1u << 4,  // the preprocessor's own diagnostics, #warning included
+    WG_MEMORY_ORDER = 1u << 5,
+    // Accepted for compatibility. Neither has a diagnostic yet: an implicit
+    // function declaration is a constraint violation in C23 and so an
+    // error, and the unused-variable warning is plan item E3.
+    WG_UNUSED_VARIABLE = 1u << 6,
+    WG_IMPLICIT_FUNCTION_DECLARATION = 1u << 7,
+    WG_ALL = (1u << 8) - 1,
+};
+
+bool wg_enabled(int group);
+void warning(int group, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 void diag(char *level, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 void diag_exit(char *level, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 

@@ -73,6 +73,8 @@ int num_ld_exarg;
 bool opt_fpic;
 bool opt_fcommon;
 bool opt_nowarn;
+// Every group on to start with; see the enum in cxx.h.
+uint32_t opt_wgroups = WG_ALL;
 bool opt_werror;
 
 static void usage(int status) {
@@ -235,6 +237,22 @@ static Target *lookup_target(char *s) {
         if (!strcmp(s, target_aliases[i].alias)) return target_aliases[i].target;
     return NULL;
 }
+
+// The warning groups a -W switch can name. Kept beside the parser rather
+// than in cxx.h because it is the driver's interface, not the compiler's.
+static const struct {
+    const char *name;
+    int bit;
+} wgroup_names[] = {
+    {"deprecated-declarations", WG_DEPRECATED},
+    {"unused-result", WG_UNUSED_RESULT},
+    {"attributes", WG_ATTRIBUTES},
+    {"return-type", WG_RETURN_TYPE},
+    {"cpp", WG_CPP},
+    {"atomic-memory-ordering", WG_MEMORY_ORDER},
+    {"unused-variable", WG_UNUSED_VARIABLE},
+    {"implicit-function-declaration", WG_IMPLICIT_FUNCTION_DECLARATION},
+};
 
 static void parse_args(int argc, char **argv) {
     // Make sure that all command line options that take an argument
@@ -527,14 +545,43 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
+        // -W<group> / -Wno-<group> / -Wall. An unrecognized group is an
+        // error: accepting every -W* and discarding it is how a typo like
+        // -Wno-bogus-option used to pass unnoticed, and gcc and clang both
+        // reject it.
+        if (!strncmp(argv[i], "-W", 2)) {
+            const char *name = argv[i] + 2;
+            bool off = !strncmp(name, "no-", 3);
+            if (off) name += 3;
+            // -Werror is handled below; everything else here is a group.
+            if (strcmp(name, "error")) {
+                if (!strcmp(name, "all") || !strcmp(name, "extra")) {
+                    opt_wgroups = WG_ALL;
+                    continue;
+                }
+                int bit = 0;
+                for (size_t k = 0; k < sizeof(wgroup_names) / sizeof(wgroup_names[0]); k++)
+                    if (!strcmp(name, wgroup_names[k].name)) {
+                        bit = wgroup_names[k].bit;
+                        break;
+                    }
+                if (!bit) fatal("unknown warning group: -W%s%s", off ? "no-" : "", name);
+                if (off)
+                    opt_wgroups &= ~(uint32_t)bit;
+                else
+                    opt_wgroups |= (uint32_t)bit;
+                continue;
+            }
+        }
+
         if (!strcmp(argv[i], "-Werror")) {
             opt_werror = true;
             continue;
         }
 
         // These options are ignored for now.
-        if (!strncmp(argv[i], "-O", 2) || !strncmp(argv[i], "-W", 2) || !strncmp(argv[i], "-g", 2) ||
-            !strncmp(argv[i], "-std=", 5) || !strcmp(argv[i], "-ffreestanding") || !strcmp(argv[i], "-fno-builtin") ||
+        if (!strncmp(argv[i], "-O", 2) || !strncmp(argv[i], "-g", 2) || !strncmp(argv[i], "-std=", 5) ||
+            !strcmp(argv[i], "-ffreestanding") || !strcmp(argv[i], "-fno-builtin") ||
             !strcmp(argv[i], "-fno-omit-frame-pointer") || !strcmp(argv[i], "-fno-stack-protector") ||
             !strcmp(argv[i], "-fno-strict-aliasing") || !strcmp(argv[i], "-m64") || !strcmp(argv[i], "-mno-red-zone"))
             continue;

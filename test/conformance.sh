@@ -171,40 +171,60 @@ else
     n_fail=$((n_fail + 1))
 fi
 
-# -Wno-* grouping is plan item D1 (out of this round's scope): the driver
-# accepts every -W* and discards it (main.c), so a -Wno-<group> is accepted
-# but has no effect. Asserted as it behaves today; when D1 makes the switch
-# real, this entry must be replaced by one that checks the warning is gone.
-# TODO(D1): -Wno-deprecated-declarations must silence the diagnostic below.
+# Warning groups: each diagnostic belongs to one, and -Wno-<group> turns
+# that group off. Before the flags existed the driver accepted every -W* and
+# discarded it, so -Wno-deprecated-declarations was accepted but changed
+# nothing.
 cat > "$tmp/wno.c" <<'EOF'
 __attribute__((deprecated)) void old_fn(void);
 int main(void) { old_fn(); return 0; }
 EOF
 warned=$("$compiler" -S -o /dev/null "$tmp/wno.c" 2>&1 | grep -c deprecated)
 quiet=$("$compiler" -Wno-deprecated-declarations -S -o /dev/null "$tmp/wno.c" 2>&1 | grep -c deprecated)
-if [ "$warned" -eq 1 ] && [ "$quiet" -eq 1 ]; then
-    echo "testing -Wno-* accepted but not yet effective (D1 pending) ... known gap"
-    n_gaps=$((n_gaps + 1))
-elif [ "$warned" -eq 1 ] && [ "$quiet" -eq 0 ]; then
-    echo "testing -Wno-* accepted but not yet effective (D1 pending) ... GAP CLOSED (update this entry)"
-    n_fail=$((n_fail + 1))
+back=$("$compiler" -Wno-deprecated-declarations -Wdeprecated-declarations -S -o /dev/null "$tmp/wno.c" 2>&1 | grep -c deprecated)
+if [ "$warned" -eq 1 ] && [ "$quiet" -eq 0 ] && [ "$back" -eq 1 ]; then
+    echo "testing -Wno-<group> silences its group ... passed"
+    n_pass=$((n_pass + 1))
 else
-    echo "testing -Wno-* accepted but not yet effective (D1 pending) ... FAILED"
-    echo "    deprecated warnings without the flag: $warned, with it: $quiet"
+    echo "testing -Wno-<group> silences its group ... FAILED"
+    echo "    deprecated warnings: default $warned, -Wno-deprecated-declarations $quiet, re-enabled $back"
     n_fail=$((n_fail + 1))
 fi
 
-# Unknown -W* options are silently accepted, which is what D1 will fix
-# (gcc/clang diagnose them). Asserted as it behaves today, with the same
-# TODO: once D1 lands this must become "the driver rejects it".
-# TODO(D1): an unknown -W<group> must be diagnosed.
-if "$compiler" -Wno-bogus-option -S -o /dev/null "$tmp/wno.c" > /dev/null 2>&1; then
-    echo "testing unknown -W* silently accepted (D1 pending) ... known gap"
-    n_gaps=$((n_gaps + 1))
+# Groups are independent: silencing one must not silence another.
+cat > "$tmp/wgrp.c" <<'EOF'
+int f(int x) __attribute__((bogus_attribute_name));
+int main(void) { return f(1); }
+EOF
+with_no=$("$compiler" -Wno-deprecated-declarations -S -o /dev/null "$tmp/wgrp.c" 2>&1 | grep -c 'unknown attribute')
+with_attr=$("$compiler" -Wno-attributes -S -o /dev/null "$tmp/wgrp.c" 2>&1 | grep -c 'unknown attribute')
+if [ "$with_no" -eq 1 ] && [ "$with_attr" -eq 0 ]; then
+    echo "testing warning groups are independent ... passed"
+    n_pass=$((n_pass + 1))
 else
-    echo "testing unknown -W* silently accepted (D1 pending) ... GAP CLOSED (update this entry)"
+    echo "testing warning groups are independent ... FAILED"
+    echo "    unknown-attribute warnings: -Wno-deprecated-declarations $with_no, -Wno-attributes $with_attr"
     n_fail=$((n_fail + 1))
 fi
+
+# An unrecognized group is an error, as it is in gcc and clang. Accepting
+# every -W* and discarding it is how a typo used to pass unnoticed.
+if "$compiler" -Wno-bogus-option -S -o /dev/null "$tmp/wno.c" > "$tmp/log" 2>&1; then
+    echo "testing an unknown -W<group> is rejected ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+elif grep -q 'unknown warning group' "$tmp/log"; then
+    echo "testing an unknown -W<group> is rejected ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing an unknown -W<group> is rejected ... FAILED (wrong diagnostic)"
+    head -2 "$tmp/log" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# The spellings a build system passes must keep working.
+cat <<'EOF' | ok "-Wall, -Wextra and -w are accepted"
+int main(void) { return 0; }
+EOF
 
 # `$` in identifiers is a GNU extension: cxx accepts it in the default mode,
 # and D3 will make -pedantic reject it. Until then -pedantic is not even a

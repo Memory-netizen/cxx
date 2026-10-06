@@ -189,7 +189,7 @@ static Token *skip_line(Token *tok) {
 
     tok->line_delta = line_delta;
     tok->filename = display_name;
-    warning(tok, "extra token");
+    warning(WG_CPP, tok, "extra token");
     while (!tok->is_sol) tok = tok->next;
     return tok;
 }
@@ -693,7 +693,7 @@ static void read_macro_definition(Token **rest, Token *tok) {
     if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
     if (tok->id == defined_id) error(tok, "'defined' cannot be used as a macro name");
     Macro *exist = find_macro(tok);
-    if (exist && exist->is_builtin) warning(tok, "redefining builtin macro");
+    if (exist && exist->is_builtin) warning(WG_CPP, tok, "redefining builtin macro");
 
     Token *name = tok;
     tok = tok->next;
@@ -703,14 +703,16 @@ static void read_macro_definition(Token **rest, Token *tok) {
         bool is_variadic = false;
         uint32_t va_args_id = 0;
         MacroParam *params = read_macro_params(&tok, tok->next, &is_variadic, &va_args_id);
-        if (!tok->is_sol && !tok->is_leadingws) warning(tok, "ISO C99 requires whitespace after the macro name");
+        if (!tok->is_sol && !tok->is_leadingws)
+            warning(WG_CPP, tok, "ISO C99 requires whitespace after the macro name");
         Macro *m = add_macro(name->id, false, tok);
         m->params = params;
         m->is_variadic = is_variadic;
         m->va_args_id = va_args_id;
     } else {
         // Object-like macro
-        if (!tok->is_sol && !tok->is_leadingws) warning(tok, "ISO C99 requires whitespace after the macro name");
+        if (!tok->is_sol && !tok->is_leadingws)
+            warning(WG_CPP, tok, "ISO C99 requires whitespace after the macro name");
         add_macro(name->id, true, tok);
     }
 }
@@ -1503,7 +1505,7 @@ static Token *preprocess2(Token *tok) {
                     tok->line_delta = line_delta;
                     tok->filename = display_name;
                     if (tok->kind == TK_ERR) error(tok, "%s", tok->msg);
-                    if (tok->kind == TK_WARN) warning(tok, "%s", tok->msg);
+                    if (tok->kind == TK_WARN) warning(WG_CPP, tok, "%s", tok->msg);
                     check_invalid_ident(tok);
                     buf = buf->next = tok;
                 }
@@ -1677,7 +1679,7 @@ static Token *preprocess2(Token *tok) {
             if (m && m->is_builtin) {
                 tok->line_delta = line_delta;
                 tok->filename = display_name;
-                warning(tok, "undefining builtin macro");
+                warning(WG_CPP, tok, "undefining builtin macro");
             }
             m = add_macro(tok->id, true, NULL);
             m->deleted = true;
@@ -1695,7 +1697,7 @@ static Token *preprocess2(Token *tok) {
         if (tok->id == dt[P_WARNING].id) {
             Token *warn = tok;
             Token *msg = read_line(&tok, tok);
-            warning(warn, "#%s", join_tokens(msg));
+            warning(WG_CPP, warn, "#%s", join_tokens(msg));
             continue;
         }
 

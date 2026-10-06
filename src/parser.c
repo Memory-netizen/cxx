@@ -1673,11 +1673,11 @@ static int check_mem_order(Token *tok, int order, int mode) {
     }
     if (ok) return order;
     if (mode == MO_RMW)
-        warning(tok, "success memory order argument to atomic operation is invalid");
+        warning(WG_MEMORY_ORDER, tok, "success memory order argument to atomic operation is invalid");
     else if (mode == MO_CAS_FAIL)
-        warning(tok, "failure memory order argument to atomic operation is invalid");
+        warning(WG_MEMORY_ORDER, tok, "failure memory order argument to atomic operation is invalid");
     else
-        warning(tok, "memory order argument to atomic operation is invalid");
+        warning(WG_MEMORY_ORDER, tok, "memory order argument to atomic operation is invalid");
     return mode == MO_CAS_FAIL ? MEM_ORDER_RELAXED : MEM_ORDER_SEQ_CST;
 }
 
@@ -2731,7 +2731,7 @@ static Node *primary(Token **rest, Token *tok) {
                     node->ty = et->is_unsigned ? T.ty_ullong : T.ty_llong;
             }
         } else {
-            if (sc->var->is_deprecated) warning(tok, "‘%s’ is deprecated", str(sc->var->id));
+            if (sc->var->is_deprecated) warning(WG_DEPRECATED, tok, "‘%s’ is deprecated", str(sc->var->id));
             node = new_var_node(sc->var, tok);
         }
         *rest = tok->next;
@@ -4018,8 +4018,8 @@ static Node *expr_stmt(Token **rest, Token *tok) {
         Node *f = call->func;
         while (f->kind == ND_IMCAST || f->kind == ND_LVTOR) f = f->lhs;
         if (f->kind == ND_VAR && f->var->is_nodiscard)
-            warning(node->lhs->tok, "ignoring return value of function ‘%s’ declared with ‘nodiscard’ attribute",
-                    str(f->var->id));
+            warning(WG_UNUSED_RESULT, node->lhs->tok,
+                    "ignoring return value of function ‘%s’ declared with ‘nodiscard’ attribute", str(f->var->id));
     }
 
     *rest = skip(tok, TK_SEMI);
@@ -4275,7 +4275,7 @@ static Node *break_stmt(Token **rest, Token *tok) {
 // RetStmt ::= "return" Exp? ";"
 static Node *return_stmt(Token **rest, Token *tok) {
     if (cur_fn->funcspec & Q_NORETURN)
-        warning(tok, "function ‘%s’ declared 'noreturn' should not return", str(cur_fn->id));
+        warning(WG_RETURN_TYPE, tok, "function ‘%s’ declared 'noreturn' should not return", str(cur_fn->id));
     Node *node = new_node(ND_RETURN, tok);
     Type *ret = cur_fn->ty->ret;
     if (tok->next->kind == TK_SEMI) {
@@ -4405,7 +4405,7 @@ static Node *label(Token **rest, Token *tok) {
             // ("empty range specified") and clang ("empty case range
             // specified") diagnose this and carry on with a case that
             // matches nothing, so this warns rather than fails.
-            if (val2 < val1) warning(tk_case, "empty case range specified");
+            if (val2 < val1) warning(WG_DEFAULT, tk_case, "empty case range specified");
             for (int64_t i = val1; i <= val2; i++) {
                 check_case(i, tk_case);
                 Node *node = new_node(ND_CASE, tk_case);
@@ -4894,7 +4894,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
         // Anonymous struct member
         if (match(&tok, tok, TK_SEMI)) {
             if (!is_record(basety)) {
-                warning(start, "declaration does not declare anything");
+                warning(WG_DEFAULT, start, "declaration does not declare anything");
                 continue;
             }
             Member *mem = emalloc(sizeof(Member));
@@ -5253,7 +5253,7 @@ static Attr *attr_entry(Token **rest, Token *tok, bool is_gnu) {
         // The GNU spelling lives in the gnu namespace; the C23 spelling
         // defaults to the standard namespace.
         info = attr_lookup(is_gnu ? "gnu" : ns, name);
-        if (!info) warning(start, "unknown attribute '%s' ignored", name);
+        if (!info) warning(WG_ATTRIBUTES, start, "unknown attribute '%s' ignored", name);
     } else if (is_gnu) {
         error(tok, "expected attribute name");
     }
@@ -5382,7 +5382,8 @@ static void apply_postdecl_attrs(Type *ty) {
             Token *t;
             ty->align = MAX(ty->align, (int)const_expr(&t, a->args->next));
         } else if (!strcmp(a->info->name, "packed") || !(a->info->targets & ATTR_TYPE) || ty->kind == TY_FUNC) {
-            warning(a->tok, "attribute '%s' ignored, because it cannot be applied to a type", attr_disp_name(a));
+            warning(WG_ATTRIBUTES, a->tok, "attribute '%s' ignored, because it cannot be applied to a type",
+                    attr_disp_name(a));
         }
     }
 }
@@ -5395,7 +5396,7 @@ static void sym_attr_flags(Sym *var, Attr *attrs, bool gnu_only) {
         if (!strcmp(a->info->name, "deprecated"))
             var->is_deprecated = true;
         else if (!strcmp(a->info->name, "nodiscard")) {
-            if (!var->is_function) warning(a->tok, "‘nodiscard’ attribute only applies to functions");
+            if (!var->is_function) warning(WG_ATTRIBUTES, a->tok, "‘nodiscard’ attribute only applies to functions");
             var->is_nodiscard = true;
         } else if (!strcmp(a->info->name, "maybe_unused"))
             var->is_maybe_unused = true;
@@ -5499,7 +5500,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                            (a->info->targets & ATTR_TYPE) && (tok->kind == TK_STRUCT || tok->kind == TK_UNION)) {
                     error(a->tok, "misplaced attributes; expected attributes here");
                 } else {
-                    warning(a->tok, "unknown attribute '%s' ignored", str(a->tok->id));
+                    warning(WG_ATTRIBUTES, a->tok, "unknown attribute '%s' ignored", str(a->tok->id));
                 }
                 a = next;
             }
@@ -5570,7 +5571,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 if (orig) {
                     for (Attr *a = orig->attrs; a; a = a->next)
                         if (a->info && !strcmp(a->info->name, "deprecated"))
-                            warning(tok, "‘%s’ is deprecated", str(tok->id));
+                            warning(WG_DEPRECATED, tok, "‘%s’ is deprecated", str(tok->id));
                     ty = orig;
                     typespec_cnt += OTHER;
                     break;

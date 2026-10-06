@@ -104,8 +104,17 @@ void error(Token *tok, const char *msg, ...) {
 
 extern bool opt_nowarn;
 extern bool opt_werror;
-void warning(Token *tok, const char *msg, ...) {
-    if (opt_nowarn) return;
+extern uint32_t opt_wgroups;
+// -w silences everything; otherwise a diagnostic is emitted when its group
+// is on. WG_DEFAULT has no bit of its own and is on whenever -w is absent.
+bool wg_enabled(int group) {
+    if (opt_nowarn) return false;
+    if (group == WG_DEFAULT) return true;
+    return (opt_wgroups & (uint32_t)group) != 0;
+}
+
+void warning(int group, Token *tok, const char *msg, ...) {
+    if (!wg_enabled(group)) return;
     va_list ap;
     va_start(ap, msg);
     Token *orig = tok;
