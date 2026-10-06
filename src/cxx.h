@@ -63,6 +63,11 @@ typedef enum {
                     // running offset (amd64, arm64)
     VA_MEM_LINEAR,  // the va_list is a single pointer that walks the
                     // argument area (rv64, rv32)
+    // The same single pointer, except that an aggregate the registers cannot
+    // hold travels in the area as a pointer to the caller's copy rather than
+    // as its own bytes: what is read, and what the cursor advances by, is then
+    // the pointer (RISC-V).
+    VA_MEM_LINEAR_PTR,
     // One aggregate whose pieces travel in different register files: each
     // piece is read from its own save area and each cursor advances on its
     // own. struct { int; double } arrives with the int in a general-purpose
@@ -185,6 +190,12 @@ struct Target {
     // with the other compiler's idea of the ABI, so the split has to be
     // written into the IR rather than left to the backend.
     void (*classify_aggregate)(Type *agg, AggClass *out);
+    // How a variadic call lowers an aggregate, when that differs from the
+    // prototyped case. RISC-V is why it exists: the callee has no prototype
+    // to read the argument against, so the base ABI applies and nothing
+    // travels in the floating-point registers -- struct { float; float }
+    // reaches va_arg as one i64. NULL means the prototype rule stands.
+    void (*classify_variadic)(Type *agg, AggClass *out);
     // Builds the records that carry flattened pieces, one shape per
     // combination of integer/floating pieces. Finite and fixed, so all of
     // them are built up front and looked up afterwards. They must go through
@@ -213,10 +224,6 @@ struct Target {
     // one-byte struct travels as i64. SysV and RISC-V keep the exact width
     // that fits, which is what their va_arg reads back.
     bool agg_full_regs;
-    // Whether the flattened pieces are separate parameters (SysV AMD64 and
-    // RISC-V: one per register) or one array parameter (AAPCS64, where the
-    // composite keeps its identity as a single value).
-    bool agg_record_param;
     // A soft-float ABI has no floating-point registers at all: every member
     // is packed into the integer registers, floating ones included.
     bool agg_no_fp;
@@ -1083,6 +1090,22 @@ Type *array_of(Type *base, int size);
 Type *agg_shape_type(AggClass *c);
 int agg_param_slots(Type *ty, AggClass *c);
 Type *agg_param_shape_type(Type *ty, AggClass *c);
+// Whether the lowered pieces travel as separate parameters -- and as separate
+// operands at a call -- rather than as one value of the shape
+// agg_param_shape_type returns. A record of pieces is one value per piece; an
+// array shape, or a shape that came down to a single piece, is one whole
+// value. It follows from the shape rather than from a per-target flag,
+// because one target can need both: RISC-V sends struct { float; float } as
+// two floats and struct { long; long } as one [2 x i64].
+bool agg_is_per_piece(AggClass *c);
+// The RISC-V ABI, shared by the two RISC-V targets. They differ in XLEN and
+// in whether they have floating-point registers at all, and the classifier
+// reads both off the active Target, so one copy serves rv64, rv32 and the
+// bare-metal rv32.
+void rv_classify_aggregate(Type *agg, AggClass *out);
+void rv_classify_variadic(Type *agg, AggClass *out);
+Type *rv_pieces_type(Type *agg);
+int rv_param_slots(Type *ty);
 Type *vla_of(Type *base, Node *expr);
 Type *struct_type(bool is_union);
 Type *enum_type(void);

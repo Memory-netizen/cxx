@@ -324,6 +324,8 @@ Type *agg_param_shape_type(Type *ty, AggClass *c) {
     return agg_shape_type(c);
 }
 
+bool agg_is_per_piece(AggClass *c) { return c && c->npiece > 1 && !c->shape_array; }
+
 int agg_param_slots(Type *ty, AggClass *c) {
     if (!c || c->npiece == 0) return 1;
     // An array shape is always a single parameter, however many elements it

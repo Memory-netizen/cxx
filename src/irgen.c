@@ -550,14 +550,32 @@ static Ref gen_va_arg(Node *node) {
     Ref ap = gen_expr(node->lhs);
     Type *want = node->ty;
 
-    if (ops->kind == VA_MEM_LINEAR) {
+    if (ops->kind == VA_MEM_LINEAR || ops->kind == VA_MEM_LINEAR_PTR) {
         // The va_list is one pointer walking the argument area: read it,
         // align it for this type, take the value, then advance.
         Type *aptr_ty = is_ir_pointer(ap.ty) && ap.ty->base ? ap.ty->base : T.ty_voidptr;
         Ref cursor = load(ap, aptr_ty, aptr_ty->align, NULL);
 
+        // An aggregate the registers cannot hold does not travel as its own
+        // bytes: the area holds a pointer to the caller's copy, so what is
+        // read -- and what the cursor advances by -- is the pointer. Whether
+        // the class is memory is asked of the same classifier the call site
+        // used, under the variadic rule, or the two would not agree.
+        bool by_ptr = false;
+        if (ops->kind == VA_MEM_LINEAR_PTR && T.classify_aggregate &&
+            (want->kind == TY_STRUCT || want->kind == TY_UNION)) {
+            AggClass mc;
+            if (T.classify_variadic)
+                T.classify_variadic(want, &mc);
+            else
+                T.classify_aggregate(want, &mc);
+            by_ptr = mc.npiece == 0;
+        }
+
         int step = ops->mem_step;
-        int align = want->align > step ? want->align : step;
+        int width = by_ptr ? T.ty_voidptr->size : want->size;
+        int natural = by_ptr ? T.ty_voidptr->align : want->align;
+        int align = natural > step ? natural : step;
         Ref aligned = cursor;
         if (align > step) {
             // A type wider than a slot sits at its natural alignment, and
@@ -578,8 +596,7 @@ static Ref gen_va_arg(Node *node) {
             aligned = back;
         }
 
-        int size = want->size;
-        int taken = (size + align - 1) / align * align;
+        int taken = (width + align - 1) / align * align;
         Ref next = aligned;
         Ref n8 = aligned;
         n8.ty = pointer_to(T.ty_char, 0);
@@ -588,9 +605,12 @@ static Ref gen_va_arg(Node *node) {
         next = adv;
         store(next, ap, aptr_ty->align, NULL);
 
-        // An aggregate is returned as its address, the same contract the
-        // register paths follow: the caller loads it as the requested type,
-        // and for a record that load hands the address back.
+        // The address the area pointed at is the aggregate, that being how a
+        // record value is represented everywhere else.
+        if (by_ptr) return load(aligned, pointer_to(want, 0), T.ty_voidptr->align, NULL);
+        // Otherwise an aggregate is returned as its address, the same contract
+        // the register paths follow: the caller loads it as the requested
+        // type, and for a record that load hands the address back.
         if (want->kind == TY_STRUCT || want->kind == TY_UNION) return aligned;
         int la = want->align;
         if (la > step) la = step;
@@ -1342,8 +1362,18 @@ static Ref gen_expr(Node *node) {
                     // registers, and a callee reading it with va_arg has to
                     // land on the same bytes. Flattening it here is what makes
                     // the two agree.
+                    Type *cfnty = node->func->ty;
+                    if (cfnty && cfnty->kind == TY_PTR) cfnty = cfnty->base;
+                    bool variadic_call = cfnty && cfnty->kind == TY_FUNC && cfnty->is_variadic;
+                    // A variadic call may lower an aggregate differently: with
+                    // no prototype the callee cannot be assumed to know the
+                    // type, so an ABI that would normally send it as its
+                    // floating-point leaves coerces it to integers instead.
                     AggClass c;
-                    T.classify_aggregate(arg->ty, &c);
+                    if (variadic_call && T.classify_variadic)
+                        T.classify_variadic(arg->ty, &c);
+                    else
+                        T.classify_aggregate(arg->ty, &c);
                     Ref addr = a;
                     if (!(addr.ty && addr.ty->kind == TY_PTR)) {
                         // A record value is an address, but one that came
@@ -1355,9 +1385,6 @@ static Ref gen_expr(Node *node) {
                         store(a, hv, arg->ty->align, NULL);
                         addr = hv;
                     }
-                    Type *cfnty = node->func->ty;
-                    if (cfnty && cfnty->kind == TY_PTR) cfnty = cfnty->base;
-                    bool variadic_call = cfnty && cfnty->kind == TY_FUNC && cfnty->is_variadic;
                     if (c.npiece == 0 && T.agg_byval_param && !variadic_call) {
                         // Too big for the registers, and the callee has a
                         // prototype: a pointer to the copy, which LLVM spells
@@ -1374,7 +1401,7 @@ static Ref gen_expr(Node *node) {
                         // prototype says, and there is none.
                         if (T.agg_byval_param) byval_slot = idx;
                         call_ops[idx++] = addr;
-                    } else {
+                    } else if (agg_is_per_piece(&c)) {
                         for (int k = 0; k < c.npiece; k++) {
                             Ref from = addr;
                             from.ty = pointer_to(T.ty_char, 0);
@@ -1384,6 +1411,15 @@ static Ref gen_expr(Node *node) {
                             new_ins(IR_LORD, piece, (Ref[]){gep, INT(c.piece[k].ty->align)}, 2);
                             call_ops[idx++] = piece;
                         }
+                    } else {
+                        // One operand carrying the whole aggregate: an array
+                        // of the repeated piece type, or a single piece. That
+                        // is the shape the signature names, so the two sides
+                        // of the call spell the same thing.
+                        Type *shape = agg_param_shape_type(arg->ty, &c);
+                        Ref v = TMP(tmp_id++, shape);
+                        new_ins(IR_LORD, v, (Ref[]){addr, INT(shape->align)}, 2);
+                        call_ops[idx++] = v;
                     }
                     continue;
                 }
@@ -2375,13 +2411,12 @@ Module *irgen(Module *md) {
                     pn++;
                 } else {
                     // The parameter arrives as one value of the shape the
-                    // target chose, not necessarily one per eightbyte: SysV
-                    // hands over the pieces, AAPCS64 an array (a homogeneous
-                    // floating-point aggregate) and RISC-V a bare type when
-                    // there is one piece. Either way it is one parameter.
-                    // The same shape the signature prints, so the two agree.
-                    Type *shape =
-                        T.agg_record_param ? (T.pieces_type ? T.pieces_type(pt) : NULL) : agg_param_shape_type(pt, &c);
+                    // target chose, or as one value per piece when that shape
+                    // is a record: SysV always per piece, AAPCS64 always the
+                    // whole array, RISC-V either one depending on the type.
+                    // The shape comes from the same helper the signature
+                    // prints, so the two sides of the call agree.
+                    Type *shape = agg_param_shape_type(pt, &c);
                     if (shape && (shape->kind == TY_STRUCT || shape->kind == TY_UNION)) {
                         // One parameter per piece, in order.
                         uint32_t k = 0;

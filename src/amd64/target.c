@@ -369,7 +369,6 @@ Target T_amd64 = {
     .agg_byval_param = true,
     .agg_always_array = false,
     .agg_full_regs = false,
-    .agg_record_param = true,
     .predef =
         "#define _LP64 1\n"
         "#define __ATOMIC_ACQUIRE 2\n"

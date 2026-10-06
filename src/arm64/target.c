@@ -280,7 +280,6 @@ Target T_arm64 = {
     .agg_byval_param = false,
     .agg_always_array = true,
     .agg_full_regs = true,
-    .agg_record_param = false,
     .predef =
         "#define _LP64 1\n"
         "#define __AARCH64EL__ 1\n"

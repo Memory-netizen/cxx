@@ -1120,11 +1120,11 @@ static void print_param_type(Type *ty, int i) {
             return;
         }
         // The parameter arrives as one value of the shape the target chose:
-        // an array of the repeated element type, or the bare piece when
-        // there is only one.
-        // SysV and RISC-V hand each piece over as its own parameter; AAPCS64
-        // passes the composite as one array value.
-        if (T.agg_record_param) {
+        // an array of the repeated element type, or the bare piece when there
+        // is only one. A record of pieces is the other case, and then there is
+        // one parameter per piece -- the two have to agree with
+        // abi_param_count, which is asked the same question.
+        if (agg_is_per_piece(&c)) {
             print_type(c.piece[i].ty);
             return;
         }
