@@ -558,6 +558,13 @@ bool is_compatible(Type *t1, Type *t2) {
         case TY_VLA:
         case TY_ARRAY:
             if (!is_compatible(t1->base, t2->base)) return false;
+            // A variable length array keeps its length as the expression that
+            // computes it, and that pointer shares its storage with `len`:
+            // reading `len` here would compare the low half of an address and
+            // answer differently from one run to the next. A variable length
+            // array therefore matches any length -- which is what gcc and
+            // clang accept for `int (*)[3]` against `&vla`.
+            if (t1->kind == TY_VLA || t2->kind == TY_VLA) return true;
             return t1->len < 0 || t2->len < 0 || t1->len == t2->len;
         case TY_STRUCT:
         case TY_UNION:

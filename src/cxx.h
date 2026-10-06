@@ -624,6 +624,12 @@ struct Sym {
     // left out of the output.
     bool is_dead;
 
+    // __attribute__((cleanup(f))): the attribute as written, kept for the
+    // declaration that owns the object. The handler is looked up only where a
+    // handler can run -- an automatic object at block scope -- so a misplaced
+    // attribute costs nothing but its warning.
+    Attr *cleanup_attr;
+
     // Attribute flags
     bool is_deprecated;
     bool is_nodiscard;
@@ -831,6 +837,10 @@ struct Node {
     };
     Node *label_ring;
     Node *label_body;
+    // The cleanup handlers this jump has to run first, as one expression in
+    // source order. A jump is the only statement that leaves scopes without
+    // reaching the end of their blocks, so it carries the calls itself.
+    Node *unwind;
 };
 
 // Represents a variable initializer
@@ -1134,7 +1144,12 @@ struct Type {
     // Data
     union {
         struct {
-            // Array or ptr
+            // Array or ptr. `len` is only the length of a *fixed* array: for a
+            // variable length one these bytes are the low half of vla_len, the
+            // pointer to the expression that computes the length, so reading
+            // `len` there compares an address -- which is what made
+            // is_compatible() answer differently from one run to the next.
+            // A variable length array matches any length instead.
             int len;
             bool is_static;
             bool is_star;

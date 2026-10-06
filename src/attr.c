@@ -39,6 +39,10 @@ static AttrInfo attrs[] = {
 
     // Clang attributes.
     {"annotate", ATTR_NS_CLANG, 1, ATTR_DECL},
+
+    // The handler runs when the object's scope is left; it is a variable
+    // attribute, so a declaration is the only position that accepts it.
+    {"cleanup", ATTR_NS_GNU, 1, ATTR_DECL},
 };
 
 static uint32_t ns_of(char *ns) {

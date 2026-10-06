@@ -42,6 +42,7 @@ static Initializer *constexpr_elem(Node *node, Initializer *init);
 static Node *elem_root(Node *node);
 static Type *decl_attrs(Token **rest, Token *tok, Type *ty);
 static void apply_postdecl_attrs(Type *ty);
+static void strip_cleanup_attr(Type *ty);
 static char *attr_disp_name(Attr *a);
 static Attr *attr_list_gnu(Token **rest, Token *tok);
 static Attr *attr_list_c23(Token **rest, Token *tok);
@@ -192,6 +193,14 @@ struct TagNameSpace {
     Token *loc;
 };
 
+// __attribute__((cleanup(f))): an automatic object and the handler that is
+// called with its address when the scope holding it is left.
+typedef struct Cleanup Cleanup;
+struct Cleanup {
+    Sym *var;
+    Sym *fn;
+};
+
 // Represents a block scope.
 typedef struct Scope Scope;
 struct Scope {
@@ -215,6 +224,12 @@ struct Scope {
     Node **vla_expr;
     Sym *stack_top;
     bool sp_saved;
+
+    // The objects of this scope that carry __attribute__((cleanup(f))), in
+    // declaration order. They are destroyed in the reverse, which is the
+    // order `cleanup_scope_chain()` builds.
+    Cleanup *cleanups;
+    int cleanup_num;
 };
 
 // Represents currently scope.
@@ -245,6 +260,121 @@ static Node *leave_scope(Token *tok) {
 }
 
 static bool is_file_scope(void) { return scope == file_scope; }
+
+// The spelling the cleanup diagnostic uses for a type. It is a pointer most
+// of the time -- the address of the object is what the handler receives --
+// and `diag_ty_name` only names scalar types, so pointers, arrays and records
+// are spelled out here.
+static char *cleanup_ty_str(Type *ty) {
+    switch (ty->kind) {
+        case TY_PTR:
+            return format("%s *", cleanup_ty_str(ty->base));
+        case TY_ARRAY:
+            return format("%s[%u]", cleanup_ty_str(ty->base), ty->len);
+        case TY_VLA:
+            return format("%s[*]", cleanup_ty_str(ty->base));
+        case TY_STRUCT:
+        case TY_UNION:
+            return format("%s %s", ty->kind == TY_STRUCT ? "struct" : "union", str(ty->uid));
+        default:
+            return format("%s", diag_ty_name(ty));
+    }
+}
+
+// Read the handler named by __attribute__((cleanup(f))). Both references want
+// a plain function name -- `&h` and a function pointer are rejected -- whose
+// parameter the object's address can be passed to as it stands: gcc and clang
+// accept `const int *` and `void *` for an `int`, and reject `char *`, which
+// is the ordinary argument compatibility rule and not a special one.
+static Sym *cleanup_handler(Sym *var) {
+    Attr *a = var->cleanup_attr;
+    Token *tok = skip(a->args, TK_LPAREN);
+    Token *arg = tok;
+    Node *node = assign(&tok, tok);
+    if (tok->kind != TK_RPAREN) error(a->tok, "‘cleanup’ attribute takes one argument");
+    // A function designator is converted to a pointer on the way out of the
+    // expression parser; that wrapper is not what was written, so it comes
+    // off. An explicit `&h` is a different node and stays, which is what both
+    // references reject.
+    while (node->kind == ND_IMCAST || node->kind == ND_LVTOR) node = node->lhs;
+    if (node->kind != ND_VAR || !node->var->is_function) {
+        if (arg->kind == TK_IDENT)
+            error(a->tok, "‘cleanup’ argument ‘%.*s’ is not a function", arg->len, tok_text(arg));
+        error(a->tok, "‘cleanup’ argument is not a function");
+    }
+    Sym *fn = node->var;
+    if (!fn->ty->params || fn->ty->params->next)
+        error(a->tok, "‘cleanup’ function ‘%s’ must take 1 parameter", str(fn->id));
+    Type *parm = fn->ty->params;
+    // A variable length object has no fixed type to compare against; both
+    // references accept a handler for one.
+    if (!parm || var->ty->kind == TY_VLA) return fn;
+    if (!is_pointer(parm) ||
+        !(parm->base->kind == TY_VOID || is_compatible(type_unqual(parm->base), type_unqual(var->ty))))
+        error(a->tok,
+              "‘cleanup’ function ‘%s’ parameter has type ‘%s’ which is incompatible "
+              "with type ‘%s’",
+              str(fn->id), cleanup_ty_str(parm), cleanup_ty_str(pointer_to(var->ty, 0)));
+    return fn;
+}
+
+// f(&var), typed like any other call so the ordinary argument conversion
+// applies. The callee's edge in the reference graph was recorded where the
+// attribute's argument was parsed, so the handler cannot be optimised away.
+static Node *cleanup_call(Sym *var, Sym *fn, Token *tok) {
+    Node *arg = new_unary(ND_ADDR, new_var_node(var, tok), tok);
+    add_type(arg);
+    Type *parm = fn->ty->params;
+    if (parm) {
+        check_asop(parm, arg, CTX_CALL);
+        lvalue_convert(&arg);
+        new_imcast(&arg, parm);
+    }
+    Node *callee = new_var_node(fn, tok);
+    add_type(callee);
+    new_imcast(&callee, pointer_to(callee->ty, 0));
+    Node *call = new_node(ND_FUNCALL, tok);
+    call->func = callee;
+    call->args = arg;
+    call->narg = 1;
+    call->ty = fn->ty->ret;
+    return call;
+}
+
+// Append one call, keeping the chain in evaluation order.
+static Node *cleanup_add(Node *chain, Node *call, Token *tok) {
+    return chain ? new_binary(ND_COMMA, chain, call, tok) : call;
+}
+
+// The handlers of one scope, most recently declared first.
+static Node *cleanup_scope_chain(Scope *scp, Token *tok) {
+    Node *chain = NULL;
+    for (int i = scp->cleanup_num; i-- > 0;)
+        chain = cleanup_add(chain, cleanup_call(scp->cleanups[i].var, scp->cleanups[i].fn, tok), tok);
+    return chain;
+}
+
+// Is `outer` one of the scopes that enclose `inner` (or `inner` itself)?
+static bool scope_encloses(Scope *outer, Scope *inner) {
+    for (Scope *sc = inner; sc; sc = sc->next)
+        if (sc == outer) return true;
+    return false;
+}
+
+// Every handler a jump leaves behind: the scopes from `from` outwards, up to
+// but not including the first one that is still live where the jump lands.
+// That scope's own handlers run where it ends, whichever way it was left, so
+// running them here as well would run them twice. `to` of NULL leaves every
+// scope, which is what a return does.
+static Node *cleanup_leaving(Scope *from, Scope *to, Token *tok) {
+    Node *chain = NULL;
+    for (Scope *sc = from; sc && sc != file_scope; sc = sc->next) {
+        if (scope_encloses(sc, to)) break;
+        for (int i = sc->cleanup_num; i-- > 0;)
+            chain = cleanup_add(chain, cleanup_call(sc->cleanups[i].var, sc->cleanups[i].fn, tok), tok);
+    }
+    return chain;
+}
 
 // All local variable instances created during parsing are
 // accumulated to this list.
@@ -4202,6 +4332,24 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         }
         sym_attr_flags(var, attrs, false);
         sym_attr_flags(var, ty->attrs, true);
+        // __attribute__((cleanup(f))): an automatic object has a scope to be
+        // left; a static, an extern or a function declared here has not, and
+        // both references ignore the attribute on those.
+        if (var->cleanup_attr) {
+            if (is_static || is_extern || is_fn)
+                warning(WG_ATTRIBUTES, var_name, "‘cleanup’ attribute only applies to local variables");
+            else {
+                Sym *fn = cleanup_handler(var);
+                if (!scope->cleanups)
+                    scope->cleanups = vnew(4, sizeof(Cleanup));
+                else
+                    scope->cleanups = vgrow(scope->cleanups, scope->cleanup_num + 4);
+                scope->cleanups[scope->cleanup_num].var = var;
+                scope->cleanups[scope->cleanup_num].fn = fn;
+                scope->cleanup_num++;
+            }
+            var->cleanup_attr = NULL;
+        }
         if (tok->kind == TK_AS) {
             if (is_extern)
                 error(var_name, "declaration of block scope identifier ‘%s’ with linkage cannot have an initializer",
@@ -4349,6 +4497,67 @@ static Node *expr_stmt(Token **rest, Token *tok) {
 static int cont_depth;
 static int brk_depth;
 
+// The scopes the enclosing loops and switches opened, innermost first. A
+// break or continue runs the handlers of every scope it leaves, up to but not
+// including the one it lands in: that scope's own handlers run where it ends,
+// which is where a break lands as well.
+typedef struct LoopScope LoopScope;
+struct LoopScope {
+    LoopScope *next;
+    Scope *scp;    // the scope the loop or switch opened
+    Node *labels;  // the label run in front of it, for `break name;`
+    bool is_loop;  // false for a switch, which only a break can leave
+};
+static LoopScope *loop_scopes;
+
+// The label run of the statement stmt() is about to parse, so that the loop
+// or switch it turns out to be can record it (see LoopScope.labels).
+static Node *stmt_label;
+
+// Where a break or continue lands: the innermost loop (or, for a break, the
+// innermost loop or switch) for the plain form, or the one a name selects.
+static LoopScope *loop_scope_of(Node *name, bool is_break) {
+    for (LoopScope *fr = loop_scopes; fr; fr = fr->next) {
+        if (!name) {
+            if (is_break || fr->is_loop) return fr;
+            continue;
+        }
+        if (!fr->labels) continue;
+        Node *t = fr->labels;
+        do {
+            if (t->label == name->label) return fr;
+            t = t->label_ring;
+        } while (t && t != fr->labels);
+    }
+    return NULL;
+}
+
+// The scope each goto and each label was parsed in, so that the handlers a
+// jump leaves can be worked out once the label it names is known.
+typedef struct JumpScope JumpScope;
+struct JumpScope {
+    Node *node;
+    Scope *scp;
+};
+static JumpScope *jump_scopes;
+static uint32_t num_jump_scopes;
+
+static void note_jump_scope(Node *node, Scope *scp) {
+    if (!jump_scopes)
+        jump_scopes = vnew(8, sizeof(JumpScope));
+    else
+        jump_scopes = vgrow(jump_scopes, num_jump_scopes + 8);
+    jump_scopes[num_jump_scopes].node = node;
+    jump_scopes[num_jump_scopes].scp = scp;
+    num_jump_scopes++;
+}
+
+static Scope *jump_scope_of(Node *node) {
+    for (uint32_t i = 0; i < num_jump_scopes; i++)
+        if (jump_scopes[i].node == node) return jump_scopes[i].scp;
+    return NULL;
+}
+
 // SelHead ::= Exp | Decl Exp | SimDecl
 // SimDecl ::= DeclSpecs Declr "=" Init
 static Node *select_head(Token **rest, Token *tok) {
@@ -4404,6 +4613,8 @@ static Node *if_stmt(Token **rest, Token *tok) {
 static Node *switch_stmt(Token **rest, Token *tok) {
     enter_scope();
     brk_depth++;
+    LoopScope loop = {loop_scopes, scope, stmt_label, false};
+    loop_scopes = &loop;
     Node *node = new_node(ND_SWITCH, tok);
     Node *sw = cur_sw;
     cur_sw = node;
@@ -4429,6 +4640,7 @@ static Node *switch_stmt(Token **rest, Token *tok) {
     falls_through = !node->default_case || fr.seen || falls_through;
     cnt_blk(1);  // gen_switch: merge (case labels count in label())
 
+    loop_scopes = loop.next;
     brk_depth--;
     cur_sw = sw;
     node->case_next = reverse_list(Node, node->case_next, case_next);
@@ -4446,6 +4658,8 @@ static Node *while_stmt(Token **rest, Token *tok) {
     enter_scope();
     cont_depth++;
     brk_depth++;
+    LoopScope loop = {loop_scopes, scope, stmt_label, true};
+    loop_scopes = &loop;
     Node *node = new_node(ND_WHILE, tok);
 
     tok = skip(tok->next, TK_LPAREN);
@@ -4460,6 +4674,7 @@ static Node *while_stmt(Token **rest, Token *tok) {
     falls_through = !(cond_never_false(node->cond) && !fr.seen);
     cnt_blk(3);  // gen_while: cond / body / merge
 
+    loop_scopes = loop.next;
     cont_depth--;
     brk_depth--;
     Node *restore = leave_scope(tok);
@@ -4472,6 +4687,8 @@ static Node *do_stmt(Token **rest, Token *tok) {
     enter_scope();
     cont_depth++;
     brk_depth++;
+    LoopScope loop = {loop_scopes, scope, stmt_label, true};
+    loop_scopes = &loop;
     Node *node = new_node(ND_DO, tok);
 
     // Body
@@ -4488,6 +4705,7 @@ static Node *do_stmt(Token **rest, Token *tok) {
     falls_through = !(cond_never_false(node->cond) && !fr.seen);
     cnt_blk(3);  // gen_do: body / cond / merge
 
+    loop_scopes = loop.next;
     cont_depth--;
     brk_depth--;
     Node *restore = leave_scope(tok);
@@ -4499,6 +4717,8 @@ static Node *for_stmt(Token **rest, Token *tok) {
     enter_scope();
     cont_depth++;
     brk_depth++;
+    LoopScope loop = {loop_scopes, scope, stmt_label, true};
+    loop_scopes = &loop;
     Node *node = new_node(ND_FOR, tok);
     tok = skip(tok->next, TK_LPAREN);
 
@@ -4538,7 +4758,14 @@ static Node *for_stmt(Token **rest, Token *tok) {
 
     cont_depth--;
     brk_depth--;
+    // This is the one of these statements whose own scope can hold a
+    // declaration -- the for-init -- so it is the one whose handlers have to
+    // run where the loop ends. A break lands there too, which is why the
+    // break does not run them itself.
+    Node *fini = cleanup_scope_chain(scope, tok);
+    loop_scopes = loop.next;
     Node *restore = leave_scope(tok);
+    if (fini) node = new_binary(ND_COMMA, node, fini, tok);
     if (restore) node = new_binary(ND_COMMA, node, restore, tok);
     return node;
 }
@@ -4562,6 +4789,9 @@ static Node *goto_stmt(Token **rest, Token *tok) {
     }
     Node *node = new_node(ND_GOTO, tok);
     node->label = get_ident(tok->next);
+    // Which handlers this jump runs is only known once the label is, so the
+    // scope it starts from waits next to it (see resolve_goto_labels).
+    note_jump_scope(node, scope);
 
     node->goto_next = gotos;
     gotos = node;
@@ -4603,6 +4833,10 @@ static Node *continue_stmt(Token **rest, Token *tok) {
         node->target = get_named_loop(&tok, tok, false);
     }
 
+    // The handlers of every scope this jump leaves run before it.
+    LoopScope *fr = loop_scope_of(node->target, false);
+    if (fr) node->unwind = cleanup_leaving(scope, fr->scp, node->tok);
+
     falls_through = false;
     *rest = skip(tok, TK_SEMI);
     return node;
@@ -4622,6 +4856,8 @@ static Node *break_stmt(Token **rest, Token *tok) {
     // The frame on top is the loop or switch this break leaves -- right for
     // the plain form; the GNU named form is attributed to the innermost one.
     if (brk_frame) brk_frame->seen = true;
+    LoopScope *fr = loop_scope_of(node->target, true);
+    if (fr) node->unwind = cleanup_leaving(scope, fr->scp, node->tok);
     falls_through = false;
     *rest = skip(tok, TK_SEMI);
     return node;
@@ -4637,6 +4873,9 @@ static Node *return_stmt(Token **rest, Token *tok) {
     if (tok->next->kind == TK_SEMI) {
         if (ret->kind != TY_VOID) error(tok, "non-void function ‘%s’ should return a value", str(cur_fn->id));
         *rest = tok->next->next;
+        // A return leaves every scope of the function; the result is read
+        // first, which is gen_ret's business.
+        node->unwind = cleanup_leaving(scope, NULL, tok);
         return node;
     }
 
@@ -4647,6 +4886,7 @@ static Node *return_stmt(Token **rest, Token *tok) {
     add_type(node);
     check_asop(ret, node->lhs, CTX_RET);
     new_imcast(&node->lhs, ret);
+    node->unwind = cleanup_leaving(scope, NULL, tok);
 
     return node;
 }
@@ -4702,6 +4942,7 @@ static Node *label(Token **rest, Token *tok) {
             falls_through = false;
             Node *node = new_node(ND_LABEL, tok);
             node->label = tok->id;
+            note_jump_scope(node, scope);
             check_label(node->label, tok);
             node->goto_next = labels;
             labels = node;
@@ -4841,6 +5082,9 @@ static Node *static_assert_decl(Token **rest, Token *tok) {
 static Node *stmt(Token **rest, Token *tok) {
     Node *lb = label(&tok, tok);
     uint32_t i = push_named_loop(lb, tok);
+    // A loop or switch records this so that `break name;` can find it.
+    Node *outer_stmt_label = stmt_label;
+    stmt_label = lb;
     // UnLabelStmt ::= AttrSpec* (PrimBlk | JmpStmt) / ExpStmt ::= AttrSpec*
     // Exp ";". Only fallthrough (and the GNU statement attributes) apply
     // to statements.
@@ -4906,6 +5150,7 @@ static Node *stmt(Token **rest, Token *tok) {
             stmt = expr_stmt(rest, tok);
             break;
     }
+    stmt_label = outer_stmt_label;
     while (i--) named_loop = named_loop->loop_next;
 
     // `[[fallthrough]];` marks the fall into the next label as deliberate,
@@ -4982,6 +5227,7 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
             if (sclass & SC_TYPEDEF) {
                 Type *ty = declarator(&tok, tok, basety);
                 apply_postdecl_attrs(ty);
+                strip_cleanup_attr(ty);
                 if (tok->kind == TK_AS)
                     error(tok,
                           "illegal initializer (only variables can be "
@@ -5003,6 +5249,16 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
         add_type(cur);
     }
 
+    // __attribute__((cleanup(f))): leaving the block destroys its objects,
+    // most recently declared first, and before the stack pointer of a
+    // variable length one is put back. The function body is the same thing,
+    // reached by falling off its end; a return out of the block runs the same
+    // handlers by carrying them itself (Node.unwind).
+    for (int i = scope->cleanup_num; i-- > 0;) {
+        Node *call = cleanup_call(scope->cleanups[i].var, scope->cleanups[i].fn, tok);
+        cur = cur->next = new_unary(ND_EXPR_STMT, call, tok);
+        add_type(cur);
+    }
     if (!is_func_body) {
         Node *restore = leave_scope(tok);
         if (restore) cur = cur->next = restore;
@@ -5784,6 +6040,22 @@ static char *attr_disp_name(Attr *a) {
 // alignment; attributes that cannot apply to a type are diagnosed (as
 // in clang). Packed is type-valid only before a record's layout, so it
 // is rejected here too.
+// `cleanup` is a variable attribute, and both references ignore it on a
+// typedef -- with a warning -- leaving the objects the type later declares
+// alone. Dropping the entry is what keeps them alone: the copy `decl_attrs()`
+// made belongs to this declaration only.
+static void strip_cleanup_attr(Type *ty) {
+    for (Attr **link = &ty->attrs; *link;) {
+        Attr *a = *link;
+        if (a->info && a->info->ns == ATTR_NS_GNU && !strcmp(a->info->name, "cleanup")) {
+            warning(WG_ATTRIBUTES, a->tok, "‘cleanup’ attribute only applies to local variables");
+            *link = a->next;
+            continue;
+        }
+        link = &a->next;
+    }
+}
+
 static void apply_postdecl_attrs(Type *ty) {
     for (Attr *a = ty->attrs; a; a = a->next) {
         if (!a->info || a->is_gnu) continue;
@@ -5812,6 +6084,13 @@ static void sym_attr_flags(Sym *var, Attr *attrs, bool gnu_only) {
             var->is_maybe_unused = true;
         else if (!strcmp(a->info->name, "unused"))
             var->is_unused = true;
+        else if (!strcmp(a->info->name, "cleanup")) {
+            // The handler is looked up where one can run -- an automatic
+            // object at block scope -- and the attribute is diagnosed as
+            // ignored everywhere else, so all this keeps is the argument.
+            if (!a->args || a->args->next->kind == TK_RPAREN) error(a->tok, "‘cleanup’ attribute takes one argument");
+            var->cleanup_attr = a;
+        }
     }
 }
 
@@ -5899,9 +6178,12 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                     // C23 spelling after the declspecs: type attributes.
                     a->next = type_attrs;
                     type_attrs = a;
-                } else if (declspec_pos_attr(a->info) || (a->is_gnu && (a->info->targets & ATTR_DECL))) {
-                    // Declaration attributes (the GNU spelling accepts
-                    // the full declaration attribute set, as in clang).
+                } else if (declspec_pos_attr(a->info) ||
+                           (a->info->ns == ATTR_NS_GNU && (a->info->targets & ATTR_DECL))) {
+                    // Declaration attributes. Both spellings of a GNU
+                    // attribute accept the full declaration set, as in
+                    // clang: `__attribute__((unused))` and `[[gnu::unused]]`
+                    // are the same attribute.
                     a->next = NULL;
                     if (attrs) attr_cur = attr_cur->next = a;
                 } else if (a->info->ns == ATTR_NS_CLANG) {
@@ -6237,9 +6519,17 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
             }
 
             Token *start = tok;
-            Type *basety = declspecs(&tok, tok, NULL, NULL, NULL, NULL);
+            Attr *param_attrs = NULL;
+            Type *basety = declspecs(&tok, tok, NULL, NULL, NULL, &param_attrs);
             Type *paramty = abstract_declarator(&tok, tok, basety, true);
             apply_postdecl_attrs(paramty);
+            // A declaration attribute in front of the type belongs to this
+            // parameter as well, and it has to sit on this parameter's own
+            // copy of the type.
+            if (param_attrs) {
+                paramty = copy_type(paramty);
+                ty_prepend_attrs(paramty, param_attrs);
+            }
             if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type");
             // "array of T" is converted to "pointer to T" in the parameter
             // context. For example, *argv[] is converted to **argv by this.
@@ -6413,6 +6703,10 @@ static void resolve_goto_labels(void) {
                 x->target = y;
                 y->is_ref = true;
                 if (x->kind == ND_LABEL_VAL) y->is_addr = true;
+                // The handlers of the scopes this jump leaves run before it:
+                // the label's own scope is still live where it lands.
+                Scope *from = jump_scope_of(x);
+                if (from) x->unwind = cleanup_leaving(from, jump_scope_of(y), x->tok);
                 break;
             }
 
@@ -6420,6 +6714,7 @@ static void resolve_goto_labels(void) {
     }
 
     gotos = labels = NULL;
+    num_jump_scopes = 0;
 }
 
 // ExDecl    ::= FuncDef | Decl
@@ -6517,6 +6812,10 @@ static Token *external_declaration(Token *tok) {
             note_inline_decl(var, fspec, sclass);
             sym_attr_flags(var, attrs, false);
             sym_attr_flags(var, ty->attrs, true);
+            if (var->cleanup_attr) {
+                warning(WG_ATTRIBUTES, var_name, "‘cleanup’ attribute only applies to local variables");
+                var->cleanup_attr = NULL;
+            }
             cur_fn = var;
             cur_fn->num_blk = 2;  // fn->start + fn->end
             cur_fn->num_lbl = 0;
@@ -6534,6 +6833,13 @@ static Token *external_declaration(Token *tok) {
                 // -Wunused-variable's.
                 Sym *pvar = new_lvar(id, param);
                 sym_attr_flags(pvar, param->attrs, true);
+                // A parameter has no scope of its own to be left: gcc and
+                // clang both ignore the attribute here.
+                if (pvar->cleanup_attr) {
+                    warning(WG_ATTRIBUTES, param->name ? param->name : var_name,
+                            "‘cleanup’ attribute only applies to local variables");
+                    pvar->cleanup_attr = NULL;
+                }
                 push_namespace(scope, id, SYM_VAR, ty, param->name)->var = pvar;
                 param = param->next;
             }
@@ -6591,6 +6897,7 @@ static Token *external_declaration(Token *tok) {
         if (sclass & SC_AUTO) error(var_name, "file-scope declaration of ‘%s’ specifies ‘auto’", str(var_name->id));
 
         if (sclass & SC_TYPEDEF) {
+            strip_cleanup_attr(ty);
             if (ns)
                 check_decl_compatile(ns, SYM_TYNAME, ty);
             else
@@ -6671,6 +6978,10 @@ static Token *external_declaration(Token *tok) {
             if (is_fn) note_inline_decl(var, fspec, sclass);
             sym_attr_flags(var, attrs, false);
             sym_attr_flags(var, ty->attrs, true);
+            if (var->cleanup_attr) {
+                warning(WG_ATTRIBUTES, var_name, "‘cleanup’ attribute only applies to local variables");
+                var->cleanup_attr = NULL;
+            }
             if (var->ty->kind == TY_ARRAY && var->ty->base->size < 0)
                 error(var_name, "array has incomplete element type");
             if (var->ty->size < 0 && (var->ty->kind != TY_ARRAY && var->ty->kind != TY_VLA))

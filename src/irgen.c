@@ -2445,6 +2445,7 @@ static Ref gen_case(Node *n) {
 }
 
 static void gen_goto(Node *n) {
+    if (n->unwind) gen_expr(n->unwind);
     curb->jmp.type = IR_JMP;
     curb->succ1 = &curf->blks[n->target->blk_idx];
     add_pred(curb, curb->succ1);
@@ -2472,6 +2473,7 @@ static Node *named_loop_body(Node *target) {
 }
 
 static void gen_break(Node *n) {
+    if (n->unwind) gen_expr(n->unwind);
     curb->jmp.type = IR_JMP;
     curb->succ1 = n->target ? named_loop_body(n->target)->brk_blk : brk_blk;
     add_pred(curb, curb->succ1);
@@ -2479,6 +2481,7 @@ static void gen_break(Node *n) {
 }
 
 static void gen_continue(Node *n) {
+    if (n->unwind) gen_expr(n->unwind);
     curb->jmp.type = IR_JMP;
     curb->succ1 = n->target ? named_loop_body(n->target)->cont_blk : cont_blk;
     add_pred(curb, curb->succ1);
@@ -2585,6 +2588,18 @@ static Ref abi_piece_value(Ref agg, Type *agg_ty, Type *abi_ty, AggClass *c) {
     return coerce_aggregate(agg, abi_ty);
 }
 
+// The result is in place; run the handlers of the scopes this return
+// leaves and jump to the exit. The value was read before they run, which is
+// what gcc and clang do -- the handler may well modify the object it is
+// handed, and `return x;` still returns what x held.
+static void ret_jump(Node *n) {
+    if (n->unwind) gen_expr(n->unwind);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = curf->end;
+    add_pred(curb, curb->succ1);
+    curb = unreach;
+}
+
 static void gen_ret(Node *n) {
     Ref result = gen_expr(n->lhs);
     if (!refeq(result, R)) {
@@ -2610,10 +2625,7 @@ static void gen_ret(Node *n) {
             }
             src.ty = pointer_to(T.ty_char, 0);
             new_ins(IR_MEMCPY, R, (Ref[]){dst, src, INT(rt->size)}, 3);
-            curb->jmp.type = IR_JMP;
-            curb->succ1 = curf->end;
-            add_pred(curb, curb->succ1);
-            curb = unreach;
+            ret_jump(n);
             return;
         }
         if (abi_lowered(rt)) {
@@ -2643,20 +2655,14 @@ static void gen_ret(Node *n) {
                 // so that is what the result slot holds.
                 Ref val = abi_piece_value(result, rt, rec, &c);
                 store(val, SLOT(ret_slot, pointer_to(rec, 0)), rec->align, NULL);
-                curb->jmp.type = IR_JMP;
-                curb->succ1 = curf->end;
-                add_pred(curb, curb->succ1);
-                curb = unreach;
+                ret_jump(n);
                 return;
             }
         }
         store(result, SLOT(ret_slot, pointer_to(rt, 0)), rt->align, NULL);
     }
 
-    curb->jmp.type = IR_JMP;
-    curb->succ1 = curf->end;
-    add_pred(curb, curb->succ1);
-    curb = unreach;
+    ret_jump(n);
 }
 
 static Ref gen_stmt(Node *node) {
@@ -2703,6 +2709,12 @@ static Ref gen_stmt(Node *node) {
             break;
         case ND_EXPR_STMT:
             return gen_expr(node->lhs);
+        case ND_COMMA:
+            // The parser chains a statement with what has to run after it --
+            // a scope's cleanup handlers, the stack restore of a variable
+            // length object -- and both halves are statements.
+            gen_stmt(node->lhs);
+            return gen_stmt(node->rhs);
         default:
             return gen_expr(node);
     }
