@@ -813,7 +813,11 @@ int main(int argc, char **argv) {
     embed_dirs = emalloc((argc + 16) * sizeof(char *));
     std_include_paths = emalloc((argc + 16) * sizeof(char *));
     dirafter = emalloc(argc * sizeof(char *));
-    ld_extra_args = emalloc(argc * 2 * sizeof(char *));
+    // ld_extra_args holds every argument that must follow the object files:
+    // --sysroot/-L/-s/-static/-shared/-Xlinker, and -l/-Wl, below. A -Wl,
+    // argument expands to one entry per comma-separated token, so allow more
+    // room than one entry per command-line argument.
+    ld_extra_args = emalloc(argc * 4 * sizeof(char *));
 
     parse_args(argc, argv);
 
@@ -833,18 +837,20 @@ int main(int argc, char **argv) {
     for (int i = 0; i < num_input; i++) {
         char *input = input_paths[i];
 
+        // Libraries belong after the objects that reference them: the
+        // linker only pulls a member out of an archive to satisfy a symbol
+        // that is already undefined, so `-lm` ahead of the object file is a
+        // no-op. run_linker appends ld_extra_args last.
         if (!strncmp(input, "-l", 2)) {
-            ld_args[num_ldarg++] = input;
+            ld_extra_args[num_ld_exarg++] = input;
             continue;
         }
 
         if (!strncmp(input, "-Wl,", 4)) {
             char *s = strdup(input + 4);
             char *arg = strtok(s, ",");
-            int i = 1;
             while (arg) {
-                ld_args = vgrow(ld_args, argc + i++);
-                ld_args[num_ldarg++] = arg;
+                ld_extra_args[num_ld_exarg++] = arg;
                 arg = strtok(NULL, ",");
             }
             continue;

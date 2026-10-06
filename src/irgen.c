@@ -1858,6 +1858,11 @@ static Ref gen_logor(Node *node) {
     new_ins(IR_CMP_NE, res_r, (Ref[]){rr, zr}, 2);
     Ref r_ext = TMP(tmp_id++, T.ty_int);
     new_ins(IR_EXT, r_ext, (Ref[]){res_r}, 1);
+    // The right operand may itself open blocks (a nested ?:, && or ||), so
+    // the edge into m_blk leaves wherever it finished -- not necessarily
+    // t_blk/f_blk. The PHI below must name that block, or LLVM reports
+    // "PHI node entries do not match predecessors".
+    Blk *rhs_end = curb;
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
     add_pred(curb, curb->succ1);
@@ -1868,7 +1873,7 @@ static Ref gen_logor(Node *node) {
     Ref result = TMP(tmp_id++, T.ty_int);
     Phi *phi = new_phi(result);
     add_phi_arg(phi, sel, INT(1));
-    add_phi_arg(phi, f_blk, r_ext);
+    add_phi_arg(phi, rhs_end, r_ext);
     insert_phi(curb, phi);
     return result;
 }
@@ -1900,6 +1905,11 @@ static Ref gen_logand(Node *node) {
     new_ins(IR_CMP_NE, res_r, (Ref[]){rr, zr}, 2);
     Ref r_ext = TMP(tmp_id++, T.ty_int);
     new_ins(IR_EXT, r_ext, (Ref[]){res_r}, 1);
+    // The right operand may itself open blocks (a nested ?:, && or ||), so
+    // the edge into m_blk leaves wherever it finished -- not necessarily
+    // t_blk/f_blk. The PHI below must name that block, or LLVM reports
+    // "PHI node entries do not match predecessors".
+    Blk *rhs_end = curb;
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
     add_pred(curb, curb->succ1);
@@ -1908,7 +1918,7 @@ static Ref gen_logand(Node *node) {
     insert_blk(curb);
     Ref result = TMP(tmp_id++, T.ty_int);
     Phi *phi = new_phi(result);
-    add_phi_arg(phi, t_blk, r_ext);
+    add_phi_arg(phi, rhs_end, r_ext);
     add_phi_arg(phi, sel, INT(0));
     insert_phi(curb, phi);
     return result;

@@ -235,6 +235,40 @@ int main() {
     CHECK_EQ("-1+1", -1 + 1, 0);
     CHECK_EQ("0/-1", 0 / -1, 0);
 
+    // === 18. Folded && / || keep the operand's truth value ===
+    // With a constant left operand the folder drops the short-circuit and
+    // keeps the right one, but 6.5.14 and 6.5.15 give an int result that
+    // is 0 or 1 -- so the surviving operand must be normalised (!!x), not
+    // negated (!x). `1 && x` used to answer exactly the wrong way for
+    // every x, which stayed invisible while both operands were constants
+    // (that path folds to the conjunction itself).
+    {
+        int one = 1, zero = 0;
+        double half = 0.5, dzero = 0.0;
+        int *live = &one, *null = 0;
+        CHECK_EQ("1&&v(1)", 1 && one, 1);
+        CHECK_EQ("1&&v(0)", 1 && zero, 0);
+        CHECK_EQ("0||v(1)", 0 || one, 1);
+        CHECK_EQ("0||v(0)", 0 || zero, 0);
+        CHECK_EQ("1&&f(0.5)", 1 && half, 1);
+        CHECK_EQ("1&&f(0.0)", 1 && dzero, 0);
+        CHECK_EQ("0||f(0.5)", 0 || half, 1);
+        CHECK_EQ("1&&p(live)", 1 && live, 1);
+        CHECK_EQ("1&&p(null)", 1 && null, 0);
+        CHECK_EQ("0||p(null)", 0 || null, 0);
+        CHECK_EQ("1&&(v==1)", 1 && (one == 1), 1);
+        CHECK_EQ("1&&(v==0)", 1 && (one == 0), 0);
+        // the constant-left operand that makes the other side dead
+        CHECK_EQ("0&&v(1)", 0 && one, 0);
+        CHECK_EQ("1||v(0)", 1 || zero, 1);
+        CHECK_EQ("0.0&&v(1)", 0.0 && one, 0);
+        CHECK_EQ("0.5||v(0)", 0.5 || zero, 1);
+        // right-nested chains: (1 && v) is constant by the time the outer
+        // && is folded, so this exercises both paths in one expression
+        CHECK_EQ("1&&1&&v(1)", 1 && 1 && one, 1);
+        CHECK_EQ("1&&1&&v(0)", 1 && 1 && zero, 0);
+    }
+
     if (failed == 0)
         printf("OK (%d tests)\n", test_no);
     else

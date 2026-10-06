@@ -498,6 +498,25 @@ int main() {
                1;
            }));
 
+    // A right operand that is itself a ?:, && or || opens blocks of its
+    // own, so the merge PHI's predecessor is not the block the generator
+    // created for it. Getting that wrong emitted a module LLVM rejected
+    // outright ("PHI node entries do not match predecessors!").
+    ASSERT(0, 0 && (0 ? 0 : 1));
+    ASSERT(1, 1 && (0 ? 0 : 1));
+    ASSERT(0, 0 && (1 ? 0 : 1));
+    ASSERT(1, 1 && (1 ? 1 : 0));
+    ASSERT(1, 0 || (0 ? 0 : 1));
+    ASSERT(1, 1 || (0 ? 0 : 1));
+    ASSERT(0, 1 && (0 && 1));
+    ASSERT(1, 1 && (1 || 0));
+    ASSERT(0, 0 || (0 || 0));
+    ASSERT(1, 0 || (0 || 1));
+    ASSERT(1, 1 && (0 || 1));
+    ASSERT(0, (0 ? 0 : 1) && 0);
+    ASSERT(0, 0 && (0 ? 0 : 1) && 1);
+    ASSERT(1, 1 && (1 ? 1 : 0) && (0 || 1));
+
     ASSERT(0, 0.0 && 0.0);
     ASSERT(0, 0.0 && 0.1);
     ASSERT(0, 0.3 && 0.0);

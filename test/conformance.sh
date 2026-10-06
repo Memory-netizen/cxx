@@ -440,6 +440,24 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# A library named on the command line must reach the linker *after* the
+# object files: `cc -o out -lm tmp.o` links, but the archive contributes
+# nothing because no symbol is undefined yet when it is read. -l/-Wl, used
+# to be replayed into the object-file list, so every program calling a libm
+# function failed with "undefined reference to `sqrt'".
+cat > "$tmp/libm.c" <<'EOF'
+#include <math.h>
+int main(void) { return sqrt(4.0) == 2.0 ? 0 : 1; }
+EOF
+if "$compiler" -w -lm -o "$tmp/libm" "$tmp/libm.c" > "$tmp/log" 2>&1 && "$tmp/libm"; then
+    echo "testing -lm links after the object files ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -lm links after the object files ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
 # Two C identifiers may denote one object-file symbol. glibc's <stdlib.h>
 # redirects both strtoq and strtoll to __isoc23_strtoll via __REDIRECT;
 # emitting one declaration per identifier declares the same symbol twice,

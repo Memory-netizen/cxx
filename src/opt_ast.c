@@ -14,12 +14,36 @@ static bool is_ptr_const(Node *node) {
     return node && node->kind == ND_EXCAST && is_pointer(node->ty) && is_int_const(node->lhs);
 }
 
-static Node *new_lognot(Node *tmpl) {
+// The truth value of x as an int, i.e. `x != 0`.
+//
+// The tree is the one the parser builds for a written-out `x != 0`, so a
+// folded `1 && x` is indistinguishable from the source form; it lowers to
+// two IR instructions (icmp/fcmp + zext) where a double negation costs
+// four, and it matches clang's -O0 output exactly for integral and
+// floating operands.
+//
+// The zero goes through an ND_IMCAST to the operand's own type, which is
+// what makes the constant come out right for every operand: a pointer
+// compares against `null`, a floating operand against 0.0 (see cast() in
+// irgen.c -- an integer 0 next to an IR `ptr` would not be valid IR).
+static Node *new_truth(Node *x) {
+    Node *zero = emalloc(sizeof(Node));
+    zero->kind = ND_NUM;
+    zero->ty = T.ty_int;
+    zero->tok = x->tok;
+
+    Node *cast = emalloc(sizeof(Node));
+    cast->kind = ND_IMCAST;
+    cast->lhs = zero;
+    cast->ty = x->ty;
+    cast->tok = x->tok;
+
     Node *node = emalloc(sizeof(Node));
-    node->kind = ND_NOT;
-    node->lhs = tmpl;
+    node->kind = ND_NE;
+    node->lhs = x;
+    node->rhs = cast;
     node->ty = T.ty_int;
-    node->tok = tmpl->tok;
+    node->tok = x->tok;
     return node;
 }
 
@@ -388,7 +412,7 @@ static Node *fold_cond(Node *node) {
 }
 
 // Fold a logical AND/OR where one side is a constant.
-// 0 && x → 0,  1 && x → x,  0 || x → x,  1 || x → 1
+// 0 && x → 0,  1 && x → x != 0,  0 || x → x != 0,  1 || x → 1
 static bool const_truthy(Node *n) {
     if (is_int_const(n)) return !int128_is_zero(n->ival);
     return !fp128_is_zero(n->fpval);  // float const: ±0.0 is false
@@ -407,10 +431,12 @@ static Node *fold_logical(Node *node) {
             return folded_int(int128_set_i(lv || rv), T.ty_int, node);
     }
 
+    // The surviving operand is not the result: && and || yield an int that
+    // is 0 or 1, so x must be replaced by its truth value.
     if (node->kind == ND_LOGAND)
-        return const_truthy(lhs) ? new_lognot(node->rhs) : folded_int(int128_set_i(0), T.ty_int, node);
+        return const_truthy(lhs) ? new_truth(node->rhs) : folded_int(int128_set_i(0), T.ty_int, node);
     else  // ND_LOGOR
-        return const_truthy(lhs) ? folded_int(int128_set_i(1), T.ty_int, node) : new_lognot(node->rhs);
+        return const_truthy(lhs) ? folded_int(int128_set_i(1), T.ty_int, node) : new_truth(node->rhs);
 }
 
 // Fold a boolean conversion to an integer constant when possible.
@@ -485,10 +511,16 @@ Node *fold_node(Node *node) {
 
         // Logical
         case ND_LOGAND:
-        case ND_LOGOR:
+        case ND_LOGOR: {
             node->lhs = fold_node(node->lhs);
             node->rhs = fold_node(node->rhs);
-            return fold_logical(node) ?: node;
+            Node *folded = fold_logical(node);
+            if (!folded) return node;
+            // The replacement can carry a new subexpression (new_truth's
+            // conversion of the zero), and it must end up folded like any
+            // other node so the tree matches a written-out `x != 0`.
+            return fold_node(folded);
+        }
 
         // Boolean conversion (implicit cast to bool)
         case ND_LVTOR:
