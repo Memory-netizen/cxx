@@ -26,6 +26,13 @@ static VaArgOps va_arg_linear_ptr = {
 
 // RISC-V has one linear cursor, so only the memory class changes the
 // strategy: there the slot holds a pointer rather than the value.
+// A _BitInt wider than two XLEN words cannot go in a register pair, so the
+// ABI hands it over through memory, exactly as it does a large aggregate.
+static bool rv32_scalar_by_ref(Type *ty) {
+    if (!(ty->kind & TY_BITINT)) return false;
+    return ty->size > 2 * T.ty_long->size;
+}
+
 static VaArgOps *rv32_va_arg(Type *want) {
     if (T.classify_variadic && (want->kind == TY_STRUCT || want->kind == TY_UNION)) {
         AggClass c;
@@ -126,6 +133,7 @@ Target T_rv32 = {
     .va_arg_ops = rv32_va_arg,
     .classify_aggregate = rv_classify_aggregate,
     .classify_variadic = rv_classify_variadic,
+    .scalar_by_ref = rv32_scalar_by_ref,
     .pieces_type = rv_pieces_type,
     .abi_param_slots = rv_param_slots,
     // The caller makes the copy and passes a pointer, and each piece travels
@@ -623,6 +631,7 @@ Target T_rv32b = {
     .va_arg_ops = rv32_va_arg,
     .classify_aggregate = rv_classify_aggregate,
     .classify_variadic = rv_classify_variadic,
+    .scalar_by_ref = rv32_scalar_by_ref,
     .pieces_type = rv_pieces_type,
     .abi_param_slots = rv_param_slots,
     // The caller makes the copy and passes a pointer, and each piece travels

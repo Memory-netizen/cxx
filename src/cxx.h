@@ -243,6 +243,11 @@ struct Target {
     // st(0) as x86_fp80. NULL when the classifier's answer covers returns
     // too, which is every other case.
     Type *(*agg_ret_value)(Type *agg);
+    // A scalar this ABI passes by reference rather than in registers, which
+    // the classifier then treats like an aggregate it has put in memory.
+    // RISC-V is the reason it exists: a _BitInt wider than two XLEN words has
+    // no register pair to go in. NULL when the target has no such type.
+    bool (*scalar_by_ref)(Type *ty);
     // The va_arg policy for an aggregate whose pieces travel in different
     // register files, or NULL when the target has none: such a type needs a
     // second cursor and a second save area, which the single-file tables do
@@ -1161,6 +1166,8 @@ int rv_param_slots(Type *ty);
 Type *vla_of(Type *base, Node *expr);
 Type *struct_type(bool is_union);
 Type *enum_type(void);
+// Give an enum the type that holds every one of its enumerators.
+void enum_set_underlying(Type *ty, EnumVal *vals);
 Type *copy_type(Type *ty);
 // Give a type its IR name and add it to the module's type list.
 void insert_ty(Type *ty, char *kind);

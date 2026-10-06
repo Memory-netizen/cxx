@@ -8,6 +8,7 @@ static Blk *tail;
 static Blk *unreach = &(Blk){};
 static bool abi_lowering(void);
 static Type *abi_ret_scalar(Type *ty);
+static bool abi_lowered(Type *ty);
 static bool abi_sret_result(Type *ty);
 static int tmp_id;
 // Block labels live in their own numbering space: the output prefixes them
@@ -1420,12 +1421,16 @@ static Ref gen_expr(Node *node) {
             // that temp ids, and hence the IR's numbering, stay in the
             // order the instructions are emitted.
             bool is_record = node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION;
+            // A scalar the target passes by reference travels through the same
+            // slot a memory-class record does, but its value is what the slot
+            // holds rather than the slot's address.
+            bool by_ref = abi_lowered(node->ty);
             // The callee's result may be replaced by the ABI: a memory-class
             // aggregate is written through a pointer the caller supplies, a
             // register-class one comes back flattened.
-            bool sret = is_record && abi_sret_result(node->ty);
+            bool sret = by_ref && abi_sret_result(node->ty);
             Type *ret_abi = node->ty;
-            if (is_record && !sret && abi_lowering()) {
+            if (by_ref && !sret && abi_lowering()) {
                 Type *scalar = abi_ret_scalar(node->ty);
                 AggClass c;
                 if (scalar)
@@ -1441,7 +1446,7 @@ static Ref gen_expr(Node *node) {
                 }
             }
             Ref slot = R;
-            if (is_record) {
+            if (by_ref) {
                 slot = TMP(tmp_id++, pointer_to(node->ty, 0));
                 new_ins(IR_ALLOCA, slot, (Ref[]){INT(node->ty->align)}, 1);
             }
@@ -1464,7 +1469,7 @@ static Ref gen_expr(Node *node) {
                 // load() cannot be used to read one: for an aggregate it
                 // hands the address back, that being how a record value is
                 // represented everywhere else.
-                if (abi_lowering() && (arg->ty->kind == TY_STRUCT || arg->ty->kind == TY_UNION)) {
+                if (abi_lowered(arg->ty)) {
                     // An aggregate argument is classified like any other: the
                     // ABI decides whether it travels in memory or in the
                     // registers, and a callee reading it with va_arg has to
@@ -1575,6 +1580,14 @@ static Ref gen_expr(Node *node) {
                 sv.ty = pointer_to(ret_abi, 0);
                 store(val, sv, ret_abi->align, NULL);
                 return slot;
+            }
+            if (sret) {
+                // A scalar handed back through memory: the callee wrote it
+                // into the slot, so the value is what the slot holds.
+                Ir *ci = new_ins(IR_CALL, R, call_ops, idx);
+                ci->is_sret = sret;
+                ci->byval_at = byval_slot;
+                return load(slot, node->ty, node->ty->align, NULL);
             }
 
             dst = TMP(tmp_id++, node->ty);
@@ -2203,6 +2216,15 @@ static void gen_continue(Node *n) {
 // Whether `ty` is returned through a hidden pointer (the ABI memory class).
 static bool abi_lowering(void) { return T.classify_aggregate != NULL; }
 
+// Whether the ABI lowering applies to this type at all: a record, whose
+// classifier decides between registers and memory, or a scalar the target
+// passes by reference, which the same classifier answers memory for.
+static bool abi_lowered(Type *ty) {
+    if (!abi_lowering()) return false;
+    if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) return true;
+    return T.scalar_by_ref && T.scalar_by_ref(ty);
+}
+
 // The single value an aggregate comes back as, or NULL when the classifier's
 // answer already says how it is returned.
 static Type *abi_ret_scalar(Type *ty) {
@@ -2212,8 +2234,7 @@ static Type *abi_ret_scalar(Type *ty) {
 }
 
 static bool abi_sret_result(Type *ty) {
-    if (!abi_lowering()) return false;
-    if (ty->kind != TY_STRUCT && ty->kind != TY_UNION) return false;
+    if (!abi_lowered(ty)) return false;
     // A value returned in a register is not written through a pointer, whatever
     // the class the same type has as an argument.
     if (abi_ret_scalar(ty)) return false;
@@ -2323,7 +2344,7 @@ static void gen_ret(Node *n) {
             curb = unreach;
             return;
         }
-        if (abi_lowering() && (rt->kind == TY_STRUCT || rt->kind == TY_UNION)) {
+        if (abi_lowered(rt)) {
             AggClass c;
             T.classify_aggregate(rt, &c);
             // The shape has to be the one the signature prints: a
@@ -2479,7 +2500,7 @@ Module *irgen(Module *md) {
         Type *ret_scalar = is_valid ? abi_ret_scalar(ty) : NULL;
         if (ret_scalar) {
             ret_abi = ret_scalar;
-        } else if (is_valid && !ret_sret && abi_lowering() && (ty->kind == TY_STRUCT || ty->kind == TY_UNION)) {
+        } else if (is_valid && !ret_sret && abi_lowered(ty)) {
             AggClass c;
             T.classify_aggregate(ty, &c);
             // The type the signature prints, so the two agree: a
@@ -2532,7 +2553,7 @@ Module *irgen(Module *md) {
         for (uint32_t i = 0; i < fn->ty->nparam; ++i, var = var->next) {
             Type *pt = var->ty;
             Ref home = TMP(var->vreg, pointer_to(pt, 0));
-            if (abi_lowering() && (pt->kind == TY_STRUCT || pt->kind == TY_UNION)) {
+            if (abi_lowered(pt)) {
                 AggClass c;
                 T.classify_aggregate(pt, &c);
                 if (c.npiece == 0) {

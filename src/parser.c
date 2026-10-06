@@ -4456,6 +4456,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
 
     if (!dummy.next) error(tok, "empty enum is invalid");
     ty->enumvals = dummy.next;
+    enum_set_underlying(ty, dummy.next);
     if (redefine) {
         if (!is_compatible(ty, exist_ty)) {
             diag("error", tag, "conflicting redefinition of enum ‘enum %s’", str(tag->id));

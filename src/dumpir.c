@@ -62,10 +62,10 @@ static const char *atomicrmw_op[] = {
 };
 
 static const char *ty_str[] = {
-    [TY_VOID] = "void",   [TY_BOOL] = "i8",       [TY_CHAR] = "i8",       [TY_SCHAR] = "i8",    [TY_UCHAR] = "i8",
-    [TY_SHORT] = "i16",   [TY_INT] = "i32",       [TY_ENUM] = "i32",      [TY_LONG] = "i64",    [TY_LLONG] = "i64",
-    [TY_FLOAT] = "float", [TY_DOUBLE] = "double", [TY_LDOUBLE] = "fp128", [TY_F16] = "half",    [TY_F32] = "float",
-    [TY_F64] = "double",  [TY_F128] = "fp128",    [TY_PTR] = "ptr",       [TY_NULLPTR] = "ptr",
+    [TY_VOID] = "void",     [TY_BOOL] = "i8",       [TY_CHAR] = "i8",     [TY_SCHAR] = "i8",  [TY_UCHAR] = "i8",
+    [TY_SHORT] = "i16",     [TY_INT] = "i32",       [TY_LONG] = "i64",    [TY_LLONG] = "i64", [TY_FLOAT] = "float",
+    [TY_DOUBLE] = "double", [TY_LDOUBLE] = "fp128", [TY_F16] = "half",    [TY_F32] = "float", [TY_F64] = "double",
+    [TY_F128] = "fp128",    [TY_PTR] = "ptr",       [TY_NULLPTR] = "ptr",
 };
 
 static void print_ident(uint32_t id) {
@@ -185,6 +185,12 @@ static void print_type(Type *ty) {
     }
     if (ty->kind == TY_LDOUBLE && T.ldouble_is_fp80) {
         fprintf(out_file, "x86_fp80");
+        return;
+    }
+    if (ty->kind == TY_ENUM) {
+        // The underlying type an enum chose decides how wide it is in the IR,
+        // not the name "enum": an enum needing 64 bits travels as an i64.
+        fprintf(out_file, "i%d", ty->size * 8);
         return;
     }
     if (ty->kind == TY_LONG) {
@@ -1044,15 +1050,18 @@ void dump_data(Sym *data) {
     fprintf(out_file, ", align %d\n", data->align);
 }
 
-static bool is_agg(Type *ty) { return ty && (ty->kind == TY_STRUCT || ty->kind == TY_UNION); }
+// Whether the ABI lowering decides this type's shape: a record, or a scalar
+// the target hands over by reference.
+static bool is_agg(Type *ty) {
+    if (!ty) return false;
+    if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) return true;
+    return T.scalar_by_ref && T.scalar_by_ref(ty);
+}
 
 // A register-class aggregate result comes back as its pieces; a memory-class
 // one is written through a pointer the caller supplies, and the function
 // itself returns nothing.
 static void print_ret_type(Type *ty) {
-    // A return value carries its mark before the type: signext i8.
-    char *ext = ext_attr(ty);
-    if (ext) fprintf(out_file, "%s ", ext);
     if (abi_lowering() && is_agg(ty)) {
         // A value the ABI returns in a register, though an argument of the
         // same type goes in memory.
@@ -1099,6 +1108,10 @@ static void print_ret_type(Type *ty) {
             }
         }
     }
+    // A returned scalar carries its mark before the type: signext i8. A
+    // memory-class result is void by the time it gets here, and has none.
+    char *ext = ext_attr(ty);
+    if (ext) fprintf(out_file, "%s ", ext);
     print_type(ty);
 }
 

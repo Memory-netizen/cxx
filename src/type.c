@@ -186,12 +186,14 @@ char *ext_attr(Type *ty) {
     // The IR names a _BitInt by its declared width, so that is the width the
     // rule is about; for every other integer the printed type is the storage.
     bool bitint = (ty->kind & TY_BITINT) != 0;
-    if (bitint && T.ext_bitint) return ty->is_unsigned ? "zeroext" : "signext";
     // A _BitInt is named by its declared width and every other integer by its
     // storage, but both are the width the printed type says.
     int bits = bitint ? bitint_width(ty) : ty->size * 8;
-    if (bits >= T.ext_bits) return NULL;
-    return ty->is_unsigned ? "zeroext" : "signext";
+    // Only the targets that mark every _BitInt reach the width test for one
+    // wider than XLEN; everywhere else a width at or above it goes unmarked.
+    if (!(bitint && T.ext_bitint) && bits >= T.ext_bits) return NULL;
+    bool sign = !ty->is_unsigned || (bits == 32 && 32 < T.ext_bits);
+    return sign ? "signext" : "zeroext";
 }
 
 bool is_fp_leaf(Type *ty) {
@@ -428,6 +430,30 @@ Type *enum_type(void) {
     ty->size = 4;
     ty->align = 4;
     return ty;
+}
+
+void enum_set_underlying(Type *ty, EnumVal *vals) {
+    int64_t lo = 0, hi = 0;
+    for (EnumVal *v = vals; v; v = v->next) {
+        if (v->val < lo) lo = v->val;
+        if (v->val > hi) hi = v->val;
+    }
+    ty->size = 4;
+    ty->align = 4;
+    if (lo >= INT32_MIN && hi <= INT32_MAX) {
+        ty->is_unsigned = false;
+        return;
+    }
+    if (lo >= 0 && hi <= UINT32_MAX) {
+        ty->is_unsigned = true;
+        return;
+    }
+    // Nothing narrower holds it. clang takes the 64-bit type here, which is
+    // long where long is 64 bits and long long where it is not; the size and
+    // alignment are the same either way, and those are what a layout sees.
+    ty->size = 8;
+    ty->align = T.ty_long->size >= 8 ? 8 : T.ty_llong->align;
+    ty->is_unsigned = lo >= 0;
 }
 
 Type *type_qual(Type *ty, uint32_t qual) {
