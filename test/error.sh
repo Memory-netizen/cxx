@@ -340,3 +340,23 @@ check 'redefinition of a loop label'
 echo 'int main(void){ int x = 0; x: for(;;){ break x; } return x; }' \
   | $compiler -S -o /dev/null -xc - > /dev/null 2>&1
 check 'a loop label may share a name with an object'
+
+# C23 6.7.2.2: an enumerator has to be representable in a fixed underlying type
+echo 'enum E : unsigned char { E0 = 300 };' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'not representable'
+check 'enumerator outside its fixed underlying type'
+
+# ... and that type has to be an integer type
+echo 'enum E : float { E0 };' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'integer type'
+check 'non-integral underlying type for an enum'
+
+# ... and only a type specifier, a type qualifier or an alignment specifier
+# belongs in that list
+echo 'enum E : static int { E0 };' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'storage class specifier is not allowed'
+check 'storage class in an enum type specifier'
+
+echo 'enum E : inline int { E0 };' \
+  | $compiler -S -o /dev/null -xc - 2>&1 | grep -q 'function specifier is not allowed'
+check 'function specifier in an enum type specifier'

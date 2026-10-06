@@ -4322,9 +4322,26 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
 
 static Node *compound_stmt(Token **rest, Token *tok) { return compound_stmt2(rest, tok, false); }
 
-// EnumSpec ::= "enum" Ident? "{" Enumr ("," Enumr)* ","? "}"
-//            | "enum" Ident
-// Enumr    ::= Ident ("=" ConstExp)?
+// EnumSpec ::= "enum" AttrSpec* Ident? EnumTypeSpec? "{" Enumr ("," Enumr)* ","? "}"
+//            | "enum" Ident EnumTypeSpec?
+// Enumr    ::= Ident AttrSpec* ("=" ConstExp)?
+// EnumTypeSpec ::= ":" SpecQualList
+//
+// Where the type specifier is given, it is the type the enum is represented
+// in and the enumerators have to fit it; where it is not, the type is the
+// narrowest one that holds them (C23 6.7.2.2).
+static bool enum_val_fits(Type *ty, int64_t v) {
+    int bits = (ty->kind & TY_BITINT) ? bitint_width(ty) : ty->size * 8;
+    if (ty->is_unsigned) {
+        // A value above INT64_MAX arrives here as a negative int64_t and does
+        // not fit an unsigned type of any width, which is the answer C wants.
+        if (v < 0) return false;
+        return bits >= 64 || (uint64_t)v <= ((UINT64_C(1) << bits) - 1);
+    }
+    if (bits >= 64) return true;
+    return v >= -(INT64_C(1) << (bits - 1)) && v <= (INT64_C(1) << (bits - 1)) - 1;
+}
+
 static Type *enum_decl(Token **rest, Token *tok) {
     tok = tok->next;
     // EnumSpec ::= "enum" AttrSpec* Ident? ...
@@ -4345,6 +4362,23 @@ static Type *enum_decl(Token **rest, Token *tok) {
         tok = tok->next;
     }
 
+    // EnumTypeSpec ::= ":" SpecQualList
+    // SpecQualList ::= TypeSpecQual+ AttrSpec*, and a TypeSpecQual is a type
+    // specifier, a type qualifier or an alignment specifier. A storage class
+    // and a function specifier are none of those, and declspecs reports each
+    // of them when its out-parameter is NULL.
+    Type *fixed = NULL;
+    Attr *fixed_attrs = NULL;
+    if (tok->kind == TK_COLON) {
+        Token *colon = tok;
+        int align = 0;
+        fixed = declspecs(&tok, tok->next, NULL, &align, NULL, &fixed_attrs);
+        if (!is_integer(fixed)) diag_exit("error", colon, "the type of an enum shall be an integer type");
+        // The alignment does not reach the enum: an enum with a fixed type is
+        // as wide and as aligned as that type, which is what clang makes of
+        // `enum E : alignas(8) int` -- a four-byte, four-aligned enum.
+    }
+
     if (tag && tok->kind != TK_LBRACE) {
         *rest = tok;
         ns = find_tag(tag, true);
@@ -4354,6 +4388,11 @@ static Type *enum_decl(Token **rest, Token *tok) {
                 diag("error", tag, "use of ‘%s’ with tag type that does not match previous declaration", str(tag->id));
                 goto note;
             }
+            // A redeclaration may repeat the fixed type, and then it has to
+            // name the one the enum already has.
+            if (fixed && ty->size > 0 && (ty->size != fixed->size || ty->is_unsigned != fixed->is_unsigned))
+                diag_exit("error", tag, "the underlying type of ‘enum %s’ does not match its previous declaration",
+                          str(tag->id));
             ty_prepend_attrs(ty, enum_attrs);
             return ty;
         }
@@ -4393,7 +4432,17 @@ static Type *enum_decl(Token **rest, Token *tok) {
         ty = enum_type();
         ty->is_anon = true;
     }
+    // A fixed underlying type decides the representation whatever the
+    // enumerators need; without one the range below decides.
+    if (fixed) {
+        ty->size = fixed->size;
+        ty->align = fixed->align;
+        ty->is_unsigned = fixed->is_unsigned;
+    }
     ty_prepend_attrs(ty, enum_attrs);
+    // Attributes from the type specifier belong to the enum, not to the type
+    // it names, which is shared with every other use of that type.
+    if (fixed_attrs) ty_prepend_attrs(ty, fixed_attrs);
 
     // Read an enum-list.
     EnumVal dummy = {};
@@ -4435,6 +4484,10 @@ static Type *enum_decl(Token **rest, Token *tok) {
 
         if (tok->kind == TK_AS) val = const_expr(&tok, tok->next);
 
+        if (fixed && !enum_val_fits(fixed, val))
+            diag_exit("error", enm_name, "enumerator value %lld is not representable in the type of ‘enum %s’",
+                      (long long)val, tag ? str(tag->id) : "(unnamed)");
+
         push_namespace(scope, name, SYM_ENUM, ty, enm_name)->enum_val = val;
         EnumVal *enm = emalloc(sizeof(EnumVal));
         enm->name = enm_name;
@@ -4456,7 +4509,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
 
     if (!dummy.next) error(tok, "empty enum is invalid");
     ty->enumvals = dummy.next;
-    enum_set_underlying(ty, dummy.next);
+    if (!fixed) enum_set_underlying(ty, dummy.next);
     if (redefine) {
         if (!is_compatible(ty, exist_ty)) {
             diag("error", tag, "conflicting redefinition of enum ‘enum %s’", str(tag->id));
