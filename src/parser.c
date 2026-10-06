@@ -43,6 +43,7 @@ static Node *elem_root(Node *node);
 static Type *decl_attrs(Token **rest, Token *tok, Type *ty);
 static void apply_postdecl_attrs(Type *ty);
 static void strip_cleanup_attr(Type *ty);
+static void warn_cleanup_attrs(Attr *attrs);
 static char *attr_disp_name(Attr *a);
 static Attr *attr_list_gnu(Token **rest, Token *tok);
 static Attr *attr_list_c23(Token **rest, Token *tok);
@@ -4252,7 +4253,10 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         // GNU post-declarator attributes attach to the declaration.
         int fspec = funcspec;
         attr_decl_apply(attrs, &fspec, &align, false);
-        attr_decl_apply(ty->attrs, &fspec, &align, true);
+        // A function declarator's post-declarator position is a type attribute
+        // one (only __attribute__ applies there); an object declarator's is
+        // the declaration position, where the spellings are equivalent.
+        attr_decl_apply(ty->attrs, &fspec, &align, ty->kind == TY_FUNC);
 
         if (ty->kind == TY_VOID) error(start, "variable ‘%s’ declared void", str(var_name->id));
 
@@ -4340,6 +4344,10 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
                 warning(WG_ATTRIBUTES, var_name, "‘cleanup’ attribute only applies to local variables");
             else {
                 Sym *fn = cleanup_handler(var);
+                // The call the handler runs is this object's use: an object
+                // whose only mention is the attribute is not unused, and
+                // neither reference reports it as one.
+                var->is_referenced = true;
                 if (!scope->cleanups)
                     scope->cleanups = vnew(4, sizeof(Cleanup));
                 else
@@ -5227,6 +5235,7 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
             if (sclass & SC_TYPEDEF) {
                 Type *ty = declarator(&tok, tok, basety);
                 apply_postdecl_attrs(ty);
+                warn_cleanup_attrs(attrs);
                 strip_cleanup_attr(ty);
                 if (tok->kind == TK_AS)
                     error(tok,
@@ -6020,6 +6029,10 @@ static bool declspec_pos_attr(AttrInfo *info) {
 static void attr_decl_apply(Attr *attrs, int *funcspec, int *align, bool gnu_only) {
     for (Attr *a = attrs; a; a = a->next) {
         if (!a->info) continue;
+        // With gnu_only this is the post-declarator position of a function
+        // declarator, which both references treat as a type attribute
+        // position: `void g(void) [[gnu::noreturn]];` is warned about and
+        // ignored rather than applied.
         if (gnu_only && !a->is_gnu) continue;
         if (!strcmp(a->info->name, "noreturn")) {
             *funcspec |= Q_NORETURN;
@@ -6040,6 +6053,15 @@ static char *attr_disp_name(Attr *a) {
 // alignment; attributes that cannot apply to a type are diagnosed (as
 // in clang). Packed is type-valid only before a record's layout, so it
 // is rejected here too.
+// The declaration attributes a typedef collected in front of it: the type is
+// the last thing a typedef declares, so `cleanup` never reaches an object of
+// its own, and both references warn about it there.
+static void warn_cleanup_attrs(Attr *attrs) {
+    for (Attr *a = attrs; a; a = a->next)
+        if (a->info && a->info->ns == ATTR_NS_GNU && !strcmp(a->info->name, "cleanup"))
+            warning(WG_ATTRIBUTES, a->tok, "‘cleanup’ attribute only applies to local variables");
+}
+
 // `cleanup` is a variable attribute, and both references ignore it on a
 // typedef -- with a warning -- leaving the objects the type later declares
 // alone. Dropping the entry is what keeps them alone: the copy `decl_attrs()`
@@ -6063,6 +6085,11 @@ static void apply_postdecl_attrs(Type *ty) {
         if (!strcmp(a->info->name, "aligned") && a->args) {
             Token *t;
             ty->align = MAX(ty->align, (int)const_expr(&t, a->args->next));
+        } else if (a->info->ns == ATTR_NS_GNU && (a->info->targets & ATTR_DECL) && ty->kind != TY_FUNC) {
+            // Written after the declarator, a GNU declaration attribute is
+            // still a declaration attribute -- sym_attr_flags() reads it --
+            // and not a type attribute that cannot apply. The `__attribute__`
+            // spelling never reached here either (the loop skips it).
         } else if (!strcmp(a->info->name, "packed") || !(a->info->targets & ATTR_TYPE) || ty->kind == TY_FUNC) {
             warning(WG_ATTRIBUTES, a->tok, "attribute '%s' ignored, because it cannot be applied to a type",
                     attr_disp_name(a));
@@ -6074,7 +6101,11 @@ static void apply_postdecl_attrs(Type *ty) {
 static void sym_attr_flags(Sym *var, Attr *attrs, bool gnu_only) {
     for (Attr *a = attrs; a; a = a->next) {
         if (!a->info) continue;
-        if (gnu_only && !a->is_gnu) continue;
+        // The flag means the GNU namespace, not the __attribute__ spelling:
+        // `int x [[gnu::cleanup(h)]]` carries the same attribute as
+        // `int x __attribute__((cleanup(h)))`, and both have to be read here
+        // (see apply_postdecl_attrs for where that holds).
+        if (gnu_only && a->info->ns != ATTR_NS_GNU) continue;
         if (!strcmp(a->info->name, "deprecated"))
             var->is_deprecated = true;
         else if (!strcmp(a->info->name, "nodiscard")) {
@@ -6530,6 +6561,11 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
                 paramty = copy_type(paramty);
                 ty_prepend_attrs(paramty, param_attrs);
             }
+            // A parameter has no scope of its own to be left, so a cleanup
+            // attribute here is ignored -- with a warning in every
+            // declaration, prototype included, which is where the references
+            // warn as well.
+            strip_cleanup_attr(paramty);
             if (paramty->kind == TY_VOID) error(start, "argument may not have ‘void’ type");
             // "array of T" is converted to "pointer to T" in the parameter
             // context. For example, *argv[] is converted to **argv by this.
@@ -6752,7 +6788,7 @@ static Token *external_declaration(Token *tok) {
         bool is_fn = ty->kind == TY_FUNC;
         // GNU post-declarator attributes attach to the declaration.
         int fspec = funcspec;
-        attr_decl_apply(ty->attrs, &fspec, &align, true);
+        attr_decl_apply(ty->attrs, &fspec, &align, ty->kind == TY_FUNC);
         if (fspec && !is_fn) {
             if (fspec & Q_NORETURN) error(tok, "‘noreturn’ can only appear on functions");
             if (fspec & Q_INLINE) error(tok, "‘inline’ can only appear on functions");
@@ -6833,13 +6869,6 @@ static Token *external_declaration(Token *tok) {
                 // -Wunused-variable's.
                 Sym *pvar = new_lvar(id, param);
                 sym_attr_flags(pvar, param->attrs, true);
-                // A parameter has no scope of its own to be left: gcc and
-                // clang both ignore the attribute here.
-                if (pvar->cleanup_attr) {
-                    warning(WG_ATTRIBUTES, param->name ? param->name : var_name,
-                            "‘cleanup’ attribute only applies to local variables");
-                    pvar->cleanup_attr = NULL;
-                }
                 push_namespace(scope, id, SYM_VAR, ty, param->name)->var = pvar;
                 param = param->next;
             }
@@ -6897,6 +6926,7 @@ static Token *external_declaration(Token *tok) {
         if (sclass & SC_AUTO) error(var_name, "file-scope declaration of ‘%s’ specifies ‘auto’", str(var_name->id));
 
         if (sclass & SC_TYPEDEF) {
+            warn_cleanup_attrs(attrs);
             strip_cleanup_attr(ty);
             if (ns)
                 check_decl_compatile(ns, SYM_TYNAME, ty);

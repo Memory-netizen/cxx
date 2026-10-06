@@ -1601,6 +1601,63 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# --- __attribute__((cleanup(f))) -------------------------------------
+
+# The attribute belongs to a variable, and to an automatic one at that. Both
+# references warn and ignore it on a file-scope object, a block-scope static,
+# a parameter (a prototype's as much as a definition's), a typedef -- on
+# either side of the declarator -- and a function declaration. The handler
+# itself, and the shapes where it runs, live in test/c2y.sh.
+cat > "$tmp/cleanpos.c" <<'EOF'
+static void h(int *p) { (void)p; }
+__attribute__((cleanup(h))) static int g = 1;
+__attribute__((cleanup(h))) typedef int T;
+typedef int U __attribute__((cleanup(h)));
+static void f(__attribute__((cleanup(h))) int x);
+static void e(__attribute__((cleanup(h))) int x) { (void)x; }
+static void onfn(void) __attribute__((cleanup(h)));
+int main(void) { __attribute__((cleanup(h))) static int s = 1; T t = 0; U u = 0; (void)t; (void)u; return 0; }
+EOF
+n=$("$compiler" -S -o /dev/null "$tmp/cleanpos.c" 2>&1 | grep -c 'only applies to local variables')
+q=$("$compiler" -Wno-attributes -S -o /dev/null "$tmp/cleanpos.c" 2>&1 | grep -c 'only applies to local variables')
+w=$("$compiler" -w -S -o /dev/null "$tmp/cleanpos.c" 2>&1 | grep -c 'only applies to local variables')
+if [ "$n" -eq 7 ] && [ "$q" -eq 0 ] && [ "$w" -eq 0 ]; then
+    echo "testing cleanup outside a local variable is ignored ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing cleanup outside a local variable is ignored ... FAILED ($n/7, $q, $w)"
+    n_fail=$((n_fail + 1))
+fi
+
+# The same attribute in all four spellings and positions on a variable that
+# can use it: the handler runs in every one, and none of them draws a warning
+# of its own. (The C23 spelling after the declarator was rejected as a type
+# attribute before this round.)
+cat > "$tmp/cleanspell.c" <<'EOF'
+int seen;
+static void h(int *p) { seen += *p; }
+int main(void) {
+    __attribute__((cleanup(h))) int a = 1;
+    int b __attribute__((cleanup(h))) = 2;
+    [[gnu::cleanup(h)]] int c = 4;
+    int d [[gnu::cleanup(h)]] = 8;
+    return seen == 0 ? 0 : 1;
+}
+EOF
+if "$compiler" -w -o "$tmp/cleanspell" "$tmp/cleanspell.c" >/dev/null 2>&1 && "$tmp/cleanspell"; then
+    own=$("$compiler" -S -o /dev/null "$tmp/cleanspell.c" 2>&1 | grep -cE 'warning:|error:')
+    if [ "$own" -eq 0 ]; then
+        echo "testing every spelling of cleanup runs the handler ... passed"
+        n_pass=$((n_pass + 1))
+    else
+        echo "testing every spelling of cleanup runs the handler ... FAILED (own diagnostics: $own)"
+        n_fail=$((n_fail + 1))
+    fi
+else
+    echo "testing every spelling of cleanup runs the handler ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
 # --- -Wsign-compare --------------------------------------------------
 
 # Mixed signedness in a comparison converts the signed operand to unsigned.
