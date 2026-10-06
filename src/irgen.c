@@ -1358,7 +1358,7 @@ static Ref gen_expr(Node *node) {
                     Type *cfnty = node->func->ty;
                     if (cfnty && cfnty->kind == TY_PTR) cfnty = cfnty->base;
                     bool variadic_call = cfnty && cfnty->kind == TY_FUNC && cfnty->is_variadic;
-                    if (c.npiece == 0 && !variadic_call) {
+                    if (c.npiece == 0 && T.agg_byval_param && !variadic_call) {
                         // Too big for the registers, and the callee has a
                         // prototype: a pointer to the copy, which LLVM spells
                         // byval in the signature. Which operand that is has to
@@ -1368,11 +1368,11 @@ static Ref gen_expr(Node *node) {
                         call_ops[idx++] = addr;
                     } else if (c.npiece == 0) {
                         // MEMORY class in a variadic call: the argument is a
-                        // copy on the stack, which LLVM spells byval here as
-                        // well. A record handed over "by value" in the IR is
-                        // not laid out that way -- the backend would pass it
-                        // the way a prototype says, and there is none.
-                        byval_slot = idx;
+                        // copy on the stack, which LLVM spells byval. A record
+                        // handed over "by value" in the IR is not laid out
+                        // that way -- the backend would pass it the way a
+                        // prototype says, and there is none.
+                        if (T.agg_byval_param) byval_slot = idx;
                         call_ops[idx++] = addr;
                     } else {
                         for (int k = 0; k < c.npiece; k++) {
@@ -1434,9 +1434,6 @@ static Ref gen_expr(Node *node) {
             }
 
             dst = TMP(tmp_id++, node->ty);
-            if (getenv("CXX_GEN_DEBUG"))
-                fprintf(stderr, "[GEN] normal call: sret=%d node->ty->kind=%d is_record=%d\n", sret, node->ty->kind,
-                        is_record);
             Ir *ci = new_ins(IR_CALL, dst, call_ops, idx);
             ci->is_sret = sret;
             ci->byval_at = byval_slot;
@@ -2088,19 +2085,29 @@ static Ref coerce_aggregate(Ref agg, Type *pieces) {
     }
     Ref at = TMP(tmp_id++, pointer_to(pieces, 0));
     new_ins(IR_ALLOCA, at, (Ref[]){INT(pieces->align)}, 1);
-    for (Member *m = pieces->members; m; m = m->next) {
+    // The destination is either a record of the pieces or an array of one
+    // repeated element type; both are read element by element.
+    bool is_arr = pieces->kind == TY_ARRAY;
+    int n = is_arr ? pieces->len : 0;
+    Type *ety = is_arr ? pieces->base : NULL;
+    int esz = is_arr ? pieces->base->size : 0;
+    Member *m = is_arr ? NULL : pieces->members;
+    for (int i = 0; is_arr ? i < n : m != NULL; i++, m = is_arr ? NULL : m->next) {
+        Type *pty = is_arr ? ety : m->ty;
+        int poff = is_arr ? i * esz : m->offset;
+        int pal = is_arr ? ety->align : m->align;
         Ref from = agg;
         from.ty = pointer_to(T.ty_char, 0);
-        Ref fgep = TMP(tmp_id++, pointer_to(m->ty, 0));
-        new_ins(IR_GEP, fgep, (Ref[]){from, INT(m->offset)}, 2);
-        Ref piece = TMP(tmp_id++, m->ty);
-        new_ins(IR_LORD, piece, (Ref[]){fgep, INT(m->align)}, 2);
+        Ref fgep = TMP(tmp_id++, pointer_to(pty, 0));
+        new_ins(IR_GEP, fgep, (Ref[]){from, INT(poff)}, 2);
+        Ref piece = TMP(tmp_id++, pty);
+        new_ins(IR_LORD, piece, (Ref[]){fgep, INT(pal)}, 2);
 
         Ref to = at;
         to.ty = pointer_to(T.ty_char, 0);
-        Ref tgep = TMP(tmp_id++, pointer_to(m->ty, 0));
-        new_ins(IR_GEP, tgep, (Ref[]){to, INT(m->offset)}, 2);
-        store(piece, tgep, m->align, NULL);
+        Ref tgep = TMP(tmp_id++, pointer_to(pty, 0));
+        new_ins(IR_GEP, tgep, (Ref[]){to, INT(poff)}, 2);
+        store(piece, tgep, pal, NULL);
     }
     Ref val = TMP(tmp_id++, pieces);
     new_ins(IR_LORD, val, (Ref[]){at, INT(pieces->align)}, 2);
@@ -2164,7 +2171,15 @@ static void gen_ret(Node *n) {
         if (abi_lowering() && (rt->kind == TY_STRUCT || rt->kind == TY_UNION)) {
             AggClass c;
             T.classify_aggregate(rt, &c);
-            Type *rec = c.npiece == 1 ? c.piece[0].ty : (T.pieces_type ? T.pieces_type(rt) : NULL);
+            // The shape has to be the one the signature prints: a
+            // homogeneous aggregate keeps its own type as the return type on
+            // AAPCS64, while the other ABIs hand back a bare piece or a
+            // record of the pieces.
+            Type *rec;
+            if (c.is_hfa && T.agg_always_array)
+                rec = rt;
+            else
+                rec = c.npiece == 1 ? c.piece[0].ty : (T.pieces_type ? T.pieces_type(rt) : NULL);
             if (rec) {
                 // Register class: the caller receives the flattened pieces,
                 // so that is what the result slot holds.
@@ -2299,11 +2314,15 @@ Module *irgen(Module *md) {
         if (is_valid && !ret_sret && abi_lowering() && (ty->kind == TY_STRUCT || ty->kind == TY_UNION)) {
             AggClass c;
             T.classify_aggregate(ty, &c);
-            // A single piece is handed back as the bare integer, which is
-            // what the signature says; only a pair needs a record.
-            if (c.npiece == 1)
+            // The type the signature prints, so the two agree: a
+            // homogeneous aggregate keeps its own type on AAPCS64, a single
+            // piece is handed back as the bare value elsewhere, and only a
+            // pair needs a record.
+            if (c.is_hfa && T.agg_always_array) {
+                ret_abi = ty;
+            } else if (c.npiece == 1) {
                 ret_abi = c.piece[0].ty;
-            else if (T.pieces_type) {
+            } else if (T.pieces_type) {
                 Type *rec = T.pieces_type(ty);
                 if (rec) ret_abi = rec;
             }
@@ -2355,21 +2374,36 @@ Module *irgen(Module *md) {
                     new_ins(IR_MEMCPY, R, (Ref[]){home, src, INT(pt->size)}, 3);
                     pn++;
                 } else {
-                    // Otherwise it arrives flattened, one parameter per piece:
-                    // put the pieces back together at their offsets.
-                    for (int k = 0; k < c.npiece; k++) {
-                        // The store's type comes from the destination's base,
-                        // so the source has to carry that type, not the
-                        // piece's own.
-                        Type *gt = c.piece[k].ty;
+                    // The parameter arrives as one value of the shape the
+                    // target chose, not necessarily one per eightbyte: SysV
+                    // hands over the pieces, AAPCS64 an array (a homogeneous
+                    // floating-point aggregate) and RISC-V a bare type when
+                    // there is one piece. Either way it is one parameter.
+                    // The same shape the signature prints, so the two agree.
+                    Type *shape =
+                        T.agg_record_param ? (T.pieces_type ? T.pieces_type(pt) : NULL) : agg_param_shape_type(pt, &c);
+                    if (shape && (shape->kind == TY_STRUCT || shape->kind == TY_UNION)) {
+                        // One parameter per piece, in order.
+                        uint32_t k = 0;
+                        for (Member *m = shape->members; m; m = m->next, k++) {
+                            Ref d = home;
+                            d.ty = pointer_to(T.ty_char, 0);
+                            Ref gep = TMP(tmp_id++, pointer_to(m->ty, 0));
+                            new_ins(IR_GEP, gep, (Ref[]){d, INT(m->offset)}, 2);
+                            store(TMP(pn + k, m->ty), gep, m->ty->align, NULL);
+                        }
+                        pn += k;
+                        continue;
+                    } else if (shape) {
+                        // An array or a bare piece: store it whole. The
+                        // record value is the address of the slot.
                         Ref d = home;
                         d.ty = pointer_to(T.ty_char, 0);
-                        Ref gep = TMP(tmp_id++, pointer_to(gt, 0));
-                        new_ins(IR_GEP, gep, (Ref[]){d, INT(c.piece[k].off)}, 2);
-                        Ref v = TMP(pn + k, gt);
-                        store(v, gep, gt->align, NULL);
+                        Ref gep = TMP(tmp_id++, pointer_to(shape, 0));
+                        new_ins(IR_GEP, gep, (Ref[]){d, INT(0)}, 2);
+                        store(TMP(pn, shape), gep, shape->align, NULL);
                     }
-                    pn += c.npiece;
+                    pn++;
                 }
                 continue;
             }

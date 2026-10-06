@@ -124,7 +124,9 @@ static bool amd64_is_memory_class(Type *agg) {
 
 static void amd64_classify_aggregate(Type *agg, AggClass *out) {
     out->npiece = 0;
-    out->size = agg->size;
+    out->size = agg ? agg->size : 0;
+    out->shape_array = false;
+    out->is_hfa = false;
     // Only a record is classified: a pointer, however it is spelled, is one
     // value and must never be expanded into the pieces of what it points at.
     if (!agg || (agg->kind != TY_STRUCT && agg->kind != TY_UNION)) return;
@@ -162,50 +164,15 @@ static void amd64_classify_aggregate(Type *agg, AggClass *out) {
     }
 }
 
-static Type *pieces_cache[8];
-static int pieces_key[8];
-static int pieces_cache_n;
-
-static void classify_publish(void) { pieces_cache_n = 0; }
+static void classify_publish(void) {}
 
 static Type *amd64_pieces_type(Type *agg) {
     if (!agg || (agg->kind != TY_STRUCT && agg->kind != TY_UNION)) return NULL;
     AggClass c;
     amd64_classify_aggregate(agg, &c);
-    if (c.npiece == 0) return NULL;
-    // One piece is not a record: the value travels as the piece itself, so
-    // an all-floating piece must reach the SSE registers and an integer one
-    // the general-purpose registers. Wrapping it in a record would send the
-    // floating case to the wrong file.
-    if (c.npiece == 1) return c.piece[0].ty;
-
-    int key = c.npiece;
-    for (int i = 0; i < c.npiece; i++) key = key * 31 + (is_flonum(c.piece[i].ty) ? 1 : 0) * 16 + c.piece[i].size;
-    for (int i = 0; i < pieces_cache_n; i++)
-        if (pieces_key[i] == key) return pieces_cache[i];
-
-    Type *ty = emalloc(sizeof(Type));
-    ty->kind = TY_STRUCT;
-    ty->size = c.npiece * 8;
-    ty->align = 8;
-    Member *tail = NULL;
-    for (int i = 0; i < c.npiece; i++) {
-        Member *m = emalloc(sizeof(Member));
-        m->ty = c.piece[i].ty;
-        m->offset = i * 8;
-        m->align = m->ty->align;
-        m->idx = i;
-        if (tail)
-            tail = tail->next = m;
-        else
-            ty->members = tail = m;
-    }
-    ty->uid = 0;
-    if (pieces_cache_n < 8) {
-        pieces_key[pieces_cache_n] = key;
-        pieces_cache[pieces_cache_n++] = ty;
-    }
-    return ty;
+    // A single piece travels as itself, so an all-floating one reaches the
+    // SSE registers and an integer one the general-purpose registers.
+    return agg_shape_type(&c);
 }
 
 // One C parameter becomes one IR parameter, unless the ABI flattens an
@@ -214,7 +181,7 @@ static int amd64_param_slots(Type *ty) {
     if (!ty || (ty->kind != TY_STRUCT && ty->kind != TY_UNION)) return 1;
     AggClass c;
     amd64_classify_aggregate(ty, &c);
-    return c.npiece == 0 ? 1 : c.npiece;
+    return agg_param_slots(ty, &c);
 }
 
 // An aggregate whose pieces split between the two register files. The
@@ -399,6 +366,10 @@ Target T_amd64 = {
     .pieces_type = amd64_pieces_type,
     .va_arg_ops_for_mixed = amd64_va_arg_mixed,
     .abi_param_slots = amd64_param_slots,
+    .agg_byval_param = true,
+    .agg_always_array = false,
+    .agg_full_regs = false,
+    .agg_record_param = true,
     .predef =
         "#define _LP64 1\n"
         "#define __ATOMIC_ACQUIRE 2\n"

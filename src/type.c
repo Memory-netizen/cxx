@@ -295,6 +295,76 @@ Type *func_type(Type *return_ty) {
     return ty;
 }
 
+// The IR type that carries a lowered aggregate: the single piece itself when
+// there is one (so a lone floating piece reaches the SIMD registers and a
+// lone integer one the general-purpose registers), an array of one repeated
+// element type when the ABI says so (AAPCS64 homogeneous floating-point
+// aggregates), or a record of the pieces otherwise. Types built here are
+// never published: they are spelled inline wherever they appear.
+// How many parameters one lowered aggregate becomes. It has to follow the
+// shape the target chose or the two sides of a call disagree: a record of the
+// pieces is one parameter per piece, while an array or a bare piece is a
+// single parameter carrying the whole value.
+// The shape an aggregate takes as a *parameter*, which is not always the
+// shape it takes as a return value: AAPCS64 hands every non-homogeneous
+// composite over in whole eight-byte registers, so struct { char } arrives as
+// an i64, while the same type is still returned as an i8. The classifier
+// keeps the exact widths; the widening belongs to the parameter spelling.
+Type *agg_param_shape_type(Type *ty, AggClass *c) {
+    (void)ty;
+    if (!c || c->npiece <= 0) return NULL;
+    if (T.agg_full_regs && !c->is_hfa) {
+        AggClass w = *c;
+        for (int i = 0; i < w.npiece; i++) {
+            w.piece[i].ty = T.ty_long;
+            w.piece[i].size = 8;
+        }
+        return agg_shape_type(&w);
+    }
+    return agg_shape_type(c);
+}
+
+int agg_param_slots(Type *ty, AggClass *c) {
+    if (!c || c->npiece == 0) return 1;
+    // An array shape is always a single parameter, however many elements it
+    // has; a record of the pieces is one parameter per piece.
+    if (c->shape_array) return 1;
+    (void)ty;
+    return c->npiece;
+}
+
+Type *agg_shape_type(AggClass *c) {
+    if (c->npiece <= 0) return NULL;
+    // A lone piece travels as itself unless the ABI still calls it an array
+    // (AAPCS64 spells struct { float } as [1 x float], not as a float).
+    if (c->npiece == 1 && !(c->shape_array && c->is_hfa && T.agg_always_array)) return c->piece[0].ty;
+    if (c->shape_array) {
+        Type *ty = array_of(c->piece[0].ty, c->npiece);
+        ty->uid = 0;
+        return ty;
+    }
+    Type *ty = emalloc(sizeof(Type));
+    ty->kind = TY_STRUCT;
+    ty->size = 0;
+    ty->align = 8;
+    Member *tail = NULL;
+    for (int i = 0; i < c->npiece; i++) {
+        Member *m = emalloc(sizeof(Member));
+        m->ty = c->piece[i].ty;
+        m->offset = c->piece[i].off;
+        m->align = m->ty->align;
+        m->idx = i;
+        if (tail)
+            tail = tail->next = m;
+        else
+            ty->members = tail = m;
+        if (m->offset + m->ty->size > ty->size) ty->size = m->offset + m->ty->size;
+    }
+    ty->size = (ty->size + ty->align - 1) / ty->align * ty->align;
+    ty->uid = 0;
+    return ty;
+}
+
 Type *array_of(Type *base, int len) {
     Type *ty = emalloc(sizeof(Type));
     ty->kind = TY_ARRAY;

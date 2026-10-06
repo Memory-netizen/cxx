@@ -68,6 +68,91 @@ static Type *rv32_va_list_type(void) {
 
 #undef TYPE
 
+// RISC-V passes an aggregate of at most two XLEN words in registers and any
+// larger one in memory. Within those two, a floating member travels in an FP
+// register when the ABI has them (float and double only, never a struct that
+// merely contains one), and everything else is packed into the integer
+// registers at its natural width. Calibrated against clang for lp64d, ilp32d
+// and ilp32.
+static void rv_classify_aggregate(Type *agg, AggClass *out) {
+    out->npiece = 0;
+    out->size = agg ? agg->size : 0;
+    out->shape_array = false;
+    out->is_hfa = false;
+    if (!agg || (agg->kind != TY_STRUCT && agg->kind != TY_UNION)) return;
+    int xlen = T.ty_long->size;
+    if (agg->size <= 0 || agg->size > 2 * xlen) return;
+
+    // One piece per member, when every member is a type that can travel on
+    // its own: naturally aligned inside a register and not straddling one.
+    bool usable = true;
+    int n = 0;
+    for (Member *m = agg->members; m; m = m->next) {
+        Type *mt = m->ty;
+        bool fp = mt->kind == TY_FLOAT || mt->kind == TY_DOUBLE;
+        if (mt->kind == TY_STRUCT || mt->kind == TY_UNION || mt->kind == TY_ARRAY) {
+            usable = false;
+            break;
+        }
+        // A soft-float ABI has no FP registers: a floating member is packed
+        // into the integer registers like any other word.
+        if (fp && T.agg_no_fp) fp = false;
+        int slot = m->offset / xlen;
+        if (m->offset != slot * xlen || m->offset + mt->size > (slot + 1) * xlen) {
+            usable = false;
+            break;
+        }
+        if (n >= MAX_AGG_PIECES) {
+            usable = false;
+            break;
+        }
+        out->piece[n].off = m->offset;
+        out->piece[n].size = mt->size;
+        out->piece[n].ty = mt;
+        n++;
+    }
+    if (usable && n > 0) {
+        out->npiece = n;
+        return;
+    }
+
+    // Otherwise the members are packed into whole registers, keeping every
+    // member inside a single one.
+    int nslot = (agg->size + xlen - 1) / xlen;
+    if (nslot > MAX_AGG_PIECES) return;
+    for (int i = 0; i < nslot; i++) {
+        int lo = i * xlen;
+        int hi = lo + xlen < agg->size ? lo + xlen : agg->size;
+        int last = 0;
+        for (Member *m = agg->members; m; m = m->next) {
+            int mhi = m->offset + m->ty->size;
+            if (mhi <= lo || m->offset >= hi) continue;
+            if (mhi > last) last = mhi;
+        }
+        if (!last) last = hi;
+        out->piece[i].off = lo;
+        out->piece[i].size = last - lo;
+        out->piece[i].ty = (last - lo) > 4 ? T.ty_long : T.ty_int;
+    }
+    out->npiece = nslot;
+}
+
+static Type *rv_pieces_type(Type *agg) {
+    if (!agg || (agg->kind != TY_STRUCT && agg->kind != TY_UNION)) return NULL;
+    AggClass c;
+    rv_classify_aggregate(agg, &c);
+    return agg_shape_type(&c);
+}
+
+static void rv_classify_publish(void) {}
+
+static int rv_param_slots(Type *ty) {
+    if (!ty || (ty->kind != TY_STRUCT && ty->kind != TY_UNION)) return 1;
+    AggClass c;
+    rv_classify_aggregate(ty, &c);
+    return agg_param_slots(ty, &c);
+}
+
 Target T_rv32 = {
     .llvm_features = "\"+m,+a,+f,+d,+c\"",
     .llvm_abi = "\"ilp32d\"",
@@ -105,6 +190,16 @@ Target T_rv32 = {
     .llong_max = 9223372036854775807LL,
     .va_list_type = rv32_va_list_type,
     .va_arg_ops = rv32_va_arg,
+    .classify_aggregate = rv_classify_aggregate,
+    .classify_publish = rv_classify_publish,
+    .pieces_type = rv_pieces_type,
+    .abi_param_slots = rv_param_slots,
+    // The caller makes the copy and passes a pointer, and each piece travels
+    // as its own parameter.
+    .agg_byval_param = false,
+    .agg_always_array = false,
+    .agg_full_regs = false,
+    .agg_record_param = true,
     .predef =
         "#define _ILP32 1\n"
         "#define __ATOMIC_ACQUIRE 2\n"
@@ -588,6 +683,16 @@ Target T_rv32b = {
     .llong_max = 9223372036854775807LL,
     .va_list_type = rv32_va_list_type,
     .va_arg_ops = rv32_va_arg,
+    .classify_aggregate = rv_classify_aggregate,
+    .classify_publish = rv_classify_publish,
+    .pieces_type = rv_pieces_type,
+    .abi_param_slots = rv_param_slots,
+    // The caller makes the copy and passes a pointer, and each piece travels
+    // as its own parameter.
+    .agg_byval_param = false,
+    .agg_always_array = false,
+    .agg_full_regs = false,
+    .agg_record_param = true,
     .predef =
         "#define _ILP32 1\n"
         "#define __ATOMIC_ACQUIRE 2\n"
@@ -1013,4 +1118,5 @@ Target T_rv32b = {
         "#define __typeof typeof\n"
         "#define __typeof__ typeof\n"
         "#define __volatile__ volatile\n",
+    .agg_no_fp = true,
 };

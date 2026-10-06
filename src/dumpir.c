@@ -566,8 +566,6 @@ void dump_blk(Blk *b) {
                 // generation, so a flag set during generation would have been
                 // overwritten many times over by then.
                 bool sret = ir->is_sret && ir->narg > 1 && ir->args[1].ty->kind == TY_PTR;
-                if (getenv("CXX_CALL_DEBUG"))
-                    fprintf(stderr, "[CALL] is_sret=%d narg=%u -> sret=%d\n", ir->is_sret, ir->narg, sret);
                 for (uint32_t i = 1; i < ir->narg; i++) {
                     Type *at = ir->args[i].ty;
                     if (sret && i == 1) {
@@ -1064,7 +1062,23 @@ static void print_ret_type(Type *ty) {
         // builds the value with, or the signature and the body would spell
         // the same thing two different ways.
         if (c.npiece == 1) {
+            // A lone piece is normally the bare value, but an ABI that keeps
+            // a homogeneous aggregate an array even at one element (AAPCS64
+            // spells struct { float } as [1 x float]) says otherwise.
+            // An AAPCS64 homogeneous aggregate keeps its own type as the
+            // return type -- the array form is how it is passed, not how it
+            // is returned -- so only the other ABIs need the bare piece.
+            if (c.is_hfa && T.agg_always_array) {
+                print_type(ty);
+                return;
+            }
             print_type(c.piece[0].ty);
+            return;
+        }
+        // A homogeneous aggregate is returned as itself; anything else is
+        // returned as the record of its pieces.
+        if (c.is_hfa && T.agg_always_array) {
+            print_type(ty);
             return;
         }
         if (T.pieces_type) {
@@ -1085,7 +1099,7 @@ static int abi_param_count(Type *ty) {
     if (!abi_lowering() || !is_agg(ty)) return 1;
     AggClass c;
     T.classify_aggregate(ty, &c);
-    return c.npiece == 0 ? 1 : c.npiece;
+    return agg_param_slots(ty, &c);
 }
 
 static void print_param_type(Type *ty, int i) {
@@ -1093,12 +1107,33 @@ static void print_param_type(Type *ty, int i) {
         AggClass c;
         T.classify_aggregate(ty, &c);
         if (c.npiece == 0) {
-            fprintf(out_file, "ptr byval(");
-            print_type(ty);
-            fprintf(out_file, ") align %d", ty->align);
+            // SysV has the callee copy the argument, which the IR spells
+            // byval; AAPCS64 and RISC-V have the caller copy it and pass a
+            // plain pointer, so byval there would ask for a second copy.
+            if (T.agg_byval_param) {
+                fprintf(out_file, "ptr byval(");
+                print_type(ty);
+                fprintf(out_file, ") align %d", ty->align);
+            } else {
+                fprintf(out_file, "ptr align %d", ty->align);
+            }
             return;
         }
-        print_type(c.piece[i].ty);
+        // The parameter arrives as one value of the shape the target chose:
+        // an array of the repeated element type, or the bare piece when
+        // there is only one.
+        // SysV and RISC-V hand each piece over as its own parameter; AAPCS64
+        // passes the composite as one array value.
+        if (T.agg_record_param) {
+            print_type(c.piece[i].ty);
+            return;
+        }
+        Type *pshape = agg_param_shape_type(ty, &c);
+        if (pshape) {
+            print_type(pshape);
+            return;
+        }
+        print_type(ty);
         return;
     }
     print_type(ty);
@@ -1191,6 +1226,9 @@ static bool already_emitted(Sym *sym) {
 }
 
 void dump_module(Module *md, FILE *out) {
+    // Shape types are built per module: a cache keyed by shape must not
+    // outlive the module it was built for.
+    if (T.classify_publish) T.classify_publish();
     out_file = out;
     curm = md;
     num_emitted = 0;

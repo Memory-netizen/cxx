@@ -114,11 +114,26 @@ typedef struct {
 // load it as -- an integer type for a piece that is INTEGER class, a floating
 // type for one that is SSE class. `off` is the piece's offset in the
 // aggregate, so it can be read straight out of the object.
-#define MAX_AGG_PIECES 2
+// The largest number of register pieces any supported ABI splits an
+// aggregate into. SysV AMD64 and RISC-V use at most two (eight-byte slots or
+// two XLEN); AAPCS64 uses up to four, one per element of a homogeneous
+// floating-point aggregate. The bound must cover the largest of them or the
+// classifier writes past the end of the array.
+#define MAX_AGG_PIECES 4
 
 typedef struct {
     int npiece;  // 0 => memory class (pointer), else number of pieces
     int size;    // size of the aggregate in bytes
+    // How the pieces are spelled in the IR when there is more than one:
+    // a record of the pieces (SysV, RISC-V) or an array of one repeated
+    // element type (AAPCS64, where a homogeneous floating-point aggregate
+    // travels as [N x float] and the backend takes the elements from the
+    // SIMD registers).
+    bool shape_array;
+    // AAPCS64: every leaf is the same floating-point type. The pieces then
+    // hold that element type rather than a per-eightbyte width, so the
+    // caller and the callee agree on which registers the value comes in.
+    bool is_hfa;
     struct {
         int off;
         int size;
@@ -186,6 +201,25 @@ struct Target {
     // ABI has lowered it: an aggregate may arrive flattened, one parameter
     // per register piece. The numbering of every slot depends on this count.
     int (*abi_param_slots)(Type *ty);
+    // Whether a memory-class aggregate parameter is spelled byval (SysV AMD64,
+    // where the copy is the callee's) or a plain pointer (AAPCS64 and RISC-V,
+    // where the caller has already made the copy).
+    bool agg_byval_param;
+    // Whether a one-piece aggregate still travels as an array of one element
+    // (AAPCS64: [1 x float]) rather than as the bare piece (SysV).
+    bool agg_always_array;
+    // Whether a non-homogeneous composite is widened to whole registers:
+    // AAPCS64 passes every such composite in full eight-byte registers, so a
+    // one-byte struct travels as i64. SysV and RISC-V keep the exact width
+    // that fits, which is what their va_arg reads back.
+    bool agg_full_regs;
+    // Whether the flattened pieces are separate parameters (SysV AMD64 and
+    // RISC-V: one per register) or one array parameter (AAPCS64, where the
+    // composite keeps its identity as a single value).
+    bool agg_record_param;
+    // A soft-float ABI has no floating-point registers at all: every member
+    // is packed into the integer registers, floating ones included.
+    bool agg_no_fp;
 
     // The type of this target's va_list as stdarg.h would declare it --
     // an array of one on amd64, a structure on arm64, a pointer on
@@ -1046,6 +1080,9 @@ void check_asop(Type *dst, Node *src, int ctx);
 Type *pointer_to(Type *base, uint32_t qual);
 Type *func_type(Type *return_ty);
 Type *array_of(Type *base, int size);
+Type *agg_shape_type(AggClass *c);
+int agg_param_slots(Type *ty, AggClass *c);
+Type *agg_param_shape_type(Type *ty, AggClass *c);
 Type *vla_of(Type *base, Node *expr);
 Type *struct_type(bool is_union);
 Type *enum_type(void);

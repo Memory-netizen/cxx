@@ -85,6 +85,99 @@ static VaArgOps va_arg_gp16 = {
     .mem_step = 16,
 };
 
+// AAPCS64: a homogeneous floating-point aggregate has every leaf of the same
+// floating-point type, at most four of them. Its elements travel in the SIMD
+// registers, one each, which the IR records as an array of that element type.
+static int hfa_collect(Type *ty, Type **elem) {
+    int n = 0;
+    if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
+        for (Member *m = ty->members; m; m = m->next) {
+            int k = hfa_collect(m->ty, elem);
+            if (k < 0) return -1;
+            if (!*elem) *elem = m->ty->kind == TY_FLOAT || m->ty->kind == TY_DOUBLE ? m->ty : NULL;
+            n += k;
+        }
+        return n;
+    }
+    if (ty->kind == TY_ARRAY) {
+        for (int i = 0; i < ty->len; i++) {
+            int k = hfa_collect(ty->base, elem);
+            if (k < 0) return -1;
+            n += k;
+        }
+        return n;
+    }
+    if (ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE) {
+        if (!*elem) *elem = ty;
+        return ty == *elem ? 1 : -1;
+    }
+    return -1;
+}
+
+static void arm64_classify_aggregate(Type *agg, AggClass *out) {
+    out->npiece = 0;
+    out->size = agg ? agg->size : 0;
+    out->shape_array = false;
+    out->is_hfa = false;
+    if (!agg || (agg->kind != TY_STRUCT && agg->kind != TY_UNION)) return;
+    if (agg->size <= 0) return;
+
+    // The homogeneous case first: it decides both the shape and the register
+    // file, and it applies even beyond sixteen bytes (up to four elements).
+    Type *elem = NULL;
+    int n = hfa_collect(agg, &elem);
+    if (n > 0 && n <= 4 && elem) {
+        out->is_hfa = true;
+        out->npiece = n;
+        // Even one element stays an array: AAPCS64 spells struct { float }
+        // as [1 x float], not as a bare float.
+        out->shape_array = true;
+        for (int i = 0; i < n; i++) {
+            out->piece[i].off = i * elem->size;
+            out->piece[i].size = elem->size;
+            out->piece[i].ty = elem;
+        }
+        return;
+    }
+    {
+    }
+
+    // Otherwise a composite of up to sixteen bytes goes in the general-purpose
+    // registers, eight bytes per register, and anything larger in memory.
+    if (agg->size > 16) return;
+    // Every such composite travels in whole eight-byte registers: a struct
+    // { char } arrives as an i64-sized value, not as an i8. The IR records
+    // that as an array of eightbytes, one per register.
+    int nslots = (agg->size + 7) / 8;
+    out->npiece = nslots;
+    out->shape_array = true;
+    for (int i = 0; i < nslots; i++) {
+        int off = i * 8;
+        int w = agg->size - off < 8 ? agg->size - off : 8;
+        out->piece[i].off = off;
+        out->piece[i].size = w;
+        // The declaration keeps the exact width; widening to a whole
+        // register happens where the argument is passed, not here.
+        out->piece[i].ty = w > 4 ? &ty_long_ : w > 2 ? &ty_int_ : w > 1 ? &ty_short_ : &ty_schar_;
+    }
+}
+
+static Type *arm64_pieces_type(Type *agg) {
+    if (!agg || (agg->kind != TY_STRUCT && agg->kind != TY_UNION)) return NULL;
+    AggClass c;
+    arm64_classify_aggregate(agg, &c);
+    return agg_shape_type(&c);
+}
+
+static void arm64_classify_publish(void) {}
+
+static int arm64_param_slots(Type *ty) {
+    if (!ty || (ty->kind != TY_STRUCT && ty->kind != TY_UNION)) return 1;
+    AggClass c;
+    arm64_classify_aggregate(ty, &c);
+    return agg_param_slots(ty, &c);
+}
+
 static VaArgOps *arm64_va_arg(Type *want) {
     if (is_flonum(want)) return &va_arg_fp;
     // An integer wider than one eightbyte takes two GP registers. Its
@@ -180,6 +273,14 @@ Target T_arm64 = {
     .llong_max = 9223372036854775807LL,
     .va_list_type = arm64_va_list_type,
     .va_arg_ops = arm64_va_arg,
+    .classify_aggregate = arm64_classify_aggregate,
+    .classify_publish = arm64_classify_publish,
+    .pieces_type = arm64_pieces_type,
+    .abi_param_slots = arm64_param_slots,
+    .agg_byval_param = false,
+    .agg_always_array = true,
+    .agg_full_regs = true,
+    .agg_record_param = false,
     .predef =
         "#define _LP64 1\n"
         "#define __AARCH64EL__ 1\n"
