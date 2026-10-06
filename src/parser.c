@@ -1516,6 +1516,30 @@ BuiltinDef builtin_defs[NUM_BUILTINFN] = {
     [BUILTIN_NANF] = {"__builtin_nanf", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_NAN] = {"__builtin_nan", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_NANL] = {"__builtin_nanl", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+
+    // The comparison macros (7.12.18). Their operands keep the types written
+    // at the call site, which no prototype expresses: converting a float
+    // operand to double first would still compare correctly but emits an
+    // fpext that a direct fcmp does not need.
+    [BUILTIN_ISGREATER] = {"__builtin_isgreater", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_ISGREATEREQUAL] = {"__builtin_isgreaterequal", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0,
+                                NULL, 0},
+    [BUILTIN_ISLESS] = {"__builtin_isless", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_ISLESSEQUAL] = {"__builtin_islessequal", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_ISLESSGREATER] = {"__builtin_islessgreater", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
+                               0},
+    [BUILTIN_ISUNORDERED] = {"__builtin_isunordered", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+
+    // The classification family. One operand for most of them, six for
+    // fpclassify (glibc passes the five results to choose between followed
+    // by the value), so irgen lowers each by hand.
+    [BUILTIN_ISNAN] = {"__builtin_isnan", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_ISINF] = {"__builtin_isinf", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_ISINF_SIGN] = {"__builtin_isinf_sign", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_ISFINITE] = {"__builtin_isfinite", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_ISNORMAL] = {"__builtin_isnormal", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_SIGNBIT] = {"__builtin_signbit", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_FPCLASSIFY] = {"__builtin_fpclassify", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
 };
 
 // The array is indexed by kind and sized by the enum, so a kind cannot land
@@ -1873,6 +1897,140 @@ static Node *parse_math_const(Token **rest, Token *tok, int kind) {
     return node;
 }
 
+// The comparison macros of 7.12.18.
+//
+// Four of them are exactly one operator over the operands, so the call is
+// rewritten to that operator and nothing downstream changes; each operand
+// is evaluated once. The NaNs make the correspondence exact rather than
+// approximate: the C operators already compile to the ordered predicates
+// the macros specify, so `isgreater(x, y)` and `x > y` are the same
+// computation, invalid-exception behaviour aside (cxx does not model
+// exceptions).
+//
+// islessgreater and isunordered are the exceptions. islessgreater is
+// defined as (x) < (y) || (x) > (y) and isunordered asks whether either
+// operand is a NaN, so both need each operand in two positions. Sharing one
+// node between them is not an option: gen_expr would generate it twice
+// while cnt_blk() counted its blocks once at parse time, and the block
+// totals have to agree. They therefore reach irgen as a call, where the
+// `one` and `uno` predicates do the job with one evaluation each.
+static Node *parse_math_cmp(Token **rest, Token *tok, int kind) {
+    Token *start = tok;
+    tok = skip(tok->next, TK_LPAREN);
+    Node *x = assign(&tok, tok);
+    tok = skip(tok, TK_COMMA);
+    Node *y = assign(&tok, tok);
+    *rest = skip(tok, TK_RPAREN);
+
+    add_type(x);
+    lvalue_convert(&x);
+    add_type(y);
+    lvalue_convert(&y);
+
+    NodeKind op = ND_GT;
+    bool one_operator = true;
+    switch (kind) {
+        case BUILTIN_ISGREATER:
+            op = ND_GT;
+            break;
+        case BUILTIN_ISGREATEREQUAL:
+            op = ND_GE;
+            break;
+        case BUILTIN_ISLESS:
+            op = ND_LT;
+            break;
+        case BUILTIN_ISLESSEQUAL:
+            op = ND_LE;
+            break;
+        default:
+            one_operator = false;
+            break;
+    }
+    if (one_operator) {
+        Node *node = new_binary(op, x, y, start);
+        add_type(node);
+        return node;
+    }
+
+    // The two that need a predicate of their own. The conversions are the
+    // ones add_type would have applied to a comparison, so a float/double
+    // pair is still compared at the wider type.
+    usual_arith_conv(&x, &y);
+    Type *fty = func_type(T.ty_int);
+    fty->is_builtin = true;
+    fty->id = kind;
+    fty->name = start;
+
+    Sym *sym = new_var(start->id, fty);
+    sym->is_function = true;
+    sym->is_builtin = true;
+
+    y->next = NULL;
+    x->next = y;
+    Node *node = new_node(ND_FUNCALL, start);
+    node->func = new_var_node(sym, start);
+    node->args = x;
+    node->narg = 2;
+    node->ty = T.ty_int;
+    return node;
+}
+
+// The classification family: __builtin_isnan, __builtin_isinf,
+// __builtin_isinf_sign, __builtin_isfinite, __builtin_isnormal,
+// __builtin_signbit and __builtin_fpclassify (7.12.4, 7.12.3).
+//
+// Each of these needs its operand value in more than one comparison, so
+// none of them can be an AST rewrite: sharing one node between two
+// positions makes gen_expr generate it twice while cnt_blk() counted its
+// blocks once, and the block totals have to agree. They travel to irgen as
+// a call instead, and the operand is evaluated there once into a Ref.
+//
+// The first five of fpclassify are the results to choose between, so they
+// are converted to int here; the value itself keeps its own type.
+static Node *parse_classify(Token **rest, Token *tok, int kind) {
+    Token *start = tok;
+    bool is_fpclassify = kind == BUILTIN_FPCLASSIFY;
+
+    tok = skip(tok->next, TK_LPAREN);
+    Node dummy = {0};
+    Node *cur = &dummy;
+    int narg = 0;
+    for (;;) {
+        Node *arg = assign(&tok, tok);
+        add_type(arg);
+        lvalue_convert(&arg);
+        if (is_fpclassify && narg < 5) {
+            Node *c = new_unary(ND_IMCAST, arg, arg->tok);
+            c->ty = T.ty_int;
+            arg = c;
+        }
+        cur = cur->next = arg;
+        narg++;
+        if (tok->kind != TK_COMMA) break;
+        tok = tok->next;
+    }
+    *rest = skip(tok, TK_RPAREN);
+
+    if (is_fpclassify && narg != 6) error(start, "\u2018%s\u2019 requires 6 arguments", str(start->id));
+    if (!is_fpclassify && narg != 1) error(start, "\u2018%s\u2019 requires one argument", str(start->id));
+
+    Type *fty = func_type(T.ty_int);
+    fty->is_builtin = true;
+    fty->id = kind;
+    fty->name = start;
+
+    Sym *sym = new_var(start->id, fty);
+    sym->is_function = true;
+    sym->is_builtin = true;
+
+    Node *node = new_node(ND_FUNCALL, start);
+    node->func = new_var_node(sym, start);
+    node->args = dummy.next;
+    node->narg = narg;
+    node->ty = T.ty_int;
+    return node;
+}
+
 static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
     Token *start = tok;
     bool is_weak = false;
@@ -1904,6 +2062,25 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
         case BUILTIN_NAN:
         case BUILTIN_NANL:
             return parse_math_const(rest, tok, kind);
+
+        // The comparison macros of 7.12.18.
+        case BUILTIN_ISGREATER:
+        case BUILTIN_ISGREATEREQUAL:
+        case BUILTIN_ISLESS:
+        case BUILTIN_ISLESSEQUAL:
+        case BUILTIN_ISLESSGREATER:
+        case BUILTIN_ISUNORDERED:
+            return parse_math_cmp(rest, tok, kind);
+
+        // The classification family of 7.12.4.
+        case BUILTIN_ISNAN:
+        case BUILTIN_ISINF:
+        case BUILTIN_ISINF_SIGN:
+        case BUILTIN_ISFINITE:
+        case BUILTIN_ISNORMAL:
+        case BUILTIN_SIGNBIT:
+        case BUILTIN_FPCLASSIFY:
+            return parse_classify(rest, tok, kind);
         case BUILTIN_VA_ARG: {
             // __builtin_va_arg(ap, type): the second operand is a type
             // name, not an expression.

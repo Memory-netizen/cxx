@@ -1043,6 +1043,231 @@ static Ref gen_scan_call(Node *node, BuiltinDef *d, int kind) {
 
 // Identify the builtin and dispatch. Emission lives in the callee so that
 // adding a builtin is a table row plus, at most, one emission routine.
+// __builtin_islessgreater and __builtin_isunordered: the two comparison
+// macros that are not one C operator. `one` and `uno` are the predicates no
+// operator spells -- `x != y` is `une`, which is true for a NaN pair where
+// islessgreater must answer 0 -- so the comparison is emitted directly.
+static Ref gen_fcmp_call(Node *node, int kind) {
+    Ref x = gen_expr(node->args);
+    Ref y = gen_expr(node->args->next);
+    Ref cond = TMP(tmp_id++, bitint[1][1]);
+    new_ins(kind == BUILTIN_ISLESSGREATER ? IR_CMP_ONE : IR_CMP_UNO, cond, (Ref[]){x, y}, 2);
+    Ref out = TMP(tmp_id++, T.ty_int);
+    new_ins(IR_EXT, out, (Ref[]){cond}, 1);
+    return out;
+}
+
+// A floating constant of `ty` from its binary128 pattern. Float and double
+// go through the legacy single-bit-pattern form; everything else through a
+// 128-bit one, where x86 long double packs its explicit significand and
+// sign/exponent into the first three limbs and binary128 is stored whole.
+static Ref fp_const(Fp128 v, Type *ty) {
+    if (ty->kind == TY_FLOAT) return FLOAT((int64_t)fp128_to_fp64_bits(v));
+    if (ty->kind == TY_DOUBLE) return DOUBLE((int64_t)fp128_to_fp64_bits(v));
+
+    Con c = {.type = CBits128};
+    if (ty->kind == TY_F16) {
+        c.bits.i128.limb[0] = fp128_to_fp16_bits(v);
+    } else if (ty->kind == TY_LDOUBLE && T.ldouble_is_fp80) {
+        uint64_t m;
+        uint16_t se;
+        fp128_to_fp80_bits(v, &m, &se);
+        c.bits.i128.limb[0] = (uint32_t)m;
+        c.bits.i128.limb[1] = (uint32_t)(m >> 32);
+        c.bits.i128.limb[2] = se;
+    } else if (ty->kind == TY_F128 || ty->kind == TY_LDOUBLE) {
+        c.bits.f128 = v;
+    } else {
+        // F32/F64: a binary32 value widened to binary64 is exact, so both
+        // share the double bit pattern (16 hex digits).
+        uint64_t b = fp128_to_fp64_bits(v);
+        c.bits.i128.limb[0] = (uint32_t)b;
+        c.bits.i128.limb[1] = (uint32_t)(b >> 32);
+    }
+    Ref r = newcon(&c, curm);
+    r.ty = ty;
+    return r;
+}
+
+// The binary128 pattern of the smallest positive normal value of ty's
+// format, 2^-e, whose binary128 exponent field is 16383 - e. Everything
+// below it and above zero is subnormal.
+static Fp128 fp_min_normal(Type *ty) {
+    int e;
+    switch (ty->kind) {
+        case TY_F16:
+            e = 14;
+            break;
+        case TY_FLOAT:
+        case TY_F32:
+            e = 126;
+            break;
+        case TY_DOUBLE:
+        case TY_F64:
+            e = 1022;
+            break;
+        default:
+            e = 16382;
+            break;  // binary128, and x87's 80-bit format
+    }
+    Fp128 v = {{0, 0, 0, (uint32_t)(16383 - e) << 16}};
+    return v;
+}
+
+// The LLVM suffix for a floating type's overloaded intrinsic names. Not the
+// bit width: x86 long double is an 80-bit format held in 16 bytes, so
+// size * 8 would ask for llvm.copysign.f128.
+static const char *fp_llvm_suffix(Type *ty) {
+    switch (ty->kind) {
+        case TY_F16:
+            return "f16";
+        case TY_FLOAT:
+        case TY_F32:
+            return "f32";
+        case TY_DOUBLE:
+        case TY_F64:
+            return "f64";
+        case TY_F128:
+            return "f128";
+        default:
+            return T.ldouble_is_fp80 ? "f80" : "f128";
+    }
+}
+
+// One comparison into a fresh i1.
+static Ref fcmp1(int op, Ref a, Ref b) {
+    Ref c = TMP(tmp_id++, bitint[1][1]);
+    new_ins(op, c, (Ref[]){a, b}, 2);
+    return c;
+}
+
+// One integer select.
+static Ref select1(Ref c, Ref t, Ref f) {
+    Ref r = TMP(tmp_id++, t.ty);
+    new_ins(IR_SELECT, r, (Ref[]){c, t, f}, 3);
+    return r;
+}
+
+// Widen an i1 to the int every one of these builtins answers with.
+static Ref bool_to_int(Ref c) {
+    Ref r = TMP(tmp_id++, T.ty_int);
+    new_ins(IR_EXT, r, (Ref[]){c}, 1);
+    return r;
+}
+
+// The classification family (7.12.4). Every one of these uses its operand
+// value in more than one place, which is why they are here and not AST
+// rewrites: the operand is evaluated once into a Ref above and the Ref is
+// what gets reused.
+static Ref gen_classify_call(Node *node, int kind) {
+    if (kind == BUILTIN_FPCLASSIFY) {
+        // __builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL,
+        //                      FP_SUBNORMAL, FP_ZERO, x)
+        Node *a = node->args;
+        Ref r_nan = gen_expr(a);
+        Ref r_inf = gen_expr(a->next);
+        Ref r_norm = gen_expr(a->next->next);
+        Ref r_sub = gen_expr(a->next->next->next);
+        Ref r_zero = gen_expr(a->next->next->next->next);
+        Node *val = a->next->next->next->next->next;
+        Type *ty = val->ty;
+        Ref x = gen_expr(val);
+
+        Ref c_nan = fcmp1(IR_CMP_UNO, x, x);
+        Ref c_pinf = fcmp1(IR_CMP_EQ, x, fp_const(FP128_INF, ty));
+        Ref c_ninf = fcmp1(IR_CMP_EQ, x, fp_const(FP128_NINF, ty));
+        Ref c_inf = TMP(tmp_id++, bitint[1][1]);
+        new_ins(IR_OR, c_inf, (Ref[]){c_pinf, c_ninf}, 2);
+        Ref c_zero = fcmp1(IR_CMP_EQ, x, fp_const(FP128_ZERO, ty));
+        // Normal is the only class left once NaN, the infinities, zero and
+        // the subnormals are excluded, so |x| >= smallest-normal is the
+        // whole test.
+        Fp128 mn = fp_min_normal(ty);
+        Ref c_hi = fcmp1(IR_CMP_LE, fp_const(mn, ty), x);
+        Ref c_lo = fcmp1(IR_CMP_LE, x, fp_const(fp128_neg(mn), ty));
+        Ref c_mag = TMP(tmp_id++, bitint[1][1]);
+        new_ins(IR_OR, c_mag, (Ref[]){c_hi, c_lo}, 2);
+        Ref c_fin = TMP(tmp_id++, bitint[1][1]);
+        Ref c_p = fcmp1(IR_CMP_ONE, x, fp_const(FP128_INF, ty));
+        Ref c_n = fcmp1(IR_CMP_ONE, x, fp_const(FP128_NINF, ty));
+        new_ins(IR_AND, c_fin, (Ref[]){c_p, c_n}, 2);
+        Ref c_norm = TMP(tmp_id++, bitint[1][1]);
+        new_ins(IR_AND, c_norm, (Ref[]){c_fin, c_mag}, 2);
+
+        // NaN, then infinity, then zero, then normal, else subnormal.
+        Ref s1 = select1(c_norm, r_norm, r_sub);
+        Ref s2 = select1(c_zero, r_zero, s1);
+        Ref s3 = select1(c_inf, r_inf, s2);
+        return select1(c_nan, r_nan, s3);
+    }
+
+    Ref x = gen_expr(node->args);
+    Type *ty = node->args->ty;
+    Ref pinf = fp_const(FP128_INF, ty);
+    Ref ninf = fp_const(FP128_NINF, ty);
+
+    switch (kind) {
+        case BUILTIN_ISNAN:
+            // Unordered with itself: true for a NaN and nothing else.
+            return bool_to_int(fcmp1(IR_CMP_UNO, x, x));
+
+        case BUILTIN_ISINF:
+        case BUILTIN_ISINF_SIGN: {
+            Ref p = fcmp1(IR_CMP_EQ, x, pinf);
+            Ref n = fcmp1(IR_CMP_EQ, x, ninf);
+            if (kind == BUILTIN_ISINF) {
+                Ref both = TMP(tmp_id++, bitint[1][1]);
+                new_ins(IR_OR, both, (Ref[]){p, n}, 2);
+                return bool_to_int(both);
+            }
+            // +1 for +inf, -1 for -inf, 0 otherwise: it is the sign that
+            // glibc's isinf macro reads out of __builtin_isinf_sign.
+            Ref neg = select1(n, INT(-1), INT(0));
+            Ref r = TMP(tmp_id++, T.ty_int);
+            new_ins(IR_SELECT, r, (Ref[]){p, INT(1), neg}, 3);
+            return r;
+        }
+
+        case BUILTIN_SIGNBIT: {
+            // copysign(1.0, x) is the ISO/IEC 60559 sign-bit operation, so
+            // it carries the sign of an infinity, a zero AND a NaN -- which
+            // 7.12.4.8 footnote 281 requires, and which every arithmetic
+            // form of the test loses for a NaN.
+            char *name = format("llvm.copysign.%s", fp_llvm_suffix(ty));
+            uint32_t id = intern(name, strlen(name));
+            register_asm_name(id, name);
+            Type *fty = func_type(ty);
+            fty->params = ty;
+            fty->nparam = 1;
+            Ref c = TMP(tmp_id++, ty);
+            new_ins(IR_CALL, c, (Ref[]){GLB(id, fty), fp_const(FP128_ONE, ty), x}, 3);
+            return bool_to_int(fcmp1(IR_CMP_LT, c, fp_const(FP128_ZERO, ty)));
+        }
+
+        default: {
+            // isfinite: `one` is ordered-and-unequal, so it is false both
+            // for an infinity (equal) and for a NaN (unordered), and one
+            // comparison per infinity settles it. isnormal adds the
+            // smallest normal magnitude, which is what separates a normal
+            // value from a subnormal one.
+            Ref fin = TMP(tmp_id++, bitint[1][1]);
+            Ref a = fcmp1(IR_CMP_ONE, x, pinf);
+            Ref b = fcmp1(IR_CMP_ONE, x, ninf);
+            new_ins(IR_AND, fin, (Ref[]){a, b}, 2);
+            if (kind == BUILTIN_ISFINITE) return bool_to_int(fin);
+
+            Fp128 mn = fp_min_normal(ty);
+            Ref hi = fcmp1(IR_CMP_LE, fp_const(mn, ty), x);
+            Ref lo = fcmp1(IR_CMP_LE, x, fp_const(fp128_neg(mn), ty));
+            Ref mag = TMP(tmp_id++, bitint[1][1]);
+            new_ins(IR_OR, mag, (Ref[]){hi, lo}, 2);
+            Ref all = TMP(tmp_id++, bitint[1][1]);
+            new_ins(IR_AND, all, (Ref[]){fin, mag}, 2);
+            return bool_to_int(all);
+        }
+    }
+}
+
 static Ref gen_builtin_call(Node *node, int kind) {
     BuiltinDef *d = builtin_def(kind);
     if (!d) fatal("unknown builtin kind %d in irgen", kind);
@@ -1070,6 +1295,21 @@ static Ref gen_builtin_call(Node *node, int kind) {
         case BUILTIN_SUB_OVERFLOW:
         case BUILTIN_MUL_OVERFLOW:
             return gen_overflow_call(node, kind);
+
+        // The two comparison macros with a predicate of their own.
+        case BUILTIN_ISLESSGREATER:
+        case BUILTIN_ISUNORDERED:
+            return gen_fcmp_call(node, kind);
+
+        // The classification family of 7.12.4.
+        case BUILTIN_ISNAN:
+        case BUILTIN_ISINF:
+        case BUILTIN_ISINF_SIGN:
+        case BUILTIN_ISFINITE:
+        case BUILTIN_ISNORMAL:
+        case BUILTIN_SIGNBIT:
+        case BUILTIN_FPCLASSIFY:
+            return gen_classify_call(node, kind);
         default:
             break;
     }
@@ -1148,43 +1388,7 @@ static Ref gen_expr(Node *node) {
             // silently treating it as an int here would mask a parser bug
             // and emit the wrong constant format. Assert instead.
             if (!node->ty) fatal("ND_NUM reached irgen without a type");
-            if (is_fpval(node->ty)) {
-                Con c = {.type = CBits128};
-                switch (node->ty->kind) {
-                    case TY_F16:
-                        c.bits.i128.limb[0] = fp128_to_fp16_bits(node->fpval);
-                        break;
-                    case TY_LDOUBLE:
-                        if (T.ldouble_is_fp80) {
-                            uint64_t m;
-                            uint16_t se;
-                            fp128_to_fp80_bits(node->fpval, &m, &se);
-                            c.bits.i128.limb[0] = (uint32_t)m;
-                            c.bits.i128.limb[1] = (uint32_t)(m >> 32);
-                            c.bits.i128.limb[2] = se;
-                        } else {
-                            c.bits.f128 = node->fpval;
-                        }
-                        break;
-                    default: {
-                        // F32/F64/F128. The legacy LLVM literal for float
-                        // and double is the double bit pattern (16 hex
-                        // digits); a binary32 value widened to binary64 is
-                        // exact, so F32 can share the F64 path.
-                        uint64_t b = fp128_to_fp64_bits(node->fpval);
-                        if (node->ty->kind == TY_F128) {
-                            c.bits.f128 = node->fpval;
-                        } else {
-                            c.bits.i128.limb[0] = (uint32_t)b;
-                            c.bits.i128.limb[1] = (uint32_t)(b >> 32);
-                        }
-                        break;
-                    }
-                }
-                dst = newcon(&c, curm);
-                dst.ty = node->ty;
-                return dst;
-            }
+            if (is_fpval(node->ty)) return fp_const(node->fpval, node->ty);
             if (is_bitint128(node->ty)) {
                 Con c = {.type = CBits128, .bits.i128 = node->ival};
                 dst = newcon(&c, curm);

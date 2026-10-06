@@ -24,6 +24,8 @@ static const char *op_str[][3] = {
     [IR_CMP_NE] = {"icmp ne", "icmp ne", "fcmp une"},
     [IR_CMP_LE] = {"icmp sle", "icmp ule", "fcmp ole"},
     [IR_CMP_LT] = {"icmp slt", "icmp ult", "fcmp olt"},
+    [IR_CMP_ONE] = {"icmp ne", "icmp ne", "fcmp one"},
+    [IR_CMP_UNO] = {"icmp eq", "icmp eq", "fcmp uno"},
     [IR_SELECT] = {"select", "select", NULL},
     [IR_EXT] = {"sext", "zext", "fpext"},
     [IR_TRUNC] = {"trunc", "trunc", "fptrunc"},
@@ -658,7 +660,9 @@ void dump_blk(Blk *b) {
             case IR_CMP_EQ:
             case IR_CMP_NE:
             case IR_CMP_LE:
-            case IR_CMP_LT: {
+            case IR_CMP_LT:
+            case IR_CMP_ONE:
+            case IR_CMP_UNO: {
                 int idx = ir->args[0].ty->is_unsigned;
                 if (is_flonum(ir->args[0].ty)) idx = 2;
                 fprintf(out_file, "%s ", op_str[ir->op][idx]);

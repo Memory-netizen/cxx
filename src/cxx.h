@@ -905,6 +905,26 @@ enum {
     BUILTIN_NAN,
     BUILTIN_NANL,
 
+    // 7.12.18: the comparison macros. Four are one C operator each and are
+    // rewritten by the parser; islessgreater and isunordered need the `one`
+    // and `uno` predicates, so they reach irgen as a call.
+    BUILTIN_ISGREATER,
+    BUILTIN_ISGREATEREQUAL,
+    BUILTIN_ISLESS,
+    BUILTIN_ISLESSEQUAL,
+    BUILTIN_ISLESSGREATER,
+    BUILTIN_ISUNORDERED,
+
+    // 7.12.4 / 7.12.3: the classification and sign macros. Each shares its
+    // operand across several comparisons, so all of them reach irgen.
+    BUILTIN_ISNAN,
+    BUILTIN_ISINF,
+    BUILTIN_ISINF_SIGN,
+    BUILTIN_ISFINITE,
+    BUILTIN_ISNORMAL,
+    BUILTIN_SIGNBIT,
+    BUILTIN_FPCLASSIFY,
+
     // One past the last kind: the table's length, so nothing has to keep a
     // separate count in step with the enum. Not a builtin itself.
     NUM_BUILTINFN,
@@ -1192,6 +1212,10 @@ void insert_ty(Type *ty, char *kind);
 Type *type_qual(Type *ty, uint32_t qual);
 Type *type_unqual(Type *ty);
 void add_type(Node *node);
+// 6.3.2.1's usual arithmetic conversions on a pair, as add_type
+// applies to the operands of a binary operator. Exported for the
+// comparison macros, which need the converted pair on its own.
+void usual_arith_conv(Node **lhs, Node **rhs);
 
 //
 // irgen.c
@@ -1252,6 +1276,13 @@ typedef enum {
     IR_CMP_EQ,
     IR_CMP_LE,
     IR_CMP_LT,
+    // The two floating predicates no C operator spells: `one` is
+    // "ordered and not equal" and `uno` is "unordered". They exist for
+    // __builtin_islessgreater and __builtin_isunordered, whose operands
+    // cannot be written out twice; both are always floating, so the
+    // integer columns of their op_str row are never reached.
+    IR_CMP_ONE,
+    IR_CMP_UNO,
 
     // Other
     IR_CALL,

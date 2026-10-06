@@ -740,6 +740,18 @@ Fp128 round116_to_target(Int128 sig, int E_fp128, int sign, FpFormat target, boo
     int vexp = (e_target == 0) ? (1 - bias) : (e_target - bias);
     int E128 = vexp - (p - 1) + msb_t + 16383;
 
+    // A negative binary128 exponent means the result is itself below
+    // binary128's smallest normal. Only an x87 target can get here: its
+    // subnormals reach 2^-16445, while binary16/32/64 bottom out far above
+    // 2^-16382 and so stay normal once widened. Store the subnormal form --
+    // exponent field 0 and a fraction with no implicit bit -- by shifting
+    // the significand down; the bits shifted out are zero, because
+    // sig128's lowest set bit is at 112 - msb_t and 1 - E128 <= 63 - msb_t.
+    if (E128 < 1) {
+        sig128 = int128_shr(sig128, 1 - E128, UNSIGNED);
+        E128 = 0;
+    }
+
     Fp128 r;
     r.limb[0] = sig128.limb[0];
     r.limb[1] = sig128.limb[1];
@@ -1037,6 +1049,7 @@ const Fp128 FP128_NAN = {{0, 0, 0, 0x7FFF8000u}};
  * 80-bit, whose significands all reach bit 110 and whose quiet bits are all
  * at or above bit 111. */
 const Fp128 FP128_SNAN = {{0, 0, 0, 0x7FFF4000u}};
+const Fp128 FP128_NINF = {{0, 0, 0, 0xFFFF0000u}};
 
 static Int256 i256_zero(void) {
     Int256 r;

@@ -76,6 +76,7 @@ extern const Fp128 FP128_ONE;
 extern const Fp128 FP128_INF;
 extern const Fp128 FP128_NAN;
 extern const Fp128 FP128_SNAN;
+extern const Fp128 FP128_NINF;
 
 #ifdef __cplusplus
 }

@@ -86,6 +86,28 @@ int main() {
     ASSERT(1, 1.0L / 10.0L == 0x1.999999999999999999999999999ap-4L);
 #endif
 
+    // === Subnormal constants (x87 only: binary128's smallest normal is
+    // 2^-16382, so the formats below it are normal in the storage) ===
+#if __LDBL_MANT_DIG__ == 64
+    // The smallest x87 subnormal, as a literal and reached by folding.
+    // round116_to_target() used to write a negative binary128 exponent
+    // here, which wrapped into the sign bit: this literal came out as
+    // zero, 0x1p-16400L as a large negative number, LDBL_MIN/4 as -inf.
+    ASSERT(1, 0x1p-16383L != 0);
+    ASSERT(1, LDBL_MIN / 2 == 0x1p-16383L);
+    ASSERT(1, LDBL_MIN / 4 == 0x1p-16384L);
+    ASSERT(1, 0x1p-16400L > 0);
+    ASSERT(1, 0x1p-16383L > 0);
+    ASSERT(1, 0x1p-16400L < 0x1p-16383L);
+    ASSERT(1, 0x1p-16383L * 2 == LDBL_MIN);
+    ASSERT(1, 0x1p-16400L * 0x1p+18L == 0x1p-16382L);
+    // The all-ones significand of the subnormal range, and the smallest
+    // value that still rounds to something other than zero.
+    ASSERT(1, 0x1.fffffffffffffffep-16383L > 0x1p-16383L);
+    ASSERT(1, 0x1p-16445L != 0);
+    ASSERT(1, 0x1p-16446L == 0);
+#endif
+
     printf("OK\n");
     return 0;
 }

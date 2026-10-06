@@ -973,7 +973,7 @@ void integer_promotion(Node **expr) {
     new_imcast(expr, ty);
 }
 
-static void usual_arith_conv(Node **lhs, Node **rhs) {
+void usual_arith_conv(Node **lhs, Node **rhs) {
     Type *ty = get_common_type((*lhs)->ty, (*rhs)->ty);
     new_imcast(lhs, ty);
     new_imcast(rhs, ty);
