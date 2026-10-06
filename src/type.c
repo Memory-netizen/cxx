@@ -433,27 +433,29 @@ Type *enum_type(void) {
 }
 
 void enum_set_underlying(Type *ty, EnumVal *vals) {
-    int64_t lo = 0, hi = 0;
+    Int128 zero = int128_set_i(0);
+    Int128 lo = zero, hi = zero;
     for (EnumVal *v = vals; v; v = v->next) {
-        if (v->val < lo) lo = v->val;
-        if (v->val > hi) hi = v->val;
+        if (int128_cmp_signed(v->val, lo) < 0) lo = v->val;
+        if (int128_cmp_signed(v->val, hi) > 0) hi = v->val;
     }
+    bool negative = int128_cmp_signed(lo, zero) < 0;
     ty->size = 4;
     ty->align = 4;
-    if (lo >= INT32_MIN && hi <= INT32_MAX) {
-        ty->is_unsigned = false;
+    // clang asks how many bits the positive values need and picks a signed
+    // type only when an enumerator is actually negative; an enum whose values
+    // are all non-negative gets an unsigned type however few bits it needs.
+    // That is why 0x7fffffffffffffffL makes an unsigned long.
+    if (int128_fits(hi, 32, negative ? SIGNED : UNSIGNED) && (!negative || int128_fits(lo, 32, SIGNED))) {
+        ty->is_unsigned = !negative && !int128_fits(hi, 32, SIGNED);
         return;
     }
-    if (lo >= 0 && hi <= UINT32_MAX) {
-        ty->is_unsigned = true;
-        return;
-    }
-    // Nothing narrower holds it. clang takes the 64-bit type here, which is
-    // long where long is 64 bits and long long where it is not; the size and
-    // alignment are the same either way, and those are what a layout sees.
+    // Nothing narrower holds it. The 64-bit type is long where long is 64
+    // bits and long long where it is not; the size and alignment are the same
+    // either way, and those are what a layout sees.
     ty->size = 8;
     ty->align = T.ty_long->size >= 8 ? 8 : T.ty_llong->align;
-    ty->is_unsigned = lo >= 0;
+    ty->is_unsigned = !negative;
 }
 
 Type *type_qual(Type *ty, uint32_t qual) {
@@ -579,7 +581,7 @@ bool is_compatible(Type *t1, Type *t2) {
             EnumVal *enm2 = t2->enumvals;
             for (; enm1 && enm2; enm1 = enm1->next, enm2 = enm2->next) {
                 if (enm1->name->id != enm2->name->id) return false;
-                if (enm1->val != enm2->val) return false;
+                if (int128_cmp_signed(enm1->val, enm2->val) != 0) return false;
             }
             return enm1 == NULL && enm2 == NULL;
         case TY_NONE:

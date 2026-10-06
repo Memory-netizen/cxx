@@ -9,6 +9,15 @@ _Static_assert(sizeof(char) == 1, "char size");
 static_assert(sizeof(long) >= 4, "long at least 32 bits");
 static_assert(sizeof(void *) == __SIZEOF_POINTER__, "pointer predef");
 
+// An ordering comparison folds with the signedness of its operands. The type
+// of the comparison itself is always int, and reading that made every 64-bit
+// unsigned value from 2^63 up look negative.
+static_assert(0xFFFFFFFFFFFFFFFFULL > 0, "a large unsigned value is positive");
+static_assert(0x8000000000000000ULL > 0x7FFFFFFFFFFFFFFFULL, "ordered as unsigned");
+static_assert(0x7FFFFFFFFFFFFFFFULL > 0, "as is the value below it");
+static_assert(-1 < 0, "a negative signed value stays negative");
+static_assert(!(1u > -1), "the usual arithmetic conversions make this unsigned");
+
 struct S {
     int x;
     char c;

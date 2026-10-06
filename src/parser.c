@@ -73,6 +73,14 @@ static Node *new_num(int64_t val, Token *tok) {
     return node;
 }
 
+// A number whose value does not fit an int64_t: an enumerator, or any other
+// constant the full-width folder produced.
+static Node *new_num128(Int128 val, Token *tok) {
+    Node *node = new_node(ND_NUM, tok);
+    node->ival = val;
+    return node;
+}
+
 // Build an ND_NUM node for TK_NUM. The lexer has already parsed the
 // literal: integer constants live in tok->ival, floating constants in
 // tok->fpval (single-rounded to the target format); there is no
@@ -161,7 +169,7 @@ struct NameSpace {
     uint32_t id;
     Sym *var;
     Type *ty;
-    int64_t enum_val;
+    Int128 enum_val;
     Token *loc;
 };
 
@@ -2438,7 +2446,21 @@ static Node *primary(Token **rest, Token *tok) {
         while (sc->prev) sc = sc->prev;
         if (sc->kind == SYM_TYNAME) error(tok, "unexpected type name ‘%s’: expected expression", str(tok->id));
         if (sc->kind == SYM_ENUM) {
-            node = new_num(sc->enum_val, tok);
+            node = new_num128(sc->enum_val, tok);
+            // An enumeration constant has type int when its value is
+            // representable there and the enumerated type otherwise, and an
+            // enumerated type is compatible with the type it is represented
+            // in. That type has to be named, not left as "enum", for the
+            // arithmetic and for _Generic to see it.
+            if (!int128_fits(sc->enum_val, 32, SIGNED)) {
+                Type *et = sc->ty;
+                if (et->size <= T.ty_int->size)
+                    node->ty = et->is_unsigned ? T.ty_uint : T.ty_int;
+                else if (et->size <= T.ty_long->size)
+                    node->ty = et->is_unsigned ? T.ty_ulong : T.ty_long;
+                else
+                    node->ty = et->is_unsigned ? T.ty_ullong : T.ty_llong;
+            }
         } else {
             if (sc->var->is_deprecated) warning(tok, "‘%s’ is deprecated", str(sc->var->id));
             node = new_var_node(sc->var, tok);
@@ -3329,19 +3351,20 @@ static int64_t eval2(Node *node, uint32_t *sym) {
             }
             if (node->kind == ND_EQ) return eval(node->lhs) == eval(node->rhs);
             if (node->kind == ND_NE) return eval(node->lhs) != eval(node->rhs);
+            bool uns = node->lhs->ty->is_unsigned;
             switch (node->kind) {
                 case ND_LT:
-                    return node->ty->is_unsigned ? (uint64_t)eval(node->lhs) < (uint64_t)eval(node->rhs)
-                                                 : eval(node->lhs) < eval(node->rhs);
+                    return uns ? (uint64_t)eval(node->lhs) < (uint64_t)eval(node->rhs)
+                               : eval(node->lhs) < eval(node->rhs);
                 case ND_LE:
-                    return node->ty->is_unsigned ? (uint64_t)eval(node->lhs) <= (uint64_t)eval(node->rhs)
-                                                 : eval(node->lhs) <= eval(node->rhs);
+                    return uns ? (uint64_t)eval(node->lhs) <= (uint64_t)eval(node->rhs)
+                               : eval(node->lhs) <= eval(node->rhs);
                 case ND_GT:
-                    return node->ty->is_unsigned ? (uint64_t)eval(node->lhs) > (uint64_t)eval(node->rhs)
-                                                 : eval(node->lhs) > eval(node->rhs);
+                    return uns ? (uint64_t)eval(node->lhs) > (uint64_t)eval(node->rhs)
+                               : eval(node->lhs) > eval(node->rhs);
                 default:
-                    return node->ty->is_unsigned ? (uint64_t)eval(node->lhs) >= (uint64_t)eval(node->rhs)
-                                                 : eval(node->lhs) >= eval(node->rhs);
+                    return uns ? (uint64_t)eval(node->lhs) >= (uint64_t)eval(node->rhs)
+                               : eval(node->lhs) >= eval(node->rhs);
             }
         }
         case ND_LOGAND: {
@@ -3502,6 +3525,19 @@ static int64_t eval_ice(Node *node) {
 int64_t const_expr(Token **rest, Token *tok) {
     Node *node = conditional(rest, tok);
     return eval_ice(node);
+}
+
+// As const_expr, but keeping the whole value. An enumerator may be any value
+// its underlying type holds, and when no type is fixed the width is chosen
+// from the enumerators, so a value that does not fit 64 bits is an answer
+// here -- unlike an array size or a case value, which have to fit size_t or
+// the switch type.
+static Int128 const_expr128(Token **rest, Token *tok) {
+    Node *node = conditional(rest, tok);
+    add_type(node);
+    if (!is_integer(node->ty)) error(node->tok, "expression is not an integer constant expression");
+    int bits = (node->ty->kind & TY_BITINT) ? bitint_width(node->ty) : node->ty->size * 8;
+    return int128_normalize(eval_int128(node), bits, node->ty->is_unsigned ? UNSIGNED : SIGNED);
 }
 
 // AsOP  ::= "=" | "*=" | "/=" | "%=" | "+=" | "-="
@@ -4330,16 +4366,9 @@ static Node *compound_stmt(Token **rest, Token *tok) { return compound_stmt2(res
 // Where the type specifier is given, it is the type the enum is represented
 // in and the enumerators have to fit it; where it is not, the type is the
 // narrowest one that holds them (C23 6.7.2.2).
-static bool enum_val_fits(Type *ty, int64_t v) {
+static bool enum_val_fits(Type *ty, Int128 v) {
     int bits = (ty->kind & TY_BITINT) ? bitint_width(ty) : ty->size * 8;
-    if (ty->is_unsigned) {
-        // A value above INT64_MAX arrives here as a negative int64_t and does
-        // not fit an unsigned type of any width, which is the answer C wants.
-        if (v < 0) return false;
-        return bits >= 64 || (uint64_t)v <= ((UINT64_C(1) << bits) - 1);
-    }
-    if (bits >= 64) return true;
-    return v >= -(INT64_C(1) << (bits - 1)) && v <= (INT64_C(1) << (bits - 1)) - 1;
+    return int128_fits(v, bits, ty->is_unsigned ? UNSIGNED : SIGNED);
 }
 
 static Type *enum_decl(Token **rest, Token *tok) {
@@ -4448,7 +4477,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
     EnumVal dummy = {};
     EnumVal *cur = &dummy;
     int i = 0;
-    int64_t val = 0;
+    Int128 val = int128_set_i(0);
     while (!consume_end(rest, tok)) {
         if (i++ > 0) tok = skip(tok, TK_COMMA);
 
@@ -4482,16 +4511,17 @@ static Type *enum_decl(Token **rest, Token *tok) {
             enm_attrs = list;
         }
 
-        if (tok->kind == TK_AS) val = const_expr(&tok, tok->next);
+        if (tok->kind == TK_AS) val = const_expr128(&tok, tok->next);
 
         if (fixed && !enum_val_fits(fixed, val))
             diag_exit("error", enm_name, "enumerator value %lld is not representable in the type of ‘enum %s’",
-                      (long long)val, tag ? str(tag->id) : "(unnamed)");
+                      (long long)int128_to_i64(val), tag ? str(tag->id) : "(unnamed)");
 
         push_namespace(scope, name, SYM_ENUM, ty, enm_name)->enum_val = val;
         EnumVal *enm = emalloc(sizeof(EnumVal));
         enm->name = enm_name;
-        enm->val = val++;
+        enm->val = val;
+        val = int128_add(val, int128_set_i(1));
         enm->attrs = enm_attrs;
         cur = cur->next = enm;
     }

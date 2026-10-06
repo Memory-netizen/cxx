@@ -1103,7 +1103,9 @@ struct Member {
 struct EnumVal {
     EnumVal *next;
     Token *name;
-    int64_t val;
+    // Full width: an enumerator may be any value its underlying type holds,
+    // and the width is chosen from the enumerators when none is fixed.
+    Int128 val;
     Attr *attrs;
 };
 

@@ -136,6 +136,42 @@ int main() {
                });
            }));
 
+    // An enumerator may be any value its underlying type holds. The value is
+    // kept whole -- it is not narrowed to 64 bits on the way in -- and the
+    // width of the enum is chosen from it.
+    ASSERT(8, ({
+               enum wb { wb0 = 0xFFFFFFFFFFFFFFFFUL };
+               sizeof(enum wb);
+           }));
+    ASSERT(1, ({
+               enum wb { wb0 = 0xFFFFFFFFFFFFFFFFUL };
+               wb0 > 0;
+           }));
+    ASSERT(1, ({
+               enum wb { wb0 = 0xFFFFFFFFFFFFFFFFUL };
+               (unsigned long long)wb0 == 0xFFFFFFFFFFFFFFFFULL;
+           }));
+    ASSERT(8, ({
+               enum ws { ws0 = 0x7FFFFFFFFFFFFFFFL };
+               sizeof(enum ws);
+           }));
+    ASSERT(8, ({
+               enum wn { wn0 = -0x7FFFFFFFFFFFFFFFL - 1 };
+               sizeof(enum wn);
+           }));
+    ASSERT(1, ({
+               enum wn { wn0 = -0x7FFFFFFFFFFFFFFFL - 1 };
+               wn0 < 0;
+           }));
+    ASSERT(4, ({
+               enum wu { wu0 = 0x80000000u };
+               sizeof(enum wu);
+           }));
+    ASSERT(1, ({
+               enum wu { wu0 = 0x80000000u };
+               wu0 > 0;
+           }));
+
     printf("OK\n");
     return 0;
 }
