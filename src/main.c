@@ -247,6 +247,15 @@ static const struct {
     int bit;
 } wgroup_names[] = {
     {"deprecated-declarations", WG_DEPRECATED},
+    // Aliases: gcc and clang name several of these differently, so both
+    // spellings map to one group.
+    {"invalid-memory-model", WG_MEMORY_ORDER},  // gcc's name
+    {"unknown-attributes", WG_ATTRIBUTES},      // clang's name
+    {"ignored-attributes", WG_ATTRIBUTES},      // clang's name
+    {"invalid-noreturn", WG_INVALID_NORETURN},
+    {"builtin-macro-redefined", WG_BUILTIN_MACRO_REDEFINED},
+    {"extra-tokens", WG_EXTRA_TOKENS},  // clang's name
+    {"endif-labels", WG_EXTRA_TOKENS},  // gcc's name for the same diagnostic
     {"unused-result", WG_UNUSED_RESULT},
     {"attributes", WG_ATTRIBUTES},
     {"return-type", WG_RETURN_TYPE},

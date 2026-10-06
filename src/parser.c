@@ -2688,6 +2688,7 @@ static Node *primary(Token **rest, Token *tok) {
     if (tok->kind == TK_STRLIT) {
         Sym *var = new_string_literal(tok->id, infer_strtype(tok));
         *rest = tok->next;
+        var->is_referenced = true;
         return new_var_node(var, tok);
     }
     if (tok->kind == TK_GENERIC) {
@@ -3901,6 +3902,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             }
             check_decl_compatile(ns, symkind, ty);
             var = new_lvar(id, ty);
+            var->tok = var_name;
         } else if (is_extern) {
             var = new_gvar(id, ty);
         } else if (is_static) {
@@ -3909,6 +3911,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             var = new_gvar(uid, ty);
         } else {
             var = new_lvar(id, ty);
+            var->tok = var_name;
         }
         NameSpace *new_ns = push_namespace(scope, id, symkind, ty, var_name);
         new_ns->var = var;
@@ -4276,7 +4279,7 @@ static Node *break_stmt(Token **rest, Token *tok) {
 // RetStmt ::= "return" Exp? ";"
 static Node *return_stmt(Token **rest, Token *tok) {
     if (cur_fn->funcspec & Q_NORETURN)
-        warning(WG_RETURN_TYPE, tok, "function ‘%s’ declared 'noreturn' should not return", str(cur_fn->id));
+        warning(WG_INVALID_NORETURN, tok, "function ‘%s’ declared 'noreturn' should not return", str(cur_fn->id));
     Node *node = new_node(ND_RETURN, tok);
     Type *ret = cur_fn->ty->ret;
     if (tok->next->kind == TK_SEMI) {
@@ -6117,6 +6120,9 @@ static Token *external_declaration(Token *tok) {
                     error(var_name, "‘[*]’ not allowed in other than function prototype scope");
                 uint32_t id = id_anon;
                 if (param->name) id = get_ident(param->name);
+                // No token: the unused-variable walk keys on one, and a
+                // parameter is -Wunused-parameter's business, not
+                // -Wunused-variable's.
                 Sym *pvar = new_lvar(id, param);
                 sym_attr_flags(pvar, param->attrs, true);
                 push_namespace(scope, id, SYM_VAR, ty, param->name)->var = pvar;
@@ -6136,6 +6142,18 @@ static Token *external_declaration(Token *tok) {
             var->body = compound_stmt2(&tok, tok, true);
 
             var->locals = reverse_list(Sym, locals, next);
+
+            // -Wunused-variable: a local that nothing ever resolved to an
+            // ND_VAR. Nameless symbols are the compiler's own temporaries
+            // (they share this list), [[maybe_unused]] and
+            // __attribute__((unused)) opt out, and a parameter has no token
+            // so it is skipped -- that warning is gcc's -Wunused-parameter,
+            // which is not in -Wall.
+            for (Sym *v = var->locals; v; v = v->next) {
+                if (!v->tok || v->is_referenced || v->is_unused || v->is_maybe_unused) continue;
+                if (v->sclass & (SC_STATIC | SC_EXTERN)) continue;
+                warning(WG_UNUSED_VARIABLE, v->tok, "unused variable \u2018%s\u2019", str(v->id));
+            }
             var->labels = labels;
             resolve_goto_labels();
 

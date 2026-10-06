@@ -597,6 +597,14 @@ struct Sym {
     // NULL when the declaration has no asm label.
     char *asm_name;
 
+    // Token that declared this symbol, for diagnostics that fire long after
+    // the declaration (the unused-variable warning is reported at the end of
+    // the function). NULL when the symbol is the compiler's own.
+    Token *tok;
+    // Set when an identifier resolves to this symbol. -Wunused-variable is
+    // the absence of it.
+    bool is_referenced;
+
     // Attribute flags
     bool is_deprecated;
     bool is_nodiscard;
@@ -1532,7 +1540,15 @@ enum {
     // error, and the unused-variable warning is plan item E3.
     WG_UNUSED_VARIABLE = 1u << 6,
     WG_IMPLICIT_FUNCTION_DECLARATION = 1u << 7,
-    WG_ALL = (1u << 8) - 1,
+    // clang's name for a function declared noreturn that returns; gcc does
+    // not diagnose it at all.
+    WG_INVALID_NORETURN = 1u << 8,
+    // Redefining or undefining a builtin macro. clang's name; gcc is silent.
+    WG_BUILTIN_MACRO_REDEFINED = 1u << 9,
+    // Tokens after a directive that takes none: clang calls it
+    // extra-tokens, gcc calls it endif-labels.
+    WG_EXTRA_TOKENS = 1u << 10,
+    WG_ALL = (1u << 11) - 1,
 };
 
 bool wg_enabled(int group);

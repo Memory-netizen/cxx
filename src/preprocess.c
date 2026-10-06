@@ -189,7 +189,7 @@ static Token *skip_line(Token *tok) {
 
     tok->line_delta = line_delta;
     tok->filename = display_name;
-    warning(WG_CPP, tok, "extra token");
+    warning(WG_EXTRA_TOKENS, tok, "extra token");
     while (!tok->is_sol) tok = tok->next;
     return tok;
 }
@@ -693,7 +693,7 @@ static void read_macro_definition(Token **rest, Token *tok) {
     if (tok->kind != TK_IDENT) error(tok, "macro name must be an identifier");
     if (tok->id == defined_id) error(tok, "'defined' cannot be used as a macro name");
     Macro *exist = find_macro(tok);
-    if (exist && exist->is_builtin) warning(WG_CPP, tok, "redefining builtin macro");
+    if (exist && exist->is_builtin) warning(WG_BUILTIN_MACRO_REDEFINED, tok, "redefining builtin macro");
 
     Token *name = tok;
     tok = tok->next;
@@ -1679,7 +1679,7 @@ static Token *preprocess2(Token *tok) {
             if (m && m->is_builtin) {
                 tok->line_delta = line_delta;
                 tok->filename = display_name;
-                warning(WG_CPP, tok, "undefining builtin macro");
+                warning(WG_BUILTIN_MACRO_REDEFINED, tok, "undefining builtin macro");
             }
             m = add_macro(tok->id, true, NULL);
             m->deleted = true;
