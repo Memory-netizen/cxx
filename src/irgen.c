@@ -1433,6 +1433,13 @@ static Ref gen_expr(Node *node) {
                           "atomic aggregate larger than 8 bytes or of non-power-of-two size is not supported");
                 return load(addr, bitint[sz * 8][1], align, NULL);
             }
+            // A record has no rvalue of its own here: the rest of the
+            // compiler represents a record value by its address, so the
+            // conversion is the identity. Emitting a load would hand back a
+            // value Ref that a member access then uses as a GEP base --
+            // `(0, t).a`, whose comma result is not an lvalue and so is
+            // converted, came out as getelementptr on the loaded struct.
+            if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) return addr;
             return load(addr, node->ty, align, node->lhs->member);
         }
         case ND_VAR:
