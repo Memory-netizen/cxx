@@ -2052,6 +2052,11 @@ static Ref gen_cond(Node *node) {
     curb = t_blk;
     insert_blk(curb);
     Ref true_r = gen_expr(node->then);
+    // An arm may open blocks of its own (a nested ?:, && or ||), so the
+    // edge into m_blk leaves wherever the arm finished, not necessarily
+    // t_blk/f_blk. The PHI below must name that block, or LLVM reports
+    // "PHI node entries do not match predecessors".
+    Blk *t_end = curb;
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
     add_pred(curb, curb->succ1);
@@ -2060,6 +2065,7 @@ static Ref gen_cond(Node *node) {
     curb = f_blk;
     insert_blk(curb);
     Ref false_r = gen_expr(node->els);
+    Blk *f_end = curb;
     curb->jmp.type = IR_JMP;
     curb->succ1 = m_blk;
     add_pred(curb, curb->succ1);
@@ -2070,8 +2076,8 @@ static Ref gen_cond(Node *node) {
     if (node->ty->kind != TY_VOID) {
         Ref result = TMP(tmp_id++, node->ty);
         Phi *phi = new_phi(result);
-        add_phi_arg(phi, t_blk, true_r);
-        add_phi_arg(phi, f_blk, false_r);
+        add_phi_arg(phi, t_end, true_r);
+        add_phi_arg(phi, f_end, false_r);
         insert_phi(curb, phi);
         return result;
     }
@@ -2697,7 +2703,10 @@ static Ref gen_stmt(Node *node) {
 Module *irgen(Module *md) {
     curm = md;
     for (Sym *fn = md->fns; fn; fn = fn->next) {
-        if (!fn->is_defined) continue;
+        // is_dead marks an internal-linkage definition that nothing
+        // reachable names; the parser diagnosed it, and emitting it would
+        // put code in the object file that clang does not emit either.
+        if (!fn->is_defined || fn->is_dead) continue;
 
         curf = fn;
         // A result returned through a hidden pointer adds one to the

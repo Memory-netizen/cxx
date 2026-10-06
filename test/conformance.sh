@@ -250,26 +250,39 @@ else
 fi
 
 # -pedantic also warns on the GNU constructs cxx accepts, and
-# -pedantic-errors stops on them. Labels-as-values is the one wired so far.
+# -pedantic-errors stops on the first of them. One diagnostic per construct:
+# a statement expression, `?:` with the middle operand omitted, a computed
+# goto, __FUNCTION__ and the address of a label.
 cat > "$tmp/gnu.c" <<'EOF'
-int f(void) { void *p = &&lab; goto *p; lab: return 0; }
-int main(void) { return f(); }
+int stmt(void) { return ({ int x = 1; x + 1; }); }
+int cond(int x) { return x ?: 7; }
+void cg(void *p) { goto *p; }
+const char *fn(void) { return __FUNCTION__; }
+void *lv(void) { l: return &&l; }
+int main(void) { return stmt() - 2 + cond(1) + (fn() != 0) + (lv() != 0); }
 EOF
-if "$compiler" -w -pedantic -S -o /dev/null "$tmp/gnu.c" 2>&1 | grep -q 'ISO C forbids'; then
-    echo "testing -pedantic warns on a GNU construct ... passed"
+ped=$("$compiler" -pedantic -S -o /dev/null "$tmp/gnu.c" 2>&1 | grep -c 'ISO C')
+off=$("$compiler" -S -o /dev/null "$tmp/gnu.c" 2>&1 | grep -c 'ISO C')
+nowarn=$("$compiler" -w -pedantic -S -o /dev/null "$tmp/gnu.c" 2>&1 | grep -c 'ISO C')
+if [ "$ped" -eq 5 ] && [ "$off" -eq 0 ] && [ "$nowarn" -eq 0 ]; then
+    echo "testing -pedantic names each GNU construct ... passed"
     n_pass=$((n_pass + 1))
 else
-    echo "testing -pedantic warns on a GNU construct ... FAILED"
+    echo "testing -pedantic names each GNU construct ... FAILED (pedantic $ped/5, default $off, -w $nowarn)"
     n_fail=$((n_fail + 1))
 fi
 
-# Without -pedantic the same program must stay silent.
-if "$compiler" -w -S -o /dev/null "$tmp/gnu.c" 2>&1 | grep -q 'ISO C forbids'; then
-    echo "testing no pedantic diagnostic without -pedantic ... FAILED"
-    n_fail=$((n_fail + 1))
-else
-    echo "testing no pedantic diagnostic without -pedantic ... passed"
+# -pedantic-errors turns the first of them into an error and stops, and -w
+# inhibits the mode as a whole -- gcc and clang stay silent for
+# `-w -pedantic` and for `-w -pedantic-errors` alike.
+err=$("$compiler" -pedantic-errors -S -o /dev/null "$tmp/gnu.c" 2>&1 | grep -c 'error:')
+wnoerr=$("$compiler" -w -pedantic-errors -S -o /dev/null "$tmp/gnu.c" 2>&1 | grep -c 'error:')
+if [ "$err" -eq 1 ] && [ "$wnoerr" -eq 0 ]; then
+    echo "testing -pedantic-errors stops on a GNU construct ... passed"
     n_pass=$((n_pass + 1))
+else
+    echo "testing -pedantic-errors stops on a GNU construct ... FAILED (errors $err, -w $wnoerr)"
+    n_fail=$((n_fail + 1))
 fi
 
 # __extension__ is a no-op marker for pedantic diagnostics cxx does not

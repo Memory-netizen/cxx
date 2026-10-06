@@ -358,4 +358,13 @@ echo 'void *f(long n) { return (void *)n; }' \
   | $compiler -S -emit-llvm -o - -xc - | grep -q inttoptr
 check 'a non-constant integer still converts with inttoptr'
 
+# A record the compiler builds itself -- the va_list ABI type -- carries no
+# name token. It used to be named with str(0), the first string the
+# preprocessor interned, which is not an identifier LLVM accepts when that
+# string happens to be a file path ("expected '=' after name"); it is
+# spelled out now, with clang's name for the same record.
+echo 'void f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); __builtin_va_end(ap); }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q '%struct.__va_list_tag = type'
+check 'the va_list record keeps its name'
+
 echo OK

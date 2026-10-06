@@ -267,6 +267,8 @@ static const struct {
     {"cpp", WG_CPP},
     {"atomic-memory-ordering", WG_MEMORY_ORDER},
     {"unused-variable", WG_UNUSED_VARIABLE},
+    {"unused-function", WG_UNUSED_FUNCTION},
+    {"unused-const-variable", WG_UNUSED_CONST_VARIABLE},
     {"implicit-function-declaration", WG_IMPLICIT_FUNCTION_DECLARATION},
 };
 

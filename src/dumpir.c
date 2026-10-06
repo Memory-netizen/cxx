@@ -1033,6 +1033,7 @@ static const char *sclass_name[] = {
 
 void dump_data(Sym *data) {
     if (already_emitted(data)) return;
+    if (data->is_dead) return;
     fprintf(out_file, "@");
     print_sym_name(data->id);
     fprintf(out_file, " = ");
@@ -1175,6 +1176,7 @@ static void print_param_type(Type *ty, int i) {
 
 void dump_fn(Sym *fn) {
     if (already_emitted(fn)) return;
+    if (fn->is_dead) return;
     dump_curf = fn;
     if (!fn->is_defined) {
         fprintf(out_file, "declare ");

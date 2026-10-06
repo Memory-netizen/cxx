@@ -354,6 +354,10 @@ static Type *amd64_va_list_type(void) {
     static bool done;
     if (!done) {
         elem.kind = TY_STRUCT;
+        // clang's name for this record. It has no name token of its own, and
+        // an unnamed one would be numbered instead, so spelling it here is
+        // what keeps the IR the same as clang's.
+        elem.id = intern("__va_list_tag", 14);
         elem.size = 24;
         elem.align = 8;
         elem.is_unsigned = true;

@@ -254,6 +254,8 @@ static Type *arm64_va_list_type(void) {
     static bool done;
     if (!done) {
         elem.kind = TY_STRUCT;
+        // clang's name for this record; see the x86-64 target.
+        elem.id = intern("__va_list", 9);
         elem.size = 32;
         elem.align = 8;
         elem.is_unsigned = true;

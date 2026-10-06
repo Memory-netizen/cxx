@@ -581,6 +581,10 @@ struct Sym {
 
     // Global variable or function
     bool is_function;
+    // A block-scope `static`: the object belongs to one function. The
+    // unused-object walk reports it, but it stays in the output the way
+    // clang leaves it there -- only a file-scope one is left out.
+    bool is_block_static;
     // Set only on the symbols the parser injects for A-class builtins. A
     // user declaration of the same name leaves it false, so the folder and
     // irgen can tell "the compiler's builtin" from "a user function that
@@ -604,6 +608,21 @@ struct Sym {
     // Set when an identifier resolves to this symbol. -Wunused-variable is
     // the absence of it.
     bool is_referenced;
+
+    // The reference graph: every file-scope symbol this function's body or
+    // this object's initializer names, in the order they were resolved and
+    // without duplicates. It is filled where the name is resolved -- the
+    // only point that knows who is referring -- and kept afterwards, so an
+    // analysis that runs later (check_unused_statics() below, then whatever
+    // an optimization pass wants) does not have to walk the trees again.
+    Sym **refs;
+    uint32_t num_refs;
+    // Set by that analysis: a symbol is reachable when a definition another
+    // translation unit can see reaches it through the graph above.
+    bool is_reachable;
+    // An internal-linkage definition nothing can reach: it is diagnosed and
+    // left out of the output.
+    bool is_dead;
 
     // Attribute flags
     bool is_deprecated;
@@ -900,9 +919,9 @@ enum {
     // The floating constant producers behind HUGE_VAL, INFINITY and NAN
     // (7.12.11.2, F.10.11). They have no runtime behaviour: the parser
     // folds each call to the constant it names, so neither the folder nor
-    // irgen ever sees one. The SNAN* family is deliberately absent: see
-    // doc/cxx-c2y-plan.md P1b -- fp128_to_fp*_bits() canonicalises every
-    // NaN to the quiet form, so a signaling NaN cannot reach the output.
+    // irgen ever sees one. The nans family is the signaling form, which the
+    // converters in fp128.c now carry through instead of canonicalising
+    // (doc/cxx-c2y-plan.md P1b).
     BUILTIN_HUGE_VAL,
     BUILTIN_HUGE_VALF,
     BUILTIN_HUGE_VALL,
@@ -912,6 +931,9 @@ enum {
     BUILTIN_NANF,
     BUILTIN_NAN,
     BUILTIN_NANL,
+    BUILTIN_NANSF,
+    BUILTIN_NANS,
+    BUILTIN_NANSL,
 
     // 7.12.18: the comparison macros. Four are one C operator each and are
     // rewritten by the parser; islessgreater and isunordered need the `one`
@@ -1556,7 +1578,12 @@ enum {
     // On by default in gcc and clang, not part of -Wall.
     WG_SHIFT_COUNT_NEGATIVE = 1u << 12,
     WG_SHIFT_COUNT_OVERFLOW = 1u << 13,
-    WG_ALL = (1u << 14) - 1,
+    // A static function or object that no reachable code names. gcc and
+    // clang split the object case in two: a const object is reported under
+    // -Wunused-const-variable, anything else under -Wunused-variable.
+    WG_UNUSED_FUNCTION = 1u << 14,
+    WG_UNUSED_CONST_VARIABLE = 1u << 15,
+    WG_ALL = (1u << 16) - 1,
     // Groups that -Wall does not enable.
     WG_OFF_DEFAULT = WG_IMPLICIT_FALLTHROUGH,
 };

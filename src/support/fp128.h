@@ -25,6 +25,9 @@ bool fp128_get_sign(Fp128 v);
 uint16_t fp128_get_exp(Fp128 v);
 Int128 fp128_get_m(Fp128 v);
 bool fp128_is_nan(Fp128 v);
+/* A NaN whose quiet bit is clear: it raises an invalid operation when used
+ * as an operand, which is the whole point of asking for one. */
+bool fp128_is_signaling_nan(Fp128 v);
 bool fp128_is_inf(Fp128 v);
 bool fp128_is_zero(Fp128 v);
 bool fp128_is_negative(Fp128 v);

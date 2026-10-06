@@ -17,6 +17,12 @@ bool fp128_is_nan(Fp128 v) {
     return e == 0x7FFF && !int128_is_zero(m);
 }
 
+bool fp128_is_signaling_nan(Fp128 v) {
+    /* The quiet bit is significand bit 111, the top bit of limb[3]'s low
+     * half, which is what fp128_get_m() leaves there. */
+    return fp128_is_nan(v) && (v.limb[3] & 0x8000u) == 0;
+}
+
 bool fp128_is_inf(Fp128 v) {
     uint16_t e = fp128_get_exp(v);
     Int128 m = fp128_get_m(v);
@@ -763,7 +769,16 @@ Fp128 round116_to_target(Int128 sig, int E_fp128, int sign, FpFormat target, boo
 uint16_t fp128_to_fp16_bits(Fp128 v) {
     uint16_t s_bit = (uint16_t)((v.limb[3] >> 31) << 15);
 
-    if (fp128_is_nan(v)) return (uint16_t)(s_bit | 0x7E00u);
+    if (fp128_is_nan(v)) {
+        if (!fp128_is_signaling_nan(v)) return (uint16_t)(s_bit | 0x7E00u);
+        /* A signaling NaN stays signaling. Of binary128's 111 payload bits
+         * binary16 keeps the leading 9, and a payload of zero would leave
+         * an infinity, so it is forced to one. Where the payload travels
+         * this way the pattern is the one gcc and clang produce. */
+        uint16_t pay = (uint16_t)(int128_shr(fp128_get_m(v), 102, UNSIGNED).limb[0] & 0x1FFu);
+        if (!pay) pay = 1;
+        return (uint16_t)(s_bit | 0x7C00u | pay);
+    }
     if (fp128_is_inf(v)) return (uint16_t)(s_bit | 0x7C00u);
     if (fp128_is_zero(v)) return s_bit;
 
@@ -791,7 +806,12 @@ uint16_t fp128_to_fp16_bits(Fp128 v) {
 uint32_t fp128_to_fp32_bits(Fp128 v) {
     uint32_t s_bit = (v.limb[3] >> 31) << 31;
 
-    if (fp128_is_nan(v)) return s_bit | 0x7FC00000u;
+    if (fp128_is_nan(v)) {
+        if (!fp128_is_signaling_nan(v)) return s_bit | 0x7FC00000u;
+        uint32_t pay = (uint32_t)(int128_shr(fp128_get_m(v), 89, UNSIGNED).limb[0] & 0x3FFFFFu);
+        if (!pay) pay = 1;
+        return s_bit | 0x7F800000u | pay;
+    }
     if (fp128_is_inf(v)) return s_bit | 0x7F800000u;
     if (fp128_is_zero(v)) return s_bit;
 
@@ -819,7 +839,13 @@ uint32_t fp128_to_fp32_bits(Fp128 v) {
 uint64_t fp128_to_fp64_bits(Fp128 v) {
     uint64_t s_bit = (uint64_t)(v.limb[3] >> 31) << 63;
 
-    if (fp128_is_nan(v)) return s_bit | 0x7FF8000000000000ULL;
+    if (fp128_is_nan(v)) {
+        if (!fp128_is_signaling_nan(v)) return s_bit | 0x7FF8000000000000ULL;
+        Int128 sh = int128_shr(fp128_get_m(v), 60, UNSIGNED);
+        uint64_t pay = ((uint64_t)sh.limb[1] << 32 | sh.limb[0]) & 0x7FFFFFFFFFFFFULL;
+        if (!pay) pay = 1;
+        return s_bit | 0x7FF0000000000000ULL | pay;
+    }
     if (fp128_is_inf(v)) return s_bit | 0x7FF0000000000000ULL;
     if (fp128_is_zero(v)) return s_bit;
 
@@ -848,7 +874,16 @@ void fp128_to_fp80_bits(Fp128 v, uint64_t *mantissa, uint16_t *sign_exp) {
     uint16_t s_bit = (uint16_t)((v.limb[3] >> 31) << 15);
 
     if (fp128_is_nan(v)) {
-        *mantissa = 0xC000000000000000ULL;
+        if (!fp128_is_signaling_nan(v)) {
+            *mantissa = 0xC000000000000000ULL;
+        } else {
+            /* Integer bit set, quiet bit clear, the leading 62 payload bits
+             * below them -- the pattern gcc and clang give __builtin_nansl. */
+            Int128 sh = int128_shr(fp128_get_m(v), 49, UNSIGNED);
+            uint64_t pay = ((uint64_t)sh.limb[1] << 32 | sh.limb[0]) & 0x3FFFFFFFFFFFFFFFULL;
+            if (!pay) pay = 1;
+            *mantissa = 0x8000000000000000ULL | pay;
+        }
         *sign_exp = s_bit | 0x7FFF;
         return;
     }

@@ -460,6 +460,34 @@ static Sym *new_gvar(uint32_t id, Type *ty) {
     return var;
 }
 
+// The file-scope object whose initializer is being parsed, or NULL. A name
+// resolved while it is set belongs to that object: an initializer runs
+// before main, so it keeps alive exactly what the object itself keeps alive.
+static Sym *cur_init;
+
+// Add one edge to the reference graph. The list holds distinct symbols, so
+// the scan is over the names a function mentions, not over its references.
+static void add_ref(Sym *from, Sym *to) {
+    for (uint32_t i = 0; i < from->num_refs; i++)
+        if (from->refs[i] == to) return;
+    if (!from->refs)
+        from->refs = vnew(16, sizeof(Sym *));
+    else
+        from->refs = vgrow(from->refs, from->num_refs + 16);
+    from->refs[from->num_refs++] = to;
+}
+
+// A symbol the source declared, as opposed to the ones the parser makes up
+// for itself -- string literals and compound literals. Only the first kind
+// has a token, and only the first kind can be diagnosed or left out.
+static bool is_user_global(Sym *sym) { return sym->tok && !sym->is_str; }
+
+// gcc and clang report an unused const object under a group of its own; an
+// array of const is a const object too.
+static bool is_const_object(Type *ty) {
+    return (ty->qual & Q_CONST) || (ty->kind == TY_ARRAY && (ty->base->qual & Q_CONST));
+}
+
 static uint32_t new_unique_varname(uint32_t id) {
     static int i = 1;
     bool same = false;
@@ -1115,7 +1143,15 @@ void insert_ty(Type *ty, char *kind) {
         t = t->next;
     }
     char *name;
-    if (i >= 0) {
+    if (!ty->id) {
+        // A record the compiler built itself -- the target's va_list, an
+        // argument aggregate -- was never given a name token. str(0) is
+        // whatever string the preprocessor interned first, which can be a
+        // file path, and a path is not an identifier the IR can carry:
+        // number those instead. i counts the unnamed records already in the
+        // list, so the first one becomes `struct.anon.1`.
+        name = format("%s.anon.%d", kind, i + 2);
+    } else if (i >= 0) {
         name = format("%s.%s.%d", kind, str(ty->id), i);
     } else {
         name = format("%s.%s", kind, str(ty->id));
@@ -1527,6 +1563,9 @@ BuiltinDef builtin_defs[NUM_BUILTINFN] = {
     [BUILTIN_NANF] = {"__builtin_nanf", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_NAN] = {"__builtin_nan", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_NANL] = {"__builtin_nanl", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_NANSF] = {"__builtin_nansf", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_NANS] = {"__builtin_nans", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_NANSL] = {"__builtin_nansl", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
 
     // The comparison macros (7.12.18). Their operands keep the types written
     // at the call site, which no prototype expresses: converting a float
@@ -1869,6 +1908,7 @@ static Node *va_list_addr(Token **rest, Token *tok) {
 static Node *parse_math_const(Token **rest, Token *tok, int kind) {
     Token *start = tok;
     bool is_nan = false;
+    bool is_snan = false;
     Type *ty;
     switch (kind) {
         case BUILTIN_HUGE_VALF:
@@ -1888,6 +1928,15 @@ static Node *parse_math_const(Token **rest, Token *tok, int kind) {
         case BUILTIN_NANL:
             ty = T.ty_ldouble, is_nan = true;
             break;
+        case BUILTIN_NANSF:
+            ty = T.ty_float, is_nan = true, is_snan = true;
+            break;
+        case BUILTIN_NANS:
+            ty = T.ty_double, is_nan = true, is_snan = true;
+            break;
+        case BUILTIN_NANSL:
+            ty = T.ty_ldouble, is_nan = true, is_snan = true;
+            break;
         default:
             ty = T.ty_double;
             break;  // HUGE_VAL and INF
@@ -1900,7 +1949,10 @@ static Node *parse_math_const(Token **rest, Token *tok, int kind) {
     }
     *rest = skip(tok, TK_RPAREN);
 
-    Fp128 v = is_nan ? FP128_NAN : FP128_INF;
+    /* FP128_SNAN carries its payload in the top payload bit, which is the
+     * shape the converters carry into each narrower format (and the same
+     * pattern gcc and clang produce). */
+    Fp128 v = is_snan ? FP128_SNAN : is_nan ? FP128_NAN : FP128_INF;
 
     Node *node = new_node(ND_NUM, start);
     node->ty = ty;
@@ -2072,6 +2124,9 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
         case BUILTIN_NANF:
         case BUILTIN_NAN:
         case BUILTIN_NANL:
+        case BUILTIN_NANSF:
+        case BUILTIN_NANS:
+        case BUILTIN_NANSL:
             return parse_math_const(rest, tok, kind);
 
         // The comparison macros of 7.12.18.
@@ -2644,7 +2699,8 @@ static Node *generic_selection(Token **rest, Token *tok) {
 static Node *primary(Token **rest, Token *tok) {
     Node *node;
     if (tok->kind == TK_LPAREN && tok->next->kind == TK_LBRACE) {
-        // This is a GNU statement expresssion.
+        // [GNU] A braced group used as an expression.
+        pedantic(tok, "ISO C forbids braced-groups within expressions");
         node = new_node(ND_STMT_EXPR, tok);
         node->body = compound_stmt(&tok, tok->next)->body;
         *rest = skip(tok, TK_RPAREN);
@@ -2731,10 +2787,25 @@ static Node *primary(Token **rest, Token *tok) {
                     node->ty = et->is_unsigned ? T.ty_ullong : T.ty_llong;
             }
         } else {
+            // [GNU] "__FUNCTION__" is another name of the standard
+            // "__func__"; the name space entry is the one that says which
+            // of the two spelled this use.
+            if (sc->id == id_function) pedantic(tok, "ISO C does not support ‘__FUNCTION__’ predefined identifier");
             if (sc->var->is_deprecated) warning(WG_DEPRECATED, tok, "‘%s’ is deprecated", str(sc->var->id));
             // -Wunused-variable is the absence of this: an identifier that
             // never resolves to its variable leaves the flag clear.
             sc->var->is_referenced = true;
+            // The same point is the only one that knows who is referring,
+            // so the reference graph is built here: the function being
+            // parsed, or the object whose initializer is being parsed. A
+            // name resolved outside both -- in the array bound of a global,
+            // say -- is code that always runs, which makes it a root.
+            if (cur_fn)
+                add_ref(cur_fn, sc->var);
+            else if (cur_init)
+                add_ref(cur_init, sc->var);
+            else
+                sc->var->is_reachable = true;
             node = new_var_node(sc->var, tok);
         }
         *rest = tok->next;
@@ -3190,6 +3261,7 @@ static Node *conditional(Token **rest, Token *tok) {
     }
 
     if (tok->next->kind == TK_COLON) {
+        pedantic(tok->next, "ISO C forbids omitting the middle term of a ‘?:’ expression");
         // [GNU] Compile `a ?: b` as `tmp = a, tmp ? tmp : b`.
         // Omitting the middle operand uses the value already computed
         // without the undesirable effects of recomputing it
@@ -3912,6 +3984,11 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             char *name = format("%s.%s", str(cur_fn->id), str(id));
             uint32_t uid = new_unique_varname(intern(name, strlen(name)));
             var = new_gvar(uid, ty);
+            // The object is a global -- hence the mangled name -- but it
+            // belongs to this function, which is what the unused-object
+            // walk and the emitter both need to know.
+            var->is_block_static = true;
+            var->tok = var_name;
         } else {
             var = new_lvar(id, ty);
             var->tok = var_name;
@@ -4277,6 +4354,7 @@ static Node *for_stmt(Token **rest, Token *tok) {
 // GotoStmt ::= "goto" Ident ";"
 static Node *goto_stmt(Token **rest, Token *tok) {
     if (tok->next->kind == TK_STAR) {
+        pedantic(tok, "ISO C forbids ‘goto *expr;’");
         // [GNU] `goto *ptr` jumps to the address specified by `ptr`.
         Node *node = new_node(ND_GOTO_EXPR, tok);
         node->lhs = expr(&tok, tok->next->next);
@@ -4746,6 +4824,18 @@ static bool enum_val_fits(Type *ty, Int128 v) {
     return int128_fits(v, bits, ty->is_unsigned ? UNSIGNED : SIGNED);
 }
 
+// 6.7.13.5 / -Wdeprecated-declarations: a type declared [[deprecated]] is
+// reported at every use that names it, which is what gcc and clang do. The
+// definition itself is not a use, and neither is a bare redeclaration
+// (`struct S;`), so both callers check the token that follows.
+static void check_deprecated_ty(Type *ty, Token *tok) {
+    for (Attr *a = ty->attrs; a; a = a->next)
+        if (a->info && !strcmp(a->info->name, "deprecated")) {
+            warning(WG_DEPRECATED, tok, "‘%s’ is deprecated", str(tok->id));
+            return;
+        }
+}
+
 static Type *enum_decl(Token **rest, Token *tok) {
     tok = tok->next;
     // EnumSpec ::= "enum" AttrSpec* Ident? ...
@@ -4798,6 +4888,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
                 diag_exit("error", tag, "the underlying type of ‘enum %s’ does not match its previous declaration",
                           str(tag->id));
             ty_prepend_attrs(ty, enum_attrs);
+            if (tok->kind != TK_SEMI) check_deprecated_ty(ty, tag);
             return ty;
         }
 
@@ -5212,6 +5303,7 @@ static Type *record_decl(Token **rest, Token *tok) {
                 goto note;
             }
             ty_prepend_attrs(ty, rec_attrs);
+            if (tok->kind != TK_SEMI) check_deprecated_ty(ty, tag);
             return ty;
         }
 
@@ -5669,9 +5761,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 if (typespec_cnt) goto loop_end;
                 Type *orig = find_typedef(tok, true);
                 if (orig) {
-                    for (Attr *a = orig->attrs; a; a = a->next)
-                        if (a->info && !strcmp(a->info->name, "deprecated"))
-                            warning(WG_DEPRECATED, tok, "‘%s’ is deprecated", str(tok->id));
+                    check_deprecated_ty(orig, tok);
                     ty = orig;
                     typespec_cnt += OTHER;
                     break;
@@ -6200,6 +6290,9 @@ static Token *external_declaration(Token *tok) {
             ty = decl_attrs(&tok, tok, ty);
             set_asm_name(var, asm_name);
 
+            // Where a diagnostic about the symbol points: the definition
+            // when there is one, else the declaration that created it.
+            var->tok = var_name;
             var->is_defined = true;
             var->funcspec |= fspec;
             sym_attr_flags(var, attrs, false);
@@ -6314,6 +6407,8 @@ static Token *external_declaration(Token *tok) {
                 ns->lnk = sclass & (SC_STATIC | SC_CONSTEXPR) ? LK_INTERN : LK_EXTERN;
             }
 
+            var->tok = var_name;
+
             // asm("name") for a file-scope object or function
             // declaration, optionally followed by attributes:
             //   extern int fscanf(...) __asm__("__isoc23_fscanf") __wur;
@@ -6339,7 +6434,10 @@ static Token *external_declaration(Token *tok) {
                 if ((ty->qual & Q_ATOMIC) && (ty->kind == TY_STRUCT || ty->kind == TY_UNION) &&
                     tok->next->kind == TK_LBRACE)
                     error(var_name, "illegal initializer type '_Atomic(%s)'", str(ty->uid));
+                Sym *outer = cur_init;
+                cur_init = var;
                 gvar_initializer(&tok, tok->next, var);
+                cur_init = outer;
                 var->is_defined = true;
                 if (sclass & SC_CONSTEXPR) {
                     // A constexpr initializer must be a constant expression.
@@ -6362,6 +6460,88 @@ static Token *external_declaration(Token *tok) {
             error(tok, "expected ‘;’ after top level declarator");
     note:
         diag_exit("note", ns->loc, "previous definition is here");
+    }
+}
+
+// -Wunused-function / -Wunused-const-variable, and the dead code
+// elimination that goes with them.
+//
+// The graph is the one add_ref() builds while parsing: every file-scope name
+// a body or an initializer resolves is an edge from the symbol being parsed.
+// A definition another translation unit can see -- external linkage, and for
+// an object a definition rather than a declaration -- is a root, and
+// everything a root reaches can run. What is left with internal linkage is
+// dead: it is diagnosed and left out of the output, which is what clang does
+// at -O0 as well.
+//
+// The reason to ask the graph rather than "was this name ever mentioned",
+// which is what gcc and clang ask, is the pair of static functions that only
+// call each other: both names are mentioned and both are dead. Being a
+// rooted walk, it reaches objects too, so a static table of function
+// pointers that nothing uses keeps nothing alive.
+static void check_unused_statics(void) {
+    // globals is built by prepending, so reading it into an array and
+    // walking that array backwards gives source order -- the order the
+    // diagnostics have to come out in.
+    uint32_t nsym = 0;
+    for (Sym *sym = globals; sym; sym = sym->next) nsym++;
+    Sym **syms = vnew(nsym + 1, sizeof(Sym *));
+    uint32_t ns = 0;
+    for (Sym *sym = globals; sym; sym = sym->next) syms[ns++] = sym;
+
+    // Every symbol is marked before it is pushed, so each is visited once
+    // and this cannot overflow.
+    Sym **work = vnew(nsym + 1, sizeof(Sym *));
+    uint32_t n = 0;
+
+    for (uint32_t i = ns; i-- > 0;) {
+        Sym *sym = syms[i];
+        if (!is_user_global(sym) || (sym->sclass & (SC_STATIC | SC_CONSTEXPR))) continue;
+        // A block-scope static is reached through the function that owns it,
+        // not from outside, so it is not a root.
+        if (sym->is_block_static) continue;
+        // A function is a definition when it has a body, an object when it
+        // is more than a declaration.
+        if (sym->is_function ? !sym->body : (sym->sclass & SC_EXTERN)) continue;
+        sym->is_reachable = true;
+        work[n++] = sym;
+    }
+
+    while (n) {
+        Sym *sym = work[--n];
+        for (uint32_t i = 0; i < sym->num_refs; i++) {
+            Sym *ref = sym->refs[i];
+            if (ref->is_reachable) continue;
+            ref->is_reachable = true;
+            work[n++] = ref;
+        }
+    }
+
+    for (uint32_t i = ns; i-- > 0;) {
+        Sym *sym = syms[i];
+        if (!is_user_global(sym) || !(sym->sclass & (SC_STATIC | SC_CONSTEXPR))) continue;
+        if (sym->is_reachable) continue;
+
+        if (sym->is_function) {
+            sym->is_dead = true;
+            // A static inline function is the header idiom for "here if you
+            // want it": gcc stays quiet about an unused one and clang does
+            // not. cxx follows gcc, whose answer survives the header case.
+            if (sym->funcspec & Q_INLINE) continue;
+            if (sym->is_unused || sym->is_maybe_unused) continue;
+            warning(WG_UNUSED_FUNCTION, sym->tok, "unused function ‘%s’", str(sym->tok->id));
+            continue;
+        }
+
+        // A declared object is promised by somewhere else; only a
+        // definition can be an object this file fails to use.
+        if (sym->sclass & SC_EXTERN) continue;
+        if (!sym->is_block_static) sym->is_dead = true;
+        if (sym->is_unused || sym->is_maybe_unused) continue;
+        // str(tok->id) rather than str(sym->id): a block-scope static is
+        // emitted as `f.q`, and gcc and clang name it `q`.
+        warning(is_const_object(sym->ty) ? WG_UNUSED_CONST_VARIABLE : WG_UNUSED_VARIABLE, sym->tok,
+                "unused variable ‘%s’", str(sym->tok->id));
     }
 }
 
@@ -6400,6 +6580,10 @@ Module *parse(Token *tok) {
 
     while (tok->kind != TK_EOF) tok = external_declaration(tok);
     leave_scope(tok);
+
+    // Every symbol now has its edges, so the reachable set can be computed
+    // once, before the module is split into functions and objects.
+    check_unused_statics();
 
     for (Sym *sym = globals; sym;) {
         Sym *next = sym->next;

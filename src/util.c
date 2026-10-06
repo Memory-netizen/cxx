@@ -118,7 +118,9 @@ bool wg_enabled(int group) {
 // warning-group machinery: -pedantic is a mode, not a group, which is how
 // gcc and clang treat it too.
 void pedantic(Token *tok, const char *msg, ...) {
-    if (!opt_pedantic) return;
+    // -w inhibits the mode as a whole, diagnostics and all: gcc and clang
+    // stay silent for `-w -pedantic` and for `-w -pedantic-errors`.
+    if (!opt_pedantic || opt_nowarn) return;
     va_list ap;
     va_start(ap, msg);
     Token *orig = tok;
