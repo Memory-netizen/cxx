@@ -973,6 +973,51 @@ void integer_promotion(Node **expr) {
     new_imcast(expr, ty);
 }
 
+// -Wsign-compare: mixing signed and unsigned in a relational operator
+// converts the signed operand to unsigned, which is how `-1 < 1u` becomes
+// false. gcc and clang both keep this group out of the C defaults (it
+// arrives with -Wextra there), so WG_SIGN_COMPARE is off unless asked for.
+// The check runs after the operands' own types are known but before
+// usual_arith_conv() rewrites them, which is what makes
+// `unsigned char < int` silent: both sides promote to int first.
+static void warn_sign_compare(Node *node) {
+    // The four relational operators and the two equality ones: gcc's
+    // -Wsign-compare covers all six (measured), and cxx types them along
+    // this same path.
+    if (node->kind != ND_LT && node->kind != ND_LE && node->kind != ND_GT && node->kind != ND_GE &&
+        node->kind != ND_EQ && node->kind != ND_NE)
+        return;
+    if (!wg_enabled(WG_SIGN_COMPARE)) return;
+
+    Node *l = node->lhs;
+    Node *r = node->rhs;
+    if (node->kind == ND_GT || node->kind == ND_GE) {
+        Node *t = l;
+        l = r;
+        r = t;  // the message names the operands as they were written
+    }
+    if (!is_integer(l->ty) || !is_integer(r->ty)) return;
+    if (is_bool(l->ty) || is_bool(r->ty)) return;
+
+    // 6.3.1.1: the integer promotions come first, and they decide the
+    // signedness the comparison actually uses.
+    Type *lt = l->ty->size < 4 ? T.ty_int : l->ty;
+    Type *rt = r->ty->size < 4 ? T.ty_int : r->ty;
+    if (lt->is_unsigned == rt->is_unsigned) return;
+
+    // A non-negative constant on the signed side fits the unsigned one, and
+    // comparing against a literal zero is the idiom the references leave
+    // alone.
+    Node *signed_side = lt->is_unsigned ? r : l;
+    Node *unsigned_side = lt->is_unsigned ? l : r;
+    if (signed_side->kind == ND_NUM && !int128_is_negative(signed_side->ival)) return;
+    if (unsigned_side->kind == ND_NUM && int128_is_zero(unsigned_side->ival)) return;
+
+    warning(WG_SIGN_COMPARE, node->tok,
+            "comparison of integer expressions of different signedness: \u2018%s\u2019 and \u2018%s\u2019",
+            diag_ty_name(lt), diag_ty_name(rt));
+}
+
 void usual_arith_conv(Node **lhs, Node **rhs) {
     Type *ty = get_common_type((*lhs)->ty, (*rhs)->ty);
     new_imcast(lhs, ty);
@@ -1097,6 +1142,7 @@ void add_type(Node *node) {
             check_binop(node);
             lvalue_convert(&node->lhs);
             lvalue_convert(&node->rhs);
+            warn_sign_compare(node);
             usual_arith_conv(&node->lhs, &node->rhs);
             node->ty = T.ty_int;
             break;

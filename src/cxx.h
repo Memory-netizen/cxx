@@ -1625,9 +1625,18 @@ enum {
     // result is an infinity -- which no constant spelling can produce,
     // because the infinities of <math.h> are identifiers, not literals.
     WG_LITERAL_RANGE = 1u << 21,
-    WG_ALL = (1u << 22) - 1,
+    // gcc's and clang's name for a relational operator whose operands have
+    // different signedness, so the signed one is converted to unsigned.
+    // Both references reach it through -Wextra in C, not by default.
+    WG_SIGN_COMPARE = 1u << 22,
+    // A constant integer that the target floating type cannot hold exactly:
+    // clang has this one *on* by default (-Wimplicit-const-int-float-conversion),
+    // and so does cxx -- a constant the program does not get is worth saying
+    // even without a flag. The wider -Wfloat-conversion stays opt-in.
+    WG_CONST_INT_FLOAT_CONVERSION = 1u << 23,
+    WG_ALL = (1u << 24) - 1,
     // Groups that -Wall does not enable.
-    WG_OFF_DEFAULT = WG_IMPLICIT_FALLTHROUGH | WG_FLOAT_CONVERSION,
+    WG_OFF_DEFAULT = WG_IMPLICIT_FALLTHROUGH | WG_FLOAT_CONVERSION | WG_SIGN_COMPARE,
 };
 
 // The scalar type names the conversion diagnostics use ("unsigned char",

@@ -285,6 +285,17 @@ static Ref gen_addr(Node *node) {
     return R;
 }
 
+// A whole access to an _Atomic aggregate goes through an integer of the same
+// size: LLVM has no atomic instruction for a record, and its cmpxchg takes
+// integer or pointer operands only. clang's IR type-puns the same way, so the
+// bytes move unchanged (the object is not read as an integer by the program).
+static Type *atomic_agg_bits(Node *node, Type *ty) {
+    int sz = ty->size;
+    if (sz != 1 && sz != 2 && sz != 4 && sz != 8)
+        error(node->tok, "atomic aggregate larger than 8 bytes or of non-power-of-two size is not supported");
+    return bitint[sz * 8][1];
+}
+
 static Ref load(Ref addr, Type *type, int align, Member *mem) {
     if (mem && mem->is_bitfield) {
         Type *ty = mem->unit_ty;
@@ -1437,11 +1448,7 @@ static Ref gen_expr(Node *node) {
                 // Whole access to an _Atomic aggregate reads the bit
                 // pattern through an integer of the same size (clang
                 // does the same; consumers store it type-punned).
-                int sz = node->ty->size;
-                if (sz != 1 && sz != 2 && sz != 4 && sz != 8)
-                    error(node->tok,
-                          "atomic aggregate larger than 8 bytes or of non-power-of-two size is not supported");
-                return load(addr, bitint[sz * 8][1], align, NULL);
+                return load(addr, atomic_agg_bits(node, node->ty), align, NULL);
             }
             // A record has no rvalue of its own here: the rest of the
             // compiler represents a record value by its address, so the
@@ -1498,12 +1505,9 @@ static Ref gen_expr(Node *node) {
                     // Whole access to an _Atomic aggregate: move the bit
                     // pattern through a same-size integer. The load/store
                     // are atomic iff their respective object is atomic.
-                    int sz = node->ty->size;
-                    if (sz != 1 && sz != 2 && sz != 4 && sz != 8)
-                        error(node->tok,
-                              "atomic aggregate larger than 8 bytes or of non-power-of-two size is not supported");
+                    Type *bits = atomic_agg_bits(node, node->ty);
                     atomic_order = node_mem_order(node);
-                    Ref src = load(src_addr, bitint[sz * 8][1], align, NULL);
+                    Ref src = load(src_addr, bits, align, NULL);
                     atomic_order = node_mem_order(node);
                     store(src, addr, align, NULL);
                     return addr;
@@ -1821,18 +1825,27 @@ static Ref gen_expr(Node *node) {
             Ref addr1 = gen_expr(node->lhs);
             Ref addr2 = gen_expr(node->rhs);
             Type *t = node->rhs->ty->base;
-            Ref old_val = load(addr2, t, t->align, NULL);
-            Ref new_val = gen_expr(node->desired);
-            // LLVM cmpxchg takes integer/pointer operands only: floating
-            // values compare by their bit pattern in an unsigned _BitInt
-            // of the same width (clang does the same). The failure
-            // writeback stores the integer into the float-typed *expected
-            // (type punning), matching clang's IR.
+            // LLVM cmpxchg takes integer/pointer operands only: a floating
+            // value compares by its bit pattern in an unsigned _BitInt of the
+            // same width, and a record has to be read out as one -- for an
+            // aggregate, gen_expr() hands back the ADDRESS of the desired
+            // record, which used to be passed as the compare value itself.
+            // The failure writeback stores the integer into the record-typed
+            // *expected (type punning), matching clang's IR.
             Type *cmp_ty = t;
-            if (is_flonum(t)) {
-                cmp_ty = bitint[t->size * 8][1];
-                old_val = bitcast(old_val, cmp_ty);
-                new_val = bitcast(new_val, cmp_ty);
+            Ref old_val, new_val;
+            if (is_record(t)) {
+                cmp_ty = atomic_agg_bits(node, t);
+                old_val = load(addr2, cmp_ty, t->align, NULL);
+                new_val = load(gen_expr(node->desired), cmp_ty, t->align, NULL);
+            } else {
+                old_val = load(addr2, t, t->align, NULL);
+                new_val = gen_expr(node->desired);
+                if (is_flonum(t)) {
+                    cmp_ty = bitint[t->size * 8][1];
+                    old_val = bitcast(old_val, cmp_ty);
+                    new_val = bitcast(new_val, cmp_ty);
+                }
             }
             Ref args[] = {addr1, old_val, new_val};
             // The ty carried by the cmpxchg dst is the compare type; the
@@ -1879,11 +1892,7 @@ static Ref gen_expr(Node *node) {
             // exchange the POINTER's value, which is why atomic_exchange()
             // on a struct answered with the wrong bytes and then faulted.
             if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) {
-                int sz = node->ty->size;
-                if (sz != 1 && sz != 2 && sz != 4 && sz != 8)
-                    error(node->tok,
-                          "atomic aggregate larger than 8 bytes or of non-power-of-two size is not supported");
-                Type *ity = bitint[sz * 8][1];
+                Type *ity = atomic_agg_bits(node, node->ty);
                 Ref src = gen_expr(node->desired);
                 Ref old = load(src, ity, node->ty->align, NULL);
                 Ref res = TMP(tmp_id++, ity);

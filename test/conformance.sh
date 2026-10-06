@@ -1473,9 +1473,13 @@ else
 fi
 
 # The floating cases are gcc's -Wfloat-conversion, off by default in both
-# references because `float f = 1.1;` would otherwise warn everywhere. The
-# message has to spell out both values: a printer too coarse to tell 1.1
-# from the float it rounds to made it read "from 1.1 to 1.1".
+# references because `float f = 1.1;` would otherwise warn everywhere -- with
+# one exception, which clang also carves out: a *constant integer* that the
+# target float cannot hold exactly has its own group and that group is on by
+# default (-Wimplicit-const-int-float-conversion there, so -Wno-float-conversion
+# does not silence it either). The message has to spell out both values: a
+# printer too coarse to tell 1.1 from the float it rounds to made it read
+# "from 1.1 to 1.1".
 cat > "$tmp/convf.c" <<'EOF'
 float f = 1.1;
 float big = 1e300;
@@ -1483,14 +1487,16 @@ float g = 16777217;
 int main(void) { return 0; }
 EOF
 d=$("$compiler" -S -o /dev/null "$tmp/convf.c" 2>&1 | grep -c 'changes value')
+nof=$("$compiler" -Wno-float-conversion -S -o /dev/null "$tmp/convf.c" 2>&1 | grep -c 'changes value')
+noi=$("$compiler" -Wno-implicit-const-int-float-conversion -S -o /dev/null "$tmp/convf.c" 2>&1 | grep -c 'changes value')
 e=$("$compiler" -Wfloat-conversion -S -o /dev/null "$tmp/convf.c" 2>&1 | grep -c 'changes value')
 t=$("$compiler" -Wfloat-conversion -S -o /dev/null "$tmp/convf.c" 2>&1 | grep -c '1.10000002')
 i=$("$compiler" -Wfloat-conversion -S -o /dev/null "$tmp/convf.c" 2>&1 | grep -c '16777216')
-if [ "$d" -eq 0 ] && [ "$e" -eq 3 ] && [ "$t" -eq 1 ] && [ "$i" -eq 1 ]; then
+if [ "$d" -eq 1 ] && [ "$nof" -eq 1 ] && [ "$noi" -eq 0 ] && [ "$e" -eq 3 ] && [ "$t" -eq 1 ] && [ "$i" -eq 1 ]; then
     echo "testing float conversions are diagnosed on request ... passed"
     n_pass=$((n_pass + 1))
 else
-    echo "testing float conversions are diagnosed on request ... FAILED ($d, $e, $t, $i)"
+    echo "testing float conversions are diagnosed on request ... FAILED (default $d, -Wno-float $nof, -Wno-const-int $noi, -Wfloat $e, $t, $i)"
     n_fail=$((n_fail + 1))
 fi
 
@@ -1504,17 +1510,44 @@ int i = 1e20;
 int main(void) { return 0; }
 EOF
 
-# The refusal has to say what would fit, or the reader is left guessing.
+# The refusal has to say what would fit -- and, since "choose another value"
+# is guesswork without one, the value nearest to the one written: gcc prints
+# the same saturation ("changes value from 1.0e+20 to 2147483647").
 cat > "$tmp/fits.c" <<'EOF'
 int i = 1e20;
 int main(void) { return 0; }
 EOF
-n=$("$compiler" -S -o /dev/null "$tmp/fits.c" 2>&1 | grep -c 'holds -2147483648 to 2147483647; choose a value or a type that can hold it')
+n=$("$compiler" -S -o /dev/null "$tmp/fits.c" 2>&1 | grep -c 'holds -2147483648 to 2147483647; the nearest representable value is 2147483647')
 if [ "$n" -eq 1 ]; then
     echo "testing the refusal names the range that would fit ... passed"
     n_pass=$((n_pass + 1))
 else
     echo "testing the refusal names the range that would fit ... FAILED ($n)"
+    n_fail=$((n_fail + 1))
+fi
+
+# Each wrong direction saturates to its own end of the range, and a NaN is
+# near nothing so it gets no value at all.
+cat > "$tmp/sat1.c" <<'EOF'
+long l = -1e30;
+int main(void) { return 0; }
+EOF
+cat > "$tmp/sat2.c" <<'EOF'
+unsigned u = -1e10;
+int main(void) { return 0; }
+EOF
+cat > "$tmp/sat3.c" <<'EOF'
+short s = 1e10;
+int main(void) { return 0; }
+EOF
+lo=$("$compiler" -S -o /dev/null "$tmp/sat1.c" 2>&1 | grep -c 'nearest representable value is -9223372036854775808')
+uz=$("$compiler" -S -o /dev/null "$tmp/sat2.c" 2>&1 | grep -c 'nearest representable value is 0')
+sh=$("$compiler" -S -o /dev/null "$tmp/sat3.c" 2>&1 | grep -c 'nearest representable value is 32767')
+if [ "$lo" -eq 1 ] && [ "$uz" -eq 1 ] && [ "$sh" -eq 1 ]; then
+    echo "testing the nearest value saturates each direction ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the nearest value saturates each direction ... FAILED (long $lo, unsigned $uz, short $sh)"
     n_fail=$((n_fail + 1))
 fi
 
@@ -1534,8 +1567,8 @@ int main(void) {
 EOF
 w=$("$compiler" -S -o /dev/null "$tmp/range.c" 2>&1 | grep -c 'warning')
 e=$("$compiler" -S -o /dev/null "$tmp/range.c" 2>&1 | grep -c 'error')
-note=$("$compiler" -S -o /dev/null "$tmp/range.c" 2>&1 | grep -c 'choose a value or a type')
-quiet=$("$compiler" -Wno-literal-conversion -S -o /dev/null "$tmp/range.c" 2>&1 | grep -c 'choose a value or a type')
+note=$("$compiler" -S -o /dev/null "$tmp/range.c" 2>&1 | grep -c 'nearest representable value')
+quiet=$("$compiler" -Wno-literal-conversion -S -o /dev/null "$tmp/range.c" 2>&1 | grep -c 'nearest representable value')
 if [ "$w" -eq 2 ] && [ "$e" -eq 0 ] && [ "$note" -eq 1 ] && [ "$quiet" -eq 0 ]; then
     echo "testing an out-of-range conversion is only a warning in a body ... passed"
     n_pass=$((n_pass + 1))
@@ -1565,6 +1598,33 @@ if [ "$n" -eq 3 ] && [ "$z" -eq 0 ]; then
     n_pass=$((n_pass + 1))
 else
     echo "testing a floating constant beyond its own type is diagnosed ... FAILED ($n, $z)"
+    n_fail=$((n_fail + 1))
+fi
+
+# --- -Wsign-compare --------------------------------------------------
+
+# Mixed signedness in a comparison converts the signed operand to unsigned.
+# gcc and clang keep this group out of the C defaults, so the entry passes
+# the flag itself; the silent rows are the promotion rules and the
+# heuristics both references use.
+cat > "$tmp/signcmp.c" <<'EOF'
+int rel(int i, unsigned u) { return i < u; }
+int eq(int i, unsigned u) { return i == u; }
+int promoted(unsigned char c, int i) { return c < i; }
+int boolish(_Bool b, unsigned u) { return b < u; }
+int zero(int i) { return i < 0u; }
+int fitted(int i) { return i < 5; }
+int plain(unsigned a, unsigned b) { return a < b; }
+int main(void) { return 0; }
+EOF
+on=$("$compiler" -Wsign-compare -S -o /dev/null "$tmp/signcmp.c" 2>&1 | grep -c 'different signedness')
+off=$("$compiler" -S -o /dev/null "$tmp/signcmp.c" 2>&1 | grep -c 'different signedness')
+quiet=$("$compiler" -Wsign-compare -Wno-sign-compare -S -o /dev/null "$tmp/signcmp.c" 2>&1 | grep -c 'different signedness')
+if [ "$on" -eq 2 ] && [ "$off" -eq 0 ] && [ "$quiet" -eq 0 ]; then
+    echo "testing mixed-sign comparisons are diagnosed on request ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing mixed-sign comparisons are diagnosed on request ... FAILED ($on, $off, $quiet)"
     n_fail=$((n_fail + 1))
 fi
 

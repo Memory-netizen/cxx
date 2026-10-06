@@ -275,6 +275,8 @@ static const struct {
     {"literal-conversion", WG_LITERAL_CONVERSION},
     {"float-conversion", WG_FLOAT_CONVERSION},
     {"literal-range", WG_LITERAL_RANGE},
+    {"sign-compare", WG_SIGN_COMPARE},
+    {"implicit-const-int-float-conversion", WG_CONST_INT_FLOAT_CONVERSION},
     {"implicit-function-declaration", WG_IMPLICIT_FUNCTION_DECLARATION},
 };
 

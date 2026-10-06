@@ -473,6 +473,15 @@ static Sym *new_gvar(uint32_t id, Type *ty) {
 // before main, so it keeps alive exactly what the object itself keeps alive.
 static Sym *cur_init;
 
+// True while the initializer being parsed belongs to an object that reaches
+// the output whatever the reference graph says: a block-scope static, or a
+// compound literal with static storage duration. Those initializers run at
+// load time, so a name they mention is live even when nothing reaches the
+// object itself -- attributing the name to a function that is dead, which is
+// what happened before, left the emitted initializer pointing at a definition
+// that had been dropped, and the module was refused.
+static bool live_init;
+
 // Add one edge to the reference graph. The list holds distinct symbols, so
 // the scan is over the names a function mentions, not over its references.
 static void add_ref(Sym *from, Sym *to) {
@@ -483,6 +492,48 @@ static void add_ref(Sym *from, Sym *to) {
     else
         from->refs = vgrow(from->refs, from->num_refs + 16);
     from->refs[from->num_refs++] = to;
+}
+
+// 6.5.3.4p2: the operand of sizeof is not evaluated -- unless its type is a
+// variable length array, whose size expression does run. So a name that only
+// a skipped operand mentions does not keep its definition alive: clang leaves
+// such a definition out of the output too (and under -Wall it says so, as
+// -Wunneeded-internal-declaration).
+//
+// While such an operand is parsed the edges the graph would gain are parked
+// here instead of being added, and the decision waits for the type: an
+// evaluated operand replays them, a skipped one drops them. A NULL `from` is
+// the "mentioned in no body and no initializer" case, which would otherwise
+// have made the name a root.
+typedef struct ParkedRef ParkedRef;
+struct ParkedRef {
+    Sym *from;
+    Sym *to;
+};
+static bool uneval_operand;
+static ParkedRef *parked;
+static uint32_t num_parked;
+
+static void park_ref(Sym *from, Sym *to) {
+    if (!parked)
+        parked = vnew(8, sizeof(ParkedRef));
+    else
+        parked = vgrow(parked, num_parked + 8);
+    parked[num_parked].from = from;
+    parked[num_parked].to = to;
+    num_parked++;
+}
+
+// The operand turned out to be evaluated (a variable length array): the
+// edges it mentioned are real after all.
+static void unpark_refs(uint32_t mark) {
+    for (uint32_t i = mark; i < num_parked; i++) {
+        if (parked[i].from)
+            add_ref(parked[i].from, parked[i].to);
+        else
+            parked[i].to->is_reachable = true;
+    }
+    num_parked = mark;
 }
 
 // 6.7.5p8: every file scope declaration of a function updates whether its
@@ -2639,19 +2690,52 @@ static void push_generic(Type *ty, Token *tok, Generic_s *gen) {
 static Node *generic_selection(Token **rest, Token *tok) {
     Token *start = tok = skip(tok->next, TK_LPAREN);
 
+    // 6.5.2.1p3: neither the controlling operand of a generic selection nor
+    // the expression of an association it does not select is evaluated, so a
+    // name that only one of those mentions does not keep its definition
+    // alive; clang leaves exactly those definitions out of the output too.
+    // Both are parsed with the parking flag up, and what the selection does
+    // evaluate -- the selected association's expression -- is replayed below.
+    bool outer_uneval = uneval_operand;
+    uint32_t ctrl_mark = num_parked;
+    // p3 also keeps the size expressions in a type name from running, where
+    // sizeof would have taken them over: nothing of the controlling operand
+    // is evaluated, so whatever it registered as a variable length bound is
+    // dropped again.
+    int ctrl_vla_num = scope->vla_num;
+    bool ctrl_vla = false;
+    bool tyname = is_typename(tok, true);
+    uneval_operand = true;
     Type *t1;
-    if (is_typename(tok, true)) {
+    if (tyname) {
         t1 = typename(&tok, tok);
+        ctrl_vla = t1->kind == TY_VLA;
     } else {
         Node *expr = assign(&tok, tok);
+        ctrl_vla = expr->ty->kind == TY_VLA;
         lvalue_convert(&expr);
         t1 = expr->ty;
     }
+    uneval_operand = outer_uneval;
+    scope->vla_num = ctrl_vla_num;
+    // p2: the lvalue, array to pointer and function to pointer conversions
+    // apply to an assignment expression operand. A type name designates the
+    // type it writes, so it is used as it stands -- gcc and clang both
+    // answer 9 for `_Generic(int[3], int *: 1, default: 9)` and for the
+    // function type beside it. A name is still kept when the type it names
+    // is a variable length one: nothing is emitted for it here either, but
+    // clang does not report it, and cxx follows that.
+    if (ctrl_vla)
+        unpark_refs(ctrl_mark);
+    else
+        num_parked = ctrl_mark;
 
-    if (t1->kind == TY_FUNC)
-        t1 = pointer_to(t1, 0);
-    else if (t1->kind == TY_ARRAY || t1->kind == TY_VLA)
-        t1 = pointer_to(t1->base, 0);
+    if (!tyname) {
+        if (t1->kind == TY_FUNC)
+            t1 = pointer_to(t1, 0);
+        else if (t1->kind == TY_ARRAY || t1->kind == TY_VLA)
+            t1 = pointer_to(t1->base, 0);
+    }
 
     Generic_s dummy, *gen = &dummy;
     gen->generic_ty = vnew(16, sizeof(Type *));
@@ -2664,6 +2748,10 @@ static Node *generic_selection(Token **rest, Token *tok) {
     // type association is selected instead.
     int def_blk = 0, def_lbl = 0;
     Node *def_labels = NULL, *def_gotos = NULL;
+    // Where the default association's parked names start; the decision waits
+    // for the end of the list, because either a type association or the
+    // default is selected.
+    uint32_t def_mark = 0;
 
     while (!match(rest, tok, TK_RPAREN)) {
         Token *as_tok = tok = skip(tok, TK_COMMA);
@@ -2679,21 +2767,33 @@ static Node *generic_selection(Token **rest, Token *tok) {
             def_lbl = cur_fn ? cur_fn->num_lbl : 0;
             def_labels = labels;
             def_gotos = gotos;
+            def_mark = num_parked;
+            uneval_operand = true;
             default_expr = assign(&tok, tok);
+            uneval_operand = outer_uneval;
             continue;
         }
 
+        // p3 covers the size expressions in these type names too: a bound
+        // they register is not a bound anything evaluates.
+        int t2_vla_num = scope->vla_num;
         Type *t2 = typename(&tok, tok);
+        scope->vla_num = t2_vla_num;
         tok = skip(tok, TK_COLON);
 
         // Unselected associations are discarded after parsing: their
-        // block/label accounting must not leak into the function.
+        // block/label accounting must not leak into the function. The type
+        // name is parsed with the flag as it was -- a variable length bound
+        // in it belongs to the enclosing scope, which still emits it.
         int saved_blk = cur_fn ? cur_fn->num_blk : 0;
         int saved_lbl = cur_fn ? cur_fn->num_lbl : 0;
         Node *saved_labels = labels;
         Node *saved_gotos = gotos;
 
+        uint32_t as_mark = num_parked;
+        uneval_operand = true;
         Node *node = assign(&tok, tok);
+        uneval_operand = outer_uneval;
         push_generic(t2, as_tok, gen);
         if (is_compatible(t1, t2)) {
             if (ret_tok) {
@@ -2702,7 +2802,11 @@ static Node *generic_selection(Token **rest, Token *tok) {
             }
             ret_tok = as_tok;
             ret_expr = node;
+            // This is the expression the selection evaluates.
+            unpark_refs(as_mark);
         } else {
+            // Nor is this one ever evaluated.
+            num_parked = as_mark;
             if (cur_fn) {
                 cur_fn->num_blk = saved_blk;
                 cur_fn->num_lbl = saved_lbl;
@@ -2714,7 +2818,8 @@ static Node *generic_selection(Token **rest, Token *tok) {
 
     if (ret_tok) {
         if (default_tok) {
-            // the default association is discarded
+            // the default association is discarded, names included
+            num_parked = def_mark;
             if (cur_fn) {
                 cur_fn->num_blk = def_blk;
                 cur_fn->num_lbl = def_lbl;
@@ -2724,7 +2829,10 @@ static Node *generic_selection(Token **rest, Token *tok) {
         }
         return ret_expr;
     }
-    if (default_tok) return default_expr;
+    if (default_tok) {
+        unpark_refs(def_mark);
+        return default_expr;
+    }
     error(start, "‘_Generic’ selector is not compatible with any association");
     return NULL;
 }
@@ -2837,7 +2945,19 @@ static Node *primary(Token **rest, Token *tok) {
             // parsed, or the object whose initializer is being parsed. A
             // name resolved outside both -- in the array bound of a global,
             // say -- is code that always runs, which makes it a root.
-            if (cur_fn)
+            // The innermost context decides, so the parking test comes
+            // first: an unevaluated operand parks the edge even inside an
+            // emitted initializer, because a nested sizeof is still folded.
+            // A block-scope static is never dropped -- gcc and clang both
+            // keep it, and clang stays quiet about a `sizeof q` mention --
+            // so parking its edge would make cxx report an object it goes on
+            // to emit.
+            if (uneval_operand && !sc->var->is_block_static) park_ref(cur_fn ? cur_fn : cur_init, sc->var);
+            // An emitted initializer roots the name even inside a dead
+            // function: that is what live_init marks.
+            else if (live_init)
+                sc->var->is_reachable = true;
+            else if (cur_fn)
                 add_ref(cur_fn, sc->var);
             else if (cur_init)
                 add_ref(cur_init, sc->var);
@@ -2967,7 +3087,18 @@ static Node *postfix(Token **rest, Token *tok) {
         if (is_file_scope() || sclass & SC_STATIC) {
             uint32_t uid = new_unique_varname(intern(".compoundliteral", 16));
             var = new_gvar(uid, ty);
+            // This literal is emitted with its initializer, and the
+            // initializer runs at load time -- even when the expression that
+            // mentions the literal is an unevaluated operand (a sizeof, an
+            // unselected _Generic association), which is why both flags are
+            // set for it.
+            bool outer_live = live_init;
+            bool outer_uneval = uneval_operand;
+            live_init = true;
+            uneval_operand = false;
             gvar_initializer(&tok, tok, var);
+            live_init = outer_live;
+            uneval_operand = outer_uneval;
         } else {
             var = new_lvar(id_anon, ty);
             init = lvar_initializer(&tok, tok, var);
@@ -3125,6 +3256,11 @@ static Node *unary(Token **rest, Token *tok) {
             Token *start = tok;
             Type *ty;
             bool tyname = false;
+            // See uneval_operand: the names this operand mentions are parked
+            // until its type says whether the operand is evaluated at all.
+            uint32_t park_mark = num_parked;
+            bool outer_uneval = uneval_operand;
+            uneval_operand = true;
             if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, true)) {
                 scope->vla_num = 0;
                 ty = typename(&tok, tok->next->next);
@@ -3141,6 +3277,11 @@ static Node *unary(Token **rest, Token *tok) {
                     node = node->lhs;
                 ty = node->ty;
             }
+            uneval_operand = outer_uneval;
+            if (ty->kind == TY_VLA)
+                unpark_refs(park_mark);
+            else
+                num_parked = park_mark;
             if (ty->size < 0 && (ty->kind != TY_ARRAY && ty->kind != TY_VLA)) {
                 error(start, "invalid application of ‘%*.s’ to incomplete type", start->len, tok_text(start));
             }
@@ -4071,7 +4212,12 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
                 tok->next->kind == TK_LBRACE)
                 error(var_name, "illegal initializer type '_Atomic(%s)'", str(ty->uid));
             if (is_static) {
+                // A block-scope static is emitted, and its initializer runs,
+                // whether or not anything reaches the function around it.
+                bool outer_live = live_init;
+                live_init = true;
                 gvar_initializer(&tok, tok->next, var);
+                live_init = outer_live;
             } else {
                 Node *expr = lvar_initializer(&tok, tok->next, var);
                 cur = cur->next = new_unary(ND_EXPR_STMT, expr, tok);
@@ -4699,6 +4845,7 @@ static Node *stmt(Token **rest, Token *tok) {
     // Exp ";". Only fallthrough (and the GNU statement attributes) apply
     // to statements.
     bool has_fallthrough = false;
+    Token *ft_tok = NULL;
     if (is_attr_start(tok)) {
         Token *start = tok;
         while (is_attr_start(tok)) {
@@ -4707,6 +4854,7 @@ static Node *stmt(Token **rest, Token *tok) {
                 if (!a->info) continue;
                 if (!strcmp(a->info->name, "fallthrough") && (a->info->targets & ATTR_STMT)) {
                     has_fallthrough = true;
+                    ft_tok = a->tok;
                 } else if (a->is_gnu && !strcmp(a->info->name, "unused")) {
                     // GNU statement attribute: accepted.
                 } else {
@@ -4762,7 +4910,17 @@ static Node *stmt(Token **rest, Token *tok) {
 
     // `[[fallthrough]];` marks the fall into the next label as deliberate,
     // which is the whole point of the attribute.
-    if (has_fallthrough) falls_through = false;
+    if (has_fallthrough) {
+        falls_through = false;
+        // 6.7.13.2p2: the annotation "shall appear only in a statement that is
+        // an empty statement", and the empty statement has to be the one the
+        // next label is reached from -- otherwise the annotation marks a fall
+        // that is not there. Both references diagnose this; clang calls it an
+        // error, and the constraint is a constraint, so cxx does too.
+        Token *next = *rest;
+        if (next->kind != TK_CASE && next->kind != TK_DEFAULT)
+            error(ft_tok, "fallthrough annotation does not directly precede switch label");
+    }
 
     if (lb) {
         lb->label_body = stmt;
@@ -5432,6 +5590,11 @@ static Type *typeof_specifier(Token **rest, Token *tok, bool is_unqual) {
     tok = skip(tok->next, TK_LPAREN);
 
     Type *ty;
+    // Only the type is wanted, so only a variable length operand is
+    // evaluated -- the same rule, and the same parking, as sizeof's.
+    uint32_t park_mark = num_parked;
+    bool outer_uneval = uneval_operand;
+    uneval_operand = true;
     if (is_typename(tok, true)) {
         ty = typename(&tok, tok);
     } else {
@@ -5444,6 +5607,11 @@ static Type *typeof_specifier(Token **rest, Token *tok, bool is_unqual) {
             error(node->tok, "invalid application of 'typeof' to bit-field ‘%s’", str(node->member->name->id));
         ty = node->ty;
     }
+    uneval_operand = outer_uneval;
+    if (ty->kind == TY_VLA)
+        unpark_refs(park_mark);
+    else
+        num_parked = park_mark;
     if (is_unqual) ty = type_unqual(ty);
     *rest = skip(tok, TK_RPAREN);
     return ty;

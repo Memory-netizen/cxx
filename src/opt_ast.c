@@ -393,17 +393,48 @@ static char *conv_int_str(Int128 v, SignKind sign) {
 // The range of an integer type, as the two decimal values the note below
 // prints. Saying "this is undefined" without saying what would fit leaves
 // the reader to work it out; the type's own limits are the answer.
-static char *conv_int_range_str(Type *ty) {
+static void conv_int_limits(Type *ty, Int128 *min, Int128 *max) {
     int width = (ty->kind & TY_BITINT) ? bitint_width(ty) : ty->size * 8;
-    SignKind sign = ty->is_unsigned ? UNSIGNED : SIGNED;
     Int128 unit = int128_set_i(1);
-    Int128 max;
-    if (ty->is_unsigned)
-        max = width >= 128 ? int128_set_i(-1) : int128_sub(int128_shl(unit, width), unit);
-    else
-        max = int128_sub(int128_shl(unit, width - 1), unit);
-    Int128 min = ty->is_unsigned ? int128_set_i(0) : int128_neg(int128_shl(unit, width - 1));
+    if (ty->is_unsigned) {
+        *min = int128_set_i(0);
+        *max = width >= 128 ? int128_set_i(-1) : int128_sub(int128_shl(unit, width), unit);
+    } else {
+        *max = int128_sub(int128_shl(unit, width - 1), unit);
+        *min = int128_neg(int128_shl(unit, width - 1));
+    }
+}
+
+static char *conv_int_range_str(Type *ty) {
+    Int128 min, max;
+    conv_int_limits(ty, &min, &max);
+    SignKind sign = ty->is_unsigned ? UNSIGNED : SIGNED;
     return format("%s to %s", conv_int_str(min, sign), conv_int_str(max, sign));
+}
+
+// The note an out-of-range conversion prints: what the target holds, and --
+// unless the source is a NaN, which is near nothing -- the value closest to
+// the one that was written. gcc prints the same saturated value ("changes
+// value from 1.0e+20 to 2147483647"); after a refusal it is the one number
+// that answers "so what do I write instead?".
+static char *conv_oor_note(Fp128 v, Type *ty) {
+    if (fp128_is_nan(v)) return format("\u2018%s\u2019 holds %s", diag_ty_name(ty), conv_int_range_str(ty));
+    Int128 min, max;
+    conv_int_limits(ty, &min, &max);
+    SignKind sign = ty->is_unsigned ? UNSIGNED : SIGNED;
+    bool ok;
+    Int128 t = fp128_to_int128(v, sign, &ok);
+    Int128 nearest;
+    if (!ok)
+        nearest = fp128_get_sign(v) ? min : max;  // past even Int128: the far end
+    else if (int128_cmp(t, min, sign) < 0)
+        nearest = min;
+    else if (int128_cmp(t, max, sign) > 0)
+        nearest = max;
+    else
+        nearest = t;
+    return format("\u2018%s\u2019 holds %s; the nearest representable value is %s", diag_ty_name(ty),
+                  conv_int_range_str(ty), conv_int_str(nearest, sign));
 }
 
 static char *conv_fp_str(Fp128 v, Type *ty) {
@@ -444,13 +475,16 @@ static Node *fold_cast(Node *node) {
         return folded_int(lhs->ival, node->ty, node);
     }
 
-    // int → any float: round once to the target format
+    // int → any float: round once to the target format. This is the one
+    // conversion whose loss is a *constant* fact -- the program never has the
+    // integer it wrote -- so it has its own group and that group is on by
+    // default, which is where clang keeps the same check.
     if (is_int_const(lhs) && is_flonum(node->ty)) {
         Fp128 v = fp128_from_int128(lhs->ival, lhs->ty->is_unsigned ? UNSIGNED : SIGNED);
         Fp128 rounded = fp128_round_to(v, fmt_of(node->ty));
         if (implicit && fp128_cmp(rounded, v) != 0 && !fp128_is_nan(v))
             warning(
-                WG_FLOAT_CONVERSION, node->tok,
+                WG_CONST_INT_FLOAT_CONVERSION, node->tok,
                 "conversion from \u2018%s\u2019 to \u2018%s\u2019 changes value from \u2018%s\u2019 to \u2018%s\u2019",
                 diag_ty_name(lhs->ty), diag_ty_name(node->ty),
                 conv_int_str(lhs->ival, lhs->ty->is_unsigned ? UNSIGNED : SIGNED), conv_fp_str(rounded, node->ty));
@@ -484,14 +518,12 @@ static Node *fold_cast(Node *node) {
                 diag("error", node->tok,
                      "conversion of out of range value from \u2018%s\u2019 to \u2018%s\u2019 is undefined",
                      diag_ty_name(lhs->ty), diag_ty_name(node->ty));
-                diag_exit("note", node->tok, "\u2018%s\u2019 holds %s; choose a value or a type that can hold it",
-                          diag_ty_name(node->ty), conv_int_range_str(node->ty));
+                diag_exit("note", node->tok, "%s", conv_oor_note(lhs->fpval, node->ty));
             } else if (implicit && wg_enabled(WG_LITERAL_CONVERSION)) {
                 warning(WG_LITERAL_CONVERSION, node->tok,
                         "implicit conversion of out of range value from \u2018%s\u2019 to \u2018%s\u2019 is undefined",
                         diag_ty_name(lhs->ty), diag_ty_name(node->ty));
-                diag("note", node->tok, "\u2018%s\u2019 holds %s; choose a value or a type that can hold it",
-                     diag_ty_name(node->ty), conv_int_range_str(node->ty));
+                diag("note", node->tok, "%s", conv_oor_note(lhs->fpval, node->ty));
             }
         } else if (implicit && !fp128_is_nan(lhs->fpval) &&
                    fp128_cmp(fp128_from_int128(v, node->ty->is_unsigned ? UNSIGNED : SIGNED), lhs->fpval) != 0) {
