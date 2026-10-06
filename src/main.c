@@ -408,6 +408,16 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
+        // -pthread is one switch on two levels: the linker has to see the
+        // thread library, and the preprocessor has to see _REENTRANT, which
+        // POSIX reserves for a program that uses threads. A program using
+        // <threads.h> or <pthread.h> otherwise needs three separate flags.
+        if (!strcmp(argv[i], "-pthread")) {
+            ld_extra_args[num_ld_exarg++] = "-pthread";
+            cmd_define_macro("_REENTRANT");
+            continue;
+        }
+
         if (!strcmp(argv[i], "-L")) {
             ld_extra_args[num_ld_exarg++] = "-L";
             ld_extra_args[num_ld_exarg++] = argv[++i];
