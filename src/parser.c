@@ -477,6 +477,14 @@ static void add_ref(Sym *from, Sym *to) {
     from->refs[from->num_refs++] = to;
 }
 
+// 6.7.5p8: every file scope declaration of a function updates whether its
+// definition can still be an inline definition. All of them have to carry
+// inline, and none may carry extern; a later declaration can take the answer
+// away again, so parse() reads it once the unit is complete.
+static void note_inline_decl(Sym *fn, int fspec, SClass sclass) {
+    if (fn->all_decls_inline && (!(fspec & Q_INLINE) || sclass == SC_EXTERN)) fn->all_decls_inline = false;
+}
+
 // A symbol the source declared, as opposed to the ones the parser makes up
 // for itself -- string literals and compound literals. Only the first kind
 // has a token, and only the first kind can be diagnosed or left out.
@@ -3989,6 +3997,11 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             // walk and the emitter both need to know.
             var->is_block_static = true;
             var->tok = var_name;
+            // 6.7.5p3: an inline definition may not define a modifiable
+            // object with static storage duration. Whether this function's
+            // definition is an inline definition is only known once the unit
+            // is complete, so remember the token for now.
+            if (!is_const_object(ty)) cur_fn->static_local_tok = var_name;
         } else {
             var = new_lvar(id, ty);
             var->tok = var_name;
@@ -6281,6 +6294,7 @@ static Token *external_declaration(Token *tok) {
                 ns->var = var;
                 ns->lnk = sclass == SC_STATIC ? LK_INTERN : LK_EXTERN;
                 var->is_function = true;
+                var->all_decls_inline = true;
                 var->sclass = sclass;
             }
 
@@ -6295,6 +6309,7 @@ static Token *external_declaration(Token *tok) {
             var->tok = var_name;
             var->is_defined = true;
             var->funcspec |= fspec;
+            note_inline_decl(var, fspec, sclass);
             sym_attr_flags(var, attrs, false);
             sym_attr_flags(var, ty->attrs, true);
             cur_fn = var;
@@ -6400,6 +6415,7 @@ static Token *external_declaration(Token *tok) {
             } else {
                 var = new_gvar(get_ident(var_name), ty);
                 var->is_function = is_fn;
+                var->all_decls_inline = is_fn;
                 var->sclass = sclass;
                 var->align = MAX(align, ty->align);
                 ns = push_namespace(scope, var->id, symkind, ty, var_name);
@@ -6447,6 +6463,7 @@ static Token *external_declaration(Token *tok) {
                 }
             }
             var->funcspec |= fspec;
+            if (is_fn) note_inline_decl(var, fspec, sclass);
             sym_attr_flags(var, attrs, false);
             sym_attr_flags(var, ty->attrs, true);
             if (var->ty->size < 0 && (var->ty->kind != TY_ARRAY && var->ty->kind != TY_VLA))
@@ -6460,6 +6477,36 @@ static Token *external_declaration(Token *tok) {
             error(tok, "expected ‘;’ after top level declarator");
     note:
         diag_exit("note", ns->loc, "previous definition is here");
+    }
+}
+
+// 6.7.5p8: a definition with external linkage whose every file scope
+// declaration is `inline` without `extern` is an inline definition. It is
+// not an external definition, so this translation unit does not define the
+// symbol: calls to it become undefined references unless another unit
+// defines it, which is what gcc and clang do at -O0 as well.
+//
+// p5 is the other half, and a constraint: an inline declaration has to be
+// defined in the same unit. gcc diagnoses a violation, clang does not.
+static void check_inline_definitions(void) {
+    for (Sym *sym = globals; sym; sym = sym->next) {
+        if (!sym->is_function || !is_user_global(sym)) continue;
+        // Internal linkage always defines the function here.
+        if (sym->sclass & SC_STATIC) continue;
+
+        if (!sym->body) {
+            // p5: declared inline, never defined in this unit.
+            if (sym->funcspec & Q_INLINE)
+                warning(WG_DEFAULT, sym->tok, "inline function \u2018%s\u2019 declared but never defined",
+                        str(sym->tok->id));
+            continue;
+        }
+        if (!sym->all_decls_inline) continue;
+        sym->is_inline_def = true;
+        // p3: an inline definition may not define a modifiable static.
+        if (sym->static_local_tok)
+            warning(WG_STATIC_LOCAL_IN_INLINE, sym->static_local_tok,
+                    "non-constant static local variable in inline function may be different in different files");
     }
 }
 
@@ -6584,6 +6631,7 @@ Module *parse(Token *tok) {
     // Every symbol now has its edges, so the reachable set can be computed
     // once, before the module is split into functions and objects.
     check_unused_statics();
+    check_inline_definitions();
 
     for (Sym *sym = globals; sym;) {
         Sym *next = sym->next;

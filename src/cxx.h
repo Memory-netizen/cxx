@@ -635,6 +635,21 @@ struct Sym {
 
     Initializer *init;
 
+    // 6.7.5p8: whether every file scope declaration of this function
+    // carries the inline specifier and none carries extern. That is what
+    // makes the definition here an *inline definition*, which does not
+    // define the symbol. A later declaration can take it away again, so the
+    // answer is read at the end of the translation unit, in parse().
+    bool all_decls_inline;
+    // Set by that read: this definition is an inline definition, so the
+    // emitters leave it out. Calls to it stay, and become undefined
+    // references exactly as they do under gcc and clang.
+    bool is_inline_def;
+    // 6.7.5p3 forbids an inline definition to define a modifiable object
+    // with static storage duration; this is the token of one if the body
+    // does, remembered until the definition's kind is known.
+    Token *static_local_tok;
+
     // Function
     uint32_t funcspec;
     Node *body;
@@ -1583,7 +1598,12 @@ enum {
     // -Wunused-const-variable, anything else under -Wunused-variable.
     WG_UNUSED_FUNCTION = 1u << 14,
     WG_UNUSED_CONST_VARIABLE = 1u << 15,
-    WG_ALL = (1u << 16) - 1,
+    // clang's name for a non-constant static local defined in an inline
+    // function (6.7.5p3); gcc diagnoses the same thing with no name of its
+    // own. clang is silent about the other half of p3, a reference to an
+    // identifier with internal linkage, and gcc warns about that one.
+    WG_STATIC_LOCAL_IN_INLINE = 1u << 16,
+    WG_ALL = (1u << 17) - 1,
     // Groups that -Wall does not enable.
     WG_OFF_DEFAULT = WG_IMPLICIT_FALLTHROUGH,
 };

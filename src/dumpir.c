@@ -1178,7 +1178,11 @@ void dump_fn(Sym *fn) {
     if (already_emitted(fn)) return;
     if (fn->is_dead) return;
     dump_curf = fn;
-    if (!fn->is_defined) {
+    // An inline definition (6.7.5p8) is not an external definition, so the
+    // module declares the function and leaves the definition to whichever
+    // translation unit holds the external one.
+    bool defined = fn->is_defined && !fn->is_inline_def;
+    if (!defined) {
         fprintf(out_file, "declare ");
     } else {
         fprintf(out_file, "define ");
@@ -1198,7 +1202,7 @@ void dump_fn(Sym *fn) {
         fprintf(out_file, "ptr noalias sret(");
         print_type(fn->ty->ret);
         fprintf(out_file, ") align %d", fn->ty->ret->align);
-        if (fn->is_defined) fprintf(out_file, " %%tmp%d", pi);
+        if (defined) fprintf(out_file, " %%tmp%d", pi);
         pi++;
     }
     for (Type *param = fn->ty->params; param; param = param->next) {
@@ -1206,7 +1210,7 @@ void dump_fn(Sym *fn) {
         for (int k = 0; k < cntt; k++) {
             if (pi) fprintf(out_file, ", ");
             print_param_type(param, k);
-            if (fn->is_defined) fprintf(out_file, " %%tmp%d", pi);
+            if (defined) fprintf(out_file, " %%tmp%d", pi);
             pi++;
         }
     }
@@ -1214,7 +1218,7 @@ void dump_fn(Sym *fn) {
     // so a definition with no named parameter (a bare "...") has none.
     if (fn->ty->is_variadic) fprintf(out_file, "%s...", pi ? ", " : "");
     fprintf(out_file, ")");
-    if (!fn->is_defined) {
+    if (!defined) {
         fprintf(out_file, "\n\n");
         return;
     }

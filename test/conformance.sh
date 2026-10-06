@@ -1263,6 +1263,104 @@ bad "reject va_copy outside a variadic function" <<'EOF'
 void f(void) { va_list ap, aq; va_copy(aq, ap); }
 EOF
 
+# --- 6.7.5 Function specifiers ----------------------------------------
+
+# 6.7.5p8: a definition whose every file scope declaration is `inline`
+# without `extern` is an *inline definition*, which does not define the
+# symbol. The unit has the definition but the object holds an undefined
+# reference, so this program does not link on its own -- exactly what gcc
+# and clang produce at -O0 as well.
+cat > "$tmp/inl_use.c" <<'EOF'
+inline int twice(int x) { return x + x; }
+int main(void) { return twice(21) == 42 ? 0 : 1; }
+EOF
+if "$compiler" -w -o "$tmp/inl_use" "$tmp/inl_use.c" > "$tmp/log" 2>&1; then
+    echo "testing an inline definition does not define the symbol ... FAILED (it linked)"
+    n_fail=$((n_fail + 1))
+else
+    echo "testing an inline definition does not define the symbol ... passed"
+    n_pass=$((n_pass + 1))
+fi
+
+# The complement of p8: another unit's `extern inline` is an external
+# definition, and the two together are a program.
+cat > "$tmp/inl_def.c" <<'EOF'
+extern inline int twice(int x) { return x + x; }
+EOF
+if "$compiler" -w -o "$tmp/inl" "$tmp/inl_use.c" "$tmp/inl_def.c" > "$tmp/log" 2>&1 && "$tmp/inl"; then
+    echo "testing extern inline in another unit completes the program ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing extern inline in another unit completes the program ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# "all the file scope declarations" is the whole unit, not the ones seen so
+# far: an extern declaration after the definition makes it an external one.
+cat > "$tmp/inl_ext.c" <<'EOF'
+inline int twice(int x) { return x + x; }
+extern int twice(int x);
+int main(void) { return twice(21) == 42 ? 0 : 1; }
+EOF
+if "$compiler" -w -o "$tmp/inl_ext" "$tmp/inl_ext.c" > "$tmp/log" 2>&1 && "$tmp/inl_ext"; then
+    echo "testing a later extern declaration makes it an external definition ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a later extern declaration makes it an external definition ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# A declaration without inline does the same thing.
+cat > "$tmp/inl_plain.c" <<'EOF'
+int twice(int x);
+inline int twice(int x) { return x + x; }
+int main(void) { return twice(21) == 42 ? 0 : 1; }
+EOF
+if "$compiler" -w -o "$tmp/inl_plain" "$tmp/inl_plain.c" > "$tmp/log" 2>&1 && "$tmp/inl_plain"; then
+    echo "testing a declaration without inline keeps the external definition ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a declaration without inline keeps the external definition ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# static inline has internal linkage, so it is a definition here and links
+# on its own; p8's first sentence leaves it alone.
+cat > "$tmp/inl_static.c" <<'EOF'
+static inline int twice(int x) { return x + x; }
+int main(void) { return twice(21) == 42 ? 0 : 1; }
+EOF
+if "$compiler" -w -o "$tmp/inl_static" "$tmp/inl_static.c" > "$tmp/log" 2>&1 && "$tmp/inl_static"; then
+    echo "testing a static inline function is defined here ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a static inline function is defined here ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# p5 (declared inline, never defined here) and p3 (a modifiable static local
+# in an inline definition) are constraints: gcc diagnoses both, clang only
+# the second. The static-local one has its own group, clang's name.
+cat > "$tmp/inl_warn.c" <<'EOF'
+inline int f(void) { static int q = 1; return q; }
+inline int g(void);
+int main(void) { return f() - 1; }
+EOF
+w=$("$compiler" -S -o /dev/null "$tmp/inl_warn.c" 2>&1 | grep -c 'declared but never defined')
+s=$("$compiler" -S -o /dev/null "$tmp/inl_warn.c" 2>&1 | grep -c 'static local')
+n=$("$compiler" -Wno-static-local-in-inline -S -o /dev/null "$tmp/inl_warn.c" 2>&1 | grep -c 'static local')
+if [ "$w" -eq 1 ] && [ "$s" -eq 1 ] && [ "$n" -eq 0 ]; then
+    echo "testing the inline constraints are diagnosed ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the inline constraints are diagnosed ... FAILED (never-defined $w/1, static-local $s/1, -Wno $n)"
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then

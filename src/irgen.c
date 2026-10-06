@@ -2706,7 +2706,10 @@ Module *irgen(Module *md) {
         // is_dead marks an internal-linkage definition that nothing
         // reachable names; the parser diagnosed it, and emitting it would
         // put code in the object file that clang does not emit either.
-        if (!fn->is_defined || fn->is_dead) continue;
+        // is_inline_def marks 6.7.5p8's inline definition: the unit has the
+        // definition but does not define the symbol, so there is nothing to
+        // emit -- calls to it stay references to the external one.
+        if (!fn->is_defined || fn->is_dead || fn->is_inline_def) continue;
 
         curf = fn;
         // A result returned through a hidden pointer adds one to the
