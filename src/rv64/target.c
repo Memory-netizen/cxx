@@ -81,6 +81,13 @@ static Type *rv64_va_list_type(void) {
 
 #undef TYPE
 
+// The RISC-V constraint letters whose LLVM spelling differs; the same set as
+// the rv32 targets use, which have their own copy of it.
+static AsmConsConv rv64_asm_cons[] = {
+    {'m', NULL, "*m", "*m"}, {'o', NULL, "*o", "*o"}, {'V', NULL, "*V", "*V"},
+    {'A', NULL, "*A", "*A"}, {'X', NULL, "X", "*X"},  {'g', NULL, "imr", "*imr"},
+};
+
 Target T_rv64 = {
     .llvm_features = "\"+m,+a,+f,+d,+c\"",
     .llvm_abi = "\"lp64d\"",
@@ -122,6 +129,8 @@ Target T_rv64 = {
     .ulong_max = 18446744073709551615UL,
     .llong_max = 9223372036854775807LL,
     .va_list_type = rv64_va_list_type,
+    .asm_cons = rv64_asm_cons,
+    .num_asm_cons = sizeof(rv64_asm_cons) / sizeof(rv64_asm_cons[0]),
     .va_arg_ops = rv64_va_arg,
     .classify_aggregate = rv_classify_aggregate,
     .classify_variadic = rv_classify_variadic,

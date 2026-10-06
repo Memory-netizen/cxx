@@ -5163,6 +5163,480 @@ static Node *static_assert_decl(Token **rest, Token *tok) {
     return new_node(ND_NOP, start);
 }
 
+//
+// GNU asm statements.
+//
+// ISO C has no asm in any form, so the whole construct is the GNU one: a
+// basic statement (a template and nothing else), an extended one (with
+// output, input and clobber lists) and asm goto (whose template may jump to
+// labels of the enclosing function). Both references implement all three the
+// same way and differ only in the wording of the diagnostics.
+//
+// Most of what happens here is translation. A template is written in GCC's
+// operand language -- `%0`, `%[name]`, `%l1`, `%%` -- and has to be rewritten
+// in LLVM's, where an operand is `$0`, a label reference `${0:l}`, a modifier
+// `${0:b}`, and a literal dollar sign `$$`. The rewrite needs the operand
+// numbering settled first, so the operands are numbered before the template
+// is converted, and the constraint string -- which is what the IR call is
+// built from -- is assembled in the same pass.
+//
+// `asm` itself is a keyword here as in gcc's GNU mode; `__asm__` is the
+// spelling that survives strict ISO mode, and the lexer folds both into one
+// token.
+
+// asm-qualifiers ::= ("volatile" | "inline" | "goto")*, in any order.
+// `volatile` says the statement has effects and may not be moved or dropped,
+// `inline` is a hint LLVM's IR has nowhere to put, and `goto` says the
+// template jumps to labels. All three are also spelled with underscores on
+// both sides, which the preprocessor has already folded into the keywords.
+static Token *asm_qualifiers(Token *tok, uint32_t *flags) {
+    for (;; tok = tok->next) {
+        if (tok->kind == TK_VOLATILE) {
+            *flags |= ASM_VOLATILE;
+        } else if (tok->kind == TK_INLINE) {
+            *flags |= ASM_INLINE;
+        } else if (tok->kind == TK_GOTO) {
+            *flags |= ASM_GOTO;
+        } else {
+            return tok;
+        }
+    }
+}
+
+// Where a constraint's letters begin. In front of them stand GCC's modifiers:
+// `=` writes the operand, `+` reads and writes it, `&` makes it an early
+// clobber, and `%` says the instruction and the operand may be swapped. LLVM
+// spells `+` as an output plus an input of its own, which the caller does --
+// it is what makes the constraint string longer than the operand list -- and
+// keeps the rest. A digit is not a modifier but the whole constraint: it is
+// the matching constraint, which shares an earlier operand's register.
+static int asm_cons_off(char *cons) {
+    int i = 0;
+    while (cons[i] == '=' || cons[i] == '+' || cons[i] == '&' || cons[i] == '%' || cons[i] == '*') i++;
+    return i;
+}
+
+// A constraint's letters, in LLVM's spelling. They are looked up in the
+// target's table: a few name one fixed register ('a' is {ax} on x86), and the
+// memory letters have to be marked indirect ('m' is *m), which is also what
+// tells the printer to hand LLVM an address. A letter no table names is left
+// as written, which is what clang does with it too.
+static char *asm_cons_conv(char *cons, bool is_output) {
+    for (int k = 0; k < T.num_asm_cons; k++) {
+        AsmConsConv *c = &T.asm_cons[k];
+        if (cons[0] != c->letter) continue;
+        char *rep = c->reg ? format("{%s}", c->reg) : (is_output ? c->out : c->in);
+        // The letter is in the table but this direction is not rewritten --
+        // an input-only constraint -- so it is spelled as written.
+        if (rep) return format("%s%s", rep, cons + 1);
+        break;
+    }
+    return format("%s", cons);
+}
+
+// Whether a name written in the template is this operand's.
+static bool asm_name_is(char *name, char *s, int len) {
+    return name && (int)strlen(name) == len && !memcmp(name, s, len);
+}
+
+// The template, rewritten in LLVM's spelling.
+//
+// GCC writes an operand as `%0`, `%[name]`, `%l1` or `%l[name]`, with an
+// optional modifier letter in front of the operand (`%b0`, `%w1`, `%c2`), and
+// `%%` is one literal per cent. LLVM marks an operand with `$`, spells a
+// label reference `${N:l}` and a modified operand `${N:b}`, and takes a
+// literal dollar sign as `$$` -- so one written in the template is doubled.
+// Whatever else a `%` is followed by is left alone: both references hand
+// `%eax` to the assembler, where the per cent is a register prefix and no
+// operand at all.
+//
+// `label_base` is where the first goto label lands in LLVM's numbering.
+// GCC's is the operand count -- which is what makes `%l0` with one input name
+// the input -- and the labels come after the input half of every `+` operand
+// in the constraint string, which is the distance between the two.
+static char *asm_tmpl_conv(Token *tok, char *src, AsmOperand *ops, Node **labels, int nlabels, uint32_t label_base) {
+    int nops = 0;
+    for (AsmOperand *x = ops; x; x = x->next) nops++;
+
+    int len = strlen(src);
+    char *buf = emalloc(len * 4 + 1);  // every byte, worst case: "$$" for one
+    int o = 0;
+
+    for (int i = 0; i < len;) {
+        char c = src[i];
+        if (c == '$') {
+            // LLVM's own operand marker: one written in the template is two.
+            buf[o++] = '$';
+            buf[o++] = '$';
+            i++;
+            continue;
+        }
+        if (c != '%') {
+            buf[o++] = c;
+            i++;
+            continue;
+        }
+        i++;
+        if (src[i] == '%') {
+            buf[o++] = '%';
+            i++;
+            continue;
+        }
+
+        bool is_label = false;
+        char mod = 0;
+        if (isalpha((unsigned char)src[i])) {
+            if (src[i] == 'l')
+                is_label = true;
+            else
+                mod = src[i];
+            i++;
+        }
+
+        // The operand: a number, or a name in brackets.
+        long num = -1;
+        char *name = NULL;
+        int nlen = 0;
+        if (isdigit((unsigned char)src[i])) {
+            for (num = 0; isdigit((unsigned char)src[i]); i++) num = num * 10 + (src[i] - '0');
+        } else if (src[i] == '[') {
+            name = src + ++i;
+            while (src[i] && src[i] != ']') i++;
+            nlen = src + i - name;
+            if (src[i] != ']') error(tok, "expected ‘]’ in asm template");
+            i++;
+        } else {
+            // Not an operand reference after all: `%eax`, or a modifier with
+            // no operand for it to modify. Both references leave it to the
+            // assembler rather than diagnosing it here.
+            buf[o++] = '%';
+            if (mod) buf[o++] = mod;
+            if (is_label) buf[o++] = 'l';
+            continue;
+        }
+
+        uint32_t pos;
+        if (is_label) {
+            int k = -1;
+            if (name) {
+                for (int j = 0; j < nlabels; j++)
+                    if (labels[j]->label == intern(name, nlen)) k = j;
+                if (k < 0) error(tok, "unknown symbolic operand name in inline assembly string");
+            } else {
+                if (num < nops || num >= nops + (long)nlabels) error(tok, "invalid ‘asm’: ‘%%l’ operand isn’t a label");
+                k = num - nops;
+            }
+            pos = label_base + k;
+        } else {
+            AsmOperand *op = NULL;
+            for (AsmOperand *x = ops; x; x = x->next) {
+                if (name) {
+                    if (asm_name_is(x->name, name, nlen)) op = x;
+                } else if ((long)x->index == num) {
+                    op = x;
+                }
+            }
+            // A number LLVM does not know is not a diagnostic there: its
+            // backend aborts on one, so it has to be caught here.
+            if (!op) {
+                if (name) error(tok, "unknown symbolic operand name in inline assembly string");
+                error(tok, "invalid operand number in inline asm string");
+            }
+            pos = op->pos;
+        }
+
+        if (is_label) {
+            o += sprintf(buf + o, "${%u:l}", pos);
+        } else if (mod) {
+            o += sprintf(buf + o, "${%u:%c}", pos, mod);
+        } else {
+            o += sprintf(buf + o, "$%u", pos);
+        }
+    }
+    buf[o] = '\0';
+    return buf;
+}
+
+// One more entry in the constraint string being built. It is built with
+// format() rather than in a buffer of its own: a statement has a handful of
+// operands, and the pieces arrive one at a time from three different places.
+static char *asm_cons_add(char *cons, char *piece) {
+    if (!cons) return format("%s", piece);
+    return format("%s,%s", cons, piece);
+}
+
+// asm-operand ::= "[" identifier "]" string-literal "(" assignment-expr ")"
+// An output is an lvalue the template writes; an input is a value it reads.
+// A `[name]` lets the template refer to the operand by name instead of by
+// number.
+static Token *asm_operand(Token **rest, Token *tok, bool is_output, AsmOperand ***tail) {
+    AsmOperand *op = emalloc(sizeof(AsmOperand));
+    op->is_output = is_output;
+    op->arg_pos = -1;
+    op->plus_arg_pos = -1;
+
+    if (tok->kind == TK_LBRACKET) {
+        tok = tok->next;
+        if (tok->kind != TK_IDENT) error(tok, "expected identifier in ‘asm’ operand name");
+        op->name = str(tok->id);
+        tok = skip(tok->next, TK_RBRACKET);
+    }
+
+    if (tok->kind != TK_STRLIT) error(tok, "expected string literal in ‘asm’");
+    if (tok->enc_prefix != PREFIX_NONE) error(tok, "expected a plain string literal in ‘asm’");
+    op->tok = tok;
+    op->cons = str(tok->id);
+    tok = skip(tok->next, TK_LPAREN);
+    op->expr = assign(&tok, tok);
+    tok = skip(tok, TK_RPAREN);
+
+    // GCC's two rules about the constraint itself: an output has to say it
+    // writes ('='), or reads and writes ('+'), and an input may say neither.
+    bool writes = op->cons[0] == '=' || op->cons[0] == '+';
+    if (is_output && !writes) error(op->tok, "output operand constraint lacks ‘=’");
+    if (!is_output && writes) error(op->tok, "input operand constraint contains ‘=’");
+    op->is_plus = op->cons[0] == '+';
+    // The output half: the modifiers with `+` turned into `=`, and the letters
+    // converted. The input half of a `+` is added later, as a constraint of
+    // its own, out of the same letters.
+    int off = asm_cons_off(op->cons);
+    char *pre = emalloc(off + 1);
+    for (int i = 0; i < off; i++) pre[i] = op->cons[i] == '+' ? '=' : op->cons[i];
+    pre[off] = '\0';
+    op->conv = format("%s%s", is_output ? pre : "", asm_cons_conv(op->cons + off, is_output));
+    op->is_indirect = strchr(op->conv, '*') != NULL;
+
+    **tail = op;
+    *tail = &op->next;
+    *rest = tok;
+    return tok;
+}
+
+// asm-operands ::= asm-operand ("," asm-operand)*
+static Token *asm_operands(Token **rest, Token *tok, bool is_output, AsmOperand ***tail, int *count) {
+    while (tok->kind != TK_COLON && tok->kind != TK_COLONCOLON && tok->kind != TK_RPAREN) {
+        if (*count) tok = skip(tok, TK_COMMA);
+        tok = asm_operand(&tok, tok, is_output, tail);
+        (*count)++;
+    }
+    *rest = tok;
+    return tok;
+}
+
+// asm-clobbers ::= string-literal ("," string-literal)*
+// Each names a register the template writes without saying so, or "memory"
+// for the memory it touches. They are constraints to LLVM ("~{rax}"), so
+// they are appended to the constraint list as they are read.
+static Token *asm_clobbers(Token **rest, Token *tok, char **cons) {
+    while (tok->kind == TK_STRLIT) {
+        if (tok->enc_prefix != PREFIX_NONE) error(tok, "expected a plain string literal in ‘asm’");
+        char *name = str(tok->id);
+        if (!name[0]) error(tok, "expected non-empty string in ‘asm’ clobber list");
+        *cons = asm_cons_add(*cons, format("~{%s}", name));
+        tok = tok->next;
+        if (tok->kind != TK_COMMA) break;
+        tok = tok->next;
+    }
+    *rest = tok;
+    return tok;
+}
+
+// asm-goto-labels ::= identifier ("," identifier)*
+// The labels are resolved with the ordinary gotos, at the end of the
+// function: an asm goto may land anywhere a goto may, and the same checks
+// apply to it. Each gets a node of the shape a goto uses, so the one pass
+// that knows how a label is found does not have to know about asm -- a node
+// of kind ND_NOP is one of these rather than a jump.
+static Token *asm_goto_labels(Token **rest, Token *tok, Node *node) {
+    while (tok->kind == TK_IDENT) {
+        if (!node->asm_labels)
+            node->asm_labels = vnew(4, sizeof(Node *));
+        else
+            node->asm_labels = vgrow(node->asm_labels, node->asm_nlabels + 1);
+
+        Token *name = tok;
+        Node *ref = new_node(ND_NOP, name);
+        ref->label = get_ident(name);
+        note_jump_scope(ref, scope);
+        ref->goto_next = gotos;
+        gotos = ref;
+        node->asm_labels[node->asm_nlabels++] = ref;
+
+        tok = tok->next;
+        if (tok->kind != TK_COMMA) break;
+        tok = tok->next;
+        if (tok->kind != TK_IDENT) error(tok, "expected label name in ‘asm’ goto label list");
+    }
+    *rest = tok;
+    return tok;
+}
+
+// AsmStmt ::= "asm" AsmQual* "(" string-literal
+//                ( ":" AsmOperands? ( ":" AsmOperands? ( ":" Clobbers?
+//                  ( ":" IdentList? )? )? )? )? ")" ";"
+//
+// A section that is not written is empty, and `:::` is three of them: the
+// first colon opens the output list, so a run of colons is a run of empty
+// sections. Only four may be written.
+static Node *asm_stmt(Token **rest, Token *tok) {
+    Token *start = tok;
+    Node *node = new_node(ND_ASM, start);
+    tok = asm_qualifiers(tok->next, &node->asm_flags);
+    tok = skip(tok, TK_LPAREN);
+
+    if (tok->kind != TK_STRLIT) error(tok, "expected string literal in ‘asm’");
+    if (tok->enc_prefix != PREFIX_NONE) error(tok, "expected a plain string literal in ‘asm’");
+    char *tmpl = str(tok->id);
+    tok = tok->next;
+
+    AsmOperand *ops = NULL, **tail = &ops;
+    int nouts = 0, nins = 0;
+    // The clobbers are collected apart from the operands: they come last in
+    // the constraint string, however early in the statement they are written.
+    char *clob = NULL;
+    char *cons = NULL;
+    // The four sections, each opened by a colon: outputs, inputs, clobbers,
+    // labels. A section that is not written is empty, so a colon followed by
+    // another opens one that holds nothing. `::` is a single token here -- it
+    // is the scope qualifier of an attribute like [[gnu::const]] -- and
+    // between two sections it is the two colons it is spelled with: reading
+    // it leaves one of them owed, and while one is owed the section is at its
+    // end already. A fifth colon has nowhere to go, which is where both
+    // references stop too.
+    int spare = 0;
+    for (int sect = 0; spare || tok->kind == TK_COLON || tok->kind == TK_COLONCOLON;) {
+        if (sect == 4) error(tok, "expected ‘)’ before ‘:’ token");
+        if (spare)
+            spare--;
+        else if (tok->kind == TK_COLON)
+            tok = tok->next;
+        else {
+            spare = 1;
+            tok = tok->next;
+        }
+        if (spare) {
+            // The colon just read was the first half of a `::`, and its
+            // second half opens the next section: this one is empty.
+            sect++;
+            continue;
+        }
+        if (sect == 0)
+            tok = asm_operands(&tok, tok, true, &tail, &nouts);
+        else if (sect == 1)
+            tok = asm_operands(&tok, tok, false, &tail, &nins);
+        else if (sect == 2)
+            tok = asm_clobbers(&tok, tok, &clob);
+        else
+            tok = asm_goto_labels(&tok, tok, node);
+        sect++;
+    }
+    if (node->asm_nlabels && !(node->asm_flags & ASM_GOTO)) error(start, "expected ‘goto’ before asm goto label list");
+
+    // Two operands may not share a name: the template refers to them by it.
+    for (AsmOperand *op = ops; op; op = op->next)
+        for (AsmOperand *x = op->next; x; x = x->next)
+            if (op->name && x->name && !strcmp(op->name, x->name))
+                error(op->tok, "duplicate ‘asm’ operand name ‘%s’", op->name);
+
+    node->asm_ops = ops;
+    node->asm_nops = nouts + nins;
+    // The block control falls through to when the template does not jump to
+    // one of its labels: an asm goto is a terminator, so what follows it is
+    // not the rest of this one.
+    if (node->asm_nlabels) cnt_blk(1);
+    // A statement with no output is one both references treat as volatile:
+    // there is no value whose use could justify keeping it, so the template
+    // must not be dropped or moved.
+    if (!nouts) node->asm_flags |= ASM_VOLATILE;
+
+    tok = skip(tok, TK_RPAREN);
+    *rest = skip(tok, TK_SEMI);
+
+    // Numbering first: GCC numbers the outputs, then the inputs, then the
+    // labels, and the template's own references are to that numbering. The
+    // constraint string lists the operands in the same order, so an operand's
+    // place in it is its number -- and the input half of a `+` operand, which
+    // GCC does not number, is put after every numbered input.
+    int arg = 0, out_ord = 0, in_ord = 0, plus_ord = 0, nplus = 0, nret = 0;
+    for (AsmOperand *op = ops; op; op = op->next)
+        if (op->is_plus) nplus++;
+    for (AsmOperand *op = ops; op; op = op->next) {
+        op->index = op->is_output ? out_ord++ : nouts + in_ord++;
+        op->pos = op->index;
+        // A register output is one of the call's return values; an indirect
+        // one travels as an address argument, in its place among the others.
+        if (op->is_output && !op->is_indirect) {
+            nret++;
+            continue;
+        }
+        op->arg_pos = arg++;
+    }
+    for (AsmOperand *op = ops; op; op = op->next) {
+        if (!op->is_plus) continue;
+        op->plus_pos = nouts + nins + plus_ord;
+        op->plus_arg_pos = arg++;
+        // A `+` operand shares the output's register ("0"), or its address
+        // ("*m"): the first is the matching constraint, the second is the
+        // same memory operand named a second time.
+        op->conv_in =
+            op->is_indirect ? asm_cons_conv(op->cons + asm_cons_off(op->cons), false) : format("%u", op->index);
+        plus_ord++;
+    }
+
+    for (AsmOperand *op = ops; op; op = op->next) cons = asm_cons_add(cons, op->conv);
+    for (AsmOperand *op = ops; op; op = op->next)
+        if (op->is_plus) cons = asm_cons_add(cons, op->conv_in);
+    for (int i = 0; i < node->asm_nlabels; i++) cons = asm_cons_add(cons, "!i");
+    if (clob) cons = asm_cons_add(cons, clob);
+    // The clobbers every asm of this target implicitly has -- the x86 flags;
+    // see the target's asm_clobbers.
+    if (T.asm_clobbers) cons = asm_cons_add(cons, T.asm_clobbers);
+
+    node->asm_cons = cons ? cons : "";
+    node->asm_narg = arg;
+    node->asm_nret = nret;
+    node->asm_tmpl = asm_tmpl_conv(start, tmpl, ops, node->asm_labels, node->asm_nlabels, nouts + nins + nplus);
+    return node;
+}
+
+// AsmDecl ::= "asm" AsmQual* "(" string-literal ")" ";"
+// A file-scope asm statement has no operands: outside a function there is
+// nothing for them to be evaluated in and no registers to bind them to. It
+// becomes LLVM's `module asm`, one directive per statement, in source order.
+static Token *asm_decl(Token *tok) {
+    Token *start = tok;
+    uint32_t flags = 0;
+    Token *qual = tok->next;
+    tok = asm_qualifiers(tok->next, &flags);
+    // There is no statement for `volatile` to say anything about, and no
+    // function for `goto` to jump inside: clang reports the first and gcc
+    // does not even parse it.
+    if (flags) error(qual, "meaningless ‘%.*s’ on asm outside function", qual->len, tok_text(qual));
+    tok = skip(tok, TK_LPAREN);
+    if (tok->kind != TK_STRLIT) error(tok, "expected string literal in ‘asm’");
+    if (tok->enc_prefix != PREFIX_NONE) error(tok, "expected a plain string literal in ‘asm’");
+    char *tmpl = str(tok->id);
+    tok = tok->next;
+    // The colon of an extended statement. gcc reports the register
+    // constraint that has nowhere to go; there is no statement to be an
+    // lvalue in, which is what its other half of the message is about.
+    if (tok->kind == TK_COLON) error(tok, "constraint allows registers outside of a function");
+    tok = skip(tok, TK_RPAREN);
+    tok = skip(tok, TK_SEMI);
+
+    // The template is still rewritten -- `%%` is one per cent, and a dollar
+    // sign is still doubled for LLVM -- but there are no operands for `%0` to
+    // name, and a number LLVM cannot resolve aborts its backend rather than
+    // diagnosing it, so a reference to one has to be caught here.
+    char *t = asm_tmpl_conv(start, tmpl, NULL, NULL, 0, 0);
+    if (!curm->masm)
+        curm->masm = vnew(4, sizeof(char *));
+    else
+        curm->masm = vgrow(curm->masm, curm->num_masm + 1);
+    curm->masm[curm->num_masm++] = t;
+    return tok;
+}
+
 // Stmt        ::= LabelStmt | UnLabelStmt
 // LabelStmt   ::= Label Stmt
 // UnLabelStmt ::= ExpStmt | PrimBlk | JmpStmt
@@ -5233,6 +5707,13 @@ static Node *stmt(Token **rest, Token *tok) {
             break;
         case TK_RETURN:
             stmt = return_stmt(rest, tok);
+            break;
+        case TK_ASM:
+            stmt = asm_stmt(rest, tok);
+            // The template of an asm goto may jump to a label, but control
+            // also reaches the statement after it, and that is what the
+            // fall-through bookkeeping asks about.
+            falls_through = true;
             break;
         default:
             stmt = expr_stmt(rest, tok);
@@ -6929,18 +7410,26 @@ static void resolve_goto_labels(void) {
                 y->is_ref = true;
                 if (x->kind == ND_LABEL_VAL) y->is_addr = true;
                 // 6.8.6.1p1: the jump may not land inside the scope of an
-                // identifier with a variably modified type.
+                // identifier with a variably modified type. An asm goto's
+                // labels are jumps of the same kind, which clang words
+                // differently.
+                char *what = x->kind == ND_NOP
+                                 ? "cannot jump from this asm goto statement to one of its possible targets"
+                                 : "cannot jump from this goto statement to its label";
                 Scope *from = jump_scope_of(x);
                 Scope *to = jump_scope_of(y);
-                check_vm_jump(x->tok, "cannot jump from this goto statement to its label", from, jump_seq_of(x), to,
-                              jump_seq_of(y));
+                check_vm_jump(x->tok, what, from, jump_seq_of(x), to, jump_seq_of(y));
                 // The handlers of the scopes this jump leaves run before it:
-                // the label's own scope is still live where it lands.
-                if (from) x->unwind = cleanup_leaving(from, to, x->tok);
+                // the label's own scope is still live where it lands. An asm
+                // goto cannot run them -- the jump is inside the template,
+                // and the path that falls out of it still needs them.
+                if (from && x->kind != ND_NOP) x->unwind = cleanup_leaving(from, to, x->tok);
                 break;
             }
 
-        if (!x->target) error(x->tok->next, "use of undeclared label");
+        // The name is the whole reference for an asm goto, which has no
+        // token after it to point at.
+        if (!x->target) error(x->kind == ND_NOP ? x->tok : x->tok->next, "use of undeclared label");
     }
 
     gotos = labels = NULL;
@@ -6957,6 +7446,11 @@ static Token *external_declaration(Token *tok) {
         static_assert_decl(&tok, tok);
         return tok;
     }
+
+    // A file-scope asm statement: `asm(".globl f");`. Only the basic form is
+    // one -- a constraint outside a function has no register to be bound to,
+    // which is what asm_decl() reports.
+    if (tok->kind == TK_ASM) return asm_decl(tok);
 
     if (is_attr_start(tok) && attr_decl_then_semi(tok)) {
         // AttrDecl: a standalone attribute declaration.

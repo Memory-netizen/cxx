@@ -402,6 +402,18 @@ static Type *amd64_va_list_type(void) {
 
 #undef TYPE
 
+// The x86 constraint letters that name one register, and the memory ones.
+// GCC spells the first group with a letter and LLVM wants the register in
+// braces; clang converts the same ones, and what it converts to is what is
+// written here. The second group is LLVM's indirect form: the operand is an
+// address, marked with '*' so the printer hands LLVM one.
+static AsmConsConv amd64_asm_cons[] = {
+    {'a', "ax", NULL, NULL},    {'b', "bx", NULL, NULL}, {'c', "cx", NULL, NULL}, {'d', "dx", NULL, NULL},
+    {'S', "si", NULL, NULL},    {'D', "di", NULL, NULL}, {'t', "st", NULL, NULL}, {'u', "st(1)", NULL, NULL},
+    {'m', NULL, "*m", "*m"},    {'o', NULL, "*o", "*o"}, {'V', NULL, "*V", "*V"}, {'X', NULL, "X", "*X"},
+    {'g', NULL, "imr", "*imr"},
+};
+
 Target T_amd64 = {
     .llvm_features = NULL,
     .llvm_abi = NULL,
@@ -441,6 +453,11 @@ Target T_amd64 = {
     .ulong_max = 18446744073709551615UL,
     .llong_max = 9223372036854775807LL,
     .va_list_type = amd64_va_list_type,
+    .asm_cons = amd64_asm_cons,
+    .num_asm_cons = sizeof(amd64_asm_cons) / sizeof(amd64_asm_cons[0]),
+    // An x86 asm may change the flags, and no template says which: clang
+    // clobbers them on every statement, and so does this.
+    .asm_clobbers = "~{dirflag},~{fpsr},~{flags}",
     .va_arg_ops = amd64_va_arg,
     .classify_aggregate = amd64_classify_aggregate,
     .classify_publish = classify_publish,

@@ -2665,6 +2665,177 @@ static void gen_ret(Node *n) {
     ret_jump(n);
 }
 
+// The IR type an asm operand travels as.
+//
+// A record has no first-class value here, so a register constraint on one
+// means whatever the ABI makes of it: a single piece is one value, and several
+// would need the constraint string to grow an operand per piece, which GCC's
+// numbering has no room for. A record the ABI would pass in memory has no
+// register to name at all. Both are refused rather than silently miscompiled;
+// neither reference refuses them, which is a divergence this compiler lives
+// with until the piece-wise form is implemented.
+static Type *asm_ir_ty(Type *ty, bool is_indirect) {
+    if (is_indirect) return ty;
+    if (ty->kind != TY_STRUCT && ty->kind != TY_UNION) return ty;
+    if (!abi_lowered(ty)) return NULL;
+    AggClass c;
+    T.classify_aggregate(ty, &c);
+    return c.npiece == 1 ? c.piece[0].ty : NULL;
+}
+
+// The address an operand travels as, for a constraint that names memory. An
+// lvalue is its own address; anything else is given a home of its own for the
+// length of the statement, which is what gcc does with a memory operand that
+// is not an lvalue (`"m"(x + 1)`).
+static Ref asm_addr(Node *e) {
+    if (e->is_lvalue) return gen_addr(e);
+    Type *ty = e->ty;
+    Ref val = gen_expr(e);
+    Ref slot = TMP(tmp_id++, pointer_to(ty, 0));
+    new_ins(IR_ALLOCA, slot, (Ref[]){INT(ty->align)}, 1);
+    store(val, slot, ty->align, NULL);
+    return slot;
+}
+
+// The value an operand that travels in a register has. An input was converted
+// to a value by the parser; a record is read as the single piece the ABI
+// splits it into, that being all a constraint can name.
+static Ref asm_value(Node *e, Type *ir_ty) {
+    if (e->ty->kind != TY_STRUCT && e->ty->kind != TY_UNION) return gen_expr(e);
+    Ref addr = gen_expr(e);
+    if (!addr.ty || addr.ty->kind != TY_PTR) fatal("asm: aggregate operand is not an address");
+    return load(addr, ir_ty, e->ty->align, NULL);
+}
+
+// The value an output operand has before the template runs, which is what the
+// input half of a '+' reads. The operand is an lvalue -- the parser kept it
+// one, since the template also writes it -- so it is loaded here, the way an
+// lvalue conversion would have.
+static Ref asm_read(Node *e, Type *ir_ty) {
+    if (e->ty->kind == TY_STRUCT || e->ty->kind == TY_UNION) return asm_value(e, ir_ty);
+    Ref addr = gen_addr(e);
+    return load(addr, ir_ty, lvalue_align(e), e->kind == ND_MEMBER ? e->member : NULL);
+}
+
+// The record the call returns when more than one register output travels
+// back. LLVM's inline asm has one result whatever the constraint list says,
+// so several outputs are one aggregate that the printer splits again with
+// extractvalue. It is an unnamed record, which print_type() spells out where
+// it is used rather than naming in the module's type list.
+static Type *asm_ret_record(Type **tys, int n) {
+    Type *rec = struct_type(false);
+    rec->align = 1;
+    Member dummy = {}, *cur = &dummy;
+    int off = 0;
+    for (int i = 0; i < n; i++) {
+        Member *m = emalloc(sizeof(Member));
+        m->ty = tys[i];
+        m->align = tys[i]->align;
+        m->offset = off;
+        off += tys[i]->size;
+        rec->align = MAX(rec->align, tys[i]->align);
+        cur = cur->next = m;
+    }
+    rec->members = dummy.next;
+    rec->size = ALIGN_UP(off, rec->align);
+    return rec;
+}
+
+// An asm statement.
+//
+// The operands are the ones the constraint string names, in its order: every
+// output, then every input, then the input half of each '+'. A register
+// output is one of the call's return values -- several travel as the record
+// above -- and is written back into the object it named once the call has
+// returned. An indirect operand travels as an address, and the printer has to
+// spell out the type it points at, because LLVM requires an elementtype on
+// every operand of a memory constraint.
+static Ref gen_asm(Node *node) {
+    int nret = node->asm_nret;
+    Ref *args = node->asm_narg ? emalloc(node->asm_narg * sizeof(Ref)) : NULL;
+    uint8_t *ind = node->asm_narg ? emalloc(node->asm_narg) : NULL;
+    Ref *home = nret ? emalloc(nret * sizeof(Ref)) : NULL;
+    Type **ty = nret ? emalloc(nret * sizeof(Type *)) : NULL;
+    // A register output may name a bit-field, which is written through its
+    // access unit rather than by storing the value whole.
+    Member **mem = nret ? emalloc(nret * sizeof(Member *)) : NULL;
+    int reti = 0;
+
+    for (AsmOperand *op = node->asm_ops; op; op = op->next) {
+        Type *ir_ty = asm_ir_ty(op->expr->ty, op->is_indirect);
+        if (!ir_ty) error(op->expr->tok, "‘asm’ operand of aggregate type is not supported");
+        if (op->is_indirect) {
+            Ref addr = asm_addr(op->expr);
+            args[op->arg_pos] = addr;
+            ind[op->arg_pos] = 1;
+            // A '+' memory operand names the same address twice: once as the
+            // output the template writes and once as the input it reads.
+            if (op->is_plus) {
+                args[op->plus_arg_pos] = addr;
+                ind[op->plus_arg_pos] = 1;
+            }
+            continue;
+        }
+        if (op->is_output) {
+            home[reti] = gen_addr(op->expr);
+            ty[reti] = ir_ty;
+            mem[reti] = op->expr->kind == ND_MEMBER ? op->expr->member : NULL;
+            // A '+' operand is read as well, and its current value is the
+            // input its matching constraint names.
+            if (op->is_plus) args[op->plus_arg_pos] = asm_read(op->expr, ir_ty);
+            reti++;
+            continue;
+        }
+        args[op->arg_pos] = asm_value(op->expr, ir_ty);
+    }
+
+    Ref dst = R;
+    if (nret == 1) {
+        dst = TMP(tmp_id++, ty[0]);
+    } else if (nret > 1) {
+        dst = TMP(tmp_id++, asm_ret_record(ty, nret));
+    }
+
+    Ir *ins = new_ins(IR_ASM, dst, args, node->asm_narg);
+    ins->asm_tmpl = node->asm_tmpl;
+    ins->asm_cons = node->asm_cons;
+    ins->asm_nret = nret;
+    ins->asm_flags = node->asm_flags & (ASM_VOLATILE | ASM_GOTO);
+    ins->asm_ind = ind;
+
+    // An asm goto is a terminator: the labels its template may jump to are
+    // successors of this block, and control that does not take one of them
+    // falls through to the next statement, which is a block of its own. The
+    // callbr has to be the last instruction of the block it ends, so the
+    // stores below go into the block it falls through to -- which is where
+    // the value of an output exists at all: on the paths that jump, GCC says
+    // the outputs are indeterminate.
+    if ((node->asm_flags & ASM_GOTO) && node->asm_nlabels) {
+        Blk *fall = new_blk();
+        curb->jmp.type = IR_CALLBR;
+        curb->narg = node->asm_nlabels;
+        curb->succ = emalloc(node->asm_nlabels * sizeof(Blk *));
+        for (int i = 0; i < node->asm_nlabels; i++) {
+            curb->succ[i] = &curf->blks[node->asm_labels[i]->target->blk_idx];
+            add_pred(curb, curb->succ[i]);
+        }
+        curb->succ1 = fall;
+        add_pred(curb, fall);
+        curb = fall;
+        insert_blk(curb);
+    }
+
+    for (int i = 0; i < nret; i++) {
+        Ref val = dst;
+        if (nret > 1) {
+            val = TMP(tmp_id++, ty[i]);
+            new_ins(IR_EXTRACTVAL, val, (Ref[]){dst, INT(i)}, 2);
+        }
+        store(val, home[i], ty[i]->align, mem[i]);
+    }
+    return dst;
+}
+
 static Ref gen_stmt(Node *node) {
     if (!node) return R;
     Ref reg;
@@ -2686,6 +2857,8 @@ static Ref gen_stmt(Node *node) {
             break;
         case ND_CASE:
             return gen_case(node);
+        case ND_ASM:
+            return gen_asm(node);
         case ND_GOTO:
             gen_goto(node);
             break;

@@ -299,6 +299,15 @@ static Type *arm64_va_list_type(void) {
 
 #undef TYPE
 
+// The AArch64 constraint letters whose LLVM spelling differs: the memory
+// letters, which LLVM wants marked indirect ('*'), and the three the
+// references rewrite as well. Everything else -- 'r', 'w', 'x', 'I'..'Z' --
+// both spell the same way, so it passes through untouched.
+static AsmConsConv arm64_asm_cons[] = {
+    {'m', NULL, "*m", "*m"}, {'o', NULL, "*o", "*o"},    {'V', NULL, "*V", "*V"}, {'Q', NULL, "*Q", "*Q"},
+    {'X', NULL, "X", "*X"},  {'g', NULL, "imr", "*imr"}, {'p', NULL, "r", NULL},
+};
+
 Target T_arm64 = {
     .llvm_features = NULL,
     .llvm_abi = NULL,
@@ -339,6 +348,8 @@ Target T_arm64 = {
     .ulong_max = 18446744073709551615UL,
     .llong_max = 9223372036854775807LL,
     .va_list_type = arm64_va_list_type,
+    .asm_cons = arm64_asm_cons,
+    .num_asm_cons = sizeof(arm64_asm_cons) / sizeof(arm64_asm_cons[0]),
     .va_arg_ops = arm64_va_arg,
     .classify_aggregate = arm64_classify_aggregate,
     .classify_publish = arm64_classify_publish,

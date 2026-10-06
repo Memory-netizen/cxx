@@ -1334,6 +1334,42 @@ void add_type(Node *node) {
             // alloca element type (base_ty ?: char) is only for the IR.
             node->ty = T.ty_voidptr;
             break;
+        // An asm statement: an input is a value the template reads, an
+        // output an object it writes, and an indirect operand of either kind
+        // is an address. The operands are the only expressions it has.
+        case ND_ASM:
+            for (AsmOperand *op = node->asm_ops; op; op = op->next) {
+                add_type(op->expr);
+                // An operand with a memory constraint is the object's
+                // address, and a bit-field has none: gcc and clang both
+                // refuse it, and what the template would be handed is the
+                // whole access unit rather than the field.
+                if (op->is_indirect && op->expr->kind == ND_MEMBER && op->expr->member->is_bitfield)
+                    error(op->expr->tok, "cannot take address of bit-field ‘%s’", str(op->expr->member->name->id));
+                if (!op->is_output) {
+                    // A memory operand names an object, so an array among them
+                    // is the array itself and not the pointer it decayed to:
+                    // the address handed over is the array's, and the type
+                    // LLVM is given for it is the array type.
+                    if (op->is_indirect && op->expr->kind == ND_IMCAST && op->expr->lhs->ty->kind == TY_ARRAY)
+                        op->expr = op->expr->lhs;
+                    // A register input is a value, which is what the lvalue
+                    // conversion produces; an indirect one keeps the object,
+                    // whose address is what travels.
+                    if (!op->is_indirect) lvalue_convert(&op->expr);
+                    continue;
+                }
+                if (!op->expr->is_lvalue || op->expr->ty->kind == TY_FUNC)
+                    error(op->expr->tok, "lvalue required in ‘asm’ statement");
+                if (op->expr->ty->qual & (Q_CONST | Q_MEMCONST)) {
+                    if (op->expr->kind == ND_VAR)
+                        error(op->expr->tok, "read-only variable ‘%s’ used as ‘asm’ output", str(op->expr->var->id));
+                    error(op->expr->tok, "read-only location used as ‘asm’ output");
+                }
+            }
+            node->ty = T.ty_void;
+            break;
+
         // other
         case ND_NOP:
         case ND_GOTO:

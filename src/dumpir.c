@@ -539,6 +539,45 @@ void dump_blk(Blk *b) {
                 print_operand(ir->args[2]);
                 fprintf(out_file, "\n");
                 break;
+            case IR_ASM: {
+                // call [<ty>] asm [sideeffect] "<template>", "<constraints>"(<args>)
+                // An asm goto is the same call with `callbr` for its opcode:
+                // the labels its `to label` list names are printed by the
+                // terminator that follows, since that is where they belong.
+                fprintf(out_file, ir->asm_flags & ASM_GOTO ? "callbr " : "call ");
+                if (refeq(ir->dst, R))
+                    fprintf(out_file, "void");
+                else
+                    print_type(ir->dst.ty);
+                // `sideeffect` is what says the statement may not be dropped
+                // or moved. A template with no output has it whether or not
+                // the statement said `volatile`; the parser settled that.
+                fprintf(out_file, " asm ");
+                if (ir->asm_flags & (ASM_VOLATILE | ASM_GOTO)) fprintf(out_file, "sideeffect ");
+                fprintf(out_file, "\"");
+                for (char *p = ir->asm_tmpl; *p; p++) fprintf(out_file, "%s", escape_char_to_string(*p));
+                fprintf(out_file, "\", \"");
+                for (char *p = ir->asm_cons; *p; p++) fprintf(out_file, "%s", escape_char_to_string(*p));
+                fprintf(out_file, "\"(");
+                for (uint32_t i = 0; i < ir->narg; i++) {
+                    if (i) fprintf(out_file, ", ");
+                    // An indirect constraint takes an address, and LLVM
+                    // insists on knowing what it points at: `ptr` alone is
+                    // rejected ("operand for indirect constraint must have
+                    // elementtype attribute").
+                    if (ir->asm_ind && ir->asm_ind[i] && ir->args[i].ty && ir->args[i].ty->kind == TY_PTR) {
+                        fprintf(out_file, "ptr elementtype(");
+                        print_type(ir->args[i].ty->base);
+                        fprintf(out_file, ") ");
+                    } else {
+                        print_type(ir->args[i].ty);
+                        fprintf(out_file, " ");
+                    }
+                    print_operand(ir->args[i]);
+                }
+                fprintf(out_file, ")\n");
+                break;
+            }
             case IR_CALL:
                 fprintf(out_file, "call ");
                 if (refeq(ir->dst, R))
@@ -695,6 +734,18 @@ void dump_blk(Blk *b) {
                 fprintf(out_file, "void");
             }
             fprintf(out_file, "\n");
+            break;
+        case IR_CALLBR:
+            // The other half of an asm goto: the block control falls through
+            // to, then the labels the template may jump to, in the order the
+            // constraint string named them -- which is the order the template
+            // numbers them in.
+            fprintf(out_file, "        to label %%blk%d [", b->succ1->blk_id);
+            for (uint32_t i = 0; i < b->narg; i++) {
+                if (i) fprintf(out_file, ", ");
+                fprintf(out_file, "label %%blk%d", b->succ[i]->blk_id);
+            }
+            fprintf(out_file, "]\n");
             break;
         case IR_JMP:
             fprintf(out_file, "br label %%blk%d\n", b->succ1->blk_id);
@@ -1280,6 +1331,16 @@ void dump_module(Module *md, FILE *out) {
     fprintf(out_file, "source_filename = \"%s\"\n", files[0]->name);
     fprintf(out_file, "target datalayout = \"%s\"\n", T.datalayout);
     fprintf(out_file, "target triple = \"%s\"\n\n", T.triple);
+    // File-scope asm statements: LLVM carries them as module-level assembly,
+    // which is emitted before the globals and in source order, the way clang
+    // emits it. There are no operands to bind them -- outside a function there
+    // is no register allocation -- so each is one directive.
+    for (int i = 0; i < md->num_masm; i++) {
+        fprintf(out_file, "module asm \"");
+        for (char *p = md->masm[i]; *p; p++) fprintf(out_file, "%s", escape_char_to_string(*p));
+        fprintf(out_file, "\"\n");
+    }
+    if (md->num_masm) fprintf(out_file, "\n");
     if (T.llvm_features) fprintf(out_file, "attributes #0 = { \"target-features\"=%s }\n\n", T.llvm_features);
     if (T.llvm_abi)
         fprintf(out_file, "!llvm.module.flags = !{!0}\n!0 = !{i32 1, !\"target-abi\", !%s}\n\n", T.llvm_abi);

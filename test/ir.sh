@@ -367,4 +367,39 @@ echo 'void f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); __bu
   | $compiler -S -emit-llvm -o - -xc - | grep -q '%struct.__va_list_tag = type'
 check 'the va_list record keeps its name'
 
+# GNU asm statements: one inline-asm call, whose constraint string names the
+# operands in the order the template numbers them, and whose indirect
+# operands carry the elementtype LLVM insists on.
+echo 'int f(int x) { int y; __asm__("movl %1, %0" : "=r"(y) : "r"(x)); return y; }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'call i32 asm "movl $1, $0", "=r,r'
+check 'asm: register output and input'
+
+echo 'void f(int *p) { __asm__("" : "=m"(*p)); }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'call void asm ".*", "=\*m.*(ptr elementtype(i32)'
+check 'asm: a memory operand is indirect, with an elementtype'
+
+echo 'void f(void) { __asm__("nop"); }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'call void asm sideeffect "nop"'
+check 'asm: a template with no output is sideeffect'
+
+echo 'int f(void) { int a, b; __asm__("" : "=r"(a), "=r"(b)); return a + b; }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'call { i32, i32 } asm'
+check 'asm: two register outputs travel as one record'
+
+! echo 'int f(int x) { int y; __asm__("" : "=r"(y) : "r"(x)); return y; }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q '!i'
+check 'asm: no label constraint without asm goto'
+
+echo 'void f(void) { __asm__ goto("" :::: lab); lab: ; }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'callbr void asm sideeffect'
+check 'asm goto: the call is a callbr'
+
+echo 'void f(void) { __asm__ goto("" :::: lab); lab: ; }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'to label .* \[label '
+check 'asm goto: the labels are the terminator'
+
+echo '__asm__(".globl x");' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'module asm ".globl x"'
+check 'asm at file scope is module asm'
+
 echo OK

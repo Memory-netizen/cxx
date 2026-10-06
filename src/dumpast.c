@@ -83,6 +83,7 @@ static const char *node_kind_name[] = {
     [ND_CONTINUE] = "CONTINUE",
     [ND_SWITCH] = "SWITCH",
     [ND_CASE] = "CASE",
+    [ND_ASM] = "ASM",
     [ND_DECL] = "DECL",
     [ND_INIT] = "INIT",
     [ND_VAR] = "VAR",
@@ -619,6 +620,28 @@ static void dump_node(Node *node) {
             depth--;
             depth--;
             break;
+
+        case ND_ASM: {
+            // The template as it will be written out, then one line per operand
+            // with the constraint and the place the IR numbers it at.
+            fprintf(stdout, "  tmpl=\"%s\"", node->asm_tmpl);
+            if (node->asm_flags & ASM_VOLATILE) fprintf(stdout, "  volatile");
+            if (node->asm_flags & ASM_INLINE) fprintf(stdout, "  inline");
+            if (node->asm_flags & ASM_GOTO) fprintf(stdout, "  goto");
+            fprintf(stdout, "\n");
+            depth++;
+            for (AsmOperand *op = node->asm_ops; op; op = op->next) {
+                print_indent();
+                fprintf(stdout, "%s %%%u [%s] %s\n", op->is_output ? "out" : "in", op->index, op->cons, op->conv);
+                dump_node(op->expr);
+            }
+            for (int i = 0; i < node->asm_nlabels; i++) {
+                print_indent();
+                fprintf(stdout, "label %%%u\n", node->asm_nops + i);
+            }
+            depth--;
+            break;
+        }
 
         case ND_CASE:
             fprintf(stdout, "  val=%ld\n", (long)int128_to_i64(node->ival));

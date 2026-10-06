@@ -1685,6 +1685,77 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# --- GNU asm statements ----------------------------------------------
+
+# asm is not ISO C in any form, so the whole construct is the GNU one. The
+# shapes below are the ones both references accept; the misuse shapes after
+# them are the ones both refuse.
+ok 'a basic asm statement' <<'EOF'
+void f(void) { __asm__("nop"); }
+EOF
+
+ok 'extended asm with every operand kind' <<'EOF'
+int f(int x) {
+    int y;
+    __asm__ __volatile__("movl %[in], %[out]"
+                         : [out] "=r"(y), "+m"(x)
+                         : [in] "r"(x), "i"(3)
+                         : "memory", "cc");
+    return y;
+}
+EOF
+
+ok 'an asm goto statement' <<'EOF'
+int f(int x) { __asm__ goto("testl %0, %0; jne %l[out]" : : "r"(x) : : out); return 0; out: return 1; }
+EOF
+
+ok 'a file-scope asm statement' <<'EOF'
+__asm__(".globl f\n.text");
+int f(void) { return 0; }
+EOF
+
+bad 'an asm output that is not an lvalue' <<'EOF'
+void f(void) { __asm__("" : "=r"(1)); }
+EOF
+
+bad 'an asm operand number with no operand' <<'EOF'
+void f(int x) { __asm__("mov %9, %0" : "=r"(x)); }
+EOF
+
+bad 'an asm operand at file scope' <<'EOF'
+__asm__("" : "=r"(1));
+EOF
+
+bad 'an asm output constraint without =' <<'EOF'
+void f(int x) { __asm__("" : "r"(x)); }
+EOF
+
+# What the template writes comes back in the object it named, the input half
+# of a `+` reads that object's current value, and an asm goto's jump lands on
+# its label.
+cat > "$tmp/asmrun.c" <<'EOF'
+int main(void) {
+    int x = 7, y = 0;
+    __asm__("movl %1, %0" : "=r"(y) : "r"(x));
+    if (y != 7) return 1;
+    __asm__("addl $2, %0" : "+r"(y));
+    if (y != 9) return 2;
+    __asm__("addl $3, %0" : "+m"(y));
+    if (y != 12) return 3;
+    __asm__ goto("testl %0, %0; jne %l[lab]" : : "r"(y) : : lab);
+    return 4;
+lab:
+    return y == 12 ? 0 : 5;
+}
+EOF
+if "$compiler" -w -o "$tmp/asmrun" "$tmp/asmrun.c" >/dev/null 2>&1 && "$tmp/asmrun"; then
+    echo "testing asm operands and asm goto run ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing asm operands and asm goto run ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then

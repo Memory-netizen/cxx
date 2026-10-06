@@ -89,6 +89,13 @@ static Type *rv32_va_list_type(void) {
 
 #undef TYPE
 
+// The RISC-V constraint letters whose LLVM spelling differs. Both RISC-V
+// targets use the same set, so the two instances below share one table.
+static AsmConsConv rv_asm_cons[] = {
+    {'m', NULL, "*m", "*m"}, {'o', NULL, "*o", "*o"}, {'V', NULL, "*V", "*V"},
+    {'A', NULL, "*A", "*A"}, {'X', NULL, "X", "*X"},  {'g', NULL, "imr", "*imr"},
+};
+
 Target T_rv32 = {
     .llvm_features = "\"+m,+a,+f,+d,+c\"",
     .llvm_abi = "\"ilp32d\"",
@@ -130,6 +137,8 @@ Target T_rv32 = {
     .ulong_max = 4294967295UL,
     .llong_max = 9223372036854775807LL,
     .va_list_type = rv32_va_list_type,
+    .asm_cons = rv_asm_cons,
+    .num_asm_cons = sizeof(rv_asm_cons) / sizeof(rv_asm_cons[0]),
     .va_arg_ops = rv32_va_arg,
     .classify_aggregate = rv_classify_aggregate,
     .classify_variadic = rv_classify_variadic,
@@ -629,6 +638,8 @@ Target T_rv32b = {
     .ulong_max = 4294967295UL,
     .llong_max = 9223372036854775807LL,
     .va_list_type = rv32_va_list_type,
+    .asm_cons = rv_asm_cons,
+    .num_asm_cons = sizeof(rv_asm_cons) / sizeof(rv_asm_cons[0]),
     .va_arg_ops = rv32_va_arg,
     .classify_aggregate = rv_classify_aggregate,
     .classify_variadic = rv_classify_variadic,

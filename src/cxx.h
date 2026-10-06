@@ -161,6 +161,22 @@ typedef struct {
     } piece[MAX_AGG_PIECES];
 } AggClass;
 
+// An asm operand's constraint is a language of its own, and LLVM's spelling
+// of it is a second one: the same letter can name a fixed register (amd64 'a'
+// is "{ax}") or a memory operand, which LLVM has to be told is indirect ('m'
+// is "*m"). One row per letter that needs converting; every other letter
+// passes through, which is what clang does with the rest of them too.
+//   reg -- a fixed-register letter: the operand travels in that register
+//   in/out -- a whole-constraint replacement, for an input and for an output
+//             (they differ: 'X' is any value as an input and any memory
+//             location as an output)
+typedef struct {
+    char letter;
+    char *reg;
+    char *in;
+    char *out;
+} AsmConsConv;
+
 struct Target {
     char *name;
     char *triple;
@@ -279,6 +295,15 @@ struct Target {
     // stays out of the headers and the variadic builtins check their
     // operand by ordinary type compatibility.
     Type *(*va_list_type)(void);
+
+    // This target's asm constraint letters that need converting (see
+    // AsmConsConv), and the clobber list every asm statement implicitly has.
+    // The second is how clang models x86: an asm may change the flags and the
+    // template does not say so, so they are always clobbered. NULL where the
+    // target's flags are not a register the template can touch.
+    AsmConsConv *asm_cons;
+    int num_asm_cons;
+    char *asm_clobbers;
 };
 
 extern Target T;
@@ -673,6 +698,50 @@ struct Sym {
     Blk **indirectbr;
 };
 
+// One operand of a GNU extended asm statement. asm is not ISO C in any form
+// -- the standard has none -- so the whole construct is the GNU one, and both
+// references implement it the same way apart from wording.
+//
+// The fields after `expr` are the lowering, worked out once at parse time
+// because the template has to be rewritten in terms of them: a reference in
+// the template (`%0`, `%[name]`, `%l1`) is an index into one numbering, and
+// that numbering has to be settled before the template can be emitted.
+typedef struct AsmOperand AsmOperand;
+struct AsmOperand {
+    AsmOperand *next;
+    Token *tok;  // the string or ‘(’ that introduced it
+    char *name;  // [name], or NULL
+    char *cons;  // the constraint as written
+    char *conv;  // the same constraint in LLVM's spelling ("=*m", "={ax}")
+    Node *expr;  // output: the lvalue; input: the value
+    bool is_output;
+    bool is_plus;      // ‘+’: read as well as written
+    bool is_indirect;  // the constraint denotes memory: the operand is an address
+    // A ‘+’ operand is one operand to GCC but two constraints to LLVM: the
+    // output above, and an input that shares its register ("0") or its
+    // address ("*m"). The second is spelled here.
+    char *conv_in;
+    uint32_t index;  // position in GCC's numbering: outputs first, then inputs
+    // Where the IR call numbers this operand in its constraint string. The
+    // two agree for everything the program may name; they differ only for the
+    // input half of a ‘+’ operand, which GCC does not number separately but
+    // the constraint string has to spell out, and which therefore follows
+    // every numbered input.
+    uint32_t pos;
+    int arg_pos;  // position among the call's arguments, or -1 for a return value
+    // The same two for that input half, which is not an operand of its own.
+    uint32_t plus_pos;
+    int plus_arg_pos;
+};
+
+// The qualifiers an asm statement can carry. GCC also spells them with
+// underscores, which the lexer folds into the same keyword.
+enum {
+    ASM_VOLATILE = 1 << 0,  // asm volatile: the statement has effects
+    ASM_INLINE = 1 << 1,    // asm inline: a hint, spelled in the IR nowhere
+    ASM_GOTO = 1 << 2,      // asm goto: the template may jump to a label
+};
+
 typedef enum {
     ND_NOP,  // do nothing
     // Expression
@@ -754,6 +823,7 @@ typedef enum {
     ND_CONTINUE,   // "continue"
     ND_SWITCH,     // "switch"
     ND_CASE,       // "case"
+    ND_ASM,        // GNU "asm" statement (basic asm, extended asm, asm goto)
 
     // Declare
     ND_DECL,
@@ -831,6 +901,23 @@ struct Node {
         struct {
             Sym *var;  // Used if kind == ND_VAR
             Node *var_init;
+        };
+        struct {
+            // ND_ASM: the template, already rewritten in LLVM's spelling --
+            // `%0` became `$0`, `%%` became `%`, a literal `$` became `$$` --
+            // because the index an operand reference carries is settled here
+            // and nothing downstream could work it out again.
+            char *asm_tmpl;
+            AsmOperand *asm_ops;  // outputs first, then inputs, in source order
+            char *asm_cons;       // the LLVM constraint string
+            // ASM_*: the qualifiers, and whether the goto-label list is there.
+            uint32_t asm_flags;
+            int asm_nops;
+            int asm_nret;  // register outputs: the call's return values
+            int asm_narg;  // operands the call passes (inputs + indirect outputs)
+            // asm goto: the labels, in the order the template names them.
+            Node **asm_labels;
+            int asm_nlabels;
         };
         Fp128 fpval;  // ND_NUM floating constants
         Int128 ival;  // ND_NUM integer constants
@@ -1351,6 +1438,13 @@ typedef enum {
     IR_VA_COPY,
     IR_VA_END,
     IR_SELECT,
+    // An asm statement: one inline-asm call, whose operands are the ones the
+    // constraint string names and whose result is the register outputs. An
+    // asm goto is this instruction plus a terminator (IR_CALLBR) that names
+    // the labels; the two are printed as the one callbr they spell.
+    IR_ASM,
+    // Terminator: the fall-through and the label list of an asm goto.
+    IR_CALLBR,
     IR_CNT,
 } IrKind;
 
@@ -1484,6 +1578,19 @@ struct Ir {
     // byval argument -- the user may simply have passed such a pointer -- so
     // which operand is a copy is recorded where it is decided.
     uint8_t byval_at;
+    // IR_ASM: the template and the constraint string, the two halves of the
+    // statement that the operands alone do not spell. `asm_ind` marks, one
+    // byte per argument, the operands a "*" constraint made indirect: LLVM
+    // requires those to carry an elementtype, and which ones they are cannot
+    // be read off the operand itself.
+    char *asm_tmpl;
+    char *asm_cons;
+    uint8_t *asm_ind;
+    // ASM_VOLATILE says the statement may not be dropped or moved, which
+    // LLVM spells `sideeffect`; ASM_GOTO makes it a callbr, with the labels
+    // as the terminator that follows it.
+    uint8_t asm_nret;  // register outputs: the leading constraint positions
+    uint8_t asm_flags;
     Ref args[];
 };
 
@@ -1523,6 +1630,10 @@ struct Module {
     Type *tys;
     Con *con;
     int ncon;
+    // File-scope asm statements, in source order: LLVM's `module asm`, which
+    // is emitted before the globals the way clang emits it.
+    char **masm;
+    int num_masm;
     // Hash over con (chain addressing, stored as indices so vgrow may
     // relocate the array) so constant-pool dedup stays O(1) for
     // modules with many globals/64-bit constants.

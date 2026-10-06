@@ -698,6 +698,14 @@ Node *fold_node(Node *node) {
             if (is_int_const(node->lhs) || is_fp_const(node->lhs)) return node->rhs;
             return node;
 
+        // An asm statement's operands are read and written by the template,
+        // and folding them is what turns `"i"(1 + 2)` into the constant LLVM
+        // wants for an immediate constraint. An output is an lvalue, which
+        // folding leaves alone.
+        case ND_ASM:
+            for (AsmOperand *op = node->asm_ops; op; op = op->next) op->expr = fold_node(op->expr);
+            return node;
+
         // Statements: fold sub-expressions
         case ND_RETURN:
         case ND_EXPR_STMT:
