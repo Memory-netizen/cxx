@@ -535,6 +535,17 @@ static Type *find_typedef(Token *tok, bool search_par) {
     return NULL;
 }
 
+// 6.2.7: the composite of two compatible types. Only an array can gain
+// information from a second declaration -- combining an unknown length with
+// a known one gives the known length, while a type that is already complete
+// is unchanged. This is what lets `int a[]; int a[10];` name one object of
+// type int[10] rather than staying incomplete.
+static Type *composite_type(Type *old, Type *new) {
+    if (old->kind != TY_ARRAY || new->kind != TY_ARRAY) return old;
+    if (old->size >= 0 || new->size < 0) return old;
+    return new;
+}
+
 static void check_decl_compatile(NameSpace *sym, SymKind kind, Type *ty) {
     if (sym->kind != kind) {
         diag("error", ty->name, "‘%s’ redeclared as different kind of symbol", str(ty->name->id));
@@ -6195,6 +6206,17 @@ static Token *external_declaration(Token *tok) {
             set_asm_name(var, asm_name);
 
             if (ty->kind == TY_VOID) error(var_name, "variable ‘%s’ declared void", str(var_name->id));
+
+            // 6.2.7: two compatible declarations of one object give it their
+            // composite type. A later declaration can supply the length an
+            // earlier one omitted -- `int a[]; int a[10];` -- and because
+            // every use of the name refers to the one object, the object has
+            // to take the complete type; keeping the first declaration's
+            // int[] is what made `sizeof(a)` an incomplete-type error.
+            if (ns && var == ns->var) {
+                Type *comp = composite_type(var->ty, ty);
+                if (comp != var->ty) var->ty = ns->ty = comp;
+            }
 
             if (tok->kind == TK_AS) {
                 // Like clang: atomic aggregates cannot be brace-initialized.

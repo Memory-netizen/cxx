@@ -1860,6 +1860,32 @@ static Ref gen_expr(Node *node) {
         }
         case ND_ATOMICRMW: {
             Ref addr = gen_expr(node->lhs);
+
+            // An aggregate has no atomic instruction of its own, so the
+            // access is a read-modify-write of an integer of the same size,
+            // type-punned -- the same treatment the load/store path gives a
+            // whole _Atomic aggregate. `node->desired` is a record lvalue,
+            // so gen_expr() yields its address; handing that to LLVM made it
+            // exchange the POINTER's value, which is why atomic_exchange()
+            // on a struct answered with the wrong bytes and then faulted.
+            if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) {
+                int sz = node->ty->size;
+                if (sz != 1 && sz != 2 && sz != 4 && sz != 8)
+                    error(node->tok,
+                          "atomic aggregate larger than 8 bytes or of non-power-of-two size is not supported");
+                Type *ity = bitint[sz * 8][1];
+                Ref src = gen_expr(node->desired);
+                Ref old = load(src, ity, node->ty->align, NULL);
+                Ref res = TMP(tmp_id++, ity);
+                Ir *rmw = new_ins(IR_ATOMICRMW, res, (Ref[]){INT(node->armw_op), addr, old}, 3);
+                rmw->mem_order = node_mem_order(node);
+                // Hand the pattern back as a record value: a slot holding it.
+                Ref slot = TMP(tmp_id++, pointer_to(node->ty, 0));
+                new_ins(IR_ALLOCA, slot, (Ref[]){INT(node->ty->align)}, 1);
+                store(res, slot, node->ty->align, NULL);
+                return slot;
+            }
+
             Ref new_val = gen_expr(node->desired);
             Ref args[] = {INT(node->armw_op), addr, new_val};
             // LLVM's atomicrmw add/sub on a pointer pointee yields the
