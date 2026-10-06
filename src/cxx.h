@@ -1606,10 +1606,46 @@ enum {
     // clang's name for 6.9.2p2's assumption that an array left without a
     // length holds one element; gcc warns about it with no name of its own.
     WG_TENTATIVE_DEFINITION_ARRAY = 1u << 17,
-    WG_ALL = (1u << 18) - 1,
+    // clang's name for an integer constant implicitly converted to an
+    // integer type that cannot represent it; gcc's -Woverflow covers the
+    // same ground by default, minus the long -> int case.
+    WG_CONSTANT_CONVERSION = 1u << 18,
+    // clang's name for a floating constant converted to an integer: the
+    // fraction is dropped, or the value is out of range. clang has it on;
+    // gcc leaves both to -Wconversion.
+    WG_LITERAL_CONVERSION = 1u << 19,
+    // gcc's name for a constant conversion to a floating type that rounding
+    // changes -- double to float, or an integer wider than the target's
+    // significand. Neither reference has it on by default: -Wconversion
+    // (gcc) and -Wimplicit-float-conversion (clang) turn it on.
+    WG_FLOAT_CONVERSION = 1u << 20,
+    // clang's name (gcc calls it -Woverflow) for a floating constant whose
+    // value does not fit the type it was written as. This one is a parse
+    // time diagnostic: the literal is rounded to its own type there, and the
+    // result is an infinity -- which no constant spelling can produce,
+    // because the infinities of <math.h> are identifiers, not literals.
+    WG_LITERAL_RANGE = 1u << 21,
+    WG_ALL = (1u << 22) - 1,
     // Groups that -Wall does not enable.
-    WG_OFF_DEFAULT = WG_IMPLICIT_FALLTHROUGH,
+    WG_OFF_DEFAULT = WG_IMPLICIT_FALLTHROUGH | WG_FLOAT_CONVERSION,
 };
+
+// The scalar type names the conversion diagnostics use ("unsigned char",
+// "long long", ...). Defined next to warning(), which is its only user.
+const char *diag_ty_name(Type *ty);
+
+// Does the value fit the range of an integer type? The same predicate
+// fold_cast() uses, shared so that a static initializer and a conversion
+// inside a function agree on what counts as out of range.
+// True while a static initializer's expression is being folded, where an
+// out-of-range conversion is an error rather than a warning (parser.c).
+extern bool in_static_init;
+
+bool fits_target(Int128 v, Type *ty);
+
+// The scalar type names the conversion diagnostics use ("unsigned char",
+// "long long", ...).
+const char *diag_ty_name(Type *ty);
 
 bool wg_enabled(int group);
 void warning(int group, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));

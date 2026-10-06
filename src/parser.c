@@ -91,6 +91,14 @@ static Node *new_num_node(Token *tok) {
 
     if (is_fpval(node->ty) || is_flonum(node->ty)) {
         node->fpval = tok->fpval;
+        // 6.4.4.2: the constant is rounded to its own type, and one that
+        // overflows it becomes an infinity. The lexer parsed the text with
+        // fp128_set_str(), which cannot report that, so the check is here.
+        // An infinity can only come from an overflowing literal: the
+        // infinities of <math.h> are identifiers, not constants.
+        if (fp128_is_inf(tok->fpval))
+            warning(WG_LITERAL_RANGE, tok, "magnitude of floating-point constant too large for type \u2018%s\u2019",
+                    diag_ty_name(node->ty));
         return node;
     }
 
@@ -1338,6 +1346,13 @@ static void mount_gvar_data(Initializer *dst, Initializer *src) {
     *dst = *src;
 }
 
+// Set while a static initializer's expression is folded. 6.3.1.4 leaves a
+// floating-to-integer conversion whose value does not fit undefined, so
+// there is no value to initialise the object with and the initializer is
+// refused outright -- clang does the same. Inside a function the same
+// conversion is a warning, which is why the decision lives in fold_cast().
+bool in_static_init;
+
 static void eval_gvar_data(Initializer *init, Type *ty) {
     // A whole-aggregate copy from a constexpr source mounts the source's
     // children at the matching positions (the element-wise evaluation
@@ -1371,6 +1386,20 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
         Member *mem = init->mem ? init->mem : ty->members;
         eval_gvar_data(init->child[mem->idx], mem->ty);
         init->is_inited |= init->child[mem->idx]->is_inited;
+    }
+
+    // Diagnostics for constant conversions come out of folding, and a
+    // global initialiser is evaluated here without ever passing through
+    // fold_ast(), which walks function bodies only -- the parser already
+    // notes that where it folds builtin arguments. Folding the scalar
+    // expression is what makes `char c = 300;` at file scope as loud as the
+    // same conversion inside a function; the bytes the data section prints
+    // come from the Con built below either way.
+    if (init->expr && ty->kind != TY_ARRAY && ty->kind != TY_STRUCT && ty->kind != TY_UNION) {
+        in_static_init = true;
+        Node *folded = fold_node(init->expr);
+        in_static_init = false;
+        if (folded) init->expr = folded;
     }
 
     if (init->expr) {

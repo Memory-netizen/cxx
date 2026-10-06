@@ -131,6 +131,37 @@ void pedantic(Token *tok, const char *msg, ...) {
     if (opt_pedantic_errors) exit(1);
 }
 
+// The scalar type names gcc and clang use in the conversion diagnostics.
+// Only arithmetic types reach them.
+const char *diag_ty_name(Type *ty) {
+    switch (ty->kind) {
+        case TY_BOOL:
+            return "_Bool";
+        case TY_CHAR:
+            return "char";
+        case TY_UCHAR:
+            return "unsigned char";
+        case TY_SCHAR:
+            return "signed char";
+        case TY_SHORT:
+            return ty->is_unsigned ? "unsigned short" : "short";
+        case TY_INT:
+            return ty->is_unsigned ? "unsigned int" : "int";
+        case TY_LONG:
+            return ty->is_unsigned ? "unsigned long" : "long";
+        case TY_LLONG:
+            return ty->is_unsigned ? "unsigned long long" : "long long";
+        case TY_FLOAT:
+            return "float";
+        case TY_DOUBLE:
+            return "double";
+        case TY_LDOUBLE:
+            return "long double";
+        default:
+            return "?";
+    }
+}
+
 void warning(int group, Token *tok, const char *msg, ...) {
     if (!wg_enabled(group)) return;
     va_list ap;

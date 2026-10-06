@@ -367,29 +367,139 @@ static Node *fold_unary_int(Node *node) {
 // a constant. Integer conversions just re-interpret the Int128 value
 // at the target width (folded_int normalizes); float conversions round
 // once to the target format.
+// Does the value fit the range of an integer type? Unlike the integer-to-
+// integer rule above, a negative value never fits an unsigned type here:
+// 6.3.1.4 leaves the floating conversions that reach this undefined rather
+// than modular, which is why clang calls both out of range.
+bool fits_target(Int128 v, Type *ty) {
+    int width = (ty->kind & TY_BITINT) ? bitint_width(ty) : ty->size * 8;
+    SignKind sign = ty->is_unsigned ? UNSIGNED : SIGNED;
+    if (ty->is_unsigned && int128_is_negative(v)) return false;
+    return int128_cmp(int128_normalize(v, width, sign), v, sign) == 0;
+}
+
+// The two values a conversion changed. The compiler runs on the host and
+// its own diagnostics print floating values through the host's printf, as
+// the AST dumper does; that is far more precision than these name.
+static char *conv_int_str(Int128 v, SignKind sign) {
+    char buf[64];
+    int128_to_str(v, sign, 10, buf, sizeof(buf));
+    return format("%s", buf);
+}
+
+// Enough digits for the type the value belongs to: nine for a float, which
+// is where its shortest round trip lives, and seventeen for the wider ones.
+// A coarser setting prints `float f = 1.1;` as "from 1.1 to 1.1".
+// The range of an integer type, as the two decimal values the note below
+// prints. Saying "this is undefined" without saying what would fit leaves
+// the reader to work it out; the type's own limits are the answer.
+static char *conv_int_range_str(Type *ty) {
+    int width = (ty->kind & TY_BITINT) ? bitint_width(ty) : ty->size * 8;
+    SignKind sign = ty->is_unsigned ? UNSIGNED : SIGNED;
+    Int128 unit = int128_set_i(1);
+    Int128 max;
+    if (ty->is_unsigned)
+        max = width >= 128 ? int128_set_i(-1) : int128_sub(int128_shl(unit, width), unit);
+    else
+        max = int128_sub(int128_shl(unit, width - 1), unit);
+    Int128 min = ty->is_unsigned ? int128_set_i(0) : int128_neg(int128_shl(unit, width - 1));
+    return format("%s to %s", conv_int_str(min, sign), conv_int_str(max, sign));
+}
+
+static char *conv_fp_str(Fp128 v, Type *ty) {
+    if (fp128_is_nan(v)) return format("%snan", fp128_get_sign(v) ? "-" : "");
+    if (fp128_is_inf(v)) return format("%sinf", fp128_get_sign(v) ? "-" : "");
+    uint64_t bits = fp128_to_fp64_bits(v);
+    double d;
+    memcpy(&d, &bits, sizeof(d));
+    return format("%.*g", ty->kind == TY_FLOAT ? 9 : 17, d);
+}
+
+// Rounding a constant to its target type is where C's conversions become
+// visible, so this is where gcc and clang warn about the ones that change
+// the value. Explicit casts are the programmer saying so, and only implicit
+// conversions (ND_IMCAST) are diagnosed.
 static Node *fold_cast(Node *node) {
     Node *lhs = node->lhs;
+    bool implicit = node->kind == ND_IMCAST;
 
     // int → int
     if (is_int_const(lhs) && is_integer(node->ty)) {
         if (is_bool(node->ty)) return folded_int(int128_set_i(!int128_is_zero(lhs->ival)), T.ty_bool, node);
+        if (implicit && lhs->ty->kind != TY_BOOL) {
+            // 6.3.1.3: the value has to be representable in the target type.
+            // A negative value and an unsigned target are measured against
+            // that type's *signed* range, which is what leaves the
+            // `unsigned u = -1;` idiom alone while `unsigned char c = -300;`
+            // loses bits -- gcc and clang agree on both.
+            int width = (node->ty->kind & TY_BITINT) ? bitint_width(node->ty) : node->ty->size * 8;
+            SignKind sign = node->ty->is_unsigned ? (int128_is_negative(lhs->ival) ? SIGNED : UNSIGNED) : SIGNED;
+            Int128 target = int128_normalize(lhs->ival, width, sign);
+            if (int128_cmp(target, lhs->ival, sign) != 0)
+                warning(WG_CONSTANT_CONVERSION, node->tok,
+                        "implicit conversion from \u2018%s\u2019 to \u2018%s\u2019 changes value from %s to %s",
+                        diag_ty_name(lhs->ty), diag_ty_name(node->ty),
+                        conv_int_str(lhs->ival, lhs->ty->is_unsigned ? UNSIGNED : SIGNED), conv_int_str(target, sign));
+        }
         return folded_int(lhs->ival, node->ty, node);
     }
 
     // int → any float: round once to the target format
     if (is_int_const(lhs) && is_flonum(node->ty)) {
         Fp128 v = fp128_from_int128(lhs->ival, lhs->ty->is_unsigned ? UNSIGNED : SIGNED);
+        Fp128 rounded = fp128_round_to(v, fmt_of(node->ty));
+        if (implicit && fp128_cmp(rounded, v) != 0 && !fp128_is_nan(v))
+            warning(
+                WG_FLOAT_CONVERSION, node->tok,
+                "conversion from \u2018%s\u2019 to \u2018%s\u2019 changes value from \u2018%s\u2019 to \u2018%s\u2019",
+                diag_ty_name(lhs->ty), diag_ty_name(node->ty),
+                conv_int_str(lhs->ival, lhs->ty->is_unsigned ? UNSIGNED : SIGNED), conv_fp_str(rounded, node->ty));
         return folded_fp128(v, node->ty, node);
     }
 
     // float → float: round once to the target format
-    if (is_fp_const(lhs) && is_flonum(node->ty)) return folded_fp128(lhs->fpval, node->ty, node);
+    if (is_fp_const(lhs) && is_flonum(node->ty)) {
+        Fp128 rounded = fp128_round_to(lhs->fpval, fmt_of(node->ty));
+        if (implicit && !fp128_is_nan(lhs->fpval) && fp128_cmp(rounded, lhs->fpval) != 0)
+            warning(
+                WG_FLOAT_CONVERSION, node->tok,
+                "conversion from \u2018%s\u2019 to \u2018%s\u2019 changes value from \u2018%s\u2019 to \u2018%s\u2019",
+                diag_ty_name(lhs->ty), diag_ty_name(node->ty), conv_fp_str(lhs->fpval, lhs->ty),
+                conv_fp_str(rounded, node->ty));
+        return folded_fp128(lhs->fpval, node->ty, node);
+    }
 
     // float → int: truncate toward zero, range-checked
     if (is_fp_const(lhs) && is_integer(node->ty)) {
         if (is_bool(node->ty)) return folded_int(int128_set_i(!fp128_is_zero(lhs->fpval)), T.ty_bool, node);
         bool ok;
         Int128 v = fp128_to_int128(lhs->fpval, node->ty->is_unsigned ? UNSIGNED : SIGNED, &ok);
+        if (!ok || !fits_target(v, node->ty)) {
+            // A static initializer has no value to be initialised with, so
+            // it is refused; inside a function this is the warning clang has
+            // on by default and gcc behind -Wconversion. Either way the
+            // reader is told what the target type can hold: a refusal that
+            // does not say what would fit leaves the choice to guesswork.
+            if (in_static_init) {
+                diag("error", node->tok,
+                     "conversion of out of range value from \u2018%s\u2019 to \u2018%s\u2019 is undefined",
+                     diag_ty_name(lhs->ty), diag_ty_name(node->ty));
+                diag_exit("note", node->tok, "\u2018%s\u2019 holds %s; choose a value or a type that can hold it",
+                          diag_ty_name(node->ty), conv_int_range_str(node->ty));
+            } else if (implicit && wg_enabled(WG_LITERAL_CONVERSION)) {
+                warning(WG_LITERAL_CONVERSION, node->tok,
+                        "implicit conversion of out of range value from \u2018%s\u2019 to \u2018%s\u2019 is undefined",
+                        diag_ty_name(lhs->ty), diag_ty_name(node->ty));
+                diag("note", node->tok, "\u2018%s\u2019 holds %s; choose a value or a type that can hold it",
+                     diag_ty_name(node->ty), conv_int_range_str(node->ty));
+            }
+        } else if (implicit && !fp128_is_nan(lhs->fpval) &&
+                   fp128_cmp(fp128_from_int128(v, node->ty->is_unsigned ? UNSIGNED : SIGNED), lhs->fpval) != 0) {
+            warning(WG_LITERAL_CONVERSION, node->tok,
+                    "implicit conversion from \u2018%s\u2019 to \u2018%s\u2019 changes value from %s to %s",
+                    diag_ty_name(lhs->ty), diag_ty_name(node->ty), conv_fp_str(lhs->fpval, lhs->ty),
+                    conv_int_str(v, node->ty->is_unsigned ? UNSIGNED : SIGNED));
+        }
         if (!ok) return NULL;
         return folded_int(v, node->ty, node);
     }

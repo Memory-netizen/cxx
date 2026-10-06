@@ -271,6 +271,10 @@ static const struct {
     {"unused-const-variable", WG_UNUSED_CONST_VARIABLE},
     {"static-local-in-inline", WG_STATIC_LOCAL_IN_INLINE},
     {"tentative-definition-array", WG_TENTATIVE_DEFINITION_ARRAY},
+    {"constant-conversion", WG_CONSTANT_CONVERSION},
+    {"literal-conversion", WG_LITERAL_CONVERSION},
+    {"float-conversion", WG_FLOAT_CONVERSION},
+    {"literal-range", WG_LITERAL_RANGE},
     {"implicit-function-declaration", WG_IMPLICIT_FUNCTION_DECLARATION},
 };
 

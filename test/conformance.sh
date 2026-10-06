@@ -1437,6 +1437,137 @@ struct S arr[];
 int main(void) { return 0; }
 EOF
 
+# --- constant conversions that change the value -----------------------
+
+# 6.3.1.3: an implicit conversion is worth a word when the constant does not
+# fit the target. The integer cases are clang's -Wconstant-conversion (gcc's
+# -Woverflow covers all but `long` to `int`), the floating-to-integer ones
+# clang's -Wliteral-conversion. Both are on by default, and explicit casts
+# and the `unsigned u = -1;` idiom are not diagnosed at all.
+cat > "$tmp/conv.c" <<'EOF'
+char c = 300;
+unsigned char uc = 300;
+short s = 70000;
+int big = 3000000000;
+int frac = 1.5;
+unsigned u = -1;
+unsigned char minus_one = -1;
+char fine = 100;
+char cast = (char)300;
+long wider = -1;
+int main(void) {
+    char block = 300;
+    return block + c + uc + s + big + frac + (int)u + minus_one + fine + cast + (int)wider;
+}
+EOF
+w=$("$compiler" -S -o /dev/null "$tmp/conv.c" 2>&1 | grep -c 'changes value')
+no_const=$("$compiler" -Wno-constant-conversion -S -o /dev/null "$tmp/conv.c" 2>&1 | grep -c 'changes value')
+no_lit=$("$compiler" -Wno-literal-conversion -S -o /dev/null "$tmp/conv.c" 2>&1 | grep -c 'changes value')
+nowarn=$("$compiler" -w -S -o /dev/null "$tmp/conv.c" 2>&1 | grep -c 'changes value')
+if [ "$w" -eq 6 ] && [ "$no_const" -eq 1 ] && [ "$no_lit" -eq 5 ] && [ "$nowarn" -eq 0 ]; then
+    echo "testing constant conversions are diagnosed ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing constant conversions are diagnosed ... FAILED ($w, $no_const, $no_lit, $nowarn)"
+    n_fail=$((n_fail + 1))
+fi
+
+# The floating cases are gcc's -Wfloat-conversion, off by default in both
+# references because `float f = 1.1;` would otherwise warn everywhere. The
+# message has to spell out both values: a printer too coarse to tell 1.1
+# from the float it rounds to made it read "from 1.1 to 1.1".
+cat > "$tmp/convf.c" <<'EOF'
+float f = 1.1;
+float big = 1e300;
+float g = 16777217;
+int main(void) { return 0; }
+EOF
+d=$("$compiler" -S -o /dev/null "$tmp/convf.c" 2>&1 | grep -c 'changes value')
+e=$("$compiler" -Wfloat-conversion -S -o /dev/null "$tmp/convf.c" 2>&1 | grep -c 'changes value')
+t=$("$compiler" -Wfloat-conversion -S -o /dev/null "$tmp/convf.c" 2>&1 | grep -c '1.10000002')
+i=$("$compiler" -Wfloat-conversion -S -o /dev/null "$tmp/convf.c" 2>&1 | grep -c '16777216')
+if [ "$d" -eq 0 ] && [ "$e" -eq 3 ] && [ "$t" -eq 1 ] && [ "$i" -eq 1 ]; then
+    echo "testing float conversions are diagnosed on request ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing float conversions are diagnosed on request ... FAILED ($d, $e, $t, $i)"
+    n_fail=$((n_fail + 1))
+fi
+
+# --- out-of-range values: 6.3.1.4 -------------------------------------
+
+# A static initializer may not be built on an undefined conversion, so an
+# out-of-range float-to-integer one is refused outright (clang refuses these
+# too, with an internal message; gcc saturates and warns instead).
+bad "a static initializer converting an out-of-range float" <<'EOF'
+int i = 1e20;
+int main(void) { return 0; }
+EOF
+
+# The refusal has to say what would fit, or the reader is left guessing.
+cat > "$tmp/fits.c" <<'EOF'
+int i = 1e20;
+int main(void) { return 0; }
+EOF
+n=$("$compiler" -S -o /dev/null "$tmp/fits.c" 2>&1 | grep -c 'holds -2147483648 to 2147483647; choose a value or a type that can hold it')
+if [ "$n" -eq 1 ]; then
+    echo "testing the refusal names the range that would fit ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the refusal names the range that would fit ... FAILED ($n)"
+    n_fail=$((n_fail + 1))
+fi
+
+bad "an explicit cast of the same value" <<'EOF'
+int i = (int)1e20;
+int main(void) { return 0; }
+EOF
+
+# Inside a function the same conversion is a warning, not an error, and a
+# value that does fit keeps its ordinary diagnosis.
+cat > "$tmp/range.c" <<'EOF'
+int main(void) {
+    int i = 1e20;
+    int j = 1.5;
+    return i + j;
+}
+EOF
+w=$("$compiler" -S -o /dev/null "$tmp/range.c" 2>&1 | grep -c 'warning')
+e=$("$compiler" -S -o /dev/null "$tmp/range.c" 2>&1 | grep -c 'error')
+note=$("$compiler" -S -o /dev/null "$tmp/range.c" 2>&1 | grep -c 'choose a value or a type')
+quiet=$("$compiler" -Wno-literal-conversion -S -o /dev/null "$tmp/range.c" 2>&1 | grep -c 'choose a value or a type')
+if [ "$w" -eq 2 ] && [ "$e" -eq 0 ] && [ "$note" -eq 1 ] && [ "$quiet" -eq 0 ]; then
+    echo "testing an out-of-range conversion is only a warning in a body ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing an out-of-range conversion is only a warning in a body ... FAILED ($w, $e, $note, $quiet)"
+    n_fail=$((n_fail + 1))
+fi
+
+# 6.4.4.2: a constant that overflows its own type becomes an infinity, and
+# that is worth saying. The check is in the parser, not the lexer, so the
+# same literal inside a dead #if branch stays quiet.
+cat > "$tmp/litrange.c" <<'EOF'
+double d = 1e400;
+float f = 1e40f;
+long double x = 1e5000L;
+double ok = 1e308;
+float down = 1e300;
+#if 0
+double dead = 1e400;
+#endif
+int main(void) { return 0; }
+EOF
+n=$("$compiler" -S -o /dev/null "$tmp/litrange.c" 2>&1 | grep -c 'too large for type')
+z=$("$compiler" -Wno-literal-range -S -o /dev/null "$tmp/litrange.c" 2>&1 | grep -c 'too large for type')
+if [ "$n" -eq 3 ] && [ "$z" -eq 0 ]; then
+    echo "testing a floating constant beyond its own type is diagnosed ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a floating constant beyond its own type is diagnosed ... FAILED ($n, $z)"
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then
