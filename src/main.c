@@ -74,7 +74,9 @@ bool opt_fpic;
 bool opt_fcommon;
 bool opt_nowarn;
 // Every group on to start with; see the enum in cxx.h.
-uint32_t opt_wgroups = WG_ALL;
+// Every group that is on by default; see the enum in cxx.h. WG_OFF_DEFAULT
+// names the ones -Wall does not enable.
+uint32_t opt_wgroups = WG_ALL & ~(uint32_t)WG_OFF_DEFAULT;
 bool opt_werror;
 bool opt_pedantic;
 bool opt_pedantic_errors;
@@ -256,6 +258,9 @@ static const struct {
     {"builtin-macro-redefined", WG_BUILTIN_MACRO_REDEFINED},
     {"extra-tokens", WG_EXTRA_TOKENS},  // clang's name
     {"endif-labels", WG_EXTRA_TOKENS},  // gcc's name for the same diagnostic
+    {"implicit-fallthrough", WG_IMPLICIT_FALLTHROUGH},
+    {"shift-count-negative", WG_SHIFT_COUNT_NEGATIVE},
+    {"shift-count-overflow", WG_SHIFT_COUNT_OVERFLOW},
     {"unused-result", WG_UNUSED_RESULT},
     {"attributes", WG_ATTRIBUTES},
     {"return-type", WG_RETURN_TYPE},
@@ -447,6 +452,21 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
+        // Whether plain char is signed is implementation-defined (6.2.5) and
+        // the ABI settles it -- signed on x86-64, unsigned on the ARM and
+        // RISC-V ABIs. These override the target's default. char is one
+        // shared Type, so the change reaches every use; signed char and
+        // unsigned char are separate types and are untouched.
+        if (!strcmp(argv[i], "-funsigned-char")) {
+            T.ty_char->is_unsigned = true;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-fsigned-char")) {
+            T.ty_char->is_unsigned = false;
+            continue;
+        }
+
         if (!strcmp(argv[i], "-L")) {
             ld_extra_args[num_ld_exarg++] = "-L";
             ld_extra_args[num_ld_exarg++] = argv[++i];
@@ -574,7 +594,9 @@ static void parse_args(int argc, char **argv) {
             }
             if (strcmp(name, "error")) {
                 if (!strcmp(name, "all") || !strcmp(name, "extra")) {
-                    opt_wgroups = WG_ALL;
+                    // -Wall turns on what is on by default; it does not reach the
+                    // WG_OFF_DEFAULT groups, which need their own flag.
+                    opt_wgroups |= WG_ALL & ~(uint32_t)WG_OFF_DEFAULT;
                     continue;
                 }
                 int bit = 0;

@@ -347,4 +347,15 @@ echo 'int x __attribute__((aligned(16)));' \
   | $compiler -S -emit-llvm -o - -xc - | grep -q '@x = .*align 16'
 check 'global aligned(16)'
 
+# A null pointer constant is a constant expression with the value 0
+# (6.3.2.3), and its conversion yields a null pointer rather than a pointer
+# built from an integer. Emitting inttoptr there put an extra instruction in
+# front of every `p == 0`, `p != 0` and `p = 0`.
+echo 'int f(void *p) { return p != 0; }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'icmp ne ptr .*, null'
+check 'a null pointer constant converts to null'
+echo 'void *f(long n) { return (void *)n; }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q inttoptr
+check 'a non-constant integer still converts with inttoptr'
+
 echo OK

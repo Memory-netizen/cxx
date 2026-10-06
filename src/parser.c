@@ -2688,7 +2688,6 @@ static Node *primary(Token **rest, Token *tok) {
     if (tok->kind == TK_STRLIT) {
         Sym *var = new_string_literal(tok->id, infer_strtype(tok));
         *rest = tok->next;
-        var->is_referenced = true;
         return new_var_node(var, tok);
     }
     if (tok->kind == TK_GENERIC) {
@@ -2733,6 +2732,9 @@ static Node *primary(Token **rest, Token *tok) {
             }
         } else {
             if (sc->var->is_deprecated) warning(WG_DEPRECATED, tok, "‘%s’ is deprecated", str(sc->var->id));
+            // -Wunused-variable is the absence of this: an identifier that
+            // never resolves to its variable leaves the flag clear.
+            sc->var->is_referenced = true;
             node = new_var_node(sc->var, tok);
         }
         *rest = tok->next;
@@ -3162,6 +3164,7 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
 
         Node *rhs = binexpr(&tok, tok->next, cur_prec);
         add_type(rhs);
+        add_type(lhs);
 
         if (expr_op == ND_ADD)
             lhs = new_add(lhs, rhs, op_tok);
@@ -4004,26 +4007,66 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
     return dummy.next;
 }
 
+// -Wimplicit-fallthrough. A case or default label is entered either by the
+// switch's own dispatch or by falling out of the statement before it. The
+// parser reads a body in order, so one bit is enough: every statement leaves
+// in it whether control can reach what follows, which is also what a
+// compound statement has to tell its parent. Only a case label reads it, and
+// it clears the bit on the way in -- that is what keeps the first label of a
+// switch, and the label after a break, quiet.
+static bool falls_through;
+
+// A break statement leaves the innermost enclosing loop or switch, so each
+// one leaves a frame here while its body is parsed. An endless loop only
+// falls through when a break of its own can leave it: `while (1) {}` does
+// not, `while (1) { if (x) break; }` does.
+typedef struct BrkFrame BrkFrame;
+struct BrkFrame {
+    BrkFrame *next;
+    bool seen;
+};
+static BrkFrame *brk_frame;
+
+// True for `while (1)` and `for (;;)`. fold_ast runs after parsing, so only
+// a literal condition is recognised here; `while (1 + 0)` is not.
+static bool cond_never_false(Node *cond) {
+    if (!cond) return true;  // for (;;)
+    if (cond->kind != ND_NUM || !cond->ty || !is_integer(cond->ty)) return false;
+    return !int128_is_zero(cond->ival);
+}
+
+// The label consumes the bit: a run of labels one after another is a single
+// entry point, not a fall-through from each one to the next.
+static void check_fallthrough(Token *tok) {
+    if (falls_through) warning(WG_IMPLICIT_FALLTHROUGH, tok, "unannotated fall-through between switch labels");
+    falls_through = false;
+}
+
 // ExpStmt ::= ";" | Exp ";"
 static Node *expr_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_EXPR_STMT, tok);
 
     if (tok->kind == TK_SEMI) {
         *rest = tok->next;
+        falls_through = true;
         return node;
     }
 
     node->lhs = expr(&tok, tok);
 
-    // A discarded call to a nodiscard function warns (as in clang).
+    // A discarded call to a nodiscard function warns (as in clang). The same
+    // unwrapping finds the callee for the fall-through bit below: a function
+    // declared noreturn never reaches the statement after the call.
     Node *call = node->lhs;
     while (call->kind == ND_LVTOR || call->kind == ND_IMCAST || call->kind == ND_EXCAST) call = call->lhs;
+    falls_through = true;
     if (call->kind == ND_FUNCALL) {
         Node *f = call->func;
         while (f->kind == ND_IMCAST || f->kind == ND_LVTOR) f = f->lhs;
         if (f->kind == ND_VAR && f->var->is_nodiscard)
             warning(WG_UNUSED_RESULT, node->lhs->tok,
                     "ignoring return value of function ‘%s’ declared with ‘nodiscard’ attribute", str(f->var->id));
+        if (f->kind == ND_VAR && f->var->is_function && (f->var->funcspec & Q_NORETURN)) falls_through = false;
     }
 
     *rest = skip(tok, TK_SEMI);
@@ -4070,8 +4113,12 @@ static Node *if_stmt(Token **rest, Token *tok) {
     tok = skip(tok, TK_RPAREN);
     // Then
     node->then = stmt(&tok, tok);
+    bool then_falls = falls_through;
     // Else
     if (tok->kind == TK_ELSE) node->els = stmt(&tok, tok->next);
+    // Without an else, the condition being false is itself a way past the
+    // if; with one, either branch may carry control to what follows.
+    falls_through = node->els ? (then_falls || falls_through) : true;
     cnt_blk(node->els ? 3 : 2);  // gen_if: then / (else) / merge
     *rest = tok;
 
@@ -4094,8 +4141,19 @@ static Node *switch_stmt(Token **rest, Token *tok) {
     add_type(node);
     tok = skip(tok, TK_RPAREN);
 
-    // body
+    // body. The first label of a switch is entered by the dispatch, not by
+    // falling out of anything, so the bit starts clear and the body's own
+    // statements fill it in from there.
+    falls_through = false;
+    BrkFrame fr = {brk_frame, false};
+    brk_frame = &fr;
     node->body = stmt(rest, tok);
+    brk_frame = fr.next;
+    // A switch reaches what follows it when no label can match -- there is no
+    // default to catch the value -- when a break leaves it, or when the last
+    // statement of the body runs off its end. Only a switch with a default
+    // whose every label ends in a jump never falls through.
+    falls_through = !node->default_case || fr.seen || falls_through;
     cnt_blk(1);  // gen_switch: merge (case labels count in label())
 
     brk_depth--;
@@ -4122,7 +4180,11 @@ static Node *while_stmt(Token **rest, Token *tok) {
     node->cond = expr(&tok, tok);
     tok = skip(tok, TK_RPAREN);
     // Body
+    BrkFrame fr = {brk_frame, false};
+    brk_frame = &fr;
     node->then = stmt(rest, tok);
+    brk_frame = fr.next;
+    falls_through = !(cond_never_false(node->cond) && !fr.seen);
     cnt_blk(3);  // gen_while: cond / body / merge
 
     cont_depth--;
@@ -4140,13 +4202,17 @@ static Node *do_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_DO, tok);
 
     // Body
+    BrkFrame fr = {brk_frame, false};
+    brk_frame = &fr;
     node->body = stmt(&tok, tok->next);
+    brk_frame = fr.next;
     // Cond
     tok = skip(tok, TK_WHILE);
     tok = skip(tok, TK_LPAREN);
     node->cond = expr(&tok, tok);
     tok = skip(tok, TK_RPAREN);
     *rest = skip(tok, TK_SEMI);
+    falls_through = !(cond_never_false(node->cond) && !fr.seen);
     cnt_blk(3);  // gen_do: body / cond / merge
 
     cont_depth--;
@@ -4190,7 +4256,11 @@ static Node *for_stmt(Token **rest, Token *tok) {
     tok = skip(tok, TK_RPAREN);
 
     // Body
+    BrkFrame fr = {brk_frame, false};
+    brk_frame = &fr;
     node->body = stmt(rest, tok);
+    brk_frame = fr.next;
+    falls_through = !(cond_never_false(node->cond) && !fr.seen);
     cnt_blk(4);  // gen_for: cond / body / incr / merge
 
     cont_depth--;
@@ -4213,6 +4283,7 @@ static Node *goto_stmt(Token **rest, Token *tok) {
         lvalue_convert(&node->lhs);
         if (!is_pointer(node->lhs->ty)) error(node->lhs->tok, "computed goto must be pointer type");
         *rest = skip(tok, TK_SEMI);
+        falls_through = false;
         return node;
     }
     Node *node = new_node(ND_GOTO, tok);
@@ -4220,6 +4291,7 @@ static Node *goto_stmt(Token **rest, Token *tok) {
 
     node->goto_next = gotos;
     gotos = node;
+    falls_through = false;
 
     *rest = skip(tok->next->next, TK_SEMI);
     return node;
@@ -4257,6 +4329,7 @@ static Node *continue_stmt(Token **rest, Token *tok) {
         node->target = get_named_loop(&tok, tok, false);
     }
 
+    falls_through = false;
     *rest = skip(tok, TK_SEMI);
     return node;
 }
@@ -4272,6 +4345,10 @@ static Node *break_stmt(Token **rest, Token *tok) {
         node->target = get_named_loop(&tok, tok, true);
     }
 
+    // The frame on top is the loop or switch this break leaves -- right for
+    // the plain form; the GNU named form is attributed to the innermost one.
+    if (brk_frame) brk_frame->seen = true;
+    falls_through = false;
     *rest = skip(tok, TK_SEMI);
     return node;
 }
@@ -4281,6 +4358,7 @@ static Node *return_stmt(Token **rest, Token *tok) {
     if (cur_fn->funcspec & Q_NORETURN)
         warning(WG_INVALID_NORETURN, tok, "function ‘%s’ declared 'noreturn' should not return", str(cur_fn->id));
     Node *node = new_node(ND_RETURN, tok);
+    falls_through = false;
     Type *ret = cur_fn->ty->ret;
     if (tok->next->kind == TK_SEMI) {
         if (ret->kind != TY_VOID) error(tok, "non-void function ‘%s’ should return a value", str(cur_fn->id));
@@ -4345,6 +4423,9 @@ static Node *label(Token **rest, Token *tok) {
     }
     while (1) {
         if (tok->kind == TK_IDENT && tok->next->kind == TK_COLON) {
+            // A label is an entry point of its own, and clang's check treats
+            // a case label that a normal label leads into as deliberate.
+            falls_through = false;
             Node *node = new_node(ND_LABEL, tok);
             node->label = tok->id;
             check_label(node->label, tok);
@@ -4366,6 +4447,7 @@ static Node *label(Token **rest, Token *tok) {
                 diag("error", tok, "multiple default labels in one switch");
                 diag_exit("note", cur_sw->default_case->tok, "this is the first default label");
             }
+            check_fallthrough(tok);
             Node *node = new_node(ND_CASE, tok);
             tok = skip(tok->next, TK_COLON);
             cur_sw->default_case = node;
@@ -4383,6 +4465,7 @@ static Node *label(Token **rest, Token *tok) {
             int64_t val1, val2;
             val1 = const_expr(&tok, tok->next);
             val1 = eval_ty(val1, cur_sw->cond->ty);
+            check_fallthrough(tk_case);
             if (tok->kind == TK_COLON) {
                 check_case(val1, tk_case);
                 Node *node = new_node(ND_CASE, tk_case);
@@ -4473,6 +4556,7 @@ static Node *static_assert_decl(Token **rest, Token *tok) {
     }
     tok = skip(tok, TK_RPAREN);
     *rest = skip(tok, TK_SEMI);
+    falls_through = true;
     return new_node(ND_NOP, start);
 }
 
@@ -4548,6 +4632,10 @@ static Node *stmt(Token **rest, Token *tok) {
     }
     while (i--) named_loop = named_loop->loop_next;
 
+    // `[[fallthrough]];` marks the fall into the next label as deliberate,
+    // which is the whole point of the attribute.
+    if (has_fallthrough) falls_through = false;
+
     if (lb) {
         lb->label_body = stmt;
         return lb;
@@ -4581,12 +4669,14 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
         if (lb) {
             uint32_t i = push_named_loop(lb, tok);
 
-            if (tok->kind == TK_RBRACE)
-                lb->label_body = new_node(ND_EXPR_STMT, start);
-            else if (is_typename(tok, true))
+            bool no_body = tok->kind == TK_RBRACE || is_typename(tok, true);
+            if (no_body)
                 lb->label_body = new_node(ND_EXPR_STMT, start);
             else
                 lb->label_body = stmt(&tok, tok);
+            // A label with no statement of its own falls straight out of the
+            // block, into the next label if there is one.
+            if (no_body) falls_through = true;
 
             cur = cur->next = lb;
             add_type(cur);
@@ -4615,6 +4705,9 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
                 cur = cur->next = declaration(&tok, tok, basety, sclass, align, funcspec, attrs);
             }
 
+            // A declaration is not a jump: control reaches the statement that
+            // follows it, whatever its initializer does.
+            falls_through = true;
             add_type(cur);
             continue;
         }
@@ -4631,6 +4724,9 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
     cur->next = NULL;
     *rest = skip(tok, TK_RBRACE);
 
+    // An empty block falls through. A block with items in it has already
+    // left the answer in falls_through.
+    if (!dummy.next) falls_through = true;
     node->body = dummy.next;
     return node;
 }

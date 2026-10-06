@@ -459,6 +459,24 @@ static Node *fold_ptradd(Node *node) {
 
 // Recursively fold an AST subtree. Returns the folded node
 // (which may be the original or a replacement).
+// -Wshift-count-negative / -Wshift-count-overflow. Both are on by default
+// in gcc and clang. This is the only place a count that became a constant by
+// folding is visible -- `x << (2 + 1)` -- and the left operand need not be a
+// constant for 6.5.7 to be violated, so only the count is inspected.
+static void check_shift_count(Node *node) {
+    Node *cnt = node->rhs;
+    if (!is_integer(node->lhs->ty) || !cnt || cnt->kind != ND_NUM || !is_integer(cnt->ty)) return;
+    int width = node->lhs->ty->size * 8;
+    int64_t n = int128_to_i64(cnt->ival);
+    // An unsigned count whose top bit is set reads back negative, but as an
+    // unsigned value it is far larger than any width.
+    bool uns = cnt->ty->is_unsigned;
+    if (n < 0 && !uns)
+        warning(WG_SHIFT_COUNT_NEGATIVE, node->tok, "shift count is negative");
+    else if (n >= width || n < 0)
+        warning(WG_SHIFT_COUNT_OVERFLOW, node->tok, "shift count >= width of type");
+}
+
 Node *fold_node(Node *node) {
     if (!node) return NULL;
 
@@ -483,6 +501,9 @@ Node *fold_node(Node *node) {
         case ND_GE:
             node->lhs = fold_node(node->lhs);
             node->rhs = fold_node(node->rhs);
+            // The count is a constant by now whenever it can be, whether it
+            // was written as one or folded into one.
+            if (node->kind == ND_LEFT || node->kind == ND_RIGHT) check_shift_count(node);
             return fold_binary_int(node) ?: fold_binary_fp(node) ?: node;
         case ND_PTRADD:
             node->lhs = fold_node(node->lhs);

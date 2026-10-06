@@ -163,6 +163,16 @@ static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
         return dst;
     }
     if (is_integer(src_ty) && is_pointer(target_ty)) {
+        // 6.3.2.3: an integer constant expression with the value 0 is a null
+        // pointer constant, and the conversion yields a null pointer rather
+        // than a pointer built from an integer. Only a constant takes the
+        // RInt form, so this is exact, and it keeps `p != 0` to the one
+        // comparison clang emits instead of an inttoptr in front of it.
+        if (val.type == RInt && val.val == 0) {
+            Ref n = NULLPTR;
+            n.ty = target_ty;
+            return n;
+        }
         Ref dst = TMP(tmp_id++, target_ty);
         new_ins(IR_INTTOPTR, dst, (Ref[]){val}, 1);
         return dst;

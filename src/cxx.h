@@ -1548,7 +1548,17 @@ enum {
     // Tokens after a directive that takes none: clang calls it
     // extra-tokens, gcc calls it endif-labels.
     WG_EXTRA_TOKENS = 1u << 10,
-    WG_ALL = (1u << 11) - 1,
+    // Not in -Wall. clang reports a switch fallthrough only when this flag
+    // is given -- neither -Wall nor -Wextra turns it on -- and gcc does not
+    // diagnose it by default at all. Groups with the WG_OFF_DEFAULT mark
+    // start cleared and are enabled only by their own -W<name>.
+    WG_IMPLICIT_FALLTHROUGH = 1u << 11,
+    // On by default in gcc and clang, not part of -Wall.
+    WG_SHIFT_COUNT_NEGATIVE = 1u << 12,
+    WG_SHIFT_COUNT_OVERFLOW = 1u << 13,
+    WG_ALL = (1u << 14) - 1,
+    // Groups that -Wall does not enable.
+    WG_OFF_DEFAULT = WG_IMPLICIT_FALLTHROUGH,
 };
 
 bool wg_enabled(int group);
