@@ -544,33 +544,129 @@ static Ref gen_va_arg_mixed(Ref ap, Type *aptr_ty, Type *want, VaArgOps *ops) {
     return slot;
 }
 
+// A record whose pieces each sit in their own SIMD register. The save area
+// spaces those registers by a stride that has nothing to do with the piece
+// width, so the pieces have to be gathered before the record they came from
+// can be read as one object; that is why this cannot be answered with an
+// address into the save area the way the other kinds are.
+static Ref gen_va_arg_simd(Ref ap, Type *aptr_ty, Type *want, VaArgOps *ops) {
+    Type *rec = aptr_ty->base;
+    if (rec->kind != TY_STRUCT) fatal("va_arg: va_list is not a struct");
+
+    AggClass c;
+    T.classify_aggregate(want, &c);
+    if (c.npiece <= 0) fatal("va_arg: no register pieces");
+    int stride = ops->reg_stride;
+    int n = c.npiece;
+    // One register per piece; on the stack the pieces are contiguous and the
+    // cursor takes the record's rounded-up size.
+    int step = n * stride;
+    int mem_step = (want->size + 7) / 8 * 8;
+
+    Type *off_ty = ops->offset_ty;
+    Ref off_addr = va_field_addr(ap, rec, ops->offset_field);
+    Ref off = load(off_addr, off_ty, off_ty->align, NULL);
+    Ref area = load(va_field_addr(ap, rec, ops->reg_field), T.ty_voidptr, 8, NULL);
+    Ref over = load(va_field_addr(ap, rec, ops->mem_field), T.ty_voidptr, 8, NULL);
+
+    // The whole record is in the save area only while this many registers
+    // are still free: the cursor plus one record's worth of slots has to stay
+    // within the area, and for the form that counts down it also has to stay
+    // negative.
+    Ref next = TMP(tmp_id++, off_ty);
+    new_ins(IR_ADD, next, (Ref[]){off, INT(step)}, 2);
+    Ref cond = TMP(tmp_id++, bitint[1][1]);
+    new_ins(IR_CMP_LE, cond, (Ref[]){next, INT(ops->offset_limit)}, 2);
+    if (ops->offset_negative) {
+        Ref in_regs = TMP(tmp_id++, bitint[1][1]);
+        new_ins(IR_CMP_LT, in_regs, (Ref[]){off, INT(0)}, 2);
+        Ref both = TMP(tmp_id++, bitint[1][1]);
+        new_ins(IR_AND, both, (Ref[]){in_regs, cond}, 2);
+        cond = both;
+    }
+
+    Blk *blk_reg = new_blk();
+    Blk *blk_mem = new_blk();
+    Blk *blk_join = new_blk();
+    curb->jmp.type = IR_JNZ;
+    curb->jmp.arg = cond;
+    curb->succ1 = blk_reg;
+    curb->succ2 = blk_mem;
+    add_pred(curb, blk_reg);
+    add_pred(curb, blk_mem);
+
+    Ref slot = TMP(tmp_id++, pointer_to(want, 0));
+    new_ins(IR_ALLOCA, slot, (Ref[]){INT(want->align)}, 1);
+
+    curb = blk_reg;
+    insert_blk(curb);
+    Ref a8 = area;
+    a8.ty = pointer_to(T.ty_char, 0);
+    Ref off64 = cast(off, off_ty, T.ty_long);
+    Ref base = TMP(tmp_id++, a8.ty);
+    new_ins(IR_GEP, base, (Ref[]){a8, off64}, 2);
+    for (int i = 0; i < n; i++) {
+        Ref at = TMP(tmp_id++, base.ty);
+        new_ins(IR_GEP, at, (Ref[]){base, INT(i * stride)}, 2);
+        Ref piece = TMP(tmp_id++, c.piece[i].ty);
+        new_ins(IR_LORD, piece, (Ref[]){at, INT(stride)}, 2);
+
+        Ref d = slot;
+        d.ty = pointer_to(T.ty_char, 0);
+        Ref dgep = TMP(tmp_id++, pointer_to(c.piece[i].ty, 0));
+        new_ins(IR_GEP, dgep, (Ref[]){d, INT(c.piece[i].off)}, 2);
+        store(piece, dgep, c.piece[i].ty->align, NULL);
+    }
+    Ref reg_next = TMP(tmp_id++, off_ty);
+    new_ins(IR_ADD, reg_next, (Ref[]){off, INT(step)}, 2);
+    store(reg_next, off_addr, off_ty->align, NULL);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = blk_join;
+    add_pred(curb, blk_join);
+
+    // On the stack the elements are already contiguous, so the aggregate is
+    // one copy away.
+    curb = blk_mem;
+    insert_blk(curb);
+    Ref o8 = over;
+    o8.ty = pointer_to(T.ty_char, 0);
+    Ref dst8 = slot;
+    dst8.ty = pointer_to(T.ty_char, 0);
+    new_ins(IR_MEMCPY, R, (Ref[]){dst8, o8, INT(want->size)}, 3);
+    Ref over_next = TMP(tmp_id++, o8.ty);
+    new_ins(IR_GEP, over_next, (Ref[]){o8, INT(mem_step)}, 2);
+    Ref over_slot = over_next;
+    over_slot.ty = T.ty_voidptr;
+    store(over_slot, va_field_addr(ap, rec, ops->mem_field), 8, NULL);
+    curb->jmp.type = IR_JMP;
+    curb->succ1 = blk_join;
+    add_pred(curb, blk_join);
+
+    curb = blk_join;
+    insert_blk(curb);
+    // The gathered slot, as every aggregate kind hands back an address.
+    return slot;
+}
+
 static Ref gen_va_arg(Node *node) {
     VaArgOps *ops = T.va_arg_ops(node->ty);
     Type *addr_ty = node->lhs->ty;  // pointer to the va_list object
     Ref ap = gen_expr(node->lhs);
     Type *want = node->ty;
 
-    if (ops->kind == VA_MEM_LINEAR || ops->kind == VA_MEM_LINEAR_PTR) {
+    if (ops->kind == VA_MEM_SIMD) return gen_va_arg_simd(ap, addr_ty, want, ops);
+
+    if (ops->kind == VA_MEM_LINEAR) {
         // The va_list is one pointer walking the argument area: read it,
         // align it for this type, take the value, then advance.
         Type *aptr_ty = is_ir_pointer(ap.ty) && ap.ty->base ? ap.ty->base : T.ty_voidptr;
         Ref cursor = load(ap, aptr_ty, aptr_ty->align, NULL);
 
-        // An aggregate the registers cannot hold does not travel as its own
-        // bytes: the area holds a pointer to the caller's copy, so what is
-        // read -- and what the cursor advances by -- is the pointer. Whether
-        // the class is memory is asked of the same classifier the call site
-        // used, under the variadic rule, or the two would not agree.
-        bool by_ptr = false;
-        if (ops->kind == VA_MEM_LINEAR_PTR && T.classify_aggregate &&
-            (want->kind == TY_STRUCT || want->kind == TY_UNION)) {
-            AggClass mc;
-            if (T.classify_variadic)
-                T.classify_variadic(want, &mc);
-            else
-                T.classify_aggregate(want, &mc);
-            by_ptr = mc.npiece == 0;
-        }
+        // A MEMORY-class aggregate does not travel as its own bytes: the area
+        // holds a pointer to the caller's copy, so what is read -- and what
+        // the cursor advances by -- is the pointer. Which types those are is
+        // the target's answer, given when it chose this table.
+        bool by_ptr = ops->agg_by_ptr;
 
         int step = ops->mem_step;
         int width = by_ptr ? T.ty_voidptr->size : want->size;
@@ -760,10 +856,16 @@ static Ref gen_va_arg(Node *node) {
     add_phi_arg(phi, blk_mem, addr_mem);
     insert_phi(curb, phi);
 
-    // An aggregate value is represented by its address, so the candidate
-    // already *is* the result: loading it would ask LLVM for a by-value
-    // first-class struct, which its load instruction cannot produce.
     if (want->kind == TY_STRUCT || want->kind == TY_UNION) {
+        // A MEMORY-class aggregate is not in the slot itself: the slot holds
+        // a pointer to the caller's copy, and the aggregate is what that
+        // points at. One slot was consumed either way, which is what the
+        // table's step already says.
+        if (ops->agg_by_ptr) return load(addr, pointer_to(want, 0), 8, NULL);
+        // Otherwise an aggregate value is represented by its address, so the
+        // candidate already *is* the result: loading it would ask LLVM for a
+        // by-value first-class struct, which its load instruction cannot
+        // produce.
         addr.ty = pointer_to(want, 0);
         return addr;
     }

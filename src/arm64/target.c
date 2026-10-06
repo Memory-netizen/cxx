@@ -56,7 +56,26 @@ static VaArgOps va_arg_gp = {
     .mem_step = 8,
 };
 
+// In the save area one SIMD register holds one argument and the registers
+// are sixteen bytes apart, but on the stack a float or double takes the
+// ordinary eight-byte slot. The two cursors therefore move by different
+// amounts, and using the register stride on the stack walks the cursor past
+// every argument that follows.
 static VaArgOps va_arg_fp = {
+    .kind = VA_MEM_REGS,
+    .offset_ty = &ty_int_,
+    .offset_field = 4,
+    .offset_bound = 0,
+    .offset_negative = true,
+    .reg_field = 2,
+    .mem_field = 0,
+    .reg_step = 16,
+    .mem_step = 8,
+};
+
+// A 128-bit float is the one floating type that fills a whole stack slot by
+// itself.
+static VaArgOps va_arg_fp16 = {
     .kind = VA_MEM_REGS,
     .offset_ty = &ty_int_,
     .offset_field = 4,
@@ -83,6 +102,36 @@ static VaArgOps va_arg_gp16 = {
     .mem_field = 0,
     .reg_step = 16,
     .mem_step = 16,
+};
+
+// An HFA arrives one element per SIMD register. The table names the cursor,
+// the save area and the stride; the element count comes from the type, so the
+// reading itself is done where the aggregate is known.
+static VaArgOps va_arg_hfa = {
+    .kind = VA_MEM_SIMD,
+    .offset_ty = &ty_int_,
+    .offset_field = 4,
+    .offset_negative = true,
+    .reg_field = 2,
+    .mem_field = 0,
+    .reg_stride = 16,
+    .offset_limit = 0,
+};
+
+// A composite too large for the registers is passed by reference: the slot
+// holds a pointer to the caller's copy, so it takes one register however big
+// the composite is, and the cursor moves one slot.
+static VaArgOps va_arg_agg_ptr = {
+    .kind = VA_MEM_REGS,
+    .offset_ty = &ty_int_,
+    .offset_field = 3,
+    .offset_bound = 0,
+    .offset_negative = true,
+    .reg_field = 1,
+    .mem_field = 0,
+    .reg_step = 8,
+    .mem_step = 8,
+    .agg_by_ptr = true,
 };
 
 // AAPCS64: a homogeneous floating-point aggregate has every leaf of the same
@@ -179,7 +228,16 @@ static int arm64_param_slots(Type *ty) {
 }
 
 static VaArgOps *arm64_va_arg(Type *want) {
-    if (is_flonum(want)) return &va_arg_fp;
+    // A composite is classified before anything else: which registers it
+    // travels in, and therefore which cursor finds it, is the classifier's
+    // answer and not the size's.
+    if (want->kind == TY_STRUCT || want->kind == TY_UNION) {
+        AggClass c;
+        arm64_classify_aggregate(want, &c);
+        if (c.npiece == 0) return &va_arg_agg_ptr;
+        if (c.is_hfa) return &va_arg_hfa;
+    }
+    if (is_flonum(want)) return want->size > 8 ? &va_arg_fp16 : &va_arg_fp;
     // An integer wider than one eightbyte takes two GP registers. Its
     // alignment is still 8, so size is what distinguishes it.
     if (want->size > 8) return &va_arg_gp16;

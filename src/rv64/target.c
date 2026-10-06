@@ -3,7 +3,7 @@
 // RISC-V: va_list is a single pointer that walks the argument area, where
 // every value occupies one 8-byte slot.
 static VaArgOps va_arg_linear = {
-    .kind = VA_MEM_LINEAR_PTR,
+    .kind = VA_MEM_LINEAR,
     .mem_step = 8,
 };
 
@@ -15,9 +15,23 @@ static VaArgOps va_arg_linear = {
         .is_unsigned = d, \
     }
 
-// RISC-V has one linear cursor, so the type does not change the strategy.
+// A composite too large for the registers is passed by reference, so the
+// area holds a pointer to it and the cursor moves one slot however big the
+// composite is.
+static VaArgOps va_arg_linear_ptr = {
+    .kind = VA_MEM_LINEAR,
+    .mem_step = 8,
+    .agg_by_ptr = true,
+};
+
+// RISC-V has one linear cursor, so only the memory class changes the
+// strategy: there the slot holds a pointer rather than the value.
 static VaArgOps *rv64_va_arg(Type *want) {
-    (void)want;
+    if (T.classify_variadic && (want->kind == TY_STRUCT || want->kind == TY_UNION)) {
+        AggClass c;
+        T.classify_variadic(want, &c);
+        if (c.npiece == 0) return &va_arg_linear_ptr;
+    }
     return &va_arg_linear;
 }
 

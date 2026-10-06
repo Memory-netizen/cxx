@@ -221,19 +221,23 @@ static VaArgOps va_arg_overflow = {
 };
 
 // Which register class a requested type is passed in.
-// Two SSE pieces: both eightbytes come from the floating-point area and the
-// cursor steps by the record's whole width. struct { double; double } is the
-// common case.
+// Two SSE pieces: both eightbytes come from the floating-point area, and the
+// area spaces XMM registers sixteen bytes apart, so the two pieces are *not*
+// adjacent in it. struct { double; double } is the common case: reading the
+// sixteen bytes contiguously gets the first double right and the second one
+// wrong, which is why this gathers instead.
 static VaArgOps va_arg_fp16 = {
-    .kind = VA_MEM_REGS,
+    .kind = VA_MEM_SIMD,
     .offset_ty = &ty_uint_,
     .offset_field = 1,
-    .offset_bound = 304,
     .reg_field = 3,
     .mem_field = 2,
-    .reg_step = 16,
     .mem_step = 16,
     .mem_align = 8,
+    .reg_stride = 16,
+    // The SSE half of the save area runs from 48 to 176; a record of two
+    // registers is there while the cursor plus both slots stays inside it.
+    .offset_limit = 176,
 };
 
 static VaArgOps *amd64_va_arg(Type *want) {

@@ -63,11 +63,6 @@ typedef enum {
                     // running offset (amd64, arm64)
     VA_MEM_LINEAR,  // the va_list is a single pointer that walks the
                     // argument area (rv64, rv32)
-    // The same single pointer, except that an aggregate the registers cannot
-    // hold travels in the area as a pointer to the caller's copy rather than
-    // as its own bytes: what is read, and what the cursor advances by, is then
-    // the pointer (RISC-V).
-    VA_MEM_LINEAR_PTR,
     // One aggregate whose pieces travel in different register files: each
     // piece is read from its own save area and each cursor advances on its
     // own. struct { int; double } arrives with the int in a general-purpose
@@ -78,6 +73,12 @@ typedef enum {
     // the registers -- and its cursor advances by the argument's own
     // rounded-up size, which a fixed table cannot express.
     VA_MEM_OVERFLOW,
+    // A record whose pieces each sit in their own SIMD register. The save
+    // area spaces registers by a stride that is not the piece width, so the
+    // pieces must be gathered before the record can be read back. AAPCS64
+    // homogeneous floating-point aggregates and SysV AMD64's two-SSE-piece
+    // records both land here.
+    VA_MEM_SIMD,
 } VaArgKind;
 
 typedef struct {
@@ -111,6 +112,20 @@ typedef struct {
     // that needs more than the ABI's stack alignment. Zero when the
     // type's alignment never exceeds it.
     int mem_align;
+
+    // VA_MEM_SIMD: the distance between consecutive register slots in the
+    // save area, and the offset value past which the area has no room for
+    // this record -- the register cursor plus one record's worth of slots
+    // must not exceed it. The descending form (AAPCS64) ends at zero.
+    int reg_stride;
+    int offset_limit;
+
+    // A MEMORY-class aggregate does not travel as its own bytes: the slot
+    // holds a pointer to the caller's copy, and only one slot is consumed
+    // whatever the aggregate's size. Both the single-cursor form (RISC-V) and
+    // the register/overflow pair (AAPCS64) spell it this way, so this is a
+    // property of the slot rather than of the cursor.
+    bool agg_by_ptr;
 } VaArgOps;
 
 // How the ABI passes an aggregate. `npiece` is 0 for the memory class,

@@ -122,7 +122,6 @@ static int tu8d(union U8d v) { return (int)v.a; }
 static int tu16(union U16 v) { return (int)v.b[0] * 1 + (int)v.b[1] * 2; }
 static int tu32(union U32 v) { return (int)v.a[0] * 1 + (int)v.a[1] * 2; }
 
-#ifdef CXX_AGG_VARIADIC
 /* ================= 可变参数：同上的类型，走 va_arg ================= */
 static int va_one(int n, ...) {
     va_list ap;
@@ -177,7 +176,6 @@ static int va_mix(int n, ...) {
     return v.a * 1 + v.b * 2 + k * 4 + (int)d.a * 8 + (int)d.b * 16;
 }
 
-#endif /* CXX_AGG_VARIADIC */
 
 /* ============ 真的传一个指向结构体的指针（不是 ABI 降级） ============ */
 static int p_pair(struct S8i *p) { return p->a * 1 + p->b * 2; }
@@ -193,7 +191,6 @@ struct HasPtr {
     int k;
 };
 static int hp(struct HasPtr v) { return v.p->a * 1 + v.p->b * 2 + v.k * 4; }
-#ifdef CXX_AGG_VARIADIC
 static int va_hasptr(int n, ...) {
     va_list ap;
     va_start(ap, n);
@@ -201,7 +198,6 @@ static int va_hasptr(int n, ...) {
     va_end(ap);
     return v.p->a * 1 + v.p->b * 2 + v.k * 4;
 }
-#endif
 
 int main() {
     struct S8i s8 = {1, 2};
@@ -235,7 +231,6 @@ int main() {
     ASSERT(1 + 4, tu16((union U16){.b = {1, 2}}));
     ASSERT(1 + 4, tu32((union U32){.a = {1.0, 2.0}}));
 
-#ifdef CXX_AGG_VARIADIC
     /* --- 可变参数 --- */
     ASSERT(7, va_one(1, (struct S1){7}));
     ASSERT(1 + 4, va_two(1, (struct S2){1, 2}));
@@ -243,12 +238,9 @@ int main() {
     ASSERT(14, va_s8d(1, (struct S8d){14.9}));
     ASSERT(1 + 4, va_s16m(1, (struct S16m){1, 2.9}));
     ASSERT(1 + 4 + 12 + 32, va_s32(1, (struct S32){1, 2, 3, 4}));
-    /* KNOWN GAP: an aggregate followed by further variadic arguments. Reading
-     * the record does not leave the cursor where the next argument begins. */
-    /* ASSERT(1 + 4 + 3 * 4 + 5 * 8 + 6 * 16,
-              va_mix(3, (struct S8i){1, 2}, 3, (struct S16d){5.9, 6.9})); */
+    ASSERT(1 + 4 + 3 * 4 + 5 * 8 + 6 * 16,
+           va_mix(3, (struct S8i){1, 2}, 3, (struct S16d){5.9, 6.9}));
 
-#endif
 
     /* --- 指向结构体的指针 --- */
     ASSERT(1 + 4, p_pair(&s8));
@@ -256,9 +248,7 @@ int main() {
     ASSERT(1 + 32, p_big(&s32));
     ASSERT(1 * 3 + 2 * 5, p_void(&s8));
     ASSERT(1 + 4 + 20, hp(h));
-#ifdef CXX_AGG_VARIADIC
     ASSERT(1 + 4 + 20, va_hasptr(1, h));
-#endif
 
     printf("OK\n");
     return 0;
