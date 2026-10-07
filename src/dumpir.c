@@ -70,9 +70,22 @@ static const char *ty_str[] = {
     [TY_F128] = "fp128",    [TY_PTR] = "ptr",       [TY_NULLPTR] = "ptr",
 };
 
+static const char *asm_name_of(uint32_t id);
+
+// The name a reference uses is the name the symbol is *emitted* under, asm
+// label included: glibc redirects fcntl to fcntl64 with __asm__, and printing
+// the C identifier here left the reference pointing at a symbol that was never
+// declared -- sqlite's aSyscall initializer mentions fcntl, and LLVM refused
+// the module with "use of undefined value '@fcntl'".
 static void print_ident(uint32_t id) {
     char *ident = str(id);
     int len = str_len(id);
+
+    const char *asm_name = asm_name_of(id);
+    if (asm_name) {
+        ident = (char *)asm_name;
+        len = (int)strlen(asm_name);
+    }
 
     bool needs_quote = false;
     for (int i = 0; i < len; i++) {
@@ -134,6 +147,13 @@ void register_asm_name(uint32_t id, char *name) {
 // name a different -- and invalid -- symbol, and it must be printed bare.
 // Intrinsics are the only registered name that is not a C identifier,
 // which is what "contains a dot" detects.
+// The asm label a symbol is emitted under, or NULL.
+static const char *asm_name_of(uint32_t id) {
+    for (int i = 0; i < num_asm_names; i++)
+        if (asm_names[i].id == id) return asm_names[i].name;
+    return NULL;
+}
+
 static void print_sym_name(uint32_t id) {
     for (int i = 0; i < num_asm_names; i++)
         if (asm_names[i].id == id) {

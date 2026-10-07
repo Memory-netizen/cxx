@@ -2007,6 +2007,48 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# --- the two things that kept sqlite from compiling --------------------
+
+# A function declared with an asm label is emitted under that label, so a
+# reference to it has to use the label too: sqlite's aSyscall table mentions
+# fcntl, which glibc redirects to fcntl64, and the reference said @fcntl while
+# the declaration said @"fcntl64" -- LLVM refused the module.
+cat > "$tmp/asmref.c" <<'EOF'
+int real(void) { return 7; }
+int alias(void) __asm__("real");
+int (*p)(void) = alias;
+int (*table[])(void) = { alias, alias };
+int main(void) { return p() + table[1]() - 14; }
+EOF
+if "$compiler" -w -o "$tmp/asmref" "$tmp/asmref.c" >/dev/null 2>&1 && "$tmp/asmref"; then
+    echo "testing a reference uses the emitted name ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a reference uses the emitted name ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
+# The reachability walk seeds the names parsing already rooted -- an emitted
+# initializer roots them (a block-scope static's does) -- and follows their
+# references. Leaving them out of the worklist stopped the walk one step in,
+# so what they mention was dropped as unused while the reference stayed.
+cat > "$tmp/rooted.c" <<'EOF'
+static int inner[] = { 7, 8 };
+static const int *chain[] = { inner, inner + 1 };
+static const int *const *pick(void) {
+    static const int *const *rooted = chain;
+    return rooted;
+}
+int main(void) { return (*pick())[0] - 7 + (*pick())[1] - 8; }
+EOF
+if "$compiler" -w -o "$tmp/rooted" "$tmp/rooted.c" >/dev/null 2>&1 && "$tmp/rooted"; then
+    echo "testing a rooted name's references stay alive ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a rooted name's references stay alive ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then

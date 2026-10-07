@@ -350,6 +350,16 @@ VLA 的 `len` 就是 `vla_len` 指针的低 32 位（见缺陷 1），所以把*
 | **记分（本轮结束）** | zlib **15/15**；lua 31/35（别名修复 +3）；libpng 15/18；sqlite 0/1 但只差一处；tinycc 与 git 仍卡在探针的取 flag 环节（tinycc 需要先 configure，git 需要先生成 `command-list.h`，探针已加 `prepare` 但 git 仍需确认） |
 | **验收** | `test/conformance.sh` **120 passed / 0 gap**（新增「转发 va_list 到 helper」运行断言）；`test/c2y.sh` **101 passed / 0 gap**（fallthrough 那条断言改成与 gcc/clang 一致）；`doc/realworld.sh` 报出上表 |
 
+### R6 真实开源项目：第三轮 —— ✅ **sqlite 编译并运行**
+
+| | |
+|---|---|
+| **里程碑** | 250k 行的 SQLite amalgamation 用 cxx 编译通过（约 5 秒），由宿主链接成程序后**跑出与 clang 版本逐字相同的结果**：`2 5 two,three` / `sqlite 3.53.4`，退出码同为 0。端到端程序（建表、插入、绑定参数查询、`group_concat`）见 `tests/sqlite_use.c` |
+| **缺陷（1）可达性走查漏掉「解析期已标记」的符号** | `is_reachable` 在解析期就会被置 1（被发出的初始化器所引用的名字，见 `live_init`），而工作队列只在**根**循环里压入符号，于是这些名字的引用从未被跟随。sqlite 的 `aSyscall` 恰好只被这类函数引用 → 被判为未使用丢掉定义，而使用点仍在模块里 → LLVM 报 `use of undefined value '@aSyscall'`。修法：把解析期已标记的符号也种进队列（`work` 相应放大一倍） |
+| **缺陷（2）引用没有用「发出时使用的名字」** | glibc 用 `__asm__` 把 `fcntl` 重定向到 `fcntl64`，于是声明发成 `@"fcntl64"` 而初始化器里的引用仍写 `@fcntl` → `use of undefined value '@fcntl'`。`print_ident()`（常量/初始化器用的打印器）不认识 asm 名，只有 `print_sym_name()` 认识；修法是让它先查 asm 名表 |
+| **验收** | `test/conformance.sh` **120 → 122 passed / 0 gap**，两条新断言都经过「去掉修复即复现」的验证：<br>• 「引用要用发出时的名字」——`int alias(void) __asm__("real"); int (*p)(void) = alias;`；<br>• 「已扎根名字的引用要活着」——块作用域 static 初始化器扎根的 `chain[]` 必须把 `inner[]` 带活（去掉种子循环即复现 `use of undefined value '@inner'`） |
+| **记分** | sqlite **1/1**；zlib **15/15**；lua 31/35；libpng 15/18；git 44/60；tinycc 0/11；cpython 未下载 |
+
 ### P3 `<stdmchar.h>`（7.26 / N3366）
 
 | | |

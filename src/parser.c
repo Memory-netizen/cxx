@@ -8011,9 +8011,9 @@ static void check_unused_statics(void) {
     uint32_t ns = 0;
     for (Sym *sym = globals; sym; sym = sym->next) syms[ns++] = sym;
 
-    // Every symbol is marked before it is pushed, so each is visited once
-    // and this cannot overflow.
-    Sym **work = vnew(nsym + 1, sizeof(Sym *));
+    // Roots and the names parsing already rooted are both seeded, so a
+    // symbol can be pushed twice; the walk below still marks each one once.
+    Sym **work = vnew(2 * nsym + 1, sizeof(Sym *));
     uint32_t n = 0;
 
     for (uint32_t i = ns; i-- > 0;) {
@@ -8028,6 +8028,15 @@ static void check_unused_statics(void) {
         sym->is_reachable = true;
         work[n++] = sym;
     }
+
+    // A name parsing already marked reachable -- one an emitted initializer
+    // roots (see live_init), or one mentioned where there is no function and
+    // no initializer to attribute it to -- carries references of its own.
+    // Leaving it out of the worklist stopped the walk there: sqlite's
+    // aSyscall is named by such functions, so the table was reported unused
+    // and dropped while the uses stayed in the module.
+    for (uint32_t i = 0; i < ns; i++)
+        if (syms[i]->is_reachable) work[n++] = syms[i];
 
     while (n) {
         Sym *sym = work[--n];
