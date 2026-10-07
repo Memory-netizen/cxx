@@ -1920,6 +1920,45 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# --- constructs real projects rely on ---------------------------------
+
+# __builtin_expect(x, c) is x -- lua, git and cpython all spell their hot-path
+# hints that way -- and offsetof is an integer constant expression (7.19p3), so
+# it can size an array. Both were missing, and each stopped real code: lua's
+# lapi.c and libpng's pngread.c would not compile at all.
+cat > "$tmp/realcode.c" <<'EOF'
+#include <stdarg.h>
+#include <stddef.h>
+
+struct S { int a; long b; char c[4]; };
+struct T { char pad[offsetof(struct S, c[2])]; int x; };
+
+static int first(int n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    int v = va_arg(ap, int);
+    va_end(ap);
+    return v;
+}
+
+int main(void) {
+    if (offsetof(struct S, b) != 8) return 1;
+    if (offsetof(struct S, c[2]) != 18) return 2;
+    if (offsetof(struct T, x) != 20) return 3;
+    if (sizeof(struct T) != 24) return 4;
+    if (__builtin_expect(first(3, 7, 8, 9), 7) != 7) return 5;
+    if (__builtin_expect(0, 1) != 0) return 6;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/realcode" "$tmp/realcode.c" >/dev/null 2>&1 && "$tmp/realcode"; then
+    echo "testing __builtin_expect and offsetof as a constant ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __builtin_expect and offsetof as a constant ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then

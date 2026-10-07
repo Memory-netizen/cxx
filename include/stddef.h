@@ -32,6 +32,6 @@ typedef union {
 // instead of aliasing it to void * here.
 typedef typeof(nullptr) nullptr_t;
 
-#define offsetof(type, member) ((size_t)&(((type *)0)->member))
+#define offsetof(type, member) __builtin_offsetof(type, member)
 
 #endif

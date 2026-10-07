@@ -1815,6 +1815,15 @@ BuiltinDef builtin_defs[NUM_BUILTINFN] = {
     // and irgen lowers them to the llvm.va_* intrinsics so the backend
     // expands them for the target's va_list layout.
     [BUILTIN_VA_START] = {"__builtin_va_start", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+
+    // llvm.expect returns its first operand and tells the backend what that
+    // operand usually is. Its second operand comes from the call site, unlike
+    // clz/ctz's immediate, which is why extra_arg is -1 and intrinsic_args
+    // says the operand is there.
+    [BUILTIN_EXPECT] = {"__builtin_expect", BCLASS_DECL, "llvm.expect.i%d", BT_LONG, BT_LONG, true, -1, 2, 2, NULL, 0},
+    // The member designator is not an expression, so the shape comes from
+    // parser code; the value is a constant, so irgen never sees it.
+    [BUILTIN_OFFSETOF] = {"__builtin_offsetof", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_VA_END] = {"__builtin_va_end", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_VA_ARG] = {"__builtin_va_arg", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_VA_COPY] = {"__builtin_va_copy", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
@@ -2179,7 +2188,16 @@ static Node *va_list_addr(Token **rest, Token *tok) {
     // The intrinsics take the address of the va_list object. When that
     // object is an array or a pointer, the operand already *is* that
     // address; only a structure or scalar operand needs it taken.
-    if (want->kind == TY_ARRAY || want->kind == TY_PTR) return ap;
+    if (want->kind == TY_ARRAY || want->kind == TY_PTR) {
+        // A pointer operand is a variable holding the address, so reading it
+        // is a load. `va_list ap` as a *parameter* is exactly that: 6.7.6.3p7
+        // adjusts the array to a pointer, so the object lives in the caller
+        // and only its address is here. Without the conversion gen_expr()
+        // handed irgen the address of the pointer variable, and a va_list
+        // forwarded to a helper -- vprintf's shape -- read the wrong bytes.
+        if (got->kind == TY_PTR) lvalue_convert(&ap);
+        return ap;
+    }
     Node *addr = new_unary(ND_ADDR, ap, tok);
     add_type(addr);
     return addr;
@@ -2402,6 +2420,45 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             *rest = skip(tok, TK_RPAREN);
             return new_num(is_compatible(type_unqual(type1), type_unqual(type2)), start);
         }
+        case BUILTIN_OFFSETOF: {
+            // __builtin_offsetof(type, member-designator), where the
+            // designator is a chain of `.member` and `[constant]`. 7.19p3
+            // makes the result an integer constant expression, and real code
+            // sizes arrays with it -- so the offset is computed here rather
+            // than left as the address constant cxx's own <stddef.h> used to
+            // spell it as.
+            tok = skip(tok->next, TK_LPAREN);
+            Type *ty = typename(&tok, tok);
+            tok = skip(tok, TK_COMMA);
+            int64_t off = 0;
+            bool first = true;
+            for (;;) {
+                if (first || tok->kind == TK_DOT) {
+                    Token *name = first ? tok : tok->next;
+                    first = false;
+                    if (ty->kind != TY_STRUCT && ty->kind != TY_UNION)
+                        error(name, "request for member ‘%s’ in something not a structure or union", str(name->id));
+                    Member *mem = get_struct_member(ty->members, name);
+                    if (!mem) error(name, "no member named ‘%s’ in ‘%s’", str(name->id), str(ty->uid));
+                    off += mem->offset;
+                    ty = mem->ty;
+                    tok = name->next;
+                    continue;
+                }
+                if (tok->kind == TK_LBRACKET) {
+                    Token *br = tok;
+                    if (ty->kind != TY_ARRAY) error(br, "subscripted value is neither array nor pointer");
+                    int64_t idx = const_expr(&tok, tok->next);
+                    off += idx * ty->base->size;
+                    ty = ty->base;
+                    tok = skip(tok, TK_RBRACKET);
+                    continue;
+                }
+                break;
+            }
+            *rest = skip(tok, TK_RPAREN);
+            return new_num(off, start);
+        }
         case BUILTIN_CONSTANT_P: {
             tok = skip(tok->next, TK_LPAREN);
             Node *operand = assign(&tok, tok);
@@ -2445,8 +2502,11 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
         case BUILTIN_VA_ARG: {
             // __builtin_va_arg(ap, type): the second operand is a type
             // name, not an expression.
-            if (!cur_fn || !cur_fn->ty->is_variadic)
-                error(tok, "‘__builtin_va_arg’ used in a function that is not variadic");
+            //
+            // No variadic-function check: 7.16.1.1 asks only for a va_list
+            // initialised by va_start or va_copy, and the function that
+            // forwards one -- vprintf's whole shape -- has no parameter list
+            // of its own to be variadic. gcc and clang accept it there.
             tok = skip(tok->next, TK_LPAREN);
             // Same operand handling as the other variadic builtins: the
             // address of the va_list object, which is what the expansion
@@ -2472,9 +2532,8 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
         }
         case BUILTIN_VA_COPY: {
             // __builtin_va_copy(dst, src). LLVM has a real intrinsic for
-            // this, so the copy itself is left to the backend.
-            if (!cur_fn || !cur_fn->ty->is_variadic)
-                error(tok, "‘__builtin_va_copy’ used in a function that is not variadic");
+            // this, so the copy itself is left to the backend. Like va_arg,
+            // this needs two va_lists, not a variadic function.
             tok = skip(tok->next, TK_LPAREN);
             Node *dst_ap = va_list_addr(&tok, tok);
             tok = skip(tok, TK_COMMA);
@@ -6071,6 +6130,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
     if (!dummy.next) error(tok, "empty enum is invalid");
     ty->enumvals = dummy.next;
     if (!fixed) enum_set_underlying(ty, dummy.next);
+    complete_copies(ty);
     if (redefine) {
         if (!is_compatible(ty, exist_ty)) {
             diag("error", tag, "conflicting redefinition of enum ‘enum %s’", str(tag->id));
@@ -6437,6 +6497,7 @@ static Type *record_decl(Token **rest, Token *tok) {
     }
     ty_prepend_attrs(ty, trail);
     layout_struct(ty, is_union);
+    complete_copies(ty);
 
     if (redefine) {
         if (!is_compatible(ty, exist_ty)) {

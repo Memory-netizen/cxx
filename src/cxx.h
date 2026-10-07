@@ -1066,6 +1066,13 @@ enum {
     BUILTIN_ISNORMAL,
     BUILTIN_SIGNBIT,
     BUILTIN_FPCLASSIFY,
+    // __builtin_offsetof(type, member-designator): an integer constant
+    // expression, so it can size an array whatever the header spells it as.
+    BUILTIN_OFFSETOF,
+    // A hint about which value the first argument usually has; the result is
+    // that argument. Real code spells it `__builtin_expect(x, 0)`, and lua,
+    // git and cpython all use it in their hot paths.
+    BUILTIN_EXPECT,
 
     // One past the last kind: the table's length, so nothing has to keep a
     // separate count in step with the enum. Not a builtin itself.
@@ -1221,7 +1228,12 @@ struct Type {
     Type *next;
     Type *base;
     Type *origin;  // for type compatibility check
-    Attr *attrs;   // attributes attached to the type
+    // Qualified copies of this type, threaded through `next_copy`. A copy is
+    // the same type with a qualifier on it, so a tag completed after the copy
+    // was made (6.7.2.3p4) has to pass its shape on.
+    Type *copies;
+    Type *next_copy;
+    Attr *attrs;  // attributes attached to the type
     // Set on the synthesised function type of a builtin that has no
     // prototype -- one whose arguments must keep their own types. `id`
     // then carries the builtin's kind, which is how a call site is
@@ -1354,6 +1366,7 @@ Type *enum_type(void);
 // Give an enum the type that holds every one of its enumerators.
 void enum_set_underlying(Type *ty, EnumVal *vals);
 Type *copy_type(Type *ty);
+void complete_copies(Type *ty);
 // Give a type its IR name and add it to the module's type list.
 void insert_ty(Type *ty, char *kind);
 Type *type_qual(Type *ty, uint32_t qual);

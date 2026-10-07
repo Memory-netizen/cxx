@@ -439,9 +439,15 @@ static Ref gen_intrinsic_call(Node *node, BuiltinDef *d, int kind) {
     Ref ops[3] = {fn, val, R};
     uint32_t n = 2;
     if (d->intrinsic_args == 2) {
-        ops[2].type = RInt;
-        ops[2].val = d->extra_arg;
-        ops[2].ty = bitint[1][1];
+        if (d->extra_arg >= 0) {
+            ops[2].type = RInt;
+            ops[2].val = d->extra_arg;
+            ops[2].ty = bitint[1][1];
+        } else {
+            // The operand belongs to the call: llvm.expect's second argument
+            // is the value the first one is usually expected to have.
+            ops[2] = gen_expr(node->args->next);
+        }
         n = 3;
     }
     new_ins(IR_CALL, dst, ops, n);

@@ -317,6 +317,22 @@ VLA 的 `len` 就是 `vla_len` 指针的低 32 位（见缺陷 1），所以把*
 | **踩到的坑（记录）** | 一开始第二阶段「52 项失败」看着像错编，其实是**安装位置**问题：`add_default_include_paths(argv[0])` 按可执行文件位置找 `include/`，放在 `/tmp` 的第二阶段于是退回 clang 的资源目录头文件，而那些头用了 cxx 尚未实现的 `__has_feature` / `__has_extension`（`#if !defined(__STDDEF_H) \|\| __has_feature(modules)` 里的 `0 ( modules )` 被当成函数调用）。探针里用符号链接把 `include/` 放到每一代旁边；`__has_feature`、`__has_extension` 仍列为待办 |
 | **验收** | 新增探针 `doc/bootstrap.sh`（默认一行「走到哪一步」，`--suites` 加跑两个套件做保真度对照），接进 `doc/probes.sh`；`test/conformance.sh` 118 → **119 passed / 0 gap**（新增「窄的无符号下标要取到那个元素」运行断言：`unsigned char i = 200; tbl[i]`） |
 
+### R4 真实开源项目：第一轮 —— ✅ 探针与三处修复落地，四个缺陷待修
+
+| | |
+|---|---|
+| **目标** | 拿真实代码库试 cxx，把「哪个文件编不过、为什么」变成可复现的数字，并修掉挡路的缺陷 |
+| **探针** | `doc/realworld.sh`：源码放在 `$RW`（默认 `~/rw`，不存在就报 not present，任何机器都能跑）。每个项目**用它自己的构建系统取编译命令**（`make -n` 抽 `-c` 行），只把编译器换成 cxx；需要 configure 的项目先用宿主 cc 跑一遍，好让特性探测诚实。输出每项目 `N/M ok` 与失败诊断的 top 两类 |
+| **已修（1）** | **`const` 作用于尚未完成的结构体时，副本永远停在 `size = -1`**。`type_qual()` 加限定符时复制类型，而 C 允许随后才给出结构体定义（6.7.2.3p4）；完成后更新的是原类型，副本没跟上，于是 `const S *p; ... struct S {...}; p->x` 报 `no member named ‘x’`。修法：副本挂到 origin 的链表上，完成时 `complete_copies()` 把形状传下去（`src/type.c`、`src/parser.c`）。这一处让 **zlib 的 trees.c 通过** |
+| **已修（2）** | **`__builtin_expect` 缺失**。lua 有 22 处、git/cpython 同样大量使用。加进内建表：`llvm.expect.iN`，第二个操作数取自调用点（`intrinsic_args = 2` 且 `extra_arg = -1` 的新情形），行为与 clang 一致 |
+| **已修（3）** | **`offsetof` 不是整数常量表达式**。cxx 自己的 `<stddef.h>` 把它写成地址常量 `&((T*)0)->m`，于是 `char pad[offsetof(S, m)]` 被判成 VLA（`field has variably modified type`），而 7.19p3 要求它是整数常量表达式；clang 的 `<stddef.h>` 用 `__builtin_offsetof`，cxx 根本不认。修法：实现 `__builtin_offsetof`（解析点即折成常量，支持 `.m` 与 `[常量]` 链），并把自带 `<stddef.h>` 改成同样的拼法 |
+| **记分（本轮结束）** | **zlib 15/15** 全过；lua 28/35；libpng 15/18；git/cpython/sqlite 见下 |
+| **待修（1，已定性）** | **转发 `va_list` 的 codegen 是错的**：`int sum(int n, va_list ap) { ... va_arg(ap, int) ... }` 编译通过但**运行时段错误**，同样的程序 gcc/clang 正常。cxx 现在对非变参函数里的 `va_arg`/`va_copy` 报错（比标准严），放宽之前必须先修好这条路径——这正是 `vprintf` 型函数的形状，真实代码里到处都是 |
+| **待修（2，已定性）** | **lua 的 `setobj`/`setsvalue`/`l_addi` 宏没有被展开**：`lobject.h:118` 的 `setobj` 是无条件定义的，但 `lapi.c:623` 的 `setobj2n(...)` 展开后内层 `setobj` 留在解析器里成了函数调用。需要按 lua 头文件做最小复现（预处理器的嵌套展开或重扫描问题） |
+| **待修（3，已定性）** | **函数指针转换被误判**：`lua_CFunction f = cast_Lfunc(dlsym(lib, sym));`（`cast_Lfunc(p) = cast(lua_CFunction, cast_func(p))`）报 `incompatible types when initializing`，gcc/clang 接受 |
+| **待修（4，已定性）** | **libpng 两处**：`PNG_IMAGE_SAMPLE_CHANNELS` 宏没展开（与 lua 同类），以及内联汇编报 `expected number in address space`；git 侧 60 个单元全挂在 `expected ‘X’ after top level declarator`，看起来是探针抽 flag 不完整（git 需要生成的 `command-list.h`/`version-def.h`，`make -n` 不生成它们），下一轮先修探针再谈 git |
+| **验收** | `test/conformance.sh` 119 → **120 passed / 0 gap**（新增「`__builtin_expect` 与 `offsetof` 当常量用」运行断言）；`doc/realworld.sh` 独立探针，`bash doc/realworld.sh ./cxx` 复现上表 |
+
 ### P3 `<stdmchar.h>`（7.26 / N3366）
 
 | | |
@@ -1060,4 +1076,5 @@ IR 从 4 条降到 2 条（`icmp/fcmp ne` + `zext`），与 `clang -O0` 逐字�
 | `doc/driver.sh` | 驱动与诊断项的现状检查 |
 | `doc/suite.sh` | 四个目标的全套件 |
 | `doc/asm.sh` | GNU asm 语句的三家对照（判决 + 运行结果 + 一条参考实现互相矛盾的信息行） |
+| `doc/realworld.sh` | 真实项目编译记分（`$RW` 下的 lua/zlib/libpng/sqlite/tinycc/git/cpython，各项目自己的 flag，报 N/M 与 top 诊断） |
 | `doc/selfhost.sh`、`doc/selfbuild.sh`、`doc/bootstrap.sh` | 自举记分板（cc1 + LLVM 收不收）、两阶段自举（编译 → 链接 → cxx2 能做什么）、三代自举链（cxx2 → cxx3 → cxx4 不动点，`--suites` 加跑保真度对照） |

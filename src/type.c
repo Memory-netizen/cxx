@@ -297,6 +297,13 @@ Type *copy_type(Type *ty) {
     ret->next = NULL;
     if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) copy_struct_type(ret, ty);
     ret->origin = ty->origin ? ty->origin : ty;
+    // A tag can be completed after a copy of it exists, and the copy is the
+    // same type, so keep it reachable from the type it came from. Copies of
+    // copies land on the same list: `origin` is the root of the chain.
+    if (ret->kind == TY_STRUCT || ret->kind == TY_UNION || ret->kind == TY_ENUM) {
+        ret->next_copy = ret->origin->copies;
+        ret->origin->copies = ret;
+    }
     return ret;
 }
 
@@ -456,6 +463,21 @@ void enum_set_underlying(Type *ty, EnumVal *vals) {
     ty->size = 8;
     ty->align = T.ty_long->size >= 8 ? 8 : T.ty_llong->align;
     ty->is_unsigned = !negative;
+}
+
+// Pass a completed tag's shape to the copies made while it was still
+// incomplete. A still-incomplete copy is what `const S *p;` leaves behind when
+// S is completed later, and reading a member through it used to fail with
+// `no member named ...` -- which is what stopped zlib's trees.c.
+void complete_copies(Type *ty) {
+    for (Type *c = ty->copies; c; c = c->next_copy) {
+        if (c->size >= 0) continue;  // copied after the completion
+        c->members = ty->members;
+        c->size = ty->size;
+        c->align = ty->align;
+        c->is_flexible = ty->is_flexible;
+        c->is_packed = ty->is_packed;
+    }
 }
 
 Type *type_qual(Type *ty, uint32_t qual) {
