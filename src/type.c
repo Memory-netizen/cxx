@@ -165,6 +165,13 @@ bool is_voidptr(Type *ty) {
     return is_void(ty->base);
 }
 
+Token *member_name_token(char *name) {
+    Token *tok = emalloc(sizeof(Token));
+    tok->kind = TK_IDENT;
+    tok->id = intern(name, strlen(name));
+    return tok;
+}
+
 bool is_funcptr(Type *ty) {
     if (ty->kind != TY_PTR) return false;
     return ty->base->kind == TY_FUNC;
@@ -449,12 +456,16 @@ void enum_set_underlying(Type *ty, EnumVal *vals) {
     bool negative = int128_cmp_signed(lo, zero) < 0;
     ty->size = 4;
     ty->align = 4;
-    // clang asks how many bits the positive values need and picks a signed
-    // type only when an enumerator is actually negative; an enum whose values
-    // are all non-negative gets an unsigned type however few bits it needs.
-    // That is why 0x7fffffffffffffffL makes an unsigned long.
+    // An enumeration whose enumerators are all non-negative has an unsigned
+    // type, one with a negative enumerator has the signed type; that is gcc's
+    // rule (6.7.2.2p4 leaves the choice to the implementation) and clang's.
+    // The signed choice this used to make for an all-non-negative enum was
+    // observable three ways: `(enum E)-1 < 0` was true, the enum was not a
+    // compatible type for `unsigned int`, and a `int (..., unsigned)` function
+    // could not be assigned to a `int (..., enum odb_write_object_flags)`
+    // member -- which is what git's odb/source-packed.c does.
     if (int128_fits(hi, 32, negative ? SIGNED : UNSIGNED) && (!negative || int128_fits(lo, 32, SIGNED))) {
-        ty->is_unsigned = !negative && !int128_fits(hi, 32, SIGNED);
+        ty->is_unsigned = !negative;
         return;
     }
     // Nothing narrower holds it. The 64-bit type is long where long is 64
@@ -528,6 +539,19 @@ static bool check_set(Type *t1, Type *t2) {
 
 bool is_compatible(Type *t1, Type *t2) {
     if (t1 == t2) return true;
+
+    // 6.7.2.2p4: an enumerated type is compatible with the implementation's
+    // choice of integer type. gcc's choice is the one cxx makes -- `unsigned
+    // int` when no enumerator is negative, `int` otherwise, and a wider type
+    // when one needs it -- so the compatible integer type is the one of the
+    // same width and signedness. Without this a pointer to
+    // `int (..., enum odb_write_object_flags)` and a pointer to
+    // `int (..., unsigned)` are not compatible function types, which is what
+    // git's odb/source-packed.c assigns across; gcc and clang both take it.
+    // The qualifier test below comes first for every other pair, so it is
+    // repeated here.
+    if ((t1->kind == TY_ENUM && is_integer(t2)) || (t2->kind == TY_ENUM && is_integer(t1)))
+        return t1->qual == t2->qual && t1->size == t2->size && t1->is_unsigned == t2->is_unsigned;
 
     // C23 6.2.5: each interchange floating type (_FloatN) is not
     // compatible with any other type, even one with the same format;
@@ -770,31 +794,56 @@ void check_condop(Node *node) {
     if (is_pointer(lhs) && is_integer(rhs)) return;
 }
 
-void check_asop(Type *dst, Node *src, int ctx) {
-    static char *msg[] = {
-        [CTX_AS] = "assigning",
-        [CTX_RET] = "returning",
-        [CTX_INIT] = "initializing",
-        [CTX_CALL] = "passing argument",
-    };
+static char *asop_msg[] = {
+    [CTX_AS] = "assigning",
+    [CTX_RET] = "returning",
+    [CTX_INIT] = "initializing",
+    [CTX_CALL] = "passing argument",
+};
+
+// Whether `src` may be assigned to `dst`, reporting only what the conversion
+// itself may report. A transparent union parameter asks this of each of its
+// members in turn, and takes the first that answers yes, so the question has
+// to be separable from the diagnostic that ends the other cases.
+bool is_assignable(Type *dst, Node *src, int ctx) {
     add_type(src);
     Type *src_ty = src->ty;
-    if (is_arith(dst) && is_arith(src_ty)) return;
-    if (is_record(dst) && is_compatible(type_unqual(dst), type_unqual(src_ty))) return;
-    if (is_pointer(dst) && is_pointer(src_ty) && is_compatible(type_unqual(dst->base), type_unqual(src_ty->base)))
-        if (BIT_SUPERSET(dst->base->qual, src_ty->base->qual)) return;
+    if (is_arith(dst) && is_arith(src_ty)) return true;
+    if (is_record(dst) && is_compatible(type_unqual(dst), type_unqual(src_ty))) return true;
 
-    if (is_objptr(dst) && is_voidptr(src_ty))
-        if (BIT_SUPERSET(dst->base->qual, src_ty->base->qual)) return;
-    if (is_objptr(src_ty) && is_voidptr(dst))
-        if (BIT_SUPERSET(dst->base->qual, src_ty->base->qual)) return;
+    // GNU C converts freely between object pointers and function pointers,
+    // and both references accept it without a diagnostic -- only -pedantic
+    // mentions it. tinycc writes `tcc_add_symbol(s, name, _tcc_backtrace)`
+    // with a function designator for a `const void *`.
+    if (is_voidptr(dst) && (src_ty->kind == TY_FUNC || is_funcptr(src_ty))) return true;
+    if (is_voidptr(src_ty) && (dst->kind == TY_FUNC || is_funcptr(dst))) return true;
 
-    if (is_nullptr(dst) && is_null_constant(src)) return;
-    if (is_nullptr(dst) && is_nullptr(src_ty)) return;
-    if (is_pointer(dst) && (is_null_constant(src) || is_nullptr(src_ty))) return;
+    // A pointer conversion whose pointed-to types agree, or that goes between
+    // `void *` and any object pointer, is the conversion itself; what can
+    // still be wrong is a qualifier the destination does not carry. Both
+    // references report that and compile it anyway, so it is a diagnostic
+    // here too rather than a refusal.
+    if (is_pointer(dst) && is_pointer(src_ty)) {
+        bool agrees = is_compatible(type_unqual(dst->base), type_unqual(src_ty->base));
+        bool void_pair = (is_objptr(dst) && is_voidptr(src_ty)) || (is_objptr(src_ty) && is_voidptr(dst));
+        if (agrees || void_pair) {
+            if (!BIT_SUPERSET(dst->base->qual, src_ty->base->qual))
+                warning(WG_DISCARDED_QUALIFIERS, src->tok, "%s discards qualifiers", asop_msg[ctx]);
+            return true;
+        }
+    }
 
-    if (is_bool(dst) && (is_pointer(src_ty) || is_nullptr(src_ty))) return;
-    error(src->tok, "incompatible types when %s", msg[ctx]);
+    if (is_nullptr(dst) && is_null_constant(src)) return true;
+    if (is_nullptr(dst) && is_nullptr(src_ty)) return true;
+    if (is_pointer(dst) && (is_null_constant(src) || is_nullptr(src_ty))) return true;
+
+    if (is_bool(dst) && (is_pointer(src_ty) || is_nullptr(src_ty))) return true;
+    return false;
+}
+
+void check_asop(Type *dst, Node *src, int ctx) {
+    if (is_assignable(dst, src, ctx)) return;
+    error(src->tok, "incompatible types when %s", asop_msg[ctx]);
 }
 
 void modifiable_lvalue(Node *node) {

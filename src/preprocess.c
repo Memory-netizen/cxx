@@ -128,6 +128,7 @@ struct FileStack {
     uint32_t display_name;
     CondIncl *condframe;
     Token *guard_macro;
+    Token *guard_ifndef;
     Token *rest;
 };
 
@@ -135,6 +136,10 @@ static int cur_path;
 static int next_path;
 static int line_delta;
 static uint32_t display_name;
+// The `#` that opened the include guard of the file being read, and the macro
+// it guards with. Both are what tell a guarded file from one that merely ends
+// in an `#endif`.
+static Token *guard_ifndef;
 static FileStack *file_stack[256];
 static int include_depth;
 #define MAX_INCL_DEPTH 200
@@ -153,6 +158,7 @@ static FileStack *push_file(Token *rest, SrcFile *file) {
     fs->display_name = display_name;
     fs->condframe = cond_incl;
     fs->guard_macro = guard_macro;
+    fs->guard_ifndef = guard_ifndef;
     fs->rest = rest;
 
     cur_path = next_path;
@@ -160,6 +166,7 @@ static FileStack *push_file(Token *rest, SrcFile *file) {
     display_name = file->id;
     cond_incl = NULL;
     guard_macro = NULL;
+    guard_ifndef = NULL;
     push_cond_incl(NULL, BLOCK_ACTIVE);
 
     file_stack[include_depth++] = fs;
@@ -174,6 +181,7 @@ static Token *pop_file(void) {
     cur_path = file->search_idx;
     cond_incl = file->condframe;
     guard_macro = file->guard_macro;
+    guard_ifndef = file->guard_ifndef;
     line_delta = file->line_delta;
     display_name = file->display_name;
 
@@ -990,39 +998,49 @@ static Token *subst(Token *tok, MacroArg *args) {
 // tokens that follow the invocation*, and that is what makes a replacement
 // ending in a function-like macro's name a call when the file puts a
 // parenthesis after it. Expanding the replacement on its own cannot see that
-// parenthesis, and a body that pastes the name together is only a call
-// because of it: tinycc writes `ELFW(ST_BIND)(sym->st_info)` over
-// `#define ELFW(type) ELF64_##type`, and without this the rescan left
-// `ELF64_ST_BIND(...)` standing as an implicit function declaration.
+// parenthesis, and it is only a call because of it: tinycc writes
+// `ELFW(ST_BIND)(sym->st_info)` over `#define ELFW(type) ELF64_##type`, and
+// `#define WRAP ELFW(ST_TYPE)` followed by `WRAP(b)`.
 //
-// The argument list is read where it lies -- read_macro_args() only reads
-// forward from the name it is given, leaving the input alone -- and copied
-// onto the end of the replacement, so the expansion below sees the whole call
-// in one list. The input cursor moves past the list that was taken.
-static void splice_call(Token *sub, Token **input) {
-    if (sub->kind == TK_EOF) return;
+// The name is taken back off the output and expanded here instead, and here
+// rather than inside the invocation's window of disabled names: the argument
+// list comes from the file, where a macro name is not painted by the
+// invocation whose replacement it happens to follow. That is what lets
+// `ELFW(ST_INFO)(a, ELFW(ST_TYPE)(b))` expand the inner ELFW too.
+//
+// `prev` is the token the expansion was appended after, `input` is the
+// caller's cursor -- already past the invocation's own argument list -- and
+// the return value is the new tail of `dst`.
+static Token *rescan_call(Token *dst, Token *prev, Token **input) {
+    for (;;) {
+        if (dst == prev) return dst;
+        if (dst->kind != TK_IDENT || dst->noexpand || is_disabled(dst->id)) return dst;
 
-    Token *tail = sub;
-    while (tail->next && tail->next->kind != TK_EOF) tail = tail->next;
-    if (!tail->next || tail->next->kind != TK_EOF) return;
-    if (tail->kind != TK_IDENT || tail->noexpand || is_disabled(tail->id)) return;
+        Macro *m = find_macro(dst);
+        if (!m || m->is_objlike || m->handler) return dst;
 
-    Macro *m = find_macro(tail);
-    if (!m || m->is_objlike || m->handler) return;
+        Token *in = *input;
+        if (!in || in->kind != TK_LPAREN) return dst;
 
-    Token *in = *input;
-    if (!in || in->kind != TK_LPAREN) return;
+        // Take the name back off the output; its expansion replaces it.
+        Token *before = prev;
+        while (before->next != dst) before = before->next;
+        Token *name = copy_token(dst);
+        before->next = NULL;
 
-    Token *eof = tail->next;
-    tail->next = in;
-    Token *after = NULL;
-    read_macro_args(&after, tail, m->params, m->is_variadic, m->va_args_id);
-    tail->next = eof;
+        // read_macro_args() reads forward from the name it is given and does
+        // not modify it, so the argument list can be read where it lies.
+        Token *next = NULL;
+        name->next = in;
+        MacroArg *args = read_macro_args(&next, name, m->params, m->is_variadic, m->va_args_id);
+        *input = next;
 
-    Token *cur = tail;
-    for (Token *t = in; t && t != after; t = t->next) cur = cur->next = copy_token(t);
-    cur->next = eof;
-    *input = after;
+        Token *sub = subst(m->body, args);
+        for (Token *t = sub; t && t->kind != TK_EOF; t = t->next) t->origin = name;
+        push_disabled(m->id);
+        dst = expand_macro(before, sub);
+        pop_disabled();
+    }
 }
 
 // Recursively expand the input linked‑list macro,
@@ -1109,6 +1127,7 @@ static Token *expand_macro(Token *dst, Token *list) {
                 prev->next->is_sol = macro_name->is_sol;
             }
             for (Token *t = prev->next; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
+            dst = rescan_call(dst, prev, &cur->next);
             cur = cur->next;
             continue;
         }
@@ -1124,15 +1143,13 @@ static Token *expand_macro(Token *dst, Token *list) {
         // Function-like macro application
         MacroArg *args = read_macro_args(&cur, cur, m->params, m->is_variadic, m->va_args_id);
         Token *sub = subst(m->body, args);
-        // Stamped before the splice, so that a diagnostic in a token taken
-        // from the source names the source and not the invocation.
         for (Token *t = sub; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
-        splice_call(sub, &cur);
 
         Token *prev = dst;
         push_disabled(m->id);
         dst = expand_macro(dst, sub);
         pop_disabled();
+        dst = rescan_call(dst, prev, &cur);
         if (prev->next) {
             prev->next->is_leadingws = macro_name->is_leadingws;
             prev->next->is_sol = macro_name->is_sol;
@@ -1425,6 +1442,7 @@ int num_guard;
 
 static void detect_include_guard1(Token *tok) {
     if (!is_hash(tok)) return;
+    Token *ifndef = tok;
     tok = tok->next;
 
     if (tok->kind != TK_IDENT || tok->id != dt[P_IFNDEF].id) return;
@@ -1442,6 +1460,7 @@ static void detect_include_guard1(Token *tok) {
     if (tok->id != macro->id) return;
 
     guard_macro = macro;
+    guard_ifndef = ifndef;
 }
 
 static void detect_include_guard2(void) {
@@ -1729,9 +1748,16 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
 
         if (tok->id == dt[P_ENDIF].id) {
             if (!cond_incl->next) error(tk_hash, "#endif without #if");
+            // A guarded file is one whose *guard* runs to the end of it. Any
+            // `#endif` that happens to be last would do instead with a looser
+            // test, and a file that does something after its guard -- tinycc's
+            // tcc.h selects TCC_SET_STATE below `#endif _TCC_H`, from
+            // `USING_GLOBALS` -- would then be skipped whole on the second
+            // read, its tail never re-evaluated.
+            bool closes_guard = guard_ifndef && cond_incl->if_tok == guard_ifndef;
             cond_incl = cond_incl->next;
             if (cond_incl->state == BLOCK_ACTIVE) tok = skip_line(tok->next);
-            if (tok->kind == TK_EOF) detect_include_guard2();
+            if (closes_guard && tok->kind == TK_EOF) detect_include_guard2();
             continue;
         }
 

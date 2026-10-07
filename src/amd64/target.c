@@ -363,11 +363,15 @@ static Type *amd64_va_list_type(void) {
         elem.is_unsigned = true;
         Member *m;
 
+        // The names are the psABI's, and clang's builtin type has them too:
+        // the record is not opaque, and code that walks it -- tinycc's
+        // lib/va_list.c, which implements __va_arg on top of these fields --
+        // reads them by name.
         m = emalloc(sizeof(Member));
         m->ty = &ty_uint_;
         m->offset = 0;
         m->align = 4;
-        m->name = NULL;
+        m->name = member_name_token("gp_offset");
         elem.members = m;
 
         m->next = emalloc(sizeof(Member));
@@ -375,18 +379,21 @@ static Type *amd64_va_list_type(void) {
         m->ty = &ty_uint_;
         m->offset = 4;
         m->align = 4;
+        m->name = member_name_token("fp_offset");
 
         m->next = emalloc(sizeof(Member));
         m = m->next;
         m->ty = &ty_voidptr_;
         m->offset = 8;
         m->align = 8;
+        m->name = member_name_token("overflow_arg_area");
 
         m->next = emalloc(sizeof(Member));
         m = m->next;
         m->ty = &ty_voidptr_;
         m->offset = 16;
         m->align = 8;
+        m->name = member_name_token("reg_save_area");
         m->next = NULL;
 
         arr.kind = TY_ARRAY;
@@ -458,6 +465,7 @@ Target T_amd64 = {
     // An x86 asm may change the flags, and no template says which: clang
     // clobbers them on every statement, and so does this.
     .asm_clobbers = "~{dirflag},~{fpsr},~{flags}",
+    .asm_dialect_alt = true,
     .va_arg_ops = amd64_va_arg,
     .classify_aggregate = amd64_classify_aggregate,
     .classify_publish = classify_publish,

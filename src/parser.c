@@ -263,6 +263,30 @@ static Node *leave_scope(Token *tok) {
 
 static bool is_file_scope(void) { return scope == file_scope; }
 
+// How a record is named in a diagnostic. `uid` is the name the *IR* prints,
+// and it is 0 for a record the compiler built itself -- the ABI's va_list, an
+// aggregate shape -- where str(0) is not a string at all but whatever the
+// interning table's first slot happens to hold: that is how a member lookup
+// came to report "no member named 'gp_offset' in '__INT_FAST8_TYPE__'". The
+// tag is the name the program wrote, so it is asked for first.
+static char *record_diag_name(Type *ty) {
+    char *kind = ty->kind == TY_UNION ? "union" : "struct";
+    // gcc's spelling for a record with no tag.
+    if (ty->is_anon) return format("%s <anonymous>", kind);
+    if (ty->id) return format("%s %s", kind, str(ty->id));
+    if (ty->uid) return format("%s %s", kind, str(ty->uid));
+    return format("%s <anonymous>", kind);
+}
+
+// The name of a type in a diagnostic: the tag for a record, the usual
+// spelling for anything else. An incomplete type has no name token of its own,
+// so every diagnostic about one has to go through here rather than dereference
+// the type's `name`.
+static char *diag_type_name(Type *ty) {
+    if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) return record_diag_name(ty);
+    return format("%s", diag_ty_name(ty));
+}
+
 // The spelling the cleanup diagnostic uses for a type. It is a pointer most
 // of the time -- the address of the object is what the handler receives --
 // and `diag_ty_name` only names scalar types, so pointers, arrays and records
@@ -277,7 +301,7 @@ static char *cleanup_ty_str(Type *ty) {
             return format("%s[*]", cleanup_ty_str(ty->base));
         case TY_STRUCT:
         case TY_UNION:
-            return format("%s %s", ty->kind == TY_STRUCT ? "struct" : "union", str(ty->uid));
+            return record_diag_name(ty);
         default:
             return format("%s", diag_ty_name(ty));
     }
@@ -1769,10 +1793,19 @@ BuiltinDef builtin_defs[NUM_BUILTINFN] = {
     [BUILTIN_CONSTANT_P] = {"__builtin_constant_p", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_TYPES_COMPATIBLE_P] = {"__builtin_types_compatible_p", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1,
                                     0, 0, NULL, 0},
+    // Both take an i32 level and answer with a pointer. The level is an
+    // immarg, so a constant is what LLVM wants; gcc asks for one too, and
+    // the callers that exist (tinycc's backtrace stubs) pass literals.
+    [BUILTIN_FRAME_ADDRESS] = {"__builtin_frame_address", BCLASS_DECL, "llvm.frameaddress.p0", BT_VOIDPTR, BT_UINT,
+                               true, -1, 1, 1, NULL, 0},
+    [BUILTIN_RETURN_ADDRESS] = {"__builtin_return_address", BCLASS_DECL, "llvm.returnaddress.p0", BT_VOIDPTR, BT_UINT,
+                                true, -1, 1, 1, NULL, 0},
     [ATOMIC_STORE] = {"__c11_atomic_store", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [ATOMIC_LOAD] = {"__c11_atomic_load", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [ATOMIC_STORE_GENERIC] = {"__atomic_store", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [ATOMIC_LOAD_GENERIC] = {"__atomic_load", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [ATOMIC_COMPARE_EXCHANGE_GENERIC] = {"__atomic_compare_exchange", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1,
+                                         0, 0, NULL, 0},
     [ATOMIC_EXCHANGE] = {"__c11_atomic_exchange", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [ATOMIC_FETCH_ADD] = {"__c11_atomic_fetch_add", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [ATOMIC_FETCH_SUB] = {"__c11_atomic_fetch_sub", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
@@ -2010,7 +2043,8 @@ static size_t builtin_find(uint32_t id) {
 // from the C11 operation's. The C11 spelling (__c11_atomic_*) is the one that
 // requires an _Atomic object, and it is the only one that does.
 static bool is_gcc_atomic_spelling(uint32_t id, int kind) {
-    if (kind == ATOMIC_STORE_GENERIC || kind == ATOMIC_LOAD_GENERIC) return true;
+    if (kind == ATOMIC_STORE_GENERIC || kind == ATOMIC_LOAD_GENERIC || kind == ATOMIC_COMPARE_EXCHANGE_GENERIC)
+        return true;
     for (size_t i = 0; i < sizeof(builtin_aliases) / sizeof(builtin_aliases[0]); ++i)
         if (intern(builtin_aliases[i].name, strlen(builtin_aliases[i].name)) == id) return true;
     return id == intern("__atomic_compare_exchange_n", 27);
@@ -2543,7 +2577,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
                     if (ty->kind != TY_STRUCT && ty->kind != TY_UNION)
                         error(name, "request for member ‘%s’ in something not a structure or union", str(name->id));
                     Member *mem = get_struct_member(ty->members, name);
-                    if (!mem) error(name, "no member named ‘%s’ in ‘%s’", str(name->id), str(ty->uid));
+                    if (!mem) error(name, "no member named ‘%s’ in ‘%s’", str(name->id), record_diag_name(ty));
                     off += mem->offset;
                     ty = mem->ty;
                     tok = name->next;
@@ -2655,9 +2689,14 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             // last parameter is accepted and ignored: the ABI's register
             // save area already covers the named parameters, and LLVM's
             // va_start takes only the va_list.
-            if (!cur_fn || !cur_fn->ty->is_variadic)
-                error(tok, "‘%s’ used in a function that is not variadic",
-                      kind == BUILTIN_VA_START ? "__builtin_va_start" : "__builtin_va_end");
+            //
+            // Only va_start has to be in a variadic function (7.16.1.1p1).
+            // va_end closes a va_list that may have been handed to a
+            // function that is not itself variadic -- the vprintf shape,
+            // which cpython's object_vacall(), git's helpers and tinycc's
+            // all use, and which gcc and clang both accept.
+            if (kind == BUILTIN_VA_START && (!cur_fn || !cur_fn->ty->is_variadic))
+                error(tok, "‘__builtin_va_start’ used in a function that is not variadic");
             tok = skip(tok->next, TK_LPAREN);
             Node *addr = va_list_addr(&tok, tok);
             if (kind == BUILTIN_VA_START && tok->kind == TK_COMMA) {
@@ -2814,6 +2853,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             is_weak = true;
         // fall through
         case ATOMIC_COMPARE_EXCHANGE_N:
+        case ATOMIC_COMPARE_EXCHANGE_GENERIC:
         case ATOMIC_COMPARE_EXCHANGE_STRONG: {
             // desired = temp; result = temp (bool);
             // result = cas(object, &expected, desired).
@@ -2828,11 +2868,21 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
                 error(expected->tok, "second argument to atomic operation must be a pointer to the same type");
             tok = skip(tok, TK_COMMA);
             Node *desired = assign(&tok, tok);
+            // The generic spelling addresses the desired value: `*desired`,
+            // not `desired`. Everything else about it is the _n form's.
+            if (kind == ATOMIC_COMPARE_EXCHANGE_GENERIC) {
+                add_type(desired);
+                if (!is_pointer(desired->ty))
+                    error(desired->tok, "third argument of ‘__atomic_compare_exchange’ must be a pointer to the value");
+                desired = new_unary(ND_DEREF, desired, desired->tok);
+                // The new node has no type yet, and both calls below read it.
+                add_type(desired);
+            }
             lvalue_convert(&desired);
             new_imcast(&desired, value_ty);
             tok = skip(tok, TK_COMMA);
-            if (kind == ATOMIC_COMPARE_EXCHANGE_N) {
-                // The GCC spelling puts the weak flag where the C11 builtins
+            if (kind == ATOMIC_COMPARE_EXCHANGE_N || kind == ATOMIC_COMPARE_EXCHANGE_GENERIC) {
+                // Both GCC spellings put the weak flag where the C11 builtins
                 // put the success order. A strong compare-exchange satisfies
                 // everything a weak one does, so the flag is read and left
                 // unused rather than turning the call into a different
@@ -3414,6 +3464,34 @@ static Node *primary(Token **rest, Token *tok) {
     return NULL;
 }
 
+// The type a call passes an argument as. A parameter of a transparent union
+// -- `union { struct sockaddr *sa; ... } __attribute__((transparent_union))`,
+// which is how glibc declares the address parameter of connect(), bind() and
+// accept() under _GNU_SOURCE -- takes the types of its members directly, and
+// the call passes one of those, never the union. The member the argument is
+// assignable to is the one it goes as; with none of them it stays the union
+// and check_asop() reports it as before.
+//
+// gcc also wants the members to be passed alike and warns `union cannot be
+// made transparent` when they are not; cxx takes the attribute at its word
+// and lets the member the argument matches decide, which is what the shape
+// that exists in the headers needs.
+static Type *transparent_union_member(Type *param, Node *arg) {
+    if (param->kind != TY_UNION) return param;
+
+    bool transparent = false;
+    for (Attr *a = param->attrs; a; a = a->next)
+        if (a->info && !strcmp(a->info->name, "transparent_union")) {
+            transparent = true;
+            break;
+        }
+    if (!transparent) return param;
+
+    for (Member *m = param->members; m; m = m->next)
+        if (is_assignable(m->ty, arg, CTX_CALL)) return m->ty;
+    return param;
+}
+
 static Node *fncall(Token **rest, Token *tok, Node *fn) {
     if (fn->ty->kind != TY_FUNC && !is_funcptr(fn->ty))
         error(tok, "called object ‘%.*s’ is not a function or function pointer", fn->tok->len, tok_text(fn->tok));
@@ -3442,14 +3520,16 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
     do {
         Node *arg = assign(&tok, tok);
         if (param_ty) {
-            check_asop(param_ty, arg, CTX_CALL);
+            // A transparent union parameter passes the member, not the union.
+            Type *pass_ty = transparent_union_member(param_ty, arg);
+            check_asop(pass_ty, arg, CTX_CALL);
             // lvalue conversion must come before the cast: it wraps the
             // operand in ND_LVTOR, and integer_promotion() would otherwise
             // hide the lvalue and the load would never happen. For a record
             // it produces no load -- the caller's value *is* its address --
             // which irgen turns into a by-value argument.
             lvalue_convert(&arg);
-            new_imcast(&arg, param_ty);
+            new_imcast(&arg, pass_ty);
             param_ty = param_ty->next;
         } else if (ty->is_variadic) {
             // Default argument promotions (6.5.2.2p7): the integer
@@ -3611,7 +3691,7 @@ static Node *postfix(Token **rest, Token *tok) {
                 if (ty->qual & Q_ATOMIC)
                     error(dot, "accessing a member of an atomic structure or union is undefined behavior");
                 Member *mem = get_struct_member(ty->members, tok);
-                if (!mem) error(tok, "no member named ‘%s’ in ‘%s’", str(tok->id), str(ty->uid));
+                if (!mem) error(tok, "no member named ‘%s’ in ‘%s’", str(tok->id), record_diag_name(ty));
 
                 while (!mem->name) {
                     node = new_unary(ND_MEMBER, node, dot);
@@ -4585,7 +4665,24 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
 
         bool is_fn = ty->kind == TY_FUNC;
         if (fspec && !is_fn) {
-            if (fspec & Q_NORETURN) error(tok, "‘noreturn’ can only appear on functions");
+            // `noreturn` on a function *pointer* is a type both references
+            // have, and git's usage.c declares several:
+            // `static __attribute__((noreturn)) report_fn usage_routine = ...`
+            // with `report_fn` a pointer typedef. cxx carries the flag on the
+            // declaration rather than in the type, so it takes it there and
+            // moves on; on anything else the attribute is ignored, which is
+            // what gcc (-Wattributes) and clang (-Wignored-attributes) say.
+            if (fspec & Q_NORETURN) {
+                if (is_funcptr(ty)) {
+                    // A type of the pointer's: taken, and kept.
+                } else {
+                    warning(WG_ATTRIBUTES, tok, "‘noreturn’ attribute ignored");
+                    // Ignored means ignored: leaving the flag on would mark
+                    // the object noreturn, and a call through it would then
+                    // be taken as one that does not return.
+                    fspec &= ~Q_NORETURN;
+                }
+            }
             if (fspec & Q_INLINE) error(tok, "‘inline’ can only appear on functions");
         }
         SymKind symkind = is_fn ? SYM_FUNC : SYM_VAR;
@@ -4691,7 +4788,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             // (copy-initialization from another object stays legal).
             if ((ty->qual & Q_ATOMIC) && (ty->kind == TY_STRUCT || ty->kind == TY_UNION) &&
                 tok->next->kind == TK_LBRACE)
-                error(var_name, "illegal initializer type '_Atomic(%s)'", str(ty->uid));
+                error(var_name, "illegal initializer type '_Atomic(%s)'", record_diag_name(ty));
             if (is_static) {
                 // A block-scope static is emitted, and its initializer runs,
                 // whether or not anything reaches the function around it.
@@ -5523,7 +5620,8 @@ static bool asm_name_is(char *name, char *s, int len) {
 // GCC's is the operand count -- which is what makes `%l0` with one input name
 // the input -- and the labels come after the input half of every `+` operand
 // in the constraint string, which is the distance between the two.
-static char *asm_tmpl_conv(Token *tok, char *src, AsmOperand *ops, Node **labels, int nlabels, uint32_t label_base) {
+static char *asm_tmpl_conv(Token *tok, char *src, AsmOperand *ops, Node **labels, int nlabels, uint32_t label_base,
+                           bool dialects) {
     int nops = 0;
     for (AsmOperand *x = ops; x; x = x->next) nops++;
 
@@ -5541,6 +5639,20 @@ static char *asm_tmpl_conv(Token *tok, char *src, AsmOperand *ops, Node **labels
             continue;
         }
         if (c != '%') {
+            // GCC's dialect alternatives: `{att|intel|...}` picks one of its
+            // arms for the assembler in use, and LLVM spells the same thing
+            // `$(att$|intel$|...)`. Only an extended statement on a target
+            // whose assembler has dialects is rewritten -- clang leaves the
+            // braces of a basic statement, and of every statement on a target
+            // without dialects, exactly as written, and cpython's
+            // pycore_pystate.h writes `{movq %%rsp, %0|mov %0, rsp}` for
+            // x86-64.
+            if (dialects && (c == '{' || c == '|' || c == '}')) {
+                buf[o++] = '$';
+                buf[o++] = c == '{' ? '(' : c == '|' ? '|' : ')';
+                i++;
+                continue;
+            }
             buf[o++] = c;
             i++;
             continue;
@@ -5548,6 +5660,14 @@ static char *asm_tmpl_conv(Token *tok, char *src, AsmOperand *ops, Node **labels
         i++;
         if (src[i] == '%') {
             buf[o++] = '%';
+            i++;
+            continue;
+        }
+        // `%{`, `%|` and `%}` are the literal characters the syntax above
+        // would otherwise take. This one is not conditional on the target:
+        // clang honours it wherever the syntax exists at all.
+        if (src[i] == '{' || src[i] == '|' || src[i] == '}') {
+            buf[o++] = src[i];
             i++;
             continue;
         }
@@ -5773,7 +5893,8 @@ static Node *asm_stmt(Token **rest, Token *tok) {
     // end already. A fifth colon has nowhere to go, which is where both
     // references stop too.
     int spare = 0;
-    for (int sect = 0; spare || tok->kind == TK_COLON || tok->kind == TK_COLONCOLON;) {
+    int sect = 0;
+    for (; spare || tok->kind == TK_COLON || tok->kind == TK_COLONCOLON;) {
         if (sect == 4) error(tok, "expected ‘)’ before ‘:’ token");
         if (spare)
             spare--;
@@ -5864,7 +5985,12 @@ static Node *asm_stmt(Token **rest, Token *tok) {
     node->asm_cons = cons ? cons : "";
     node->asm_narg = arg;
     node->asm_nret = nret;
-    node->asm_tmpl = asm_tmpl_conv(start, tmpl, ops, node->asm_labels, node->asm_nlabels, nouts + nins + nplus);
+    // A statement with no colon is *basic* asm, and a basic template is not
+    // rewritten at all: GCC's dialect alternatives, like its `%` escapes,
+    // belong to the extended form. clang keeps `{a|b}` in a basic statement
+    // and rewrites it in an extended one, operands or not.
+    node->asm_tmpl = asm_tmpl_conv(start, tmpl, ops, node->asm_labels, node->asm_nlabels, nouts + nins + nplus,
+                                   sect > 0 && T.asm_dialect_alt);
     return node;
 }
 
@@ -5897,7 +6023,7 @@ static Token *asm_decl(Token *tok) {
     // sign is still doubled for LLVM -- but there are no operands for `%0` to
     // name, and a number LLVM cannot resolve aborts its backend rather than
     // diagnosing it, so a reference to one has to be caught here.
-    char *t = asm_tmpl_conv(start, tmpl, NULL, NULL, 0, 0);
+    char *t = asm_tmpl_conv(start, tmpl, NULL, NULL, 0, 0, false);
     if (!curm->masm)
         curm->masm = vnew(4, sizeof(char *));
     else
@@ -7477,7 +7603,14 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
 
             Token *start = tok;
             Attr *param_attrs = NULL;
-            Type *basety = declspecs(&tok, tok, NULL, NULL, NULL, &param_attrs);
+            SClass psclass = 0;
+            Type *basety = declspecs(&tok, tok, &psclass, NULL, NULL, &param_attrs);
+            // 6.7.6.3p2: `register` is the only storage-class specifier a
+            // parameter may carry. A NULL sclass here refused every one of
+            // them, which is what stopped git's kwset.c at
+            // `register struct tree const *tree`.
+            if (psclass & ~SC_REG)
+                error(start, "storage class ‘%s’ is not allowed on a parameter", sclass_name[psclass & ~SC_REG]);
             Type *paramty = abstract_declarator(&tok, tok, basety, true);
             apply_postdecl_attrs(paramty);
             // A declaration attribute in front of the type belongs to this
@@ -7515,9 +7648,6 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
                 paramty->name = fn->name;
             }
 
-            if (paramty->size < 0)
-                error(paramty->name, "parameter ‘%.*s’ has incomplete type", paramty->name->len,
-                      tok_text(paramty->name));
             if (paramty->name) {
                 uint32_t id = get_ident(paramty->name);
                 for (Type *p = dummy.next; p && p->name; p = p->next) {
@@ -7765,7 +7895,16 @@ static Token *external_declaration(Token *tok) {
         int fspec = funcspec;
         attr_decl_apply(ty->attrs, &fspec, &align, ty->kind == TY_FUNC);
         if (fspec && !is_fn) {
-            if (fspec & Q_NORETURN) error(tok, "‘noreturn’ can only appear on functions");
+            // See the same check in the block-scope declaration path: the
+            // attribute is a type of function pointer's, or it is ignored.
+            if (fspec & Q_NORETURN) {
+                if (is_funcptr(ty)) {
+                    // See the block-scope path above.
+                } else {
+                    warning(WG_ATTRIBUTES, tok, "‘noreturn’ attribute ignored");
+                    fspec &= ~Q_NORETURN;
+                }
+            }
             if (fspec & Q_INLINE) error(tok, "‘inline’ can only appear on functions");
         }
 
@@ -7783,6 +7922,17 @@ static Token *external_declaration(Token *tok) {
             if (sclass & SC_CONSTEXPR) error(tok, "function definition declared ‘constexpr’");
             if (sclass & SC_REG) error(tok, "function definition declared ‘register’");
             if (sclass & SC_AUTO) error(tok, "function definition declared ‘auto’");
+
+            // A definition's parameters have to be complete, a declaration's
+            // do not: `void show_reflog_message(..., struct date_mode, ...)`
+            // in git's reflog-walk.h names one that the header never
+            // completes, and both references take it. The check used to sit
+            // in func_param(), where it fired on the declaration -- and
+            // dereferenced a name token an unnamed parameter does not have,
+            // taking cxx down instead of reporting.
+            for (Type *p = ty->params; p; p = p->next)
+                if (p->size < 0)
+                    error(p->name ? p->name : var_name, "parameter has incomplete type ‘%s’", diag_type_name(p));
 
             if (ns) {
                 check_decl_compatile(ns, SYM_FUNC, ty);
@@ -8003,7 +8153,7 @@ static Token *external_declaration(Token *tok) {
                 // Like clang: atomic aggregates cannot be brace-initialized.
                 if ((ty->qual & Q_ATOMIC) && (ty->kind == TY_STRUCT || ty->kind == TY_UNION) &&
                     tok->next->kind == TK_LBRACE)
-                    error(var_name, "illegal initializer type '_Atomic(%s)'", str(ty->uid));
+                    error(var_name, "illegal initializer type '_Atomic(%s)'", record_diag_name(ty));
                 Sym *outer = cur_init;
                 cur_init = var;
                 gvar_initializer(&tok, tok->next, var);

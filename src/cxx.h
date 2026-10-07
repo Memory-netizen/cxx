@@ -304,6 +304,11 @@ struct Target {
     AsmConsConv *asm_cons;
     int num_asm_cons;
     char *asm_clobbers;
+    // Whether this target's assembler has more than one dialect, which is
+    // what makes GCC's `{att|intel}` alternative syntax meaningful in an
+    // extended asm template. Only x86 does; clang leaves the braces of every
+    // template on any other target exactly as written.
+    bool asm_dialect_alt;
 };
 
 extern Target T;
@@ -970,6 +975,10 @@ enum {
     BUILTIN_ALLOCA_WITH_ALIGN,
     BUILTIN_CONSTANT_P,
     BUILTIN_TYPES_COMPATIBLE_P,
+    // __builtin_frame_address(n) / __builtin_return_address(n): the address
+    // of the frame n levels up, or of the return address in it.
+    BUILTIN_FRAME_ADDRESS,
+    BUILTIN_RETURN_ADDRESS,
     ATOMIC_STORE,
     ATOMIC_LOAD,
     // GCC's generic forms: __atomic_store(ptr, val, order) and
@@ -977,6 +986,9 @@ enum {
     // and are a separate operation from the _n spelling, not an alias of it.
     ATOMIC_STORE_GENERIC,
     ATOMIC_LOAD_GENERIC,
+    // __atomic_compare_exchange: as the _n spelling, but the desired value is
+    // addressed as well.
+    ATOMIC_COMPARE_EXCHANGE_GENERIC,
     ATOMIC_EXCHANGE,
     ATOMIC_FETCH_ADD,
     ATOMIC_FETCH_SUB,
@@ -1355,9 +1367,18 @@ bool is_scalar(Type *ty);
 bool is_record(Type *ty);
 bool is_array(Type *ty);
 bool is_funcptr(Type *ty);
+// A member name for a record the target builds itself. There is no source
+// token behind it, so it carries the one thing a lookup compares: the
+// interned id. The ABI's own records -- the x86-64 and AArch64 va_list -- are
+// what needs these, because code that walks them spells the fields
+// (tinycc's lib/va_list.c reads ap->gp_offset).
+Token *member_name_token(char *name);
 bool is_compatible(Type *t1, Type *t2);
 int float_rank(Type *ty);
 void check_asop(Type *dst, Node *src, int ctx);
+// The same question without the diagnostic: may `src` be assigned to `dst`?
+// A transparent union's parameter asks it of each member.
+bool is_assignable(Type *dst, Node *src, int ctx);
 Type *pointer_to(Type *base, uint32_t qual);
 Type *func_type(Type *return_ty);
 Type *array_of(Type *base, int size);
@@ -1708,6 +1729,10 @@ Node *fold_node(Node *node);
 int encode_utf8(char *buf, uint32_t c);
 uint32_t decode_utf8(char **new_pos, char *p, bool *success);
 bool is_ident1(uint32_t c);
+// The length of the punctuator at `p` (0 if none), with its kind in *kind.
+// Exposed for the -E printer, which has to know when two tokens would merge
+// into one.
+int read_punct(char *p, uint32_t *kind);
 bool is_ident2(uint32_t c);
 int display_width(char *p, int len);
 
@@ -1793,7 +1818,15 @@ enum {
     // and so does cxx -- a constant the program does not get is worth saying
     // even without a flag. The wider -Wfloat-conversion stays opt-in.
     WG_CONST_INT_FLOAT_CONVERSION = 1u << 23,
-    WG_ALL = (1u << 24) - 1,
+    // gcc's name for a pointer conversion that drops a qualifier the
+    // destination does not carry -- `free(p)` with a `const char *`, or
+    // `char *q = p` with a `const char *p`. It is a constraint violation
+    // (6.5.16.1p1) and both references diagnose it and compile through; cxx
+    // refused, which is what stopped git's bloom.c, tinycc's tccrun.c and
+    // five cpython units. clang calls it
+    // -Wincompatible-pointer-types-discards-qualifiers.
+    WG_DISCARDED_QUALIFIERS = 1u << 24,
+    WG_ALL = (1u << 25) - 1,
     // Groups that -Wall does not enable.
     WG_OFF_DEFAULT = WG_IMPLICIT_FALLTHROUGH | WG_FLOAT_CONVERSION | WG_SIGN_COMPARE,
 };

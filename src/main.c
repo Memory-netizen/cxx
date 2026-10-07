@@ -285,6 +285,7 @@ static const struct {
     {"float-conversion", WG_FLOAT_CONVERSION},
     {"literal-range", WG_LITERAL_RANGE},
     {"sign-compare", WG_SIGN_COMPARE},
+    {"discarded-qualifiers", WG_DISCARDED_QUALIFIERS},
     {"implicit-const-int-float-conversion", WG_CONST_INT_FLOAT_CONVERSION},
     {"implicit-function-declaration", WG_IMPLICIT_FUNCTION_DECLARATION},
 };
@@ -763,11 +764,43 @@ bool file_exists(char *path) {
 
 // --- Compilation stages ---
 
+// Whether a space has to be printed between two tokens of -E output. What is
+// printed has to re-tokenize to the same tokens (6.10.3.3), and `is_leadingws`
+// cannot say that on its own: after substitution an argument's first token
+// carries the whitespace it had where it was written, which says nothing about
+// the token it now follows. `#define __SOCKADDR_COMMON(prefix) sa_family_t
+// prefix;` called as `__SOCKADDR_COMMON (sa_family)` printed
+// `sa_family_tsa_family;` that way.
+static bool needs_space(Token *prev, Token *cur) {
+    if (!prev) return false;
+    unsigned char c1 = (unsigned char)tok_text(prev)[prev->len - 1];
+    unsigned char c2 = (unsigned char)tok_text(cur)[0];
+
+    // An identifier or a number runs into what follows it.
+    if ((is_ident2(c1) || c1 >= 0x80) && (is_ident2(c2) || c2 >= 0x80)) return true;
+
+    // A `.` that would join a number, and the third one of an ellipsis.
+    if (prev->kind == TK_NUM && c2 == '.') return true;
+    if (c1 == '.' && cur->kind == TK_NUM) return true;
+    if (c1 == '.' && c2 == '.' && cur->next && cur->next->kind == TK_ELLIPSIS) return true;
+
+    // Two punctuators that would lex as one longer one; the lexer that reads
+    // them is the authority on which those are.
+    char buf[8];
+    int n = 0;
+    buf[n++] = c1;
+    for (uint32_t i = 0; i < cur->len && n < 7; i++) buf[n++] = tok_text(cur)[i];
+    buf[n] = 0;
+    uint32_t kind;
+    return read_punct(buf, &kind) > 1;
+}
+
 // Print tokens to stdout. Used for -E.
 static void print_tokens(Token *tok) {
     FILE *out = open_outfile(opt_o ? opt_o : "-");
 
     int cur_line = 0;
+    Token *prev = NULL;
     for (; tok->kind != TK_EOF; tok = tok->next) {
         if (cur_line > 0 && tok->is_sol) {
             int line, col;
@@ -789,8 +822,9 @@ static void print_tokens(Token *tok) {
             fprintf(out, "# %lu \"%s\"", (unsigned long)tok->id, str(tok->filename));
             continue;
         }
-        if (tok->is_leadingws) fprintf(out, " ");
+        if (tok->is_leadingws || needs_space(prev, tok)) fprintf(out, " ");
         fprintf(out, "%.*s", (int)tok->len, tok_text(tok));
+        prev = tok;
     }
     fprintf(out, "\n");
 }

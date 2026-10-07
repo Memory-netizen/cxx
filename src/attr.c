@@ -36,6 +36,10 @@ static AttrInfo attrs[] = {
     {"noinline", ATTR_NS_GNU, 1, ATTR_DECL},
     {"format", ATTR_NS_GNU, 1, ATTR_DECL},
     {"sentinel", ATTR_NS_GNU, 1, ATTR_DECL},
+    // A parameter of this union type takes any of the union's member types
+    // directly, which is how glibc declares the address parameter of
+    // connect(), bind(), accept() and sendto() under _GNU_SOURCE.
+    {"transparent_union", ATTR_NS_GNU, 1, ATTR_TYPE | ATTR_DECL},
 
     // Clang attributes.
     {"annotate", ATTR_NS_CLANG, 1, ATTR_DECL},

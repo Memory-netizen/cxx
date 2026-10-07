@@ -169,6 +169,19 @@ Node *fold_builtin_call(int kind, Node *call) {
         case BUILTIN_BSWAP32:
         case BUILTIN_BSWAP64:
             return fold_bswap(call);
+        // The level is an immarg: LLVM wants a literal in that operand, and
+        // gcc asks for a constant integer as well. Saying so here is the
+        // difference between a diagnostic and an LLVM complaint about the IR
+        // cxx handed it. Neither folds to a constant -- the frame's address
+        // is only known at run time -- so both answer NULL.
+        case BUILTIN_FRAME_ADDRESS:
+        case BUILTIN_RETURN_ADDRESS: {
+            Node *level = call->args;
+            if (!level || level->kind != ND_NUM)
+                error(level ? level->tok : call->tok, "argument to ‘%s’ must be a constant integer",
+                      BUILTIN_ROW(kind)->name);
+            return NULL;
+        }
         case BUILTIN_CLZ:
         case BUILTIN_CLZL:
         case BUILTIN_CLZLL:
@@ -197,6 +210,7 @@ Node *fold_builtin_call(int kind, Node *call) {
         case BUILTIN_TYPES_COMPATIBLE_P:
         case ATOMIC_STORE:
         case ATOMIC_LOAD:
+        case ATOMIC_COMPARE_EXCHANGE_GENERIC:
         case ATOMIC_EXCHANGE:
         case ATOMIC_FETCH_ADD:
         case ATOMIC_FETCH_SUB:

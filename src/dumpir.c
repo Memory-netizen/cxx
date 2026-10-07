@@ -901,6 +901,118 @@ static void dump_union_elem(Type *ty, Member *mem, Initializer *child) {
     fprintf(out_file, " }");
 }
 
+// Whether an initializer needs its type spelled out. A union initialized
+// through a member other than the canonical one is written *as that member* --
+// clang's type-punning form, `{ %struct.anon }` for an `int64_t` union
+// initialized through an 8-byte struct member -- and LLVM then requires the
+// type containing it to be spelled out the same way. `%struct.obj = type
+// { %union.u, ptr }` with an initializer that writes the union's other member
+// is what LLVM reports as "element 0 of struct initializer doesn't match
+// struct element type": cpython's `struct _object` has exactly that shape, its
+// first member a union of an `int64_t` refcount and a struct of three smaller
+// fields.
+static bool init_needs_inline(Initializer *init, Type *ty) {
+    if (!init || !init->is_inited) return false;
+
+    if (ty->kind == TY_UNION) {
+        Member *mem = init->mem ? init->mem : ty->members;
+        return mem != union_canon_member(ty);
+    }
+    if (ty->kind == TY_STRUCT) {
+        for (Member *m = ty->members; m; m = m->next) {
+            // A bit-field has no element of its own (see dump_init).
+            if (m->is_bitfield) continue;
+            if (init_needs_inline(init->child[m->idx], m->ty)) return true;
+        }
+        return false;
+    }
+    if (ty->kind == TY_ARRAY && ty->base->kind == TY_UNION) {
+        // An array whose elements initialize different members is written as
+        // a packed struct of per-element types, which is spelled out too.
+        Member *canon = union_canon_member(ty->base);
+        for (int i = 0; i < ty->len; i++) {
+            Initializer *c = init->child[i];
+            if (c->is_inited && c->mem && c->mem != canon) return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+// The type a `dump_init()` value is written with. Everything that needs no
+// type-punning keeps its name, so the IR of every other initializer is left
+// exactly as it was; only a type that contains a punned union is spelled out,
+// and it is spelled out the way `dump_init()` writes its elements -- the same
+// walk, in the same order, or LLVM rejects the initializer as belonging to
+// another type.
+static void print_init_ty(Initializer *init, Type *ty) {
+    if (!init_needs_inline(init, ty)) {
+        print_type(ty);
+        return;
+    }
+
+    if (ty->kind == TY_UNION) {
+        Member *canon = union_canon_member(ty);
+        Member *mem = (init->is_inited && init->mem) ? init->mem : canon;
+        if (mem == canon)
+            print_type(ty);
+        else
+            print_union_elem_ty(ty, mem);
+        return;
+    }
+
+    if (ty->kind == TY_STRUCT) {
+        fprintf(out_file, "{ ");
+        int pos = 0;
+        bool first = true;
+        for (Member *m = ty->members; m;) {
+            int off = m->offset;
+            if (off < pos) {
+                m = m->next;
+                continue;
+            }
+            if (!first) fprintf(out_file, ", ");
+            first = false;
+            if (pos < off) {
+                fprintf(out_file, "[%d x i8], ", off - pos);
+                pos = off;
+            }
+            if (m->is_bitfield) {
+                print_type(m->unit_ty);
+                pos += m->unit_ty->size;
+            } else {
+                print_init_ty(init->child[m->idx], m->ty);
+                pos += m->ty->size;
+            }
+            m = m->next;
+        }
+        if (pos < ty->size) {
+            if (!first) fprintf(out_file, ", ");
+            fprintf(out_file, "[%d x i8]", ty->size - pos);
+        }
+        fprintf(out_file, " }");
+        return;
+    }
+
+    if (ty->kind == TY_ARRAY && ty->base->kind == TY_UNION) {
+        Member *canon = union_canon_member(ty->base);
+        fprintf(out_file, "<{ ");
+        for (int i = 0; i < ty->len; i++) {
+            if (i) fprintf(out_file, ", ");
+            Initializer *c = init->child[i];
+            Member *mem = (c->is_inited && c->mem) ? c->mem : canon;
+            if (!c->is_inited || mem == canon)
+                print_type(ty->base);
+            else
+                print_union_elem_ty(ty->base, mem);
+        }
+        fprintf(out_file, " }>");
+        return;
+    }
+
+    print_type(ty);
+}
+
 // The bits of one element of a record's image. An element is a byte range
 // `[pos, pos + size)`, and a bit-field may straddle two of them: the element
 // boundaries come from the type, where each field that starts a new access
@@ -994,7 +1106,7 @@ static void dump_init(Initializer *init, Type *ty) {
         }
     }
 
-    print_type(ty);
+    print_init_ty(init, ty);
     fprintf(out_file, " ");
     if (ty->kind == TY_ARRAY) {
         if (!init || !init->is_inited) {

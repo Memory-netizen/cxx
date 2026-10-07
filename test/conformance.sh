@@ -2424,6 +2424,514 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# va_end closes a va_list that may have been handed to a function that is not
+# itself variadic -- the vprintf shape. Only va_start has to be in a variadic
+# function (7.16.1.1p1); gcc and clang both accept the rest, and cpython's
+# object_vacall(), git's helpers and tinycc's all do it.
+cat > "$tmp/fwdvalist.c" <<'EOF'
+#include <stdarg.h>
+static int sum(int n, va_list ap) {
+    int total = 0;
+    va_list copy;
+    va_copy(copy, ap);
+    for (int i = 0; i < n; i++) total += va_arg(ap, int);
+    va_end(copy);
+    va_end(ap);
+    return total;
+}
+static int call(int n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    int total = sum(n, ap);
+    va_end(ap);
+    return total;
+}
+int main(void) { return call(3, 1, 2, 3) == 6 ? 0 : 1; }
+EOF
+if "$compiler" -w -o "$tmp/fwdvalist" "$tmp/fwdvalist.c" >/dev/null 2>&1 && "$tmp/fwdvalist"; then
+    echo "testing va_end on a forwarded va_list ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing va_end on a forwarded va_list ... FAILED"
+    "$compiler" -w -o "$tmp/fwdvalist" "$tmp/fwdvalist.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# GCC's dialect alternatives in an extended asm template: `{att|intel}` picks
+# one arm for the assembler in use, and LLVM spells it `$(att$|intel$)`. A
+# *basic* statement is not rewritten at all -- cpython's pycore_pystate.h
+# writes the extended form for x86-64, and every module that includes it
+# failed with `Expected '}'` until the rewrite landed.
+cat > "$tmp/dialect.c" <<'EOF'
+#include <stdint.h>
+#include <stddef.h>
+static uintptr_t stack_pointer(void) {
+    uintptr_t result;
+    __asm__ ("{movq %%rsp, %0|mov %0, rsp}" : "=r" (result));
+    return result;
+}
+int main(void) {
+    uintptr_t sp = stack_pointer();
+    char here;
+    uintptr_t local = (uintptr_t)&here;
+    uintptr_t diff = sp > local ? sp - local : local - sp;
+    return (sp != 0 && diff < 65536) ? 0 : 1;
+}
+EOF
+if "$compiler" -w -o "$tmp/dialect" "$tmp/dialect.c" >/dev/null 2>&1 && "$tmp/dialect"; then
+    echo "testing asm dialect alternatives ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing asm dialect alternatives ... FAILED"
+    "$compiler" -w -o "$tmp/dialect" "$tmp/dialect.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# A pointer conversion that only drops a qualifier is a constraint violation
+# (6.5.16.1p1) that both references diagnose and then compile through:
+# `free(p)` with a `const char *p` is -Wdiscarded-qualifiers in gcc and
+# -Wincompatible-pointer-types-discards-qualifiers in clang, and cxx refused
+# to compile git's bloom.c, tinycc's tccrun.c and five cpython units over it.
+# A function designator reaching a `void *` parameter is the GNU extension
+# both references accept in silence.
+cat > "$tmp/qualconv.c" <<'EOF'
+static void take(const void *p) { (void)p; }
+static void release(void *p) { (void)p; }
+static void fn(int a) { (void)a; }
+int main(void) {
+    const char *c = "x";
+    take(c);
+    release(c);
+    char *q = c;
+    (void)q;
+    take(fn);
+    return c[0] == 'x' ? 0 : 1;
+}
+EOF
+if "$compiler" -w -o "$tmp/qualconv" "$tmp/qualconv.c" >/dev/null 2>&1 && "$tmp/qualconv"; then
+    echo "testing a qualifier-dropping pointer conversion ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a qualifier-dropping pointer conversion ... FAILED"
+    "$compiler" -w -o "$tmp/qualconv" "$tmp/qualconv.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# ... and it is a diagnostic, not a silence: gcc's group name has to turn it
+# on, -w and -Wno-discarded-qualifiers have to turn it off.
+if "$compiler" -Wdiscarded-qualifiers -c -o /dev/null "$tmp/qualconv.c" > "$tmp/log" 2>&1 &&
+    grep -q 'discards qualifiers' "$tmp/log" &&
+    "$compiler" -w -c -o /dev/null "$tmp/qualconv.c" > "$tmp/log2" 2>&1 &&
+    ! grep -q 'discards qualifiers' "$tmp/log2"; then
+    echo "testing -Wdiscarded-qualifiers names the warning ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -Wdiscarded-qualifiers names the warning ... FAILED"
+    head -3 "$tmp/log" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# 6.10.3.4p1: the replacement is rescanned together with the tokens that
+# follow the invocation, so a replacement ending in a function-like macro's
+# name is a call when the file supplies the parenthesis. tinycc writes
+# `ELFW(ST_BIND)(x)` over `#define ELFW(type) ELF64_##type`, and
+# `#define WRAP ELFW(ST_TYPE)` followed by `WRAP(b)`; the rescan also has to
+# run outside the invocation's own window of disabled names, or the inner
+# `ELFW(ST_TYPE)(b)` in `ELFW(ST_INFO)(a, ELFW(ST_TYPE)(b))` stays unexpanded.
+cat > "$tmp/rescancall.c" <<'EOF'
+#define ELFW(type) ELF64_##type
+#define ELF64_ST_TYPE(v) ((v) & 0xf)
+#define ELF64_ST_BIND(v) (((v) >> 4) & 0xf)
+#define ELF64_ST_INFO(b, t) (((b) << 4) + ((t) & 0xf))
+#define WRAP ELFW(ST_TYPE)
+int f(int info) { return ELFW(ST_BIND)(info); }
+int g(int b, int t) { return ELFW(ST_INFO)(b, ELFW(ST_TYPE)(t)); }
+int h(int v) { return WRAP(v); }
+int main(void) {
+    if (f(0x21) != 2) return 1;
+    if (g(2, 1) != 0x21) return 2;
+    if (h(0x1f) != 0xf) return 3;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/rescancall" "$tmp/rescancall.c" >/dev/null 2>&1 && "$tmp/rescancall"; then
+    echo "testing a replacement rescanned with what follows ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a replacement rescanned with what follows ... FAILED"
+    "$compiler" -w -o "$tmp/rescancall" "$tmp/rescancall.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# A file is guarded only when its *guard* runs to the end of it. Any trailing
+# `#endif` used to count, so a header that does something after its guard --
+# tinycc's tcc.h selects TCC_SET_STATE below `#endif _TCC_H` -- was skipped
+# whole on the second read and its tail never re-evaluated.
+mkdir -p "$tmp/guard"
+cat > "$tmp/guard/g.h" <<'EOF'
+#ifndef G_H
+#define G_H
+#define BODY_SEEN 1
+#endif
+
+#undef PICKED
+#ifdef FLAG
+#define PICKED 2
+#else
+#define PICKED 3
+#endif
+EOF
+cat > "$tmp/guard.c" <<'EOF'
+#include "guard/g.h"
+#define FLAG 1
+#include "guard/g.h"
+int main(void) { return PICKED == 2 ? 0 : 1; }
+EOF
+if "$compiler" -w -I"$tmp" -o "$tmp/guardprog" "$tmp/guard.c" >/dev/null 2>&1 && "$tmp/guardprog"; then
+    echo "testing code after an include guard's #endif ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing code after an include guard's #endif ... FAILED"
+    "$compiler" -w -I"$tmp" -o "$tmp/guardprog" "$tmp/guard.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# `__attribute` with one pair of underscores is the older spelling of
+# `__attribute__`, and both references take it; tinycc's lib/dsohandle.c
+# writes `void *h __attribute((visibility("hidden"))) = &h;`.
+cat > "$tmp/attrspell.c" <<'EOF'
+void *h __attribute((visibility("hidden"))) = &h;
+int f(void) __attribute((noinline));
+int f(void) { return 0; }
+int main(void) { return h == &h && f() == 0 ? 0 : 1; }
+EOF
+if "$compiler" -w -o "$tmp/attrspell" "$tmp/attrspell.c" >/dev/null 2>&1 && "$tmp/attrspell"; then
+    echo "testing __attribute with one pair of underscores ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __attribute with one pair of underscores ... FAILED"
+    "$compiler" -w -o "$tmp/attrspell" "$tmp/attrspell.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# GNU C gives `void *` arithmetic a byte step, and `getelementptr void` is not
+# IR: LLVM answers "void type only allowed for function results". tinycc's
+# __bound_ptr_add() returns `p + offset` on a `void *`, and four cpython units
+# had the same shape.
+cat > "$tmp/voidarith.c" <<'EOF'
+#include <string.h>
+int main(void) {
+    char buf[16];
+    strcpy(buf, "abcdef");
+    void *p = buf;
+    void *q = p + 2;
+    void *r = q;
+    r += 3;
+    void *s = r++;
+    if ((char *)q != buf + 2) return 1;
+    if ((char *)r != buf + 6) return 2;
+    if ((char *)s != buf + 5) return 3;
+    if ((char *)(s - 1) != buf + 4) return 4;
+    return strcmp((char *)q, "cdef") == 0 ? 0 : 5;
+}
+EOF
+if "$compiler" -w -o "$tmp/voidarith" "$tmp/voidarith.c" >/dev/null 2>&1 && "$tmp/voidarith"; then
+    echo "testing void pointer arithmetic ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing void pointer arithmetic ... FAILED"
+    "$compiler" -w -o "$tmp/voidarith" "$tmp/voidarith.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# __builtin_frame_address and __builtin_return_address, and the constant the
+# level has to be: without the check the IR carried a non-immediate immarg and
+# LLVM refused it, which is a diagnostic about the IR rather than about the
+# program. tinycc's backtrace stubs are the callers that exist.
+cat > "$tmp/frameaddr.c" <<'EOF'
+#include <stdint.h>
+static int check(void) {
+    uintptr_t here = (uintptr_t)__builtin_frame_address(0);
+    uintptr_t local = (uintptr_t)&here;
+    long d = (long)(here > local ? here - local : local - here);
+    if (here == 0 || d > 65536) return 1;
+    if (__builtin_return_address(0) == 0) return 2;
+    if (__builtin_frame_address(1) == 0) return 3;
+    return 0;
+}
+int main(void) { return check(); }
+EOF
+if "$compiler" -w -o "$tmp/frameaddr" "$tmp/frameaddr.c" >/dev/null 2>&1 && "$tmp/frameaddr"; then
+    echo "testing frame and return address ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing frame and return address ... FAILED"
+    "$compiler" -w -o "$tmp/frameaddr" "$tmp/frameaddr.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+cat > "$tmp/framevar.c" <<'EOF'
+void *f(unsigned n) { return __builtin_frame_address(n); }
+EOF
+"$compiler" -w -c -o /dev/null "$tmp/framevar.c" > "$tmp/log" 2>&1
+if grep -q 'must be a constant integer' "$tmp/log"; then
+    echo "testing a non-constant frame level is diagnosed ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a non-constant frame level is diagnosed ... FAILED"
+    head -3 "$tmp/log" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# The x86-64 psABI names the fields of __va_list_tag, and clang's builtin type
+# has them: code that walks the record spells them. tinycc's lib/va_list.c
+# implements __va_arg on top of ap->gp_offset and friends.
+cat > "$tmp/valistfields.c" <<'EOF'
+#include <stdarg.h>
+#include <stddef.h>
+int main(void) {
+    va_list ap;
+    /* Written and read by name: the fields are the point, not varargs. */
+    ap->gp_offset = 1;
+    ap->fp_offset = 2;
+    ap->overflow_arg_area = 0;
+    ap->reg_save_area = 0;
+    /* The record's own layout, measured through the names above. */
+    if ((char *)&ap->fp_offset - (char *)ap != 4) return 1;
+    if ((char *)&ap->overflow_arg_area - (char *)ap != 8) return 2;
+    if ((char *)&ap->reg_save_area - (char *)ap != 16) return 3;
+    return ap->gp_offset == 1 && ap->fp_offset == 2 ? 0 : 4;
+}
+EOF
+if "$compiler" -w -o "$tmp/valistfields" "$tmp/valistfields.c" >/dev/null 2>&1 && "$tmp/valistfields"; then
+    echo "testing the va_list field names ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the va_list field names ... FAILED"
+    "$compiler" -w -o "$tmp/valistfields" "$tmp/valistfields.c" 2>&1 | head -4 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# __atomic_compare_exchange is the _n form with the desired value addressed,
+# and it writes the current value back through `expected` when it fails.
+cat > "$tmp/genericacx.c" <<'EOF'
+#include <stdatomic.h>
+int main(void) {
+    int v = 5, cmp, xchg;
+    cmp = 5;
+    xchg = 9;
+    if (!__atomic_compare_exchange(&v, &cmp, &xchg, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return 1;
+    if (v != 9 || cmp != 5) return 2;
+    cmp = 5;
+    xchg = 7;
+    if (__atomic_compare_exchange(&v, &cmp, &xchg, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return 3;
+    if (v != 9 || cmp != 9) return 4;
+    unsigned char b = 1, bc = 1, bx = 2;
+    if (!__atomic_compare_exchange(&b, &bc, &bx, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return 5;
+    return b == 2 ? 0 : 6;
+}
+EOF
+if "$compiler" -w -o "$tmp/genericacx" "$tmp/genericacx.c" >/dev/null 2>&1 && "$tmp/genericacx"; then
+    echo "testing the generic __atomic_compare_exchange ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the generic __atomic_compare_exchange ... FAILED"
+    "$compiler" -w -o "$tmp/genericacx" "$tmp/genericacx.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# A record is named in a diagnostic by its tag. `uid` is the name the IR
+# prints and is 0 for the records the compiler builds itself -- the ABI's
+# va_list, an aggregate shape -- where str(0) is not a string: a member lookup
+# on one reported "no member named 'gp_offset' in '__INT_FAST8_TYPE__'", which
+# is whatever the interning table's first slot happened to hold.
+# cxx stops at the first error, so each shape gets its own file.
+recdiag_ok=1
+for want in "struct S" "union U" "struct <anonymous>"; do
+    case $want in
+        "struct S") decl="struct S { int a; } x;" ;;
+        "union U") decl="union U { int a; } x;" ;;
+        *) decl="struct { int a; } x;" ;;
+    esac
+    printf '%s\nint f(void) { return x.b; }\n' "$decl" > "$tmp/recdiag.c"
+    "$compiler" -w -c -o /dev/null "$tmp/recdiag.c" > "$tmp/log" 2>&1
+    grep -q "in .$want." "$tmp/log" || recdiag_ok=0
+    grep -q '__INT_FAST8_TYPE__' "$tmp/log" && recdiag_ok=0
+done
+if [ "$recdiag_ok" = 1 ]; then
+    echo "testing a record's name in a diagnostic ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a record's name in a diagnostic ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -5
+    n_fail=$((n_fail + 1))
+fi
+
+cat > "$tmp/recdiag2.c" <<'EOF'
+#include <stdarg.h>
+unsigned f(va_list ap) { return ap->gp_offset + ap->nope; }
+EOF
+"$compiler" -w -c -o /dev/null "$tmp/recdiag2.c" > "$tmp/log" 2>&1
+if grep -q '__va_list_tag' "$tmp/log"; then
+    echo "testing a builtin record's name in a diagnostic ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a builtin record's name in a diagnostic ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# glibc declares the address parameter of connect(), bind() and accept() as a
+# transparent union under _GNU_SOURCE -- a union of `struct sockaddr *` and
+# friends with __attribute__((transparent_union)) -- so the call passes one of
+# the members, never the union. Without it every socket call is an
+# incompatible-types error.
+cat > "$tmp/transparent.c" <<'EOF'
+#include <sys/socket.h>
+#include <netdb.h>
+#include <unistd.h>
+union my_arg {
+    const struct sockaddr *sa;
+    const void *v;
+} __attribute__((transparent_union));
+static int takes(union my_arg a) { return a.v == 0 ? 0 : 1; }
+int main(void) {
+    struct sockaddr_storage ss;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd >= 0) {
+        (void)connect(fd, (struct sockaddr *)&ss, sizeof(ss));
+        close(fd);
+    }
+    return takes((const void *)0) == 0 && takes(&ss) == 1 ? 0 : 1;
+}
+EOF
+if "$compiler" -w -o "$tmp/transparent" "$tmp/transparent.c" >/dev/null 2>&1 && "$tmp/transparent"; then
+    echo "testing a transparent union parameter ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a transparent union parameter ... FAILED"
+    "$compiler" -w -o "$tmp/transparent" "$tmp/transparent.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# -E output has to re-tokenize to the same tokens (6.10.3.3). An argument's own
+# leading whitespace says nothing about the token it follows after
+# substitution: `#define COMMON(prefix) sa_family_t prefix;` called as
+# `COMMON(sa_family)` printed `sa_family_tsa_family;`.
+cat > "$tmp/retok.c" <<'EOF'
+#define COMMON(prefix) sa_family_t prefix;
+typedef int sa_family_t;
+struct s {
+    COMMON(sa_family)
+};
+#define P +
+int y = 1 P + 2;
+#define N 5
+int z = N;
+EOF
+"$compiler" -E -P "$tmp/retok.c" > "$tmp/retok_pre.c" 2>&1
+"$compiler" -w -c -o /dev/null "$tmp/retok_pre.c" > "$tmp/log" 2>&1
+if grep -q 'sa_family_t sa_family;' "$tmp/retok_pre.c" && grep -q 'int y = 1 + + 2;' "$tmp/retok_pre.c" &&
+    grep -q 'int z = 5;' "$tmp/retok_pre.c" && [ ! -s "$tmp/log" ]; then
+    echo "testing -E output re-tokenizes ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -E output re-tokenizes ... FAILED"
+    head -4 "$tmp/retok_pre.c" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# 6.7.6.3p4: a declaration may name an incomplete parameter type (git's
+# reflog-walk.h does), a definition may not. The check used to sit in the
+# parameter parser and dereference a name token an unnamed parameter has not.
+cat > "$tmp/incparam.c" <<'EOF'
+struct date_mode;
+void show(struct date_mode, int force);
+int main(void) { return 0; }
+EOF
+cat > "$tmp/incparam2.c" <<'EOF'
+struct date_mode;
+void show(struct date_mode m) { (void)m; }
+EOF
+"$compiler" -w -c -o /dev/null "$tmp/incparam.c" > "$tmp/log" 2>&1
+if [ ! -s "$tmp/log" ] &&
+    "$compiler" -w -c -o /dev/null "$tmp/incparam2.c" > "$tmp/log2" 2>&1; then
+    echo "testing an incomplete parameter type ... FAILED"
+    echo "    the definition was accepted"
+    sed 's/^/    /' "$tmp/log" | head -3
+    n_fail=$((n_fail + 1))
+elif grep -q 'incomplete type' "$tmp/log2"; then
+    echo "testing an incomplete parameter type ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing an incomplete parameter type ... FAILED"
+    head -2 "$tmp/log2" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# 6.7.6.3p2: `register` is the only storage class a parameter may carry, and
+# git's kwset.c writes `register struct tree const *tree`.
+cat > "$tmp/regparam.c" <<'EOF'
+struct tree { int x; };
+static int depth(register struct tree const *t) { return t ? t->x : 0; }
+static int plain(int register n) { return n; }
+int main(void) { struct tree t = {7}; return depth(&t) + plain(1) == 8 ? 0 : 1; }
+EOF
+if "$compiler" -w -o "$tmp/regparam" "$tmp/regparam.c" >/dev/null 2>&1 && "$tmp/regparam"; then
+    echo "testing a register parameter ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a register parameter ... FAILED"
+    "$compiler" -w -o "$tmp/regparam" "$tmp/regparam.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# `noreturn` on a function pointer is a type both references have -- git's
+# usage.c declares `static __attribute__((noreturn)) report_fn usage_routine`
+# with report_fn a pointer typedef -- and on anything else it is ignored with
+# a warning, which is what -Wattributes and -Wignored-attributes say.
+cat > "$tmp/noreturnptr.c" <<'EOF'
+typedef void (*report_fn)(const char *err, ...);
+static void builtin_fn(const char *err, ...) { (void)err; }
+static __attribute__((noreturn)) report_fn routine = builtin_fn;
+static __attribute__((noreturn)) int counter = 1;
+int main(void) { return routine == builtin_fn && counter == 1 ? 0 : 1; }
+EOF
+"$compiler" -c -o /dev/null "$tmp/noreturnptr.c" > "$tmp/log" 2>&1
+if grep -q 'noreturn. attribute ignored' "$tmp/log" && ! grep -q 'error' "$tmp/log" &&
+    "$compiler" -w -o "$tmp/noreturnptr" "$tmp/noreturnptr.c" >/dev/null 2>&1 && "$tmp/noreturnptr"; then
+    echo "testing noreturn on a function pointer ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing noreturn on a function pointer ... FAILED"
+    head -3 "$tmp/log" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# 6.7.2.2p4: an enumerated type is compatible with the implementation's choice
+# of integer type -- unsigned here when no enumerator is negative, as both
+# references do it. git's odb/source-packed.c assigns a `int (..., unsigned)`
+# function to a `int (..., enum odb_write_object_flags)` member.
+cat > "$tmp/enumcompat.c" <<'EOF'
+enum odb_write_object_flags { ODB_WRITE_OBJECT_NOOP = 1 };
+typedef int (*writer)(const void *buf, enum odb_write_object_flags flags);
+static int impl(const void *buf, unsigned flags);
+int main(void) {
+    writer w = impl;
+    if ((enum odb_write_object_flags)-1 < 0) return 1;
+    return w(0, 0) == 0 ? 0 : 2;
+}
+static int impl(const void *buf, unsigned flags) { (void)buf; return (int)flags; }
+EOF
+if "$compiler" -w -o "$tmp/enumcompat" "$tmp/enumcompat.c" >/dev/null 2>&1 && "$tmp/enumcompat"; then
+    echo "testing an enum against its integer type ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing an enum against its integer type ... FAILED"
+    "$compiler" -w -o "$tmp/enumcompat" "$tmp/enumcompat.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then

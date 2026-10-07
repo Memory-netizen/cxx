@@ -305,6 +305,16 @@ static Type *atomic_agg_bits(Node *node, Type *ty) {
     return bitint[sz * 8][1];
 }
 
+// The pointer type a GEP may step by. GNU C gives `void *` arithmetic a byte
+// step -- the element size is taken as one -- and `void` is not a type a GEP
+// can name: LLVM answers "void type only allowed for function results".
+// tinycc's __bound_ptr_add() returns `p + offset` on a `void *`, and cpython
+// has the same shape.
+static Type *gep_step_type(Type *ptr_ty) {
+    if (ptr_ty->kind == TY_PTR && ptr_ty->base && ptr_ty->base->kind == TY_VOID) return pointer_to(T.ty_char, 0);
+    return ptr_ty;
+}
+
 static Ref load(Ref addr, Type *type, int align, Member *mem) {
     if (mem && mem->is_bitfield) {
         Type *ty = mem->unit_ty;
@@ -1594,6 +1604,7 @@ static Ref gen_expr(Node *node) {
                 rr = INT(addend);
                 rr.ty = node->ty;
             }
+            if (ir_op == IR_GEP) lr.ty = gep_step_type(lr.ty);
             dst = TMP(tmp_id++, node->ty);
             new_ins(ir_op, dst, (Ref[]){lr, rr}, 2);
             store(dst, addr, align, node->lhs->member);
@@ -1608,6 +1619,7 @@ static Ref gen_expr(Node *node) {
             atomic_order = node_mem_order(node);
             Ref lr = load(addr, node->ty, align, node->lhs->member);
             Ref rr = gen_expr(node->rhs);
+            lr.ty = gep_step_type(lr.ty);
             dst = TMP(tmp_id++, node->ty);
             new_ins(IR_GEP, dst, (Ref[]){lr, rr}, 2);
             atomic_order = node_mem_order(node);
@@ -1995,6 +2007,7 @@ static Ref gen_expr(Node *node) {
             } else {
                 ty = node->ty;
             }
+            lr.ty = gep_step_type(lr.ty);
             dst = TMP(tmp_id++, ty);
             new_ins(IR_GEP, dst, (Ref[]){lr, rr}, 2);
             return dst;

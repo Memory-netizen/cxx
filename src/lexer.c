@@ -69,7 +69,7 @@ static inline bool start_with(char *p, char *q) {
 
 // Read a punctuator at `p`, storing its kind in `*kind`.
 // Returns the length of the punctuator, or 0 if `p` does not begin with one.
-static int read_punct(char *p, uint32_t *kind) {
+int read_punct(char *p, uint32_t *kind) {
     static struct {
         char *punct;
         uint32_t type;
@@ -814,6 +814,7 @@ void convert_keywords(Token *tok) {
         {"_Thread_local", 0, TK_THREAD},
         {"__asm", 0, TK_ASM},
         {"__asm__", 0, TK_ASM},
+        {"__attribute", 0, TK_ATTR},
         {"__attribute__", 0, TK_ATTR},
         {"__extension__", 0, TK_EXTENSION},
         {"__restrict", 0, TK_RESTRICT},

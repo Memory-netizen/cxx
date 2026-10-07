@@ -261,10 +261,13 @@ static Type *arm64_va_list_type(void) {
         elem.is_unsigned = true;
         Member *m;
 
+        // The AArch64 ABI's names for these fields, which clang's builtin
+        // type carries too; see the x86-64 target for why they are here.
         m = emalloc(sizeof(Member));
         m->ty = &ty_voidptr_;
         m->offset = 0;
         m->align = 8;
+        m->name = member_name_token("__stack");
         elem.members = m;
 
         m->next = emalloc(sizeof(Member));
@@ -272,24 +275,28 @@ static Type *arm64_va_list_type(void) {
         m->ty = &ty_voidptr_;
         m->offset = 8;
         m->align = 8;
+        m->name = member_name_token("__gr_top");
 
         m->next = emalloc(sizeof(Member));
         m = m->next;
         m->ty = &ty_voidptr_;
         m->offset = 16;
         m->align = 8;
+        m->name = member_name_token("__vr_top");
 
         m->next = emalloc(sizeof(Member));
         m = m->next;
         m->ty = &ty_int_;
         m->offset = 24;
         m->align = 4;
+        m->name = member_name_token("__gr_offs");
 
         m->next = emalloc(sizeof(Member));
         m = m->next;
         m->ty = &ty_int_;
         m->offset = 28;
         m->align = 4;
+        m->name = member_name_token("__vr_offs");
         m->next = NULL;
 
         done = true;
