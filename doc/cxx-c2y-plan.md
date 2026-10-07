@@ -360,6 +360,15 @@ VLA 的 `len` 就是 `vla_len` 指针的低 32 位（见缺陷 1），所以把*
 | **验收** | `test/conformance.sh` **120 → 122 passed / 0 gap**，两条新断言都经过「去掉修复即复现」的验证：<br>• 「引用要用发出时的名字」——`int alias(void) __asm__("real"); int (*p)(void) = alias;`；<br>• 「已扎根名字的引用要活着」——块作用域 static 初始化器扎根的 `chain[]` 必须把 `inner[]` 带活（去掉种子循环即复现 `use of undefined value '@inner'`） |
 | **记分** | sqlite **1/1**；zlib **15/15**；lua 31/35；libpng 15/18；git 44/60；tinycc 0/11；cpython 未下载 |
 
+### R7 真实开源项目：第四轮 —— ✅ 限定副本的完成（git 的十二个单元）
+
+| | |
+|---|---|
+| **缺陷** | `struct V { volatile struct V *next; };` 里，`volatile` 会给**正在定义中**的 V 做一份限定副本，而副本要等 V 布局完成才能拿到成员。R3 加的 `complete_copies()` 用 `size >= 0` 判断「副本是完成之后做的」，可**正在定义中的结构体 size 是 0，不是 -1**（-1 只标前向声明），于是恰好把最需要的那类副本跳过了：`head->next->next` 报 `no member named 'next'`。git 的 `list.h` 正是这个形状（`volatile struct volatile_list_head *next, *prev`），它挡住了 git 的十二个编译单元。修法：无条件把标签的形状同步给副本（已有形状的副本重写一次是空操作） |
+| **定位过程** | 用**差分谓词**（cxx 拒绝 ∧ clang 接受）对 delta debugging 收紧条件，才从「未声明标签」「不完整结构体」这些两家都会拒绝的岔路上摆脱出来，最终得到两行复现 |
+| **验收** | `test/conformance.sh` **122 → 123 passed / 0 gap**（新增「自身结构体的限定副本里的成员」运行断言）；`doc/realworld.sh` 记分见下 |
+| **记分** | git **44/60 → 52/60**；sqlite **1/1**；zlib 15/15；lua 31/35；libpng 15/18；tinycc 0/11；cpython 未下载 |
+
 ### P3 `<stdmchar.h>`（7.26 / N3366）
 
 | | |

@@ -2049,6 +2049,50 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# --- a member whose type is a qualified copy of its own struct ---------
+
+# `struct V { volatile struct V *next; }` copies V to attach the qualifier
+# while V is still being defined, and the copy has to learn V's members when
+# V is laid out. It did not, so a second `->` through such a member lost the
+# members: `head->next->next` was "no member named 'next'". git's list.h has
+# exactly that shape (`volatile struct volatile_list_head *next, *prev`) and
+# it stopped twelve of git's translation units.
+cat > "$tmp/qualcopy.c" <<'EOF'
+struct V {
+    volatile struct V *next, *prev;
+    int payload;
+};
+struct W {
+    const struct W *link;
+    int v;
+};
+
+static void chain(struct V *head, struct V *newp) {
+    head->next->prev = newp;
+    newp->next = head->next;
+    newp->prev = head;
+    head->next = newp;
+    newp->next->payload = 1;
+}
+
+int main(void) {
+    struct V a = { &a, &a, 0 }, b = { 0, 0, 0 };
+    struct W w = { 0, 7 };
+    chain(&a, &b);
+    if (a.next != &b || b.prev != &a || b.next != &a) return 1;
+    if (a.payload != 1) return 2;
+    if (w.link != 0 || w.v != 7) return 3;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/qualcopy" "$tmp/qualcopy.c" >/dev/null 2>&1 && "$tmp/qualcopy"; then
+    echo "testing a member of a qualified copy of its own struct ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a member of a qualified copy of its own struct ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then

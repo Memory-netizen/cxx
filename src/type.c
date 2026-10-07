@@ -470,8 +470,12 @@ void enum_set_underlying(Type *ty, EnumVal *vals) {
 // S is completed later, and reading a member through it used to fail with
 // `no member named ...` -- which is what stopped zlib's trees.c.
 void complete_copies(Type *ty) {
+    // Every copy gets the shape, whatever its size says: a tag being defined
+    // has size 0 rather than -1 (the -1 marks only a forward declaration), so
+    // a size test skipped the copies that matter most -- the ones a member
+    // declared `volatile struct V *next` makes while V is still being parsed.
+    // Rewriting a copy that already has the shape is a no-op.
     for (Type *c = ty->copies; c; c = c->next_copy) {
-        if (c->size >= 0) continue;  // copied after the completion
         c->members = ty->members;
         c->size = ty->size;
         c->align = ty->align;
