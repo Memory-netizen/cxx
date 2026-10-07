@@ -67,6 +67,15 @@ static uint32_t defined_id;
 static uint32_t vaarg_id;
 static uint32_t vaopt_id;
 static uint32_t once_id;
+static uint32_t pack_id;
+static uint32_t push_macro_id;
+static uint32_t pop_macro_id;
+
+// `#pragma pack` state: the value in force, and the stack `push` and `pop`
+// move. Zero means the target's default alignment, as in gcc.
+static int pack_value;
+static int pack_stack[32];
+static int pack_depth;
 static uint32_t has_include_id;
 static uint32_t has_include_next_id;
 static uint32_t has_embed_id;
@@ -1525,6 +1534,137 @@ static uint32_t file_identity(char *path) {
     return id;
 }
 
+// The value `#pragma pack(...)` leaves behind, and the token that carries it
+// to the parser. The forms gcc accepts are `(n)`, `()`, `(push)`,
+// `(push, n)`, `(push, ident, n)`, `(pop)`, `(pop, ident, n)` and `(show)`;
+// an identifier is accepted and ignored, which is all it is for. *rest is set
+// past the end of the directive's line.
+static int read_pack_pragma(Token **rest, Token *tok) {
+    // tok is the `pack` identifier.
+    tok = tok->next;
+    if (tok->kind != TK_LPAREN) return pack_value;
+    bool push = false, pop = false;
+    int value = pack_value;
+    bool saw_value = false;
+    // The directive's own tokens carry no reliable line markers, so the walk
+    // stops at the closing parenthesis and is bounded besides: a malformed
+    // `#pragma pack` must not swallow the rest of the file.
+    int guard = 0;
+    for (tok = tok->next; tok && tok->kind != TK_RPAREN && guard++ < 12; tok = tok->next) {
+        if (tok->kind == TK_IDENT && tok->id == intern("push", 4))
+            push = true;
+        else if (tok->kind == TK_IDENT && tok->id == intern("pop", 4))
+            pop = true;
+        else if (tok->kind == TK_IDENT && tok->id == intern("show", 4))
+            warning(WG_CPP, tok, "current #pragma pack alignment is %d", pack_value);
+        else if (tok->kind == TK_NUM || tok->kind == TK_PPNUM) {
+            if (tok->kind == TK_NUM) {
+                value = (int)int128_to_i64(tok->ival);
+            } else {
+                // A number in a directive is a preprocessing number, whose
+                // value cxx does not convert. The token's text is not
+                // NUL-terminated -- only its len bytes belong to it -- so the
+                // digits are read one by one, the way #line does it.
+                value = 0;
+                for (uint32_t i = 0; i < tok->len; i++) {
+                    char c = tok_text(tok)[i];
+                    if (!isdigit((unsigned char)c)) {
+                        value = -1;
+                        break;
+                    }
+                    value = value * 10 + (c - '0');
+                }
+            }
+            saw_value = true;
+            if (value != 1 && value != 2 && value != 4 && value != 8 && value != 16)
+                warning(WG_CPP, tok, "alignment for #pragma pack must be 1, 2, 4, 8 or 16");
+        }
+    }
+    if (pop) {
+        if (pack_depth > 0) pack_value = pack_stack[--pack_depth];
+    } else if (push) {
+        if (pack_depth < 32) pack_stack[pack_depth++] = pack_value;
+        if (saw_value && value != 0) pack_value = value;
+    } else {
+        pack_value = saw_value ? value : 0;
+    }
+    if (tok && tok->kind == TK_RPAREN) tok = tok->next;
+    while (tok && !tok->is_sol && tok->kind != TK_EOF) tok = tok->next;
+    *rest = tok;
+    return pack_value;
+}
+
+// The stack `#pragma push_macro` fills; `#pragma pop_macro` restores the most
+// recent entry for the name.
+typedef struct {
+    uint32_t id;
+    Macro *saved;  // NULL when the name was undefined at the push
+} SavedMacro;
+static SavedMacro *saved_macros;
+static int num_saved;
+
+// The macro a name currently resolves to, or NULL when it is undefined: the
+// newest entry for the name wins, and a deleted one means "undefined".
+static Macro *macro_entry(uint32_t id) {
+    if (macro_ht)
+        for (Macro *m = macro_ht[id & (macro_cap - 1)]; m; m = m->hnext)
+            if (m->id == id) return m->deleted ? NULL : m;
+    return NULL;
+}
+
+// The name `#pragma push_macro("x")` gives: a string literal, whose text is
+// not NUL-terminated -- only its len bytes belong to it.
+static bool read_macro_name(Token *tok, uint32_t *id) {
+    if (!tok || tok->kind != TK_LPAREN) return false;
+    tok = tok->next;
+    if (!tok || tok->kind != TK_STRLIT) return false;
+    char *p = tok_text(tok);
+    uint32_t len = tok->len;
+    if (len >= 2 && p[0] == '"' && p[len - 1] == '"') {
+        p++;
+        len -= 2;
+    }
+    if (len == 0) return false;
+    *id = intern(p, len);
+    return true;
+}
+
+static void push_macro(uint32_t id) {
+    Macro *m = macro_entry(id);
+    if (!saved_macros)
+        saved_macros = vnew(8, sizeof(SavedMacro));
+    else
+        saved_macros = vgrow(saved_macros, num_saved + 1);
+    saved_macros[num_saved].id = id;
+    saved_macros[num_saved++].saved = m;
+}
+
+static void pop_macro(uint32_t id) {
+    for (int i = num_saved - 1; i >= 0; i--) {
+        if (saved_macros[i].id != id) continue;
+        Macro *want = saved_macros[i].saved;
+        // What the name resolved to at the push has to become what it
+        // resolves to now. The lookup stops at the newest entry for a name,
+        // so a fresh entry is added on top -- the saved one itself may be
+        // shadowed by anything defined in between, and `#undef` works the
+        // same way, by adding a deleted marker.
+        if (want) {
+            Macro *m = add_macro(id, want->is_objlike, want->body);
+            m->is_variadic = want->is_variadic;
+            m->va_args_id = want->va_args_id;
+            m->params = want->params;
+            m->handler = want->handler;
+            m->is_builtin = want->is_builtin;
+        } else {
+            Macro *m = add_macro(id, true, NULL);
+            m->deleted = true;
+        }
+        for (int k = i; k < num_saved - 1; k++) saved_macros[k] = saved_macros[k + 1];
+        num_saved--;
+        return;
+    }
+}
+
 static uint32_t *pragma_path;
 static int num_pragma;
 
@@ -1965,6 +2105,30 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
             continue;
         }
 
+        if (tok->id == dt[P_PRAGMA].id && (tok->next->id == push_macro_id || tok->next->id == pop_macro_id)) {
+            bool push = tok->next->id == push_macro_id;
+            uint32_t name;
+            if (!read_macro_name(tok->next->next, &name)) error(tok, "a macro name in quotes is required");
+            if (push)
+                push_macro(name);
+            else
+                pop_macro(name);
+            do {
+                tok = tok->next;
+            } while (!tok->is_sol && tok->kind != TK_EOF);
+            continue;
+        }
+
+        if (tok->id == dt[P_PRAGMA].id && tok->next->id == pack_id) {
+            Token *marker = copy_token(tok);
+            int value = read_pack_pragma(&tok, tok->next);
+            marker->kind = TK_PRAGMA;
+            marker->ival = int128_set_i(value);
+            marker->is_sol = true;
+            cur = cur->next = marker;
+            continue;
+        }
+
         if (tok->id == dt[P_PRAGMA].id) {
             do {
                 tok = tok->next;
@@ -2206,6 +2370,9 @@ void init_macros(void) {
     vaarg_id = intern("__VA_ARGS__", 11);
     vaopt_id = intern("__VA_OPT__", 10);
     once_id = intern("once", 4);
+    pack_id = intern("pack", 4);
+    push_macro_id = intern("push_macro", 10);
+    pop_macro_id = intern("pop_macro", 9);
     has_extension_id = intern("__has_extension", 15);
     building_module_id = intern("__building_module", 17);
     has_include_id = intern("__has_include", 13);

@@ -78,7 +78,12 @@ static VaArgOps va_arg_gp16 = {
     .kind = VA_MEM_REGS,
     .offset_ty = &ty_uint_,
     .offset_field = 0,
-    .offset_bound = 40,
+    // The bound leaves room for *this* argument, not for one eightbyte: an
+    // argument is in the overflow area unless every one of its slots is
+    // free, and this table's step is two slots (48 - 16). With 40 a record
+    // at offset 32 -- registers 5 and 6, and there is no register 6 -- was
+    // read out of the register save area, one byte past its end.
+    .offset_bound = 32,
     .reg_field = 3,
     .mem_field = 2,
     .reg_step = 16,
@@ -474,6 +479,11 @@ Target T_amd64 = {
     .va_arg_ops_for_mixed = amd64_va_arg_mixed,
     .abi_param_slots = amd64_param_slots,
     .agg_byval_param = true,
+    // Six general-purpose and eight SSE registers for arguments (the psABI's
+    // counts). A variadic aggregate is passed in the overflow area unless all
+    // of its eightbytes fit in the registers still free.
+    .vararg_gp_regs = 6,
+    .vararg_sse_regs = 8,
     .agg_always_array = false,
     .agg_full_regs = false,
     .predef =

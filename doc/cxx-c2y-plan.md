@@ -464,6 +464,128 @@ VLA 的 `len` 就是 `vla_len` 指针的低 32 位（见缺陷 1），所以把*
 | **记分（`doc/realworld.sh` 全量探针）** | **git 567/567 保持全过**；**cpython 368/385 → 377/385**（本轮修好的 9 个单元：`Modules/socketmodule.c`、`Python/crossinterp.c`（这两个是崩溃）、`Python/codegen.c`、`Python/compile.c`、`Python/pythonrun.c`、`Python/getcompiler.c`、`Objects/typeobject.c`、`Modules/expat/xmltok.c`、`Modules/expat/xmlrole.c`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21 不变 |
 | **剩余阻塞项** | **cpython 8**（按性质分两类）。环境类 4 个：`Python/pystrhex.c`（`implicit declaration of function ‘__builtin_shufflevector’`）、`Modules/Hacl_Hash_Blake2s_Simd128.c`、`Modules/Hacl_Hash_Blake2b_Simd256.c`、`Modules/_testcapimodule.c`（`static assertion failed: __extension__ __alignof__(buf) >= 64`）——这四个都要 `vector_size` 向量类型，而它们之所以被启用，是因为这棵树的 `pyconfig.h` 是安装时用宿主 clang 配置出来的（它声明「本编译器有 `__builtin_shufflevector`、有 64 字节对齐的 SIMD」），cxx 本身不支持向量类型。真正的缺陷 4 个：`Modules/posixmodule.c`（`implicit declaration of function ‘__builtin_memset’`）、`Python/jit_unwind.c`（`premature end of input`）、`Modules/_testsinglephase.c`（`array initializer must be an initializer list`），以及（R14 复查后更正）`Modules/_ctypes/_ctypes_test.c` —— 它在 `__GNUC__` 下包含 `<complex.h>`，而 glibc 的 `bits/cmathcalls.h` 用 `_Mdouble_complex_`（`double _Complex`）声明函数，属于本计划 **有意不做** 的 `_Complex` 缺口，不是新缺陷 |
 
+### R24 数组类型上的限定符归于元素 —— ✅ 两个用例转绿（C11 6.7.3p9）
+
+`39_typedef` 报“`ca` 重新声明为冲突类型”，`100_c99array-decls` 报“restrict requires a pointer”——两者共用一条规则：
+**“如果数组类型的说明包含限定符，那么被限定的是元素类型，而不是数组类型”**。
+
+| | |
+|---|---|
+| **缺陷（1）限定符落在数组类型上** | `typedef int A[3]; extern A const ca;` 与 `extern const int ca[3];` 本是同一个声明，cxx 把 `const` 记在了数组类型上，两边看成两种类型。修法：声明符结束时，若类型是数组（含 VLA）就用已有的 `array_elem_qual()` 把限定符推到最内层元素 |
+| **缺陷（2）`restrict` 直接被拒** | `typedef restrict pointer_array x;`（`pointer_array` = `int *[2]`）合法：被限定的是那两个指针。cxx 在 `declspec` 里遇到 `restrict` 就报错。修法：先收下限定符，在限定符遇到类型时判断——沿数组链找到最内层元素，必须是指针（否则报错，如同 gcc） |
+| **缺陷（3）兼容性比较追了 typedef 的 `origin`** | `is_compatible()` 为了看穿 typedef 名会追 `origin`；数组追过去就丢了**元素的限定符**（`A const` 变回 `A`）。修法：数组不追 `origin`（它的身份就在元素里），其余判断照旧 |
+| **一次回归（当场捕获）** | 第一版我写成“两边都是数组就直接比元素”，绕过了 switch 底部的**长度**规则，于是 c2y 套件里“VLA 匹配任意长度、定长数组仍然比较”那条失败（`int (*)[4]` 不再拒绝 `int a[3]`）。改成只跳过 origin 追踪、保留后面的长度比较后，c2y 101/0 恢复 |
+| **验收** | **tests2 95 → 97 通过 / 9 败**（`39_typedef`、`100_c99array-decls` 转绿）；`test/conformance.sh` **195 → 196 passed / 0 gap**（新增：三种写法同一个对象、`restrict` 到元素、嵌套 restrict 保留）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与上一轮相同**：git 567/567；cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21。本轮修的是**数组类型上限定符的归属**（C11 6.7.3p9）：探针里七棵树没有“同一对象用 typedef 数组的限定写法声明两次”或“对指针数组用 restrict”的形状，所以记分不动；变化在 `doc/tcctests.sh` **95 → 97 通过 / 9 败**（`39_typedef`、`100_c99array-decls` 转绿）与 `test/conformance.sh` 195 → 196 |
+
+### R23 `#pragma push_macro` / `pop_macro` —— ✅ C23 标准功能，`77_push_pop_macro` 转绿
+
+上一轮看剩下的编译失败时发现，`77_push_pop_macro` 并不报错，只是**输出不对**：它用的
+`#pragma push_macro` / `pop_macro` 是 **C23 6.10.11**（N2686）的标准功能，而 cxx 把它当普通 pragma 略过了（三个 `abort` 全是 `333`）。
+正好 R20 已经搭好了“预处理器认得 `#pragma` 参数”的路子，这一轮把它实现了。
+
+| | |
+|---|---|
+| **实现** | `push` 记下名字**当前解析到的定义**（包括“未定义”），`pop` 把它放回去；名字取自引号字符串（按 `len` 读，`tok_text()` 不加 NUL）。栈是一个数组，同名可多次压入，`pop` 弹最近一次 |
+| **关键细节（第一版就踩了）** | cxx 的查找 `find_macro` 是“**最新的那条记录定输赢**，它标了 `deleted` 就算未定义”，而 **不会继续往后找**——所以“把旧记录的 `deleted` 清掉”根本恢复不了（它被后来的记录遮住了）。`#undef` 本身就是“压一条删除标记”，所以 `pop` 也得**加一条新记录**：有保存就把它的 `is_objlike`/`body`/`params`/`is_variadic` 拷贝过去，没有就压一条 `deleted` |
+| **实测** | `77_push_pop_macro` **逐行对上**（`111 / 222 / 333 / 222 / 111`）；`doc/tcctests.sh` **94 → 95 通过 / 11 败** |
+| **验收** | `test/conformance.sh` **194 → 195 passed / 0 gap**（新增：嵌套 push/pop、未定义名字压入再弹出回到未定义、函数式宏完整回来）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与上一轮相同**：git 567/567；cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21。本轮是**加 C23 标准能力**（`#pragma push_macro`/`pop_macro`）：探针里七棵树没有用这对 pragma（真用了的话，宏在 pop 之后就是错的，早就编译或运行失败了），所以记分不动；变化在 `doc/tcctests.sh` **94 → 95 通过 / 11 败**（`77_push_pop_macro` 转绿）与 `test/conformance.sh` 194 → 195 |
+
+### R22 位域存储把隔壁清成了零：移位 64 是未定义 —— ✅ `95_bitfields` 的主体修好
+
+R21 修完宽位域掩码后，`95_bitfields` 只剩三处。用测试框架自己的语句序列做最小复现时发现一个**更严重的误编译**：
+
+```c
+s.z = 120;      /* unsigned long long z : 38; char a; 紧挨在后面 */
+```
+
+三家对比：gcc/clang 的 `a` 保持 `-1`，cxx 变成 **0**；带上 `s.a += 0x44, ++s.a` 后就是 `0x44` 对 `0x45`（恰好差一位，
+这就是 R21 里那个“差一位”的真相）。
+
+| | |
+|---|---|
+| **根因** | 清位掩码用 `(1ULL << total_bits) - 1` 裁到单元宽度。**八字节单元时 `total_bits == 64`**，而移位计数按 mod 64 取——表达式等于 **0**，清位掩码就是 0，于是“清掉字段的位”变成“清掉整个单元”。IIR 里看得很清楚：`and i64 %tmp19, 0` |
+| **修法** | 单元宽度就是 64 时不再取位（取反本就是全一）；同时把“字段宽度掩码”也改成 `width >= 64 ? ~0ULL : (1ULL << width) - 1`，因为全宽位域（`unsigned long long x : 64`）会踩到同一个坑 |
+| **实测** | 上面那两行现在与 gcc/clang 逐字节一致；`95_bitfields` 的 **TEST 5 与 TEST 5 PACKED 全对**，剩下两类共三处（见下） |
+| **剩下的种类一：跨超 64 位的位域** | TEST 2 PACKED 的 `struct { int x:12; char y:6; long long z:63; ... }`：打包后 `z` 从第 18 位开始，**占到第 80 位**，不能装进任何单克隆单元；现在 `min_bytes_for_bits()` 最大只到 8 字节，于是读写都错（实测 `z` 读回 `c000000000000000`，两家是 `123456789abcdef0`）。下一步：让这种字段走**逐字节拼接**（或两次单元访问） |
+| **剩下的种类二：位域上的 `aligned(16)`** | TEST 2/3 的 `A char a:4`（`A` = `__attribute__((aligned(16)))`）：两家把记录撑到 `align/size 16 32`，cxx 是 `8 24`——位域上的 aligned 属于 gcc 特例，留待后续 |
+| **验收** | `test/conformance.sh` **193 → 194 passed / 0 gap**（新增：写 `z` 不能动 `a`/`b`，包括测试框架那个逐字段置全 1 再赋值的序列）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净；tests2 仍 **94 通过 / 12 败**（`95_bitfields` 从三处到三处，但 TEST 5 两轮全对） |
+| **记分（`doc/realworld.sh` 全量探针）** | **与上一轮相同**：git 567/567；cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21。本轮修的是**八字节单元里位域的清位掩码恒为 0**（移位 64 是未定义）——探针里七棵树没有这种形状的写入序列（位域在八字节单元里、且紧邻着别的成员），所以记分不动；变化在 `test/conformance.sh` 193 → 194 与 `95_bitfields`（TEST 5 与 TEST 5 PACKED 全对，只剩跨 64 位的位域与位域上的 `aligned(16)` 两类） |
+
+### R21 四字节以上的位域：掩码被截断 —— ✅ 一类误编译修正
+
+R20 把 `95_bitfields` 的差异从十四处压到三处后，剩下的全是**宽位域**。最小复现：
+`struct { long long x : 45; long long : 2; long long y : 30; unsigned long long z : 38; }`，逐字节对照三家。
+
+| | |
+|---|---|
+| **缺陷** | 位域存储的两个掩码用 `INT()` 构造，而 `INT()` 是 **`int32_t`**：45 位字段的清位掩码 `~(((1<<45)-1))` 被截成它的低半——**恰好是 0**，于是“清掉周围位”变成了“清掉字段自己”；值掩码同理变成 -1。实测：`s.x = ~0` 在 45 位字段上写了**八个 FF**，两家写的是 `FF FF FF FF FF 1F` |
+| **修法** | 按**存储单元自己的宽度**选常量构造器：单元 > 4 字节用 `LONG`，否则 `INT`（两个掩码都改）。**实测**：三个字段各自置全 1 后的整个结构字节与 gcc/clang **逐字节相同**（`FF FF FF FF FF 1F` / `FF FF FF 3F` / `FF FF FF FF 3F`），读回来的值也一致 |
+| **验收** | `test/conformance.sh` **192 → 193 passed / 0 gap**（新增：45/30/38 位三个字段的逐字节布局与“写一个不动隔壁”）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净；tests2 仍 **94 通过 / 12 败**（`95_bitfields` 的差异再从三处到三处，但性质变了：布局行全对，剩下是两个值的位差与 TEST 2 PACKED） |
+| **记分（`doc/realworld.sh` 全量探针）** | **与上一轮相同**：git 567/567；cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21。本轮修的是**四字节以上位域的掩码被截断**：探针里七棵树没有这种形状的位域（真有的话读到写到的值本来就是错的），所以记分不动；变化在 `test/conformance.sh` 192 → 193 与 `95_bitfields`（布局行全对，只剩两个值的位差与 TEST 2 PACKED） |
+
+### R20 `#pragma pack` —— ✅ 新能力（`95_bitfields` 的 packed 半边跑通了，差三处宽位域）
+
+`95_bitfields` 失败的主因不是位域布局，而是**这个测试的整个 packed 半边都没生效**：它用 `#pragma pack(push,1)` 而不是
+`__attribute__((packed))`，而 cxx 只实现了后者（实测：`struct { char c; int i; }` 在 pragma 下仍然是 8/4，两家是 5/1）。现在四种写法全部
+与 gcc/clang 一致：`pack(push,1)` 5/1、`pack(pop)` 8/4、`pack(2)` 6/2、`pack()` 8/4。
+
+| | |
+|---|---|
+| **实现** | 预处理器认得 `#pragma pack`（`push`/`pop`/`show`/`()`/带参数均可，MSVC 形式的标识符接受但忽略），自己维护 push/pop 栈；**因为预处理器跑完才轮到解析器**，
+当前值随一个 `TK_PRAGMA` 标记令牌传给解析器，解析器在文件作用域与块作用域的循环里消费它。布局时：成员对齐被截到 `n`，
+且 `n == 1` 时整个记录走**packed 布局**（位域之间也没有存储单元边界）——这正是 gcc 的行为：十二位接七位紧挨着，
+`95_bitfields` 期望的就是三字节 |
+| **调试中碰到的两个坑** | （a）指令里的数字是 **`TK_PPNUM`**（预处理数字）而不是 `TK_NUM`，而且它的 `ival` **没有被转换**（实测 `kind=155 ival=0`），
+必须像 `#line` 那样按 `len` 逐位读字符；（b）`tok_text()` 返回的是**不加 NUL 的源码指针**，用 `%s` 打印会一直跑到文件尾——
+我一开始就被这个当成“令牌文本坏了”，多绕了两轮 |
+| **现状对比** | `95_bitfields` 的差异从**十四处缩到三处**，且剩下三处全是**宽位域**：`long long z : 63`（TEST 2）与 `long long z : 38`（TEST 5）的布局，
+以及 TEST 2 PACKED 的值（`0e` 对 `1e`）——下一轮从这里接 |
+| **验收** | `test/conformance.sh` **191 → 192 passed / 0 gap**（新增：四种 pack 写法与两个 packed 位域记录的 `sizeof`/`_Alignof`）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净；tests2 仍 **94 通过 / 12 败**（本轮是能力增加，没有用例因此整体转绿） |
+| **记分（`doc/realworld.sh` 全量探针）** | **与上一轮相同**：git 567/567；cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21。本轮是**加能力**（`#pragma pack`）而不是改语义：七棵树里没有用 `#pragma pack` 的记录（真用了的话布局本来就会被 cxx 算错、早就编不过了），所以记分不动；变化在别处：`test/conformance.sh` 191 → 192、tests2 仍 94/12（`95_bitfields` 的差异从十四处缩到三处，全是宽位域） |
+
+### R19 可变参数聚合参数（放方半边）—— ✅ `73_arm64` 完整转绿
+
+R18 把守方修好后，这一轮把**放方**那半补上：可变参数调用里，聚合参数只有在**它的每一个八字节都装得下**时才走寄存器，
+否则整个参数进溢出区（IR 里写作 `byval`）。参照物就是 clang 自己的 IR：
+`六个九字节结构体` 在 clang 里是 `i64 %5, i8 %7, i64 %9, i8 %11`（前两个）+ **四个** `ptr byval(%struct.s9)`。
+
+| | |
+|---|---|
+| **缺陷（1）参数寄存器预算根本没算** | 原来每个可变参数聚合都拆成散装（`agg_is_per_piece`），于是第三个结构体起，clang（后端）只能给每个标量各放一个栈槽，而 ABI 给聚合参数留的是十六字节。修法：目标新增 `vararg_gp_regs`/`vararg_sse_regs`（amd64 = 6/8，其他目标 0 = 无此规则），调用降级时从第一个参数起**记账**（命名参数占掉的也算），只有可变参数尾部才受预算约束；装不下时改发 `byval` 指针（并不再占寄存器） |
+| **缺陷（2）一个调用只能标一个 `byval`** | `Ir.byval_at` 是一个 `uint8_t` 下标，而 clang 的参照 IR 里有**四个** `byval` 参数——于是只有最后一个被正确标记，前三个当成普通指针传了过去，被调方 `va_arg` 读到的是指针本身。修法：改成 `uint32_t *byval_at; int nbyval;`（附加时收集下标，打印时查表）。**实测**：修好后 cxx 的调用变成 `i64, i8, i64, i8, ptr byval(...) ×4`，与 clang 逐个对应 |
+| **验收** | **`73_arm64` 完整转绿**（两行 stdarg 与全部 HFA 行都对上），**tests2 93 → 94 通过 / 12 败**；`test/conformance.sh` **190 → 191 passed / 0 gap**（新增：五个九字节结构体走可变参数，前两个走寄存器、后三个走溢出区）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净；最小复现（六个九字节结构体）与 gcc/clang **逐字节相同** |
+| **记分（`doc/realworld.sh` 全量探针）** | **与上一轮相同**：git 567/567；cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21。这两轮改的是**变参数聚合参数的 ABI 布局**：探针里七棵树的变参数调用里没有“装不下的聚合参数”，所以记分不动；变化在行为侧：**tests2 93 → 94**（`73_arm64` 完整过）、`test/conformance.sh` 190 → 191、`doc/probes.sh` 仍然全部基线（含 cxx2 = cxx3 = cxx4 逐字节相同） |
+
+### R18 `73_arm64` 的 stdarg 部分：可变参数聚合参数 —— ✅ 诊断到底，守方修好，放方还差一半
+
+R17 修完参数槽越界后，`73_arm64` 只剩两处；这一轮把其中的 stdarg 部分（第 70-71 行）追到了根因：
+`myprintf("%9s %9s %9s %9s %9s %9s", s9, s9, s9, s9, s9, s9)`，六个九字节结构体通过**可变参数**传递（十二个八字节）。
+用一个直接打印 `va_list` 各字段与溢出区原始字节的探针（clang/gcc/cxx 各编一份）定位到**两个独立缺陷**，一个在守方、一个在放方。
+
+| | |
+|---|---|
+| **缺陷（1）守方：`va_arg` 的“还有位置吗”只算一个槽** | `struct { char x[9]; }` 是两个八字节，而 ABI 规定：只要有任一个八字节没位置，**整个参数走溢出区**。cxx 的 `va_arg_gp16`（两个八字节的类型用的表，步长 16）却沿用了单槽的界 `offset_bound = 40`，于是偏移 32 的参数（即第 5、第 6 个寄存器）仍被当成在寄存器里读，而那个区域只到 48 字节——**越界读一个字节**。修法：该表的界改成 `48 - 16 = 32`。**证据**：clang 自己的 `va_arg` 就是这么做的——同一个探针里，clang 在 `gp_offset = 40` 时读完第三个结构体后把游标停在 40（即改走溢出区），而 cxx 修前继续从保存区读 |
+| **缺陷（2）放方：可变参数里把聚合体拆成散装** | amd64 上 cxx 把聚合参数按“一块一个标量参数”发送（`agg_is_per_piece`），这对**有原型**的调用是自洽的（cxx 自己的被调方也按块接），但可变参数调用**没有原型**：clang（后端）只能把每个标量各放一个栈槽，而 ABI 给聚合参数留的是 `ceil(size/8)*8` 字节——九字节结构体是十六字节。**证据**：探针打印溢出区原始字节，clang 自己的放方是 `ABCDEFGHI.` 以十六字节为步长，cxx 发出的参数却是第一个槽里只有一个 `I`（第九个字节）、各块各占一槽。改法：可变参数调用里把整个聚合体当**一个参数**传（不拆片），让后端按 ABI 布局。已经试过一版（用 `IR_LORD` 取整个记录值后作为一个操作数），**测出来更差**：LLVM 把那个记录值按另一种方式降级，溢出区变成了垃圾（`F...@...G...@...`），所以已回退；下一步得从“传 **结构体本身**（而非 pieces 形状）并确认 LLVM 对可变参数聚合体的降级”入手 |
+| **验收** | `make test` exit 0；`test/conformance.sh` **190 passed / 0 gap**（本轮没有新增断言：缺陷（1）是守方的一半，只有当放方也修好后才有一个能稳定通过的用例）；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净；tests2 仍 **93 通过 / 13 败**（`73_arm64` 的 stdarg 行从“第四个起变成 `I`”变成“第三个起”，依然不对，但对坏了的位置与 clang 守方一致） |
+| **实测：双槽标量的可变参数（两个界都对）** | `show("five then i128", 1ull, 2ull, 3ull, 4ull, 5ull, (__int128)-1234567890123LL)`：五个八字节后游标到 40，`__int128` 必须走溢出区。三家都输出 `1 2 3 4 5 -> -1234567890123`（而 `four then i128` 四个后游标 32，仍在寄存器，也是三家一致）——这是缺陷（1）在实际代码里已经对上的形状 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与上一轮相同**：git 567/567；cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21。本轮修的是 `va_arg` 的**守方半边**（两槽记录在偏移 32 时必须走溢出区），它只在**混合语言**（clang 编译的放方 + cxx 编译的守方）或放方也按 ABI 布局时才显形；探针里这七棵树都是**整树用 cxx 编译**（放守双方都是 cxx 的拆片约定），所以记分不动；`test/conformance.sh` 也没有为此新增断言——能稳定通过的那个用例要等放方也修好。两槽**标量**（`__int128`）的可变参数形状三家一致，已记在上面的实测行里 |
+
+### R17 参数槽越界（SIGILL）与 `dev`/`main` 分支插曲 —— ✅ 一类栈破坏修正
+
+R16 从 tests2 列出的 13 个失败里，`73_arm64`（一个“在任何架构上都应该跑出同样结果”的 ABI 用例）
+直接崩在第四个调用：`struct { char x[3]; }` 按值传递。这一轮把它修成了“能跑完”。
+
+| | |
+|---|---|
+| **缺陷（1）寄存器块比对象宽时写到参数槽外面** | SysV 下 `struct { char x[3]; }` 走一个 `i32`，而被调方把**四个字节全写进三字节的槽**——那多出来的一字节是它在栈上的邻居。tinycc 的 `73_arm64.c` 因此 **SIGILL**：gdb 里返回地址是被截断的 `0x00000000555551c0`（`main` 实际在 `0x5555555551c0`），那一字节正是保存的返回地址。修法：`store_piece()` ——块先存到一个自己大小的临时槽，再只拷贝对象真正有的字节数；单块与多块两条路都走它 |
+| **缺陷（2）同一类问题在“多块”路径上** | 修好三字节后，崩溃往后移到十一字节：`struct { char x[11]; }` 走 `i64`+`i32`（**十二字节装十一个**），`struct { char x[13]; }` 走两个 `i64`（十六装十三）。多块路径逐块存储，最后一块会越界。修法：同一个 `store_piece()`，按 `pt->size - m->offset` 与块大小取小者存储。**实测**：1/2/3/4/5/6/7/8/9/10/11/12/13/15/17 字节全部形状在同一个函数里依次调用，与 gcc/clang 行为一致（修前 SIGILL），15 个参数与实参都完好；`73_arm64` 从“崩”变成“跑完” |
+| **验收** | `test/conformance.sh` **189 → 190 passed / 0 gap**（一条新断言：十五种寄存器形状的聚合参数）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净；tests2 仍是 **93 通过 / 13 败**（`73_arm64` 还差两处，见下） |
+| **记分（`doc/realworld.sh` 全量探针）** | **与上一轮完全相同**：git 567/567；cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21。这一轮修的是**参数槽越界**：它只在栈布局恰好时才致命，探针里“能编”的单元本来就没被它绊倒，所以记分不动正是预期；变化在行为侧：`73_arm64` 从 SIGILL 变成跑完，`test/conformance.sh` 189 → 190 |
+| **`73_arm64` 剩下的两处** | （a）`fa1(s8, s9, s10, s11, s12, s13)`：六个聚合参数 = 十二个块，超出六个寄存器的部分走栈，第 70 行有一个字节被改写（`ABCDEFGH\xa0 I I I`）——同一类问题在**发送方**的栈参区；（b）`fa3`/`fa4` 的 HFA 与 `long double` 用例（第 73-82 行）。下一轮从（a）开始 |
+| **`dev` / `main` 分支插曲（记一笔）** | 这一轮开始时工作树在 **`main`**（`2a128b5 tmp`）上，而 R14–R16 的改动与本计划都在 **`dev`**（`fae873c Fix some bug`）上；表现出来就是“补丁打不上、源码比二进制还新”。已经确认并切回 `dev` 继续。另外当日 WSL 实例出现一次文件系统级故障（`df`/`free` 都 SIGSEGV、`/tmp` 只读），`wsl --shutdown` 重启后恢复，未丢数据 |
+
 ### R16 行为测试驱动：tinycc tests2 与它找出的六处 —— ✅ 89 → 93 通过（含一类指针误编译）
 
 R15 加的 `doc/tcctests.sh` 把 tinycc 自带的 `tests/tests2` 当成**行为**探针（编译 + 运行 + 对比 `.expect`，

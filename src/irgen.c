@@ -323,6 +323,49 @@ static Type *gep_step_type(Type *ptr_ty) {
     return ptr_ty;
 }
 
+// Does this aggregate have to go to the overflow area? It does when the
+// register files cannot hold every one of its eightbytes, and the running
+// counts are raised by what it takes when they can (a byval argument takes
+// none). Only a variadic tail is subject to the budget.
+static bool needs_overflow(AggClass *c, int *gp_used, int *sse_used, bool in_tail) {
+    if (!in_tail || !T.vararg_gp_regs) return false;
+    int gp = 0, sse = 0;
+    for (int i = 0; i < c->npiece; i++) {
+        if (is_flonum(c->piece[i].ty))
+            sse++;
+        else
+            gp++;
+    }
+    if (*gp_used + gp > T.vararg_gp_regs || *sse_used + sse > T.vararg_sse_regs) return true;
+    *gp_used += gp;
+    *sse_used += sse;
+    return false;
+}
+
+// The registers an argument takes on its way in, counted per file. Only a
+// variadic call needs this: the ABI gives an aggregate those registers only
+// when *every* eightbyte of it fits, and one that does not fit is passed in
+// the overflow area (which the IR spells byval). clang's own IR for six
+// nine-byte structs shows exactly that split -- the first two as their
+// pieces, the rest as byval pointers.
+static void count_arg_regs(Type *ty, AggClass *c, int *gp, int *sse) {
+    if (abi_lowered(ty) && c) {
+        for (int i = 0; i < c->npiece; i++) {
+            if (is_flonum(c->piece[i].ty))
+                (*sse)++;
+            else
+                (*gp)++;
+        }
+        return;
+    }
+    // A long double is in the x87 class on amd64 and always travels in
+    // memory, so it takes no register at all.
+    if (is_flonum(ty) && ty->size <= 8)
+        (*sse)++;
+    else if (is_integer(ty) || is_pointer(ty))
+        (*gp)++;
+}
+
 static Ref load(Ref addr, Type *type, int align, Member *mem) {
     if (mem && mem->is_bitfield) {
         Type *ty = mem->unit_ty;
@@ -352,12 +395,24 @@ static void store(Ref val, Ref addr, int align, Member *mem) {
         int width = mem->bit_width;
         int boff = mem->bit_offset;
         int total_bits = ty->size * 8;
+        // A constant written at the unit's own width: INT() is an int32_t, so
+        // the masks of a field wider than four bytes would be truncated to
+        // their low half (the clear mask's is zero, which wipes exactly the
+        // field it is meant to preserve).
+        bool wide_unit = ty->size > 4;
+
+        // A field as wide as its unit has no mask to speak of, and shifting
+        // by that width is undefined anyway: the count is taken modulo 64, so
+        // `(1ULL << 64) - 1` is zero. That zero turned the clear mask into
+        // zero -- a store wiped the bytes around the field, which is how a
+        // `char` next to a 38-bit field lost its value.
+        uint64_t width_mask = (width >= 64) ? ~0ULL : (1ULL << width) - 1;
 
         // b. clear mask
-        int64_t mask = ((1ULL << width) - 1) << boff;
+        int64_t mask = (int64_t)(width_mask << boff);
         uint64_t clear_mask_val = ~mask;
-        clear_mask_val &= (1ULL << total_bits) - 1;
-        Ref clear_mask = INT(clear_mask_val);
+        if (total_bits < 64) clear_mask_val &= (1ULL << total_bits) - 1;
+        Ref clear_mask = wide_unit ? LONG(clear_mask_val) : INT(clear_mask_val);
 
         // c. clear old value
         Ref old_cleared = TMP(tmp_id++, ty);
@@ -369,7 +424,7 @@ static void store(Ref val, Ref addr, int align, Member *mem) {
         // says where they start, so the unit's own truncation is not enough.
         Ref trunc = cast(val, val.ty, ty);
         if (width < total_bits) {
-            Ref mask = INT((1ULL << width) - 1);
+            Ref mask = wide_unit ? LONG(width_mask) : INT(width_mask);
             Ref masked = TMP(tmp_id++, ty);
             new_ins(IR_AND, masked, (Ref[]){trunc, mask}, 2);
             trunc = masked;
@@ -845,7 +900,9 @@ static Ref gen_va_arg(Node *node) {
         new_ins(IR_AND, cond, (Ref[]){in_regs, still}, 2);
     } else {
         // The offset counts up from zero, so "still has room" is simply
-        // being within the bound that leaves space for one more slot.
+        // being within the bound the table gives for this kind of argument.
+        // A table whose step covers several slots carries the bound that
+        // leaves room for all of them.
         cond = TMP(tmp_id++, bitint[1][1]);
         new_ins(IR_CMP_LE, cond, (Ref[]){off, INT(ops->offset_bound)}, 2);
     }
@@ -1736,9 +1793,29 @@ static Ref gen_expr(Node *node) {
             call_ops[0] = gen_expr(node->func);
 
             int idx = 1;
-            int byval_slot = 0;
+            // The operands spelled `byval(T)`: there can be more than one
+            // (a variadic call whose aggregates no longer fit in the
+            // registers), so they are collected rather than remembered one at
+            // a time.
+            uint32_t *byval_idxs = NULL;
+            int num_byval = 0;
             if (sret) call_ops[idx++] = slot;
+            // A variadic call follows the ABI's register budget: the named
+            // parameters have taken their share, and everything after them
+            // competes for what is left.
+            Type *vfty = node->func->ty;
+            if (vfty && vfty->kind == TY_PTR) vfty = vfty->base;
+            bool is_variadic_call = vfty && vfty->kind == TY_FUNC && vfty->is_variadic;
+            int gp_used = 0, sse_used = 0;
+            bool in_variadic_tail = false;
+            uint32_t named_left = is_variadic_call ? vfty->nparam : 0;
             for (Node *arg = node->args; arg; arg = arg->next) {
+                if (is_variadic_call) {
+                    if (named_left > 0)
+                        named_left--;
+                    else
+                        in_variadic_tail = true;
+                }
                 Ref a = gen_expr(arg);
                 // A record argument is passed by value. Whether the
                 // operand already is that value depends on its shape: the
@@ -1783,7 +1860,9 @@ static Ref gen_expr(Node *node) {
                         // byval in the signature. Which operand that is has to
                         // be recorded: a plain pointer to a record looks
                         // identical at print time.
-                        byval_slot = idx;
+                        byval_idxs = byval_idxs ? vgrow(byval_idxs, (num_byval + 1) * sizeof(uint32_t))
+                                                : vnew(4, sizeof(uint32_t));
+                        byval_idxs[num_byval++] = idx;
                         call_ops[idx++] = addr;
                     } else if (c.npiece == 0) {
                         // MEMORY class in a variadic call: the argument is a
@@ -1791,7 +1870,24 @@ static Ref gen_expr(Node *node) {
                         // handed over "by value" in the IR is not laid out
                         // that way -- the backend would pass it the way a
                         // prototype says, and there is none.
-                        if (T.agg_byval_param) byval_slot = idx;
+                        if (T.agg_byval_param) {
+                            byval_idxs = byval_idxs ? vgrow(byval_idxs, (num_byval + 1) * sizeof(uint32_t))
+                                                    : vnew(4, sizeof(uint32_t));
+                            byval_idxs[num_byval++] = idx;
+                        }
+                        call_ops[idx++] = addr;
+                    } else if (needs_overflow(&c, &gp_used, &sse_used, in_variadic_tail)) {
+                        // No longer fits in the registers the ABI offers for
+                        // variadic arguments: the whole argument goes to the
+                        // overflow area, which the IR spells byval. Sending
+                        // the pieces instead gives each of them a stack slot
+                        // of its own, and the callee's va_arg reads the
+                        // argument, not the pieces.
+                        if (T.agg_byval_param) {
+                            byval_idxs = byval_idxs ? vgrow(byval_idxs, (num_byval + 1) * sizeof(uint32_t))
+                                                    : vnew(4, sizeof(uint32_t));
+                            byval_idxs[num_byval++] = idx;
+                        }
                         call_ops[idx++] = addr;
                     } else if (agg_is_per_piece(&c)) {
                         for (int k = 0; k < c.npiece; k++) {
@@ -1827,12 +1923,25 @@ static Ref gen_expr(Node *node) {
                     }
                 }
                 call_ops[idx++] = a;
+                if (is_variadic_call) {
+                    AggClass ac;
+                    AggClass *acp = NULL;
+                    if (abi_lowered(arg->ty)) {
+                        if (in_variadic_tail && T.classify_variadic)
+                            T.classify_variadic(arg->ty, &ac);
+                        else
+                            T.classify_aggregate(arg->ty, &ac);
+                        acp = &ac;
+                    }
+                    count_arg_regs(arg->ty, acp, &gp_used, &sse_used);
+                }
             }
 
             if (node->ty->kind == TY_VOID) {
                 Ir *ci = new_ins(IR_CALL, R, call_ops, idx);
                 ci->is_sret = sret;
-                ci->byval_at = byval_slot;
+                ci->byval_at = byval_idxs;
+                ci->nbyval = num_byval;
                 return R;
             }
 
@@ -1845,7 +1954,8 @@ static Ref gen_expr(Node *node) {
                     // the slot already holds it and nothing comes back.
                     Ir *ci = new_ins(IR_CALL, R, call_ops, idx);
                     ci->is_sret = sret;
-                    ci->byval_at = byval_slot;
+                    ci->byval_at = byval_idxs;
+                    ci->nbyval = num_byval;
                     return slot;
                 }
                 // Register class: receive the flattened value and store it
@@ -1854,7 +1964,8 @@ static Ref gen_expr(Node *node) {
                 Ref val = TMP(tmp_id++, ret_abi);
                 Ir *ci = new_ins(IR_CALL, val, call_ops, idx);
                 ci->is_sret = sret;
-                ci->byval_at = byval_slot;
+                ci->byval_at = byval_idxs;
+                ci->nbyval = num_byval;
                 Ref sv = slot;
                 sv.ty = pointer_to(ret_abi, 0);
                 store(val, sv, ret_abi->align, NULL);
@@ -1865,14 +1976,16 @@ static Ref gen_expr(Node *node) {
                 // into the slot, so the value is what the slot holds.
                 Ir *ci = new_ins(IR_CALL, R, call_ops, idx);
                 ci->is_sret = sret;
-                ci->byval_at = byval_slot;
+                ci->byval_at = byval_idxs;
+                ci->nbyval = num_byval;
                 return load(slot, node->ty, node->ty->align, NULL);
             }
 
             dst = TMP(tmp_id++, node->ty);
             Ir *ci = new_ins(IR_CALL, dst, call_ops, idx);
             ci->is_sret = sret;
-            ci->byval_at = byval_slot;
+            ci->byval_at = byval_idxs;
+            ci->nbyval = num_byval;
             return dst;
         }
         case ND_CAS: {
@@ -2759,6 +2872,24 @@ static Ref asm_addr(Node *e) {
     return slot;
 }
 
+// Store a register piece into `dst`, keeping only the bytes the object
+// actually has. A piece is a whole register -- an i32 for a three-byte
+// struct, two i64s for a thirteen-byte one -- and the object is whatever the
+// program declared, so the bytes past its end must stay untouched: the slot
+// the parameter lives in is followed by the caller's or the callee's own
+// stack. The piece goes through a temporary of its own size and only `keep`
+// bytes are copied.
+static void store_piece(Ref val, Ref dst, Type *piece, int keep) {
+    if (keep >= piece->size) {
+        store(val, dst, piece->align, NULL);
+        return;
+    }
+    Ref tmp = TMP(tmp_id++, pointer_to(piece, 0));
+    new_ins(IR_ALLOCA, tmp, (Ref[]){INT(piece->align)}, 1);
+    store(val, tmp, piece->align, NULL);
+    new_ins(IR_MEMCPY, R, (Ref[]){dst, tmp, INT(keep)}, 3);
+}
+
 // The value an operand that travels in a register has. An input was converted
 // to a value by the parser; a record is read as the single piece the ABI
 // splits it into, that being all a constraint can name.
@@ -3096,14 +3227,20 @@ Module *irgen(Module *md) {
                     // prints, so the two sides of the call agree.
                     Type *shape = agg_param_shape_type(pt, &c);
                     if (shape && (shape->kind == TY_STRUCT || shape->kind == TY_UNION)) {
-                        // One parameter per piece, in order.
+                        // One parameter per piece, in order. The last piece
+                        // of a shape can reach past the object -- eleven
+                        // bytes travel as eight plus four -- so only the
+                        // bytes the object has are written.
                         uint32_t k = 0;
                         for (Member *m = shape->members; m; m = m->next, k++) {
+                            if (m->offset >= pt->size) continue;
                             Ref d = home;
                             d.ty = pointer_to(T.ty_char, 0);
                             Ref gep = TMP(tmp_id++, pointer_to(m->ty, 0));
                             new_ins(IR_GEP, gep, (Ref[]){d, INT(m->offset)}, 2);
-                            store(TMP(pn + k, m->ty), gep, m->ty->align, NULL);
+                            int keep = pt->size - m->offset;
+                            if (keep > m->ty->size) keep = m->ty->size;
+                            store_piece(TMP(pn + k, m->ty), gep, m->ty, keep);
                         }
                         pn += k;
                         continue;
@@ -3114,20 +3251,7 @@ Module *irgen(Module *md) {
                         d.ty = pointer_to(T.ty_char, 0);
                         Ref gep = TMP(tmp_id++, pointer_to(shape, 0));
                         new_ins(IR_GEP, gep, (Ref[]){d, INT(0)}, 2);
-                        // A register piece may be wider than the object it
-                        // carries: `struct { char x[3]; }` travels as an i32,
-                        // and storing those four bytes over a three-byte slot
-                        // writes one byte past the parameter -- into whatever
-                        // the callee put next to it. Go through a temporary
-                        // of the piece's size and copy the object's bytes.
-                        if (shape->size > pt->size) {
-                            Ref tmp = TMP(tmp_id++, pointer_to(shape, 0));
-                            new_ins(IR_ALLOCA, tmp, (Ref[]){INT(shape->align)}, 1);
-                            store(TMP(pn, shape), tmp, shape->align, NULL);
-                            new_ins(IR_MEMCPY, R, (Ref[]){d, tmp, INT(pt->size)}, 3);
-                        } else {
-                            store(TMP(pn, shape), gep, shape->align, NULL);
-                        }
+                        store_piece(TMP(pn, shape), gep, shape, pt->size);
                     }
                     pn++;
                 }

@@ -5,6 +5,13 @@ static Module *curm;
 extern bool opt_fpic;
 extern bool opt_fcommon;
 
+// Is this operand spelled `byval(T)`?
+static bool is_byval(Ir *ir, uint32_t i) {
+    for (int k = 0; k < ir->nbyval; k++)
+        if (ir->byval_at[k] == i) return true;
+    return false;
+}
+
 // True when this symbol's object-file name was already emitted (see the
 // definition below dump_str); used to fold asm-name aliases together.
 static bool already_emitted(Sym *sym);
@@ -662,7 +669,7 @@ void dump_blk(Blk *b) {
                         fprintf(out_file, "ptr noalias sret(");
                         print_type(at->base);
                         fprintf(out_file, ") align %d ", at->base->align);
-                    } else if (ir->byval_at == i) {
+                    } else if (is_byval(ir, i)) {
                         // Only the operand the generator marked is a copy: a
                         // pointer to a record that the program passed itself
                         // is an ordinary argument, and reading its pointee as

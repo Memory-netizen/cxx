@@ -3175,6 +3175,352 @@ static report_fn usage_routine __attribute__((noreturn));
 int main(void) { return usage_routine == 0 ? 0 : 1; }
 EOF
 
+# --- a qualifier on an array type qualifies the element ---------------
+# C11 6.7.3p9, kept by C23: "If the specification of an array type includes
+# any type qualifiers, the element type is so-qualified, not the array type."
+# cxx qualified the array itself, so three spellings of one object looked like
+# three types, and `restrict` in a specifier list was refused outright.
+# tinycc's tests2/39_typedef.c and 100_c99array-decls.c are both about this.
+cat > "$tmp/arrqual.c" <<'EOF'
+typedef int A[3];
+extern A const ca;
+extern const A ca;
+extern const int ca[3];
+extern const int ca[3]; /* the same type, again */
+
+typedef int *pa[2];
+typedef restrict pa rpa; /* the pointers are the restrict-qualified ones */
+typedef int *restrict rp;
+typedef rp rparr[2];
+
+_Static_assert(__builtin_types_compatible_p(rpa, rparr), "restrict reaches the element");
+_Static_assert(__builtin_types_compatible_p(rpa, int *restrict[2]), "and the element is a pointer");
+_Static_assert(!__builtin_types_compatible_p(int **, rp *), "a nested restrict is kept");
+_Static_assert(sizeof(A) == 3 * sizeof(int), "the array is still three ints");
+
+const int ca[3] = {1, 2, 3};
+int main(void) {
+    rpa v = {0, 0};
+    if (ca[0] != 1 || ca[2] != 3) return 1;
+    if (sizeof(v) != 2 * sizeof(int *)) return 2;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/arrqual" "$tmp/arrqual.c" > "$tmp/log" 2>&1 && "$tmp/arrqual"; then
+    echo "testing a qualifier on an array type qualifying the element ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a qualifier on an array type qualifying the element ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- #pragma push_macro / pop_macro -----------------------------------
+# C23 6.10.11. A push remembers what a name resolves to (including "nothing")
+# and a pop puts it back, nesting included. tinycc's tests2/77_push_pop_macro.c
+# checks exactly that, with the pragma names themselves defined as macros.
+cat > "$tmp/pushmac.c" <<'EOF'
+#define m 1
+#define f(a) ((a) + 1)
+int main(void) {
+#pragma push_macro("m")
+#undef m
+#define m 2
+#pragma push_macro("m")
+#undef m
+#define m 3
+    if (m != 3) return 1;
+#pragma pop_macro("m")
+    if (m != 2) return 2;
+#pragma pop_macro("m")
+    if (m != 1) return 3;
+    /* a name that was undefined at the push goes back to undefined */
+#pragma push_macro("n")
+#define n 7
+    if (n != 7) return 4;
+#pragma pop_macro("n")
+#ifdef n
+    return 5;
+#endif
+    /* a function-like macro comes back whole, parameters included */
+#pragma push_macro("f")
+#undef f
+#define f(a) ((a) + 100)
+    if (f(1) != 101) return 6;
+#pragma pop_macro("f")
+    if (f(1) != 2) return 7;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/pushmac" "$tmp/pushmac.c" > "$tmp/log" 2>&1 && "$tmp/pushmac"; then
+    echo "testing #pragma push_macro / pop_macro ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing #pragma push_macro / pop_macro ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a bit-field store leaves its neighbours alone --------------------
+# The clear mask is trimmed to the storage unit's width with `(1ULL <<
+# total_bits) - 1`. For an eight-byte unit that shifts by 64, which the
+# machine takes modulo 64: the expression is zero, the clear mask becomes
+# zero, and a store wipes the whole unit instead of the field's bits. It cost
+# tinycc's tests2/95_bitfields.c a `char` sitting next to a 38-bit field.
+cat > "$tmp/bfneigh.c" <<'EOF'
+struct s {
+    long long x : 45;
+    long long : 2;
+    long long y : 30;
+    unsigned long long z : 38;
+    char a;
+    short b;
+};
+int main(void) {
+    struct s v;
+    unsigned char *p = (unsigned char *)&v;
+    for (unsigned i = 0; i < sizeof v; i++) p[i] = 0;
+    /* a neighbour in the same eight-byte unit as z, and one outside it */
+    v.a = -1;
+    v.b = -1;
+    v.z = 120;
+    if (v.a != -1 || v.b != -1) return 1;
+    /* the same for the wide fields at the front of the record */
+    v.z = ~0ULL;
+    if (v.a != -1 || v.b != -1) return 2;
+    v.z = 0;
+    if (v.a != -1 || v.b != -1) return 3;
+    /* and setting all of them to -1 then to values, as the tinycc test does */
+    v.x = -1, v.y = -1, v.z = -1, v.a = -1, v.b = -1;
+    if (v.a != -1 || v.b != -1) return 4;
+    v.x = 0x123456789ULL, v.y = 120 << 25, v.z = 120, v.a += 0x44, ++v.a, v.b = 0x77;
+    if (v.a != 0x44 || v.b != 0x77) return 5;
+    if (v.z != 120) return 6;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/bfneigh" "$tmp/bfneigh.c" > "$tmp/log" 2>&1 && "$tmp/bfneigh"; then
+    echo "testing a bit-field store leaving its neighbours alone ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a bit-field store leaving its neighbours alone ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- bit-fields wider than four bytes ---------------------------------
+# The masks a bit-field store uses are as wide as its storage unit. Computed
+# as int32_t, a 45-bit field's clear mask became its low half -- zero -- and
+# the store wiped the field it was meant to preserve: `s.x = ~0` wrote eight
+# bytes of FF where gcc and clang write FF FF FF FF FF 1F.
+cat > "$tmp/widebf.c" <<'EOF'
+struct s {
+    long long x : 45;
+    long long : 2;
+    long long y : 30;
+    unsigned long long z : 38;
+    char a;
+    short b;
+};
+static int bytes_eq(void *p, int n, const unsigned char *want) {
+    unsigned char *q = p;
+    for (int i = 0; i < n; i++)
+        if (q[i] != want[i]) return 0;
+    return 1;
+}
+int main(void) {
+    struct s v;
+    unsigned char *p = (unsigned char *)&v;
+    for (unsigned i = 0; i < sizeof v; i++) p[i] = 0;
+    v.x = ~0ULL;
+    {   /* the 45-bit field, and nothing after it */
+        const unsigned char want[24] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x1F};
+        if (!bytes_eq(&v, 24, want)) return 1;
+    }
+    for (unsigned i = 0; i < sizeof v; i++) p[i] = 0;
+    v.y = ~0ULL;
+    {   /* bits 47..76: four bytes at offset 8 */
+        const unsigned char want[24] = {0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x3F};
+        if (!bytes_eq(&v, 24, want)) return 2;
+    }
+    for (unsigned i = 0; i < sizeof v; i++) p[i] = 0;
+    v.z = ~0ULL;
+    {   /* bits 79..114: offset 16, five bytes, 0x3F of the last */
+        const unsigned char want[24] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                        0xFF, 0xFF, 0xFF, 0xFF, 0x3F};
+        if (!bytes_eq(&v, 24, want)) return 3;
+    }
+    /* writing one field must leave its neighbours alone */
+    for (unsigned i = 0; i < sizeof v; i++) p[i] = 0;
+    v.x = ~0ULL;
+    if (v.y != 0 || v.z != 0 || v.a != 0 || v.b != 0) return 4;
+    for (unsigned i = 0; i < sizeof v; i++) p[i] = 0;
+    v.z = ~0ULL;
+    if (v.a != 0 || v.b != 0) return 5;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/widebf" "$tmp/widebf.c" > "$tmp/log" 2>&1 && "$tmp/widebf"; then
+    echo "testing bit-fields wider than four bytes ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing bit-fields wider than four bytes ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- #pragma pack ------------------------------------------------------
+# The other way real code asks for a packed record (tinycc's
+# tests2/95_bitfields.c runs its whole packed half through it). It caps the
+# alignment of every record declared after it, and pack(1) gives the packed
+# layout -- no storage-unit boundary between bit-fields either.
+cat > "$tmp/pack.c" <<'EOF'
+#pragma pack(push, 1)
+struct a { char c; int i; };
+#pragma pack(pop)
+struct b { char c; int i; };
+#pragma pack(2)
+struct c { char x; int i; };
+#pragma pack()
+struct d { char x; int i; };
+#pragma pack(1)
+struct e { unsigned x : 12; unsigned char y : 7; };
+#pragma pack()
+struct f { unsigned x : 12; unsigned char y : 7; };
+int main(void) {
+    if (sizeof(struct a) != 5 || _Alignof(struct a) != 1) return 1;
+    if (sizeof(struct b) != 8 || _Alignof(struct b) != 4) return 2;
+    if (sizeof(struct c) != 6 || _Alignof(struct c) != 2) return 3;
+    if (sizeof(struct d) != 8 || _Alignof(struct d) != 4) return 4;
+    /* twelve bits then seven, contiguous: three bytes */
+    if (sizeof(struct e) != 3 || _Alignof(struct e) != 1) return 5;
+    if (sizeof(struct f) != 4 || _Alignof(struct f) != 4) return 6;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/pack" "$tmp/pack.c" > "$tmp/log" 2>&1 && "$tmp/pack"; then
+    echo "testing #pragma pack ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing #pragma pack ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- variadic aggregate arguments follow the register budget -----------
+# An aggregate argument is passed in the registers only when every one of its
+# eightbytes fits; the rest go to the overflow area, which the IR spells
+# `byval`. cxx sent every one of them as its pieces, so the backend gave each
+# piece its own stack slot instead of the argument's slot, and the callee's
+# va_arg read the wrong bytes. tinycc's tests2/73_arm64.c passes six nine-byte
+# structs through a variadic call; clang's own IR for it splits them into
+# pieces (the ones that fit) and byval pointers (the rest).
+cat > "$tmp/varagg.c" <<'EOF'
+#include <stdarg.h>
+struct s9 { char x[9]; };
+static int check(int n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++) {
+        struct s9 v = va_arg(ap, struct s9);
+        for (int j = 0; j < 9; j++)
+            if (v.x[j] != (char)('A' + i)) return i * 16 + j + 1;
+    }
+    va_end(ap);
+    return 0;
+}
+static struct s9 mk(char c) {
+    struct s9 v;
+    for (int j = 0; j < 9; j++) v.x[j] = c;
+    return v;
+}
+int main(void) {
+    /* one, two: register pieces; three, four, five: the overflow area */
+    return check(5, mk('A'), mk('B'), mk('C'), mk('D'), mk('E'));
+}
+EOF
+if "$compiler" -w -o "$tmp/varagg" "$tmp/varagg.c" > "$tmp/log" 2>&1 && "$tmp/varagg"; then
+    echo "testing variadic aggregates across the register budget ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing variadic aggregates across the register budget ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a register piece is not stored past the object -------------------
+# An aggregate argument travels as whole registers: `struct { char x[3]; }`
+# as an i32 (four bytes for three), `struct { char x[11]; }` as an i64 and an
+# i32 (twelve for eleven), `struct { char x[13]; }` as two i64s (sixteen for
+# thirteen). The callee stores those pieces into the parameter's slot, and
+# the bytes past the object belong to whatever the compiler put next to it --
+# tinycc's tests2/73_arm64.c died with SIGILL because one of them was part of
+# a saved return address.
+cat > "$tmp/aggsz.c" <<'EOF'
+#include <string.h>
+struct s1 { char x[1]; };  struct s2 { char x[2]; };  struct s3 { char x[3]; };
+struct s4 { char x[4]; };  struct s5 { char x[5]; };  struct s6 { char x[6]; };
+struct s7 { char x[7]; };  struct s8 { char x[8]; };  struct s9 { char x[9]; };
+struct s10 { char x[10]; }; struct s11 { char x[11]; }; struct s12 { char x[12]; };
+struct s13 { char x[13]; }; struct s15 { char x[15]; }; struct s17 { char x[17]; };
+static int c1(struct s1 a) { return a.x[0]; }
+static int c2(struct s2 a) { return a.x[1]; }
+static int c3(struct s3 a) { return a.x[2]; }
+static int c4(struct s4 a) { return a.x[3]; }
+static int c5(struct s5 a) { return a.x[4]; }
+static int c6(struct s6 a) { return a.x[5]; }
+static int c7(struct s7 a) { return a.x[6]; }
+static int c8(struct s8 a) { return a.x[7]; }
+static int c9(struct s9 a) { return a.x[8]; }
+static int c10(struct s10 a) { return a.x[9]; }
+static int c11(struct s11 a) { return a.x[10]; }
+static int c12(struct s12 a) { return a.x[11]; }
+static int c13(struct s13 a) { return a.x[12]; }
+static int c15(struct s15 a) { return a.x[14]; }
+static int c17(struct s17 a) { return a.x[16]; }
+int main(void) {
+    struct s1 v1;   struct s2 v2;   struct s3 v3;   struct s4 v4;   struct s5 v5;
+    struct s6 v6;   struct s7 v7;   struct s8 v8;   struct s9 v9;   struct s10 v10;
+    struct s11 v11; struct s12 v12; struct s13 v13; struct s15 v15; struct s17 v17;
+    memset(&v1, 'a', sizeof v1);   memset(&v2, 'b', sizeof v2);
+    memset(&v3, 'c', sizeof v3);   memset(&v4, 'd', sizeof v4);
+    memset(&v5, 'e', sizeof v5);   memset(&v6, 'f', sizeof v6);
+    memset(&v7, 'g', sizeof v7);   memset(&v8, 'h', sizeof v8);
+    memset(&v9, 'i', sizeof v9);   memset(&v10, 'j', sizeof v10);
+    memset(&v11, 'k', sizeof v11); memset(&v12, 'l', sizeof v12);
+    memset(&v13, 'm', sizeof v13); memset(&v15, 'o', sizeof v15);
+    memset(&v17, 'q', sizeof v17);
+    /* every shape in one function: the callee's slots sit next to each
+       other and to main's own locals, so an over-wide store shows up */
+    if (c1(v1) != 'a') return 1;
+    if (c2(v2) != 'b') return 2;
+    if (c3(v3) != 'c') return 3;
+    if (c4(v4) != 'd') return 4;
+    if (c5(v5) != 'e') return 5;
+    if (c6(v6) != 'f') return 6;
+    if (c7(v7) != 'g') return 7;
+    if (c8(v8) != 'h') return 8;
+    if (c9(v9) != 'i') return 9;
+    if (c10(v10) != 'j') return 10;
+    if (c11(v11) != 'k') return 11;
+    if (c12(v12) != 'l') return 12;
+    if (c13(v13) != 'm') return 13;
+    if (c15(v15) != 'o') return 14;
+    if (c17(v17) != 'q') return 15;
+    /* and the arguments themselves are still intact afterwards */
+    if (v3.x[2] != 'c' || v9.x[8] != 'i' || v11.x[10] != 'k' || v13.x[12] != 'm') return 16;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/aggsz" "$tmp/aggsz.c" > "$tmp/log" 2>&1 && "$tmp/aggsz"; then
+    echo "testing aggregate arguments of every register shape ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing aggregate arguments of every register shape ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
 # --- converting an integer to a pointer keeps its value ---------------
 # LLVM's inttoptr zero-extends a narrower operand, so `(void *) -1` has to be
 # widened first: gcc and clang make it all ones, and that is the value

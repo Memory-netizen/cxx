@@ -6280,6 +6280,20 @@ static Node *stmt(Token **rest, Token *tok) {
 
 // CompStmt ::= "{" BlkItem* "}"
 // BlkItem  ::= Decl | UnLabelStmt | Label
+// The alignment cap `#pragma pack` last asked for: zero means the target's
+// default. It is read where a record is laid out, so a record keeps the
+// layout it was declared under after a later `pack(pop)`.
+static int cur_pack;
+
+// Consume a marker the preprocessor left behind, if this is one. The caller
+// loops, since several `#pragma pack` lines may sit in a row.
+static bool consume_pragma(Token **rest, Token *tok) {
+    if (tok->kind != TK_PRAGMA) return false;
+    cur_pack = (int)int128_to_i64(tok->ival);
+    *rest = tok->next;
+    return true;
+}
+
 static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
     Node dummy, *cur = &dummy;
     Node *node = new_node(ND_COMP_STMT, tok);
@@ -6300,6 +6314,7 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
 
     tok = tok->next;
     while (tok->kind != TK_RBRACE) {
+        if (consume_pragma(&tok, tok)) continue;
         Token *start = tok;
 
         // Label
@@ -6804,6 +6819,12 @@ static void layout_struct(Type *ty, bool is_union) {
             ap = &a->next;
     }
 
+    // `#pragma pack(n)` caps the alignment of everything the record holds,
+    // and with n == 1 the layout is the packed one -- gcc packs twelve bits
+    // and then seven with no storage-unit boundary between them, which is
+    // what tinycc's tests2/95_bitfields.c measures as a seven-byte record.
+    bool packed_layout = ty->is_packed || cur_pack == 1;
+
     // Bit-field layout follows gcc/clang: each bit-field lives in a
     // storage unit of its declared type's size, anchored at multiples
     // of that size (in bits); fields of different types share a unit as
@@ -6818,6 +6839,7 @@ static void layout_struct(Type *ty, bool is_union) {
     for (Member *mem = ty->members; mem; mem = mem->next) {
         int mem_align = (ty->is_packed || mem->is_packed) ? 1 : mem->align;
         if (mem->is_align) mem_align = mem->align;  // explicit alignment overrides packed
+        if (cur_pack > 0 && mem_align > cur_pack) mem_align = cur_pack;
         ty->align = MAX(ty->align, mem_align);
         mem->idx = idx++;
 
@@ -6832,7 +6854,7 @@ static void layout_struct(Type *ty, bool is_union) {
             uint64_t s = bitpos;
             if (width == 0) {
                 s = ALIGN_UP(s, unit);
-            } else if (!ty->is_packed) {
+            } else if (!packed_layout) {
                 // The field must not cross its unit's boundary.
                 while (s + width > (s / unit + 1) * unit) s = (s / unit + 1) * unit;
             }
@@ -7412,7 +7434,10 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 qual |= Q_VOLATILE;
                 break;
             case TK_RESTRICT:
-                error(tok, "restrict requires a pointer or reference");
+                // Whether it is allowed is decided where the qualifier meets
+                // the type: on an array it belongs to the element, which is
+                // where a pointer may be found.
+                qual |= Q_RESTRICT;
                 break;
             case TK_ATOMIC: {
                 Token *start = tok;
@@ -7664,7 +7689,20 @@ loop_end:
     }
 
     *rest = tok;
-    ty = type_qual(ty, qual);
+    // A qualifier written on an array type applies to the element type, not
+    // to the array type (C11 6.7.3p9). Without this, `const A` and
+    // `const int[3]` are different types and a redeclaration is rejected.
+    if (is_array(ty) || ty->kind == TY_VLA)
+        ty = array_elem_qual(ty, qual);
+    else
+        ty = type_qual(ty, qual);
+    // `restrict` may qualify only a pointer to an object (6.7.3p2), and the
+    // rule above may have moved it to an array's element.
+    if (qual & Q_RESTRICT) {
+        Type *elem = ty;
+        while (is_array(elem) || elem->kind == TY_VLA) elem = elem->base;
+        if (!is_pointer(elem)) error(tok, "restrict requires a pointer");
+    }
     if (type_attrs) {
         ty = copy_type(ty);
         ty_prepend_attrs(ty, type_attrs);
@@ -8555,7 +8593,10 @@ Module *parse(Token *tok) {
     // is used for diagnostics that mention it.
     push_namespace(file_scope, intern("__builtin_va_list", 17), SYM_TYNAME, va_list_ty, tok);
 
-    while (tok->kind != TK_EOF) tok = external_declaration(tok);
+    while (tok->kind != TK_EOF) {
+        if (consume_pragma(&tok, tok)) continue;
+        tok = external_declaration(tok);
+    }
     leave_scope(tok);
 
     // Every symbol now has its edges, so the reachable set can be computed

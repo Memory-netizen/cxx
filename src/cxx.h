@@ -277,6 +277,12 @@ struct Target {
     // where the copy is the callee's) or a plain pointer (AAPCS64 and RISC-V,
     // where the caller has already made the copy).
     bool agg_byval_param;
+    // The register budget a variadic argument may use, when the target has
+    // one: an aggregate is passed in the overflow area unless every one of
+    // its eightbytes fits in what is left. Zero means "no such rule", and
+    // aggregates travel as their pieces.
+    int vararg_gp_regs;
+    int vararg_sse_regs;
     // Whether a one-piece aggregate still travels as an array of one element
     // (AAPCS64: [1 x float]) rather than as the bare piece (SysV).
     bool agg_always_array;
@@ -382,6 +388,11 @@ enum {
     TK_WS,
     TK_COMMENT,
     TK_LINE,
+    // A `#pragma` the parser has to act on: `#pragma pack` caps the alignment
+    // of every record declared after it, and the preprocessor has already
+    // finished by the time records are laid out. The value it leaves behind
+    // rides in the token's integer.
+    TK_PRAGMA,
     TK_PUNCT,
 
     // Single-byte punctuators are encoded directly as their ASCII code.
@@ -1417,6 +1428,8 @@ void complete_copies(Type *ty);
 // Give a type its IR name and add it to the module's type list.
 void insert_ty(Type *ty, char *kind);
 Type *type_qual(Type *ty, uint32_t qual);
+// Qualify an array's element type instead of the array (rebuilding the chain).
+Type *array_elem_qual(Type *ty, uint32_t qual);
 Type *type_unqual(Type *ty);
 void add_type(Node *node);
 // 6.3.2.1's usual arithmetic conversions on a pair, as add_type
@@ -1637,7 +1650,12 @@ struct Ir {
     // or 0 when there is none. A pointer to a record is not by itself a
     // byval argument -- the user may simply have passed such a pointer -- so
     // which operand is a copy is recorded where it is decided.
-    uint8_t byval_at;
+    // Which operands are spelled `byval(T)`. A call can have several: a
+    // variadic call with more aggregates in the overflow area than the
+    // registers can hold marks every one of them, and clang's own IR for six
+    // nine-byte structs has four.
+    uint32_t *byval_at;
+    int nbyval;
     // IR_ASM: the template and the constraint string, the two halves of the
     // statement that the operands alone do not spell. `asm_ind` marks, one
     // byte per argument, the operands a "*" constraint made indirect: LLVM

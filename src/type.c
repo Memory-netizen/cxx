@@ -509,7 +509,7 @@ Type *type_qual(Type *ty, uint32_t qual) {
 
 // Qualify the element type of an array (rebuilding the array chain);
 // plain types are qualified directly.
-static Type *array_elem_qual(Type *ty, uint32_t qual) {
+Type *array_elem_qual(Type *ty, uint32_t qual) {
     if (ty->kind != TY_ARRAY && ty->kind != TY_VLA) return type_qual(ty, qual);
     Type *copy = copy_type(ty);
     copy->base = array_elem_qual(ty->base, qual);
@@ -567,8 +567,13 @@ bool is_compatible(Type *t1, Type *t2) {
     }
     if (t1->qual != t2->qual) return false;
 
-    if (t1->origin) t1 = t1->origin;
-    if (t2->origin) t2 = t2->origin;
+    // An array is what its element type makes it, and a qualifier written on
+    // an array belongs to that element (6.7.3p9). Following `origin` for an
+    // array would compare the unqualified element of the typedef it came
+    // from, so `A const` would look like plain `A`. Fixed arrays are still
+    // compared by length below, and a VLA still matches any length.
+    if (!is_array(t1) && t1->origin) t1 = t1->origin;
+    if (!is_array(t2) && t2->origin) t2 = t2->origin;
 
     if (t1 == t2) return true;
 
