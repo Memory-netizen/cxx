@@ -581,8 +581,25 @@ struct Hideset {
 
 static Hideset *hideset;
 
+// While a macro argument is being pre-expanded, every name that expansion
+// disables is also recorded here. The standard calls the result the token's
+// "paint": an argument's tokens reach the body re-scan already-painted for the
+// names that produced them, and for no others. cxx has no per-token hideset,
+// so the painted names of one argument expansion are collected in this list
+// and the tokens it produced are marked from it -- see `subst`.
+static Hideset *paint;
+static bool collecting;
+
 static bool is_disabled(uint32_t id) {
     for (Hideset *hs = hideset; hs; hs = hs->next)
+        if (hs->id == id) return true;
+    return false;
+}
+
+// Is `id` painted since `snap`, a snapshot of `paint` taken before the
+// expansion in question? Only the nodes above the snapshot belong to it.
+static bool is_painted(Hideset *snap, uint32_t id) {
+    for (Hideset *hs = paint; hs != snap; hs = hs->next)
         if (hs->id == id) return true;
     return false;
 }
@@ -592,6 +609,12 @@ static void push_disabled(uint32_t id) {
     hs->id = id;
     hs->next = hideset;
     hideset = hs;
+    if (collecting) {
+        Hideset *p = emalloc(sizeof(Hideset));
+        p->id = id;
+        p->next = paint;
+        paint = p;
+    }
 }
 
 static void pop_disabled() { hideset = hideset->next; }
@@ -919,22 +942,36 @@ static Token *subst(Token *tok, MacroArg *args) {
             continue;
         }
 
-        // Expand the argument and mark the resulting tokens so they
-        // are not expanded again during the body re-scan.
+        // Expand the argument, and mark the names it left painted so that the
+        // body re-scan does not expand them a second time: that is what stops
+        // `#define A A` from expanding forever. A name the argument merely
+        // mentions is *not* painted and stays expandable, because whether it
+        // is called is the body's decision -- libpng's
+        // `PNG_IMAGE_PIXEL_(PNG_IMAGE_SAMPLE_CHANNELS, fmt)` passes a macro
+        // name as an argument and calls it in the body as `test(fmt)`.
         // The first token inherits is_leadingws from the parameter token
         // in the macro body (since it conceptually "replaces" it there).
         if (arg) {
+            Hideset *snap = paint;
+            bool saved = collecting;
+            collecting = true;
             Token dummy2 = {};
             expand_macro(&dummy2, arg->tok);
+            collecting = saved;
+
             bool first = true;
             for (Token *t = dummy2.next; t; t = t->next) {
                 cur = cur->next = copy_token(t);
-                cur->noexpand = true;
+                if (t->kind == TK_IDENT && is_painted(snap, t->id)) cur->noexpand = true;
                 if (first) {
                     cur->is_leadingws = tok->is_leadingws;
                     first = false;
                 }
             }
+            // Nested expansions keep their paint for the level that is still
+            // collecting; the outermost one is done with it.
+            if (!saved) paint = NULL;
+
             tok = tok->next;
             continue;
         }
@@ -947,6 +984,45 @@ static Token *subst(Token *tok, MacroArg *args) {
 
     cur->next = tok;
     return dummy.next;
+}
+
+// 6.10.3.4p1 asks for the replacement list to be rescanned *together with the
+// tokens that follow the invocation*, and that is what makes a replacement
+// ending in a function-like macro's name a call when the file puts a
+// parenthesis after it. Expanding the replacement on its own cannot see that
+// parenthesis, and a body that pastes the name together is only a call
+// because of it: tinycc writes `ELFW(ST_BIND)(sym->st_info)` over
+// `#define ELFW(type) ELF64_##type`, and without this the rescan left
+// `ELF64_ST_BIND(...)` standing as an implicit function declaration.
+//
+// The argument list is read where it lies -- read_macro_args() only reads
+// forward from the name it is given, leaving the input alone -- and copied
+// onto the end of the replacement, so the expansion below sees the whole call
+// in one list. The input cursor moves past the list that was taken.
+static void splice_call(Token *sub, Token **input) {
+    if (sub->kind == TK_EOF) return;
+
+    Token *tail = sub;
+    while (tail->next && tail->next->kind != TK_EOF) tail = tail->next;
+    if (!tail->next || tail->next->kind != TK_EOF) return;
+    if (tail->kind != TK_IDENT || tail->noexpand || is_disabled(tail->id)) return;
+
+    Macro *m = find_macro(tail);
+    if (!m || m->is_objlike || m->handler) return;
+
+    Token *in = *input;
+    if (!in || in->kind != TK_LPAREN) return;
+
+    Token *eof = tail->next;
+    tail->next = in;
+    Token *after = NULL;
+    read_macro_args(&after, tail, m->params, m->is_variadic, m->va_args_id);
+    tail->next = eof;
+
+    Token *cur = tail;
+    for (Token *t = in; t && t != after; t = t->next) cur = cur->next = copy_token(t);
+    cur->next = eof;
+    *input = after;
 }
 
 // Recursively expand the input linked‑list macro,
@@ -1048,7 +1124,10 @@ static Token *expand_macro(Token *dst, Token *list) {
         // Function-like macro application
         MacroArg *args = read_macro_args(&cur, cur, m->params, m->is_variadic, m->va_args_id);
         Token *sub = subst(m->body, args);
+        // Stamped before the splice, so that a diagnostic in a token taken
+        // from the source names the source and not the invocation.
         for (Token *t = sub; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
+        splice_call(sub, &cur);
 
         Token *prev = dst;
         push_disabled(m->id);
@@ -1508,15 +1587,18 @@ static void check_invalid_ident(Token *tok) {
 }
 
 // Visit all tokens in `tok` while evaluating preprocessing
-// macros and directives.
-static Token *preprocess2(Token *tok) {
+// macros and directives. `file` is the source file `tok` came from: with
+// -D/-U/-include the stream starts with the command line's own directives, so
+// the first token is not necessarily the file's, and naming the file after it
+// would label every diagnostic in the file `<command line>`.
+static Token *preprocess2(Token *tok, SrcFile *file) {
     int line, col;
     Token dummy = {};
     Token *cur = &dummy;
     push_cond_incl(tok, BLOCK_ACTIVE);
     cur_path = 0;
     line_delta = 0;
-    display_name = tok->file->id;
+    display_name = file->id;
 
     cur = cur->next = new_linemarker(tok, 1, display_name);
 
@@ -1794,6 +1876,13 @@ static void remove_quote(char *buf, const char *str) {
     buf[len] = '\0';
 }
 
+// The command-line directives share one buffer, and the offset the next one
+// is written at has to be where the last one ended. Every one of them adds
+// the length of the directive word and its newline by hand, which is a count
+// that is easy to get wrong and was: `#define NAME 1` is eleven characters
+// past the name, not nine, so a run of -D without a value had each definition
+// written over the tail of the one before it and only the first was defined.
+// sprintf already reports what it wrote.
 void cmd_include_file(char *str) {
     static char buf[4096];
     remove_quote(buf, str);
@@ -1804,8 +1893,7 @@ void cmd_include_file(char *str) {
     else
         cmd_buf = vgrow(cmd_buf, cmd_len + len + 16);
 
-    sprintf(cmd_buf + cmd_len, "#include \"%s\"\n", buf);
-    cmd_len += len + 12;
+    cmd_len += sprintf(cmd_buf + cmd_len, "#include \"%s\"\n", buf);
 }
 
 void cmd_define_macro(char *str) {
@@ -1825,10 +1913,9 @@ void cmd_define_macro(char *str) {
     if (!cmd_buf)
         cmd_buf = vnew(4096, sizeof(char));
     else
-        cmd_buf = vgrow(cmd_buf, cmd_len + len + 12);
+        cmd_buf = vgrow(cmd_buf, cmd_len + len + 16);
 
-    sprintf(cmd_buf + cmd_len, "#define %s\n", buf);
-    cmd_len += len + 9;
+    cmd_len += sprintf(cmd_buf + cmd_len, "#define %s\n", buf);
 }
 
 void cmd_undef_macro(char *name) {
@@ -1838,8 +1925,7 @@ void cmd_undef_macro(char *name) {
     else
         cmd_buf = vgrow(cmd_buf, cmd_len + len + 12);
 
-    sprintf(cmd_buf + cmd_len, "#undef %s\n", name);
-    cmd_len += len + 8;
+    cmd_len += sprintf(cmd_buf + cmd_len, "#undef %s\n", name);
 }
 
 static Token *prep_cmdline(void) {
@@ -1978,7 +2064,7 @@ static void prep_builtin(void) {
     SrcFile *pred_marcos = new_file("<bulit-in>", 1, T.predef);
     Token *tok = tokenize(pred_marcos);
     tok = filter_tokens(tok);
-    preprocess2(tok);
+    preprocess2(tok, pred_marcos);
 }
 
 void init_macros(void) {
@@ -2090,6 +2176,7 @@ void join_adjacent_string_literals(Token *tok) {
 Token *preprocess(Token *tok) {
     init_macros();
 
+    SrcFile *file = tok->file;
     Token *main;
     Token *tok_cmd = prep_cmdline();
     if (!tok_cmd) {
@@ -2102,7 +2189,16 @@ Token *preprocess(Token *tok) {
     }
 
     tok = filter_tokens(main);
-    tok = preprocess2(tok);
+    tok = preprocess2(tok, file);
+
+    // The per-segment scan in preprocess2() is where `_Pragma` is normally
+    // handled, but a token that reaches the parser is a call to a function
+    // named `_Pragma` and not the operator at all, so there is no harm in
+    // asking once more: what is left at this point can only be an operator
+    // that some path copied past the segment it was expanded in. cpython's
+    // pyport.h wraps it in _Py_COMP_DIAG_PUSH, and those wrappers were the
+    // whole of its remaining `_Pragma` class.
+    tok = scan_pragma_op(tok);
 
     convert_keywords(tok);
     convert_ppnumber(tok);

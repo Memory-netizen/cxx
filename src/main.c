@@ -149,8 +149,6 @@ static void add_default_include_paths(char *argv0) {
         std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = inc;
     }
 
-    add_gcc_include_paths(T.triple);
-
     char *sysroot = opt_sysroot ?: T.sysroot;
     if (sysroot) {
         std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
@@ -168,6 +166,17 @@ static void add_default_include_paths(char *argv0) {
         std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/local/include";
         std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include";
     }
+
+    // GCC's include directory goes after the system's, which is where clang
+    // puts the equivalent of it (nowhere: clang reaches glibc directly). It
+    // has to, because clang's own <limits.h> -- the one in the resource
+    // directory above -- does `#include_next <limits.h>` and sets
+    // _GCC_LIMITS_H_ first, precisely so that gcc's copy steps aside. With
+    // gcc's directory next in line that copy *is* what include_next finds, it
+    // steps aside as asked, and the chain ends without glibc's limits.h ever
+    // being read: SSIZE_MAX and the rest of <bits/posix1_lim.h> were missing,
+    // which is what cpython's pyport.h reaches for.
+    add_gcc_include_paths(T.triple);
 }
 
 static void add_dirafter(void) {

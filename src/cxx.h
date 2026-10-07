@@ -972,6 +972,11 @@ enum {
     BUILTIN_TYPES_COMPATIBLE_P,
     ATOMIC_STORE,
     ATOMIC_LOAD,
+    // GCC's generic forms: __atomic_store(ptr, val, order) and
+    // __atomic_load(ptr, ret, order) address the value instead of passing it,
+    // and are a separate operation from the _n spelling, not an alias of it.
+    ATOMIC_STORE_GENERIC,
+    ATOMIC_LOAD_GENERIC,
     ATOMIC_EXCHANGE,
     ATOMIC_FETCH_ADD,
     ATOMIC_FETCH_SUB,
@@ -1032,6 +1037,11 @@ enum {
     // siblings, which <stdckdint.h> is written in terms of. Their IR is a
     // two-value return -- { iN, i1 } -- so they are the one family here
     // that needs an aggregate in the IR.
+    // __builtin_assume_aligned(ptr, align[, offset]): the pointer, with a
+    // promise about its alignment that only the optimiser may use.
+    BUILTIN_ASSUME_ALIGNED,
+    // __builtin_unreachable(): control never gets here.
+    BUILTIN_UNREACHABLE,
     BUILTIN_ADD_OVERFLOW,
     BUILTIN_SUB_OVERFLOW,
     BUILTIN_MUL_OVERFLOW,

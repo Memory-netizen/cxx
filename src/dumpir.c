@@ -901,6 +901,32 @@ static void dump_union_elem(Type *ty, Member *mem, Initializer *child) {
     fprintf(out_file, " }");
 }
 
+// The bits of one element of a record's image. An element is a byte range
+// `[pos, pos + size)`, and a bit-field may straddle two of them: the element
+// boundaries come from the type, where each field that starts a new access
+// unit contributes that unit's type, and the smallest unit covering a 12-bit
+// field is two bytes, so a following 8-bit field begins inside it and ends in
+// the next element. Every field that overlaps the range therefore contributes
+// the part of its value that falls in it, at its own distance from the
+// element's first bit.
+static int64_t bitfield_image(Type *ty, Initializer *init, int pos, int size) {
+    int lo = pos * 8, hi = (pos + size) * 8;
+    int64_t val = 0;
+    for (Member *m = ty->members; m; m = m->next) {
+        if (!m->is_bitfield) continue;
+        int start = m->offset * 8 + m->bit_offset;
+        int end = start + m->bit_width;
+        int from = MAX(start, lo);
+        int to = MIN(end, hi);
+        if (from >= to) continue;
+        Con *c = init->child[m->idx] ? init->child[m->idx]->val : NULL;
+        uint64_t bits = c ? (uint64_t)c->bits.i : 0;
+        uint64_t mask = (to - from >= 64) ? ~(uint64_t)0 : ((uint64_t)1 << (to - from)) - 1;
+        val |= (int64_t)(((bits >> (from - start)) & mask) << (from - lo));
+    }
+    return val;
+}
+
 static void dump_init(Initializer *init, Type *ty) {
     if (ty->kind == TY_UNION) {
         if (!init || !init->is_inited) {
@@ -1001,38 +1027,47 @@ static void dump_init(Initializer *init, Type *ty) {
         }
         fprintf(out_file, "{ ");
         Member *mem = ty->members;
+        // The walk `dump_type` makes, and it has to be that one: the elements
+        // written here are the elements written there, in the same order, or
+        // LLVM rejects the initializer as belonging to another type. A
+        // bit-field that begins inside the access unit of an earlier member
+        // has no element of its own there -- its bits are part of that
+        // member's value -- so it can have none here either. Grouping
+        // bit-fields by equal `offset` instead, as this used to, invented an
+        // element per field: libpng's read_chunks table came out with eight
+        // values for a five-element struct, and the padding between them was
+        // a negative length, `[-1 x i8]`.
         int pos = 0;
+        bool first = true;
         while (mem) {
+            int off = mem->offset;
+            if (off < pos) {
+                mem = mem->next;
+                continue;
+            }
+            if (!first) fprintf(out_file, ", ");
+            first = false;
+            if (pos < off) {
+                fprintf(out_file, "[%d x i8] zeroinitializer, ", off - pos);
+                pos = off;
+            }
             if (mem->is_bitfield) {
-                Member *after = mem->next;
-                int off = mem->offset;
-                while (after && after->offset == off) after = after->next;
-                int64_t val = 0;
-                for (Member *m = mem; m != after; m = m->next) {
-                    int width = m->bit_width;
-                    int boff = m->bit_offset;
-                    Con *bit_val = init->child[m->idx]->val;
-                    int trunc = bit_val ? bit_val->bits.i & ((1ULL << width) - 1) : 0;
-                    val |= trunc << boff;
-                }
+                int64_t val = bitfield_image(ty, init, pos, mem->unit_ty->size);
                 print_type(mem->unit_ty);
                 fprintf(out_file, " ");
                 printcon(&(Con){0, CBits, 0, {val}}, mem->unit_ty);
                 pos += mem->unit_ty->size;
-                mem = after;
+                mem = mem->next;
             } else {
                 dump_init(init->child[mem->idx], mem->ty);
                 pos += mem->ty->size;
                 mem = mem->next;
             }
-            if (!mem) break;
-            fprintf(out_file, ", ");
-            if (pos != mem->offset) {
-                fprintf(out_file, "[%d x i8] zeroinitializer, ", mem->offset - pos);
-                pos = mem->offset;
-            }
         }
-        if (pos < ty->size) fprintf(out_file, ", [%d x i8] zeroinitializer", ty->size - pos);
+        if (pos < ty->size) {
+            if (!first) fprintf(out_file, ", ");
+            fprintf(out_file, "[%d x i8] zeroinitializer", ty->size - pos);
+        }
         fprintf(out_file, " }");
         return;
     }

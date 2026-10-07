@@ -576,10 +576,18 @@ bool is_compatible(Type *t1, Type *t2) {
             if (!is_compatible(t1->ret, t2->ret)) return false;
             if (t1->is_variadic != t2->is_variadic) return false;
 
+            // 6.7.6.3p15: a parameter declared with a qualified type is
+            // taken as having the unqualified version of it, so `strtof`
+            // declared once as `(const char *restrict, char **restrict)` and
+            // again as `(const char *, char **)` is one function, not two
+            // conflicting ones. tinycc's tcc.h redeclares strtof and strtold
+            // that way against glibc's <stdlib.h>, and the qualifier check
+            // at the top of this function rejected every one of its thirty
+            // sources.
             Type *p1 = t1->params;
             Type *p2 = t2->params;
             for (; p1 && p2; p1 = p1->next, p2 = p2->next)
-                if (!is_compatible(p1, p2)) return false;
+                if (!is_compatible(type_unqual(p1), type_unqual(p2))) return false;
             return p1 == NULL && p2 == NULL;
         case TY_VLA:
         case TY_ARRAY:

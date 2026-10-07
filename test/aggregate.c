@@ -176,7 +176,6 @@ static int va_mix(int n, ...) {
     return v.a * 1 + v.b * 2 + k * 4 + (int)d.a * 8 + (int)d.b * 16;
 }
 
-
 /* ============ 真的传一个指向结构体的指针（不是 ABI 降级） ============ */
 static int p_pair(struct S8i *p) { return p->a * 1 + p->b * 2; }
 static int p_dbl(struct S16d *p) { return (int)p->a * 1 + (int)p->b * 2; }
@@ -269,9 +268,7 @@ int main() {
     ASSERT(14, va_s8d(1, (struct S8d){14.9}));
     ASSERT(1 + 4, va_s16m(1, (struct S16m){1, 2.9}));
     ASSERT(1 + 4 + 12 + 32, va_s32(1, (struct S32){1, 2, 3, 4}));
-    ASSERT(1 + 4 + 3 * 4 + 5 * 8 + 6 * 16,
-           va_mix(3, (struct S8i){1, 2}, 3, (struct S16d){5.9, 6.9}));
-
+    ASSERT(1 + 4 + 3 * 4 + 5 * 8 + 6 * 16, va_mix(3, (struct S8i){1, 2}, 3, (struct S16d){5.9, 6.9}));
 
     /* --- 指向结构体的指针 --- */
     ASSERT(1 + 4, p_pair(&s8));
@@ -285,7 +282,9 @@ int main() {
      * The classification sees the elements, never the array: a pair of
      * doubles is SSE on amd64, not one integer eightbyte. */
     ASSERT(21, ({
-               struct { double a[2]; } v = {{1.0, 2.0}};
+               struct {
+                   double a[2];
+               } v = {{1.0, 2.0}};
                (int)(v.a[0] * 1 + v.a[1] * 10);
            }));
     ASSERT(21, agg_ard(1.0, 2.0));

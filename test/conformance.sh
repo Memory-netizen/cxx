@@ -2093,6 +2093,337 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# --- what this round's real code found -------------------------------
+# cpython, git, tinycc and libpng each stopped cxx on something the suite had
+# no case for. One check per thing, so the next round starts from here.
+
+# The command-line directives share one buffer and the offset the next one is
+# written at was counted by hand -- but `#define NAME 1` is two characters
+# longer than that count allowed for, so each definition was written over the
+# tail of the one before it. Of a run of -D without a value only the first
+# survived, which is why -DNDEBUG ate cpython's -DPy_BUILD_CORE and its
+# headers answered with `#error "this header requires Py_BUILD_CORE define"`.
+cat > "$tmp/manydefs.c" <<'EOF'
+#ifndef ONE
+#error ONE
+#endif
+#ifndef TWO
+#error TWO
+#endif
+#ifndef THREE
+#error THREE
+#endif
+#ifndef FOUR
+#error FOUR
+#endif
+int f(void) { return ONE + TWO + THREE + FOUR; }
+EOF
+if "$compiler" -w -DONE -DTWO -DTHREE -DFOUR -c -o /dev/null "$tmp/manydefs.c" > "$tmp/log" 2>&1; then
+    echo "testing a run of -D without a value ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a run of -D without a value ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# With a -D present the stream the preprocessor walks starts with the command
+# line's own directives, and the display name was taken from that first token:
+# every diagnostic in the file was reported at `<command line>`.
+cat > "$tmp/where.c" <<'EOF'
+int f(void) { return no_such_function(); }
+EOF
+"$compiler" -w -DUNUSED -c -o /dev/null "$tmp/where.c" > "$tmp/log" 2>&1
+if grep -q 'where\.c:' "$tmp/log"; then
+    echo "testing a diagnostic names the file, not the command line ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a diagnostic names the file, not the command line ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -3
+    n_fail=$((n_fail + 1))
+fi
+
+# A macro name passed as an argument is only *called* once the body puts a
+# parenthesis after it, so what the argument expansion left unpainted has to
+# stay expandable: libpng's PNG_IMAGE_PIXEL_(PNG_IMAGE_SAMPLE_CHANNELS, fmt)
+# writes `test(fmt)` in its body. Marking every token of an expanded argument
+# "do not expand again" -- what this used to do -- left the call unresolved.
+cat > "$tmp/argcall.c" <<'EOF'
+#define SAMPLE_CHANNELS(fmt) (((fmt) & 3) + 1)
+#define PIXEL_(test, fmt) (((fmt) & 4) ? 1 : test(fmt))
+#define PIXEL_CHANNELS(fmt) PIXEL_(SAMPLE_CHANNELS, fmt)
+int main(void) { return PIXEL_CHANNELS(2) == 3 ? 0 : 1; }
+EOF
+if "$compiler" -w -o "$tmp/argcall" "$tmp/argcall.c" >/dev/null 2>&1 && "$tmp/argcall"; then
+    echo "testing a macro name called where the body calls it ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a macro name called where the body calls it ... FAILED"
+    "$compiler" -w -o "$tmp/argcall" "$tmp/argcall.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# A record's constant initializer is one byte image, and the elements the type
+# is written with may cut a bit-field in half: a 12-bit field's access unit is
+# two bytes, so the 8-bit field after it starts inside that element and ends
+# in the next one. libpng's read_chunks table is a record of six such fields,
+# and the elements were walked by grouping fields with equal offsets, which
+# invented one value per field and left a negative-length pad, `[-1 x i8]`,
+# between two of them. Every field has to be written where it lies.
+cat > "$tmp/bfimage.c" <<'EOF'
+struct B {
+    unsigned a : 12, b : 8, c : 4, d : 4, e : 1;
+};
+static const struct B bt = { 13, 208, 15, 9, 1 };
+int main(void) {
+    if (sizeof bt != 4) return 20;
+    unsigned one = 1;
+    if (*(unsigned char *)&one == 1) {
+        static const unsigned char want[4] = {0x0d, 0x00, 0xfd, 0x19};
+        const unsigned char *p = (const unsigned char *)&bt;
+        for (int i = 0; i < 4; i++)
+            if (p[i] != want[i]) return i + 1;
+    }
+    if (bt.a != 13 || bt.b != 208 || bt.c != 15 || bt.d != 9 || bt.e != 1) return 10;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/bfimage" "$tmp/bfimage.c" >/dev/null 2>&1 && "$tmp/bfimage"; then
+    echo "testing a bit-field constant record image ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a bit-field constant record image ... FAILED"
+    "$compiler" -w -o "$tmp/bfimage" "$tmp/bfimage.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# 6.7.6.3p15: a parameter declared with a qualified type is taken as having
+# the unqualified version of it. tinycc's tcc.h declares `strtof` and
+# `strtold` again with no `restrict` against glibc's <stdlib.h>, and the
+# qualifier check rejected every one of its thirty sources.
+cat > "$tmp/paramqual.c" <<'EOF'
+#include <stdlib.h>
+extern float strtof(const char *nptr, char **endptr);
+extern long double strtold(const char *nptr, char **endptr);
+extern int f(const char *restrict, char **restrict);
+extern int f(const char *, char **);
+int main(void) { return 0; }
+EOF
+if "$compiler" -w -c -o /dev/null "$tmp/paramqual.c" > "$tmp/log" 2>&1; then
+    echo "testing a parameter's qualifier does not break compatibility ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a parameter's qualifier does not break compatibility ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# 6.10.3.4p1: the replacement list is rescanned together with the tokens that
+# follow the invocation, so a replacement that ends in the name of a
+# function-like macro is a call when the file puts a parenthesis after it.
+# tinycc writes `ELFW(ST_BIND)(sym->st_info)` over
+# `#define ELFW(type) ELF64_##type`; expanding the body on its own left
+# `ELF64_ST_BIND(...)` standing as an implicit function declaration.
+cat > "$tmp/pastecall.c" <<'EOF'
+#define ELFW(type) ELF64_##type
+#define ELF64_ST_BIND(v) (((v) >> 4) & 0xf)
+#define ELF64_ST_INFO(b, t) (((b) << 4) + ((t) & 0xf))
+int f(int info) { return ELFW(ST_BIND)(info); }
+int main(void) { return f(0x21) == 2 ? 0 : 1; }
+EOF
+if "$compiler" -w -o "$tmp/pastecall" "$tmp/pastecall.c" >/dev/null 2>&1 && "$tmp/pastecall"; then
+    echo "testing a pasted macro name called by the source ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a pasted macro name called by the source ... FAILED"
+    "$compiler" -w -o "$tmp/pastecall" "$tmp/pastecall.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# GNU `__extension__` marks the expression after it as one to be accepted
+# without a pedantic diagnostic, and what follows it is a *cast* expression:
+# lua's `#define cast_func(p) (__extension__ (voidf)(p))` re-entered the
+# expression parser below the cast, so the `(voidf)(p)` was no longer read as
+# one and the initialisation it feeds was rejected.
+cat > "$tmp/extension.c" <<'EOF'
+typedef void (*voidf)(void);
+typedef int (*lua_CFunction)(void *);
+void *dlsym(void *, const char *);
+#define cast(t, e) ((t)(e))
+#define cast_func(p) (__extension__ (voidf)(p))
+#define cast_Lfunc(p) cast(lua_CFunction, cast_func(p))
+int main(void) { lua_CFunction f = cast_Lfunc(dlsym(0, "x")); return f == 0 ? 0 : 1; }
+EOF
+if "$compiler" -w -c -o /dev/null "$tmp/extension.c" > "$tmp/log" 2>&1; then
+    echo "testing __extension__ before a cast ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __extension__ before a cast ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# 6.9.2p2: a declaration with `extern` and no initializer is not a
+# definition, and only a definition needs a complete type. cpython declares
+# every object in PyAPI_DATA that way, and git's headers declare records the
+# same way; cxx rejected each one as `variable 'X' has incomplete type`.
+cat > "$tmp/externinc.c" <<'EOF'
+struct Never;
+typedef struct Never NeverT;
+extern struct Never a;
+extern NeverT b;
+void f(void) {
+    extern NeverT c;
+    (void)&c;
+}
+int main(void) { return 0; }
+EOF
+if "$compiler" -w -c -o /dev/null "$tmp/externinc.c" > "$tmp/log" 2>&1; then
+    echo "testing an extern declaration of an incomplete type ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing an extern declaration of an incomplete type ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# GCC's generic atomics address the value instead of passing it:
+# __atomic_load(ptr, ret, order) and __atomic_store(ptr, val, order). They are
+# not aliases of the _n spelling -- the arguments differ -- and they take the
+# address of an ordinary object, where the C11 spelling requires an _Atomic
+# one. cpython's pyatomic_gcc.h writes both for every width it has no _n form
+# for, which was the single blocker behind 322 of its 371 failing units.
+cat > "$tmp/genericatomic.c" <<'EOF'
+struct S { int a; double d; };
+int main(void) {
+    int x = 7, y = 0;
+    double p = 1.5, q = 0;
+    struct S s = { 3, 2.5 }, t = { 0, 0 };
+    __atomic_load(&x, &y, __ATOMIC_RELAXED);
+    __atomic_load(&p, &q, __ATOMIC_SEQ_CST);
+    __atomic_load(&s, &t, __ATOMIC_RELAXED);
+    __atomic_store(&y, &x, __ATOMIC_RELAXED);
+    if (y != 7 || q != 1.5 || t.a != 3 || t.d != 2.5) return 1;
+    return __atomic_load_n(&x, __ATOMIC_RELAXED) == 7 ? 0 : 2;
+}
+EOF
+if "$compiler" -w -o "$tmp/genericatomic" "$tmp/genericatomic.c" >/dev/null 2>&1 && "$tmp/genericatomic"; then
+    echo "testing the generic __atomic load and store ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the generic __atomic load and store ... FAILED"
+    "$compiler" -w -o "$tmp/genericatomic" "$tmp/genericatomic.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# GCC spells the overflow builtins once per operation and once per type, and
+# cpython's bundled mimalloc calls __builtin_umull_overflow: those calls were
+# the whole of a 13-translation-unit sample's "implicit declaration" class.
+cat > "$tmp/typedovf.c" <<'EOF'
+int main(void) {
+    unsigned long u = 0;
+    unsigned long long uu = 0;
+    long s = 0;
+    int bad = 0;
+    bad += __builtin_umull_overflow(3UL, 4UL, &u) != 0 || u != 12;
+    bad += __builtin_umul_overflow(3U, 4U, (unsigned *)&u) != 0;
+    bad += __builtin_umull_overflow(1UL << 40, 1UL << 40, &u) != 1;
+    bad += __builtin_smull_overflow(-3L, 4L, &s) != 0 || s != -12;
+    bad += __builtin_smulll_overflow(1LL << 62, 4LL, (long long *)&uu) != 1;
+    bad += __builtin_mul_overflow(6ULL, 7ULL, &uu) != 0 || uu != 42;
+    return bad;
+}
+EOF
+if "$compiler" -w -o "$tmp/typedovf" "$tmp/typedovf.c" >/dev/null 2>&1 && "$tmp/typedovf"; then
+    echo "testing the typed overflow builtins ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the typed overflow builtins ... FAILED"
+    "$compiler" -w -o "$tmp/typedovf" "$tmp/typedovf.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# __builtin_assume_aligned and __builtin_unreachable: cpython's mimalloc and
+# its Py_UNREACHABLE reach for both. The first is the pointer it is given; the
+# second is a no-op here, because cxx has no unreachable terminator to emit --
+# reaching it is undefined either way, so no result depends on which it is.
+cat > "$tmp/gnubuiltins.c" <<'EOF'
+#include <string.h>
+int classify(int x) {
+    switch (x) {
+        case 1: return 10;
+        case 2: return 20;
+        default: __builtin_unreachable();
+    }
+}
+int main(void) {
+    char buf[64];
+    strcpy(buf, "ok");
+    char *p = __builtin_assume_aligned(buf, 16);
+    void *v = __builtin_assume_aligned((void *)buf, 8, 0);
+    if (p != buf || v != (void *)buf) return 1;
+    if (classify(1) != 10 || classify(2) != 20) return 2;
+    return p[0] == 'o' ? 0 : 3;
+}
+EOF
+if "$compiler" -w -o "$tmp/gnubuiltins" "$tmp/gnubuiltins.c" >/dev/null 2>&1 && "$tmp/gnubuiltins"; then
+    echo "testing assume_aligned and unreachable ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing assume_aligned and unreachable ... FAILED"
+    "$compiler" -w -o "$tmp/gnubuiltins" "$tmp/gnubuiltins.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# `_Pragma` is an operator, not a function: wherever it is written it has to be
+# consumed before the parser sees it, including when a wrapper macro carries it
+# -- cpython's pyport.h defines _Py_COMP_DIAG_PUSH that way and those wrappers
+# reached the parser as calls.
+cat > "$tmp/pragmaop.c" <<'EOF'
+#define _Py_COMP_DIAG_PUSH _Pragma("GCC diagnostic push")
+#define _Py_COMP_DIAG_IGNORE_DEPR_DECLS \
+    _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+#define _Py_COMP_DIAG_POP _Pragma("GCC diagnostic pop")
+_Py_COMP_DIAG_PUSH
+_Py_COMP_DIAG_IGNORE_DEPR_DECLS
+static inline int f(void) { return 1; }
+_Py_COMP_DIAG_POP
+int main(void) { return f() == 1 ? 0 : 1; }
+EOF
+if "$compiler" -w -o "$tmp/pragmaop" "$tmp/pragmaop.c" >/dev/null 2>&1 && "$tmp/pragmaop"; then
+    echo "testing a macro that carries _Pragma ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a macro that carries _Pragma ... FAILED"
+    "$compiler" -w -o "$tmp/pragmaop" "$tmp/pragmaop.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# <limits.h> is clang's own, and it does `#include_next <limits.h>` after
+# defining _GCC_LIMITS_H_. GCC's include directory must therefore not be next
+# in line, or that directory's copy steps aside as asked and glibc's
+# <bits/posix1_lim.h> -- where SSIZE_MAX lives -- is never read. cpython's
+# pyport.h asks for SSIZE_MAX, and 22 units of a 60-unit sample failed on it.
+cat > "$tmp/ssizemax.c" <<'EOF'
+#define _GNU_SOURCE 1
+#include <limits.h>
+#include <stddef.h>
+#include <stdint.h>
+int main(void) {
+    if (SSIZE_MAX != LONG_MAX) return 1;
+    if (SIZE_MAX <= (size_t)SSIZE_MAX) return 2;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/ssizemax" "$tmp/ssizemax.c" >/dev/null 2>&1 && "$tmp/ssizemax"; then
+    echo "testing SSIZE_MAX from <limits.h> ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing SSIZE_MAX from <limits.h> ... FAILED"
+    "$compiler" -w -o "$tmp/ssizemax" "$tmp/ssizemax.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then

@@ -53,6 +53,7 @@ static Node *compound_stmt(Token **rest, Token *tok);
 static Node *expr(Token **rest, Token *tok);
 static Node *assign(Token **rest, Token *tok);
 static Node *cast(Token **rest, Token *tok);
+static Node *new_excast(Node *expr, Type *ty, Token *tok);
 static int64_t eval(Node *node);
 static int64_t eval2(Node *node, uint32_t *sym);
 static int64_t eval_rval(Node *node, uint32_t *sym);
@@ -1770,6 +1771,8 @@ BuiltinDef builtin_defs[NUM_BUILTINFN] = {
                                     0, 0, NULL, 0},
     [ATOMIC_STORE] = {"__c11_atomic_store", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [ATOMIC_LOAD] = {"__c11_atomic_load", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [ATOMIC_STORE_GENERIC] = {"__atomic_store", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [ATOMIC_LOAD_GENERIC] = {"__atomic_load", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [ATOMIC_EXCHANGE] = {"__c11_atomic_exchange", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [ATOMIC_FETCH_ADD] = {"__c11_atomic_fetch_add", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [ATOMIC_FETCH_SUB] = {"__c11_atomic_fetch_sub", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
@@ -1855,6 +1858,9 @@ BuiltinDef builtin_defs[NUM_BUILTINFN] = {
     // and lose the width the intrinsic name is built from. The IR result is
     // { iN, i1 }, the value and an overflow flag, which is why these are
     // the only builtins whose call yields an aggregate.
+    [BUILTIN_ASSUME_ALIGNED] = {"__builtin_assume_aligned", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0,
+                                NULL, 0},
+    [BUILTIN_UNREACHABLE] = {"__builtin_unreachable", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_ADD_OVERFLOW] = {"__builtin_add_overflow", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
                               0},
     [BUILTIN_SUB_OVERFLOW] = {"__builtin_sub_overflow", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
@@ -1961,6 +1967,29 @@ static struct {
     {"__atomic_fetch_xor", ATOMIC_FETCH_XOR},
     {"__atomic_thread_fence", ATOMIC_THREAD_FENCE},
     {"__atomic_signal_fence", ATOMIC_SIGNAL_FENCE},
+    // GCC spells the overflow builtins once per operation and once per type,
+    // and all of them are the same three-operand operation: the operands keep
+    // their own types, so the width comes from them either way. cpython's
+    // bundled mimalloc calls __builtin_umull_overflow, and those calls were
+    // the whole of its remaining "implicit declaration" class.
+    {"__builtin_uadd_overflow", BUILTIN_ADD_OVERFLOW},
+    {"__builtin_uaddl_overflow", BUILTIN_ADD_OVERFLOW},
+    {"__builtin_uaddll_overflow", BUILTIN_ADD_OVERFLOW},
+    {"__builtin_sadd_overflow", BUILTIN_ADD_OVERFLOW},
+    {"__builtin_saddl_overflow", BUILTIN_ADD_OVERFLOW},
+    {"__builtin_saddll_overflow", BUILTIN_ADD_OVERFLOW},
+    {"__builtin_usub_overflow", BUILTIN_SUB_OVERFLOW},
+    {"__builtin_usubl_overflow", BUILTIN_SUB_OVERFLOW},
+    {"__builtin_usubll_overflow", BUILTIN_SUB_OVERFLOW},
+    {"__builtin_ssub_overflow", BUILTIN_SUB_OVERFLOW},
+    {"__builtin_ssubl_overflow", BUILTIN_SUB_OVERFLOW},
+    {"__builtin_ssubll_overflow", BUILTIN_SUB_OVERFLOW},
+    {"__builtin_umul_overflow", BUILTIN_MUL_OVERFLOW},
+    {"__builtin_umull_overflow", BUILTIN_MUL_OVERFLOW},
+    {"__builtin_umulll_overflow", BUILTIN_MUL_OVERFLOW},
+    {"__builtin_smul_overflow", BUILTIN_MUL_OVERFLOW},
+    {"__builtin_smull_overflow", BUILTIN_MUL_OVERFLOW},
+    {"__builtin_smulll_overflow", BUILTIN_MUL_OVERFLOW},
 };
 
 static size_t builtin_find(uint32_t id) {
@@ -1975,8 +2004,13 @@ static size_t builtin_find(uint32_t id) {
     return builtin_row_count;  // not a builtin
 }
 
-// Whether this call is one of the GCC-spelled atomics.
-static bool is_gcc_atomic_spelling(uint32_t id) {
+// Whether this call is one of the GCC-spelled atomics, which take the address
+// of an ordinary object: a name that is an alias in the table, or one of the
+// generic forms that needed a row of its own because their arguments differ
+// from the C11 operation's. The C11 spelling (__c11_atomic_*) is the one that
+// requires an _Atomic object, and it is the only one that does.
+static bool is_gcc_atomic_spelling(uint32_t id, int kind) {
+    if (kind == ATOMIC_STORE_GENERIC || kind == ATOMIC_LOAD_GENERIC) return true;
     for (size_t i = 0; i < sizeof(builtin_aliases) / sizeof(builtin_aliases[0]); ++i)
         if (intern(builtin_aliases[i].name, strlen(builtin_aliases[i].name)) == id) return true;
     return id == intern("__atomic_compare_exchange_n", 27);
@@ -2237,13 +2271,22 @@ static Node *va_list_addr(Token **rest, Token *tok) {
     // object is an array or a pointer, the operand already *is* that
     // address; only a structure or scalar operand needs it taken.
     if (want->kind == TY_ARRAY || want->kind == TY_PTR) {
-        // A pointer operand is a variable holding the address, so reading it
-        // is a load. `va_list ap` as a *parameter* is exactly that: 6.7.6.3p7
-        // adjusts the array to a pointer, so the object lives in the caller
-        // and only its address is here. Without the conversion gen_expr()
-        // handed irgen the address of the pointer variable, and a va_list
-        // forwarded to a helper -- vprintf's shape -- read the wrong bytes.
-        if (got->kind == TY_PTR) lvalue_convert(&ap);
+        // An operand that has already decayed -- an array va_list reaching
+        // here as a pointer, which is what a forwarded one looks like --
+        // has to be read: `va_list ap` as a *parameter* is exactly that,
+        // because 6.7.6.3p7 adjusts the array to a pointer, so the object
+        // lives in the caller and only its address is here. Without the
+        // conversion gen_expr() handed irgen the address of the pointer
+        // variable, and a va_list forwarded to a helper -- vprintf's shape --
+        // read the wrong bytes.
+        //
+        // A va_list that is itself a pointer (rv32, rv64) is the other case,
+        // and it must *not* be read here. There the object is the pointer
+        // variable, and the linear cursor strategy loads it, takes the value
+        // out of the argument area and stores the advanced pointer back into
+        // it; reading it first left irgen loading through the cursor as if
+        // the area held the va_list (`load void`), which is not IR.
+        if (want->kind == TY_ARRAY && got->kind == TY_PTR) lvalue_convert(&ap);
         return ap;
     }
     Node *addr = new_unary(ND_ADDR, ap, tok);
@@ -2459,7 +2502,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
     Token *start = tok;
     bool is_weak = false;
     bool is_signal = false;
-    gcc_atomic_args = is_gcc_atomic_spelling(tok->id);
+    gcc_atomic_args = is_gcc_atomic_spelling(tok->id, kind);
     switch (kind) {
         case BUILTIN_TYPES_COMPATIBLE_P: {
             tok = skip(tok->next, TK_LPAREN);
@@ -2661,12 +2704,20 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             alloc->rhs = new_ulong(align, tok);
             return alloc;
         }
-        case ATOMIC_STORE: {
+        case ATOMIC_STORE:
+        case ATOMIC_STORE_GENERIC: {
             // temp = desired; *object = temp with the given order.
             tok = skip(tok->next, TK_LPAREN);
             Node *object = atomic_object(&tok, start);
             tok = skip(tok, TK_COMMA);
             Node *desired = assign(&tok, tok);
+            // __atomic_store addresses the value: `*val`, not `val`.
+            if (kind == ATOMIC_STORE_GENERIC) {
+                add_type(desired);
+                if (!is_pointer(desired->ty))
+                    error(desired->tok, "argument 2 of ‘__atomic_store’ must be a pointer to the value");
+                desired = new_unary(ND_DEREF, desired, desired->tok);
+            }
             tok = skip(tok, TK_COMMA);
             int order = atomic_order(&tok, MO_STORE);
             *rest = skip(tok, TK_RPAREN);
@@ -2678,11 +2729,25 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             store->mem_order = order + 1;
             return new_binary(ND_COMMA, desired_init, store, tok);
         }
-        case ATOMIC_LOAD: {
+        case ATOMIC_LOAD:
+        case ATOMIC_LOAD_GENERIC: {
             // temp = *object with the given order; yield temp.
             tok = skip(tok->next, TK_LPAREN);
             Node *object = atomic_object(&tok, start);
             tok = skip(tok, TK_COMMA);
+            // __atomic_load addresses the result: `*ret`, not `ret`. gcc's
+            // form has no value of its own; cxx leaves the loaded value as
+            // the expression's, which accepts everything gcc does and one
+            // thing more.
+            Node *ret = NULL;
+            if (kind == ATOMIC_LOAD_GENERIC) {
+                ret = assign(&tok, tok);
+                add_type(ret);
+                if (!is_pointer(ret->ty))
+                    error(ret->tok, "argument 2 of ‘__atomic_load’ must be a pointer to the result");
+                ret = new_unary(ND_DEREF, ret, ret->tok);
+                tok = skip(tok, TK_COMMA);
+            }
             int order = atomic_order(&tok, MO_LOAD);
             *rest = skip(tok, TK_RPAREN);
 
@@ -2690,7 +2755,10 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             Node *src = new_unary(ND_DEREF, object, tok);
             src->mem_order = order + 1;
             Node *load = new_binary(ND_AS, new_var_node(result_sym, start), src, tok);
-            return new_binary(ND_COMMA, load, new_var_node(result_sym, start), tok);
+            Node *result = new_binary(ND_COMMA, load, new_var_node(result_sym, start), tok);
+            if (!ret) return result;
+            Node *store = new_binary(ND_AS, ret, result, tok);
+            return new_binary(ND_COMMA, store, new_var_node(result_sym, start), tok);
         }
         case ATOMIC_EXCHANGE:
         case ATOMIC_FETCH_ADD:
@@ -2814,6 +2882,40 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             *rest = skip(tok, TK_RPAREN);
             return new_num(size <= T.ty_nullptr->size, start);
         }
+        case BUILTIN_UNREACHABLE: {
+            // GNU __builtin_unreachable(): the statement after which control
+            // never arrives, and reaching it is undefined. cxx has no
+            // unreachable terminator to emit -- the IR opcode for one is
+            // declared and unused -- so what it builds is the no-op that a
+            // void expression already is. The program's results are the same
+            // either way, because a path that reaches this point has none;
+            // what is lost is the optimiser's knowledge that it cannot.
+            // cpython's Py_UNREACHABLE() expands to it.
+            tok = skip(tok->next, TK_LPAREN);
+            *rest = skip(tok, TK_RPAREN);
+            return new_excast(new_num(0, start), T.ty_void, start);
+        }
+        case BUILTIN_ASSUME_ALIGNED: {
+            // GNU __builtin_assume_aligned(ptr, align[, offset]) is the
+            // pointer itself plus a promise to the optimiser that it is
+            // aligned. The promise changes no result, so what is kept is the
+            // pointer -- evaluated, and converted the way any expression
+            // value is -- and the other two arguments are read and checked
+            // the way gcc reads them: both must be constants, and the
+            // alignment a power of two. cpython's bundled mimalloc calls it.
+            tok = skip(tok->next, TK_LPAREN);
+            Node *ptr = assign(&tok, tok);
+            add_type(ptr);
+            lvalue_convert(&ptr);
+            tok = skip(tok, TK_COMMA);
+            int64_t align = const_expr(&tok, tok);
+            if (align <= 0 || (align & (align - 1)))
+                error(tok, "requested alignment ‘%ld’ is not a positive power of 2", align);
+            if (match(&tok, tok, TK_COMMA)) const_expr(&tok, tok);
+            *rest = skip(tok, TK_RPAREN);
+            return ptr;
+        }
+
         case BUILTIN_ADD_OVERFLOW:
         case BUILTIN_SUB_OVERFLOW:
         case BUILTIN_MUL_OVERFLOW: {
@@ -3554,10 +3656,15 @@ static Node *postfix(Token **rest, Token *tok) {
 static Node *unary(Token **rest, Token *tok) {
     // GNU `__extension__` is a no-op marker that suppresses pedantic
     // diagnostics; it may prefix an expression (glibc writes
-    // `__extension__ ({ ... })` for statement expressions).
+    // `__extension__ ({ ... })` for statement expressions). What follows is a
+    // cast expression, so the parse resumes at `cast`, not at `unary`: with
+    // the narrower entry the `(voidf)(p)` of lua's
+    // `#define cast_func(p) (__extension__ (voidf)(p))` was no longer seen as
+    // a cast at all, and the initialisation it feeds was rejected as
+    // incompatible.
     if (tok->kind == TK_EXTENSION) {
         *rest = tok->next;
-        return unary(rest, tok->next);
+        return cast(rest, tok->next);
     }
 
     switch (tok->kind) {
@@ -4645,7 +4752,12 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
         // diagnose the bare form here.
         if (!is_extern && var->ty->kind == TY_ARRAY && var->ty->len < 0)
             error(var_name, "definition of variable with array type needs an explicit size or an initializer");
-        if (var->ty->size < 0 && (var->ty->kind != TY_ARRAY && var->ty->kind != TY_VLA))
+        // 6.9.2p2: a declaration with `extern` and no initializer is not a
+        // definition, and only a definition needs a complete type -- both
+        // references accept `extern struct S x;` for a type that is never
+        // completed. cpython declares every object in PyAPI_DATA that way,
+        // and git's headers declare records the same way.
+        if (var->ty->size < 0 && !is_extern && (var->ty->kind != TY_ARRAY && var->ty->kind != TY_VLA))
             error(var_name, "variable ‘%s’ has incomplete type", str(var_name->id));
     } while (match(&tok, tok, TK_COMMA));
 
@@ -7923,7 +8035,8 @@ static Token *external_declaration(Token *tok) {
             }
             if (var->ty->kind == TY_ARRAY && var->ty->base->size < 0)
                 error(var_name, "array has incomplete element type");
-            if (var->ty->size < 0 && (var->ty->kind != TY_ARRAY && var->ty->kind != TY_VLA))
+            if (var->ty->size < 0 && !(var->sclass & SC_EXTERN) &&
+                (var->ty->kind != TY_ARRAY && var->ty->kind != TY_VLA))
                 error(var_name, "variable ‘%s’ has incomplete type", str(var_name->id));
         }
         if (match(&tok, tok, TK_COMMA))
