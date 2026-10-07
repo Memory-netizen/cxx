@@ -194,6 +194,14 @@ static char *convert_universal_chars(char *p, int len, SrcFile *file) {
         if (*p == '\\' && (p[1] == 'u' || p[1] == 'U')) {
             uint32_t c = read_universal_char(&p, p + 2, p[1], file);
             cur += encode_utf8(cur, c);
+        } else if (*p == '\\' && p + 1 < end) {
+            // Any other escape is two characters, and the one after the
+            // backslash is part of it: `"\\u00"` is a backslash followed by
+            // u00, not a universal character name. Reading the second
+            // backslash as one is what rejected sqlite's
+            // jsonAppendRawNZ(pOut, "\\u00", 4).
+            *cur++ = *p++;
+            *cur++ = *p++;
         } else {
             *cur++ = *p++;
         }
@@ -797,6 +805,9 @@ void convert_keywords(Token *tok) {
         {"_Float32", 0, TK_F32},
         {"_Float64", 0, TK_F64},
         {"_Float128", 0, TK_F128},
+        {"_Float32x", 0, TK_F32X},
+        {"_Float64x", 0, TK_F64X},
+        {"_Float128x", 0, TK_F128X},
         {"_Generic", 0, TK_GENERIC},
         {"_Noreturn", 0, TK_NORETURN},
         {"_Static_assert", 0, TK_STATIC_ASSERT},

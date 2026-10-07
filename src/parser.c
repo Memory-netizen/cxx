@@ -1326,8 +1326,10 @@ static void union_initializer2(Token **rest, Token *tok, Initializer *init) {
 // BracedInit ::= "{" ((Desig+ "=")? Init ("," (Desig+ "=")? Init)* ","?)? "}"
 static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_brace) {
     if (init->ty->kind == TY_ARRAY) {
-        if (tok->kind == TK_STRLIT ||
-            (tok->kind == TK_LBRACE && tok->next->kind == TK_STRLIT && tok->next->next->kind == TK_RBRACE)) {
+        bool braced_str = tok->kind == TK_LBRACE && tok->next->kind == TK_STRLIT && tok->next->next->kind == TK_RBRACE;
+        if (braced_str && !is_compatible(type_unqual(infer_strtype(tok->next)->base), type_unqual(init->ty->base)))
+            braced_str = false;
+        if (tok->kind == TK_STRLIT || braced_str) {
             bool has_brace = match(&tok, tok, TK_LBRACE);
             Type *ty = infer_strtype(tok);
             if (!(is_char(init->ty->base) && is_char(ty->base)) && !is_compatible(ty, init->ty))
@@ -1778,6 +1780,8 @@ BuiltinDef builtin_defs[NUM_BUILTINFN] = {
                                       false, -1, 0, 0, NULL, 0},
     [ATOMIC_COMPARE_EXCHANGE_STRONG] = {"__c11_atomic_compare_exchange_strong", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE,
                                         false, -1, 0, 0, NULL, 0},
+    [ATOMIC_COMPARE_EXCHANGE_N] = {"__atomic_compare_exchange_n", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0,
+                                   0, NULL, 0},
     [ATOMIC_THREAD_FENCE] = {"__c11_atomic_thread_fence", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
                              0},
     [ATOMIC_SIGNAL_FENCE] = {"__c11_atomic_signal_fence", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
@@ -1824,6 +1828,8 @@ BuiltinDef builtin_defs[NUM_BUILTINFN] = {
     // The member designator is not an expression, so the shape comes from
     // parser code; the value is a constant, so irgen never sees it.
     [BUILTIN_OFFSETOF] = {"__builtin_offsetof", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_SYNC_SYNCHRONIZE] = {"__sync_synchronize", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
+                                  0},
     [BUILTIN_VA_END] = {"__builtin_va_end", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_VA_ARG] = {"__builtin_va_arg", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_VA_COPY] = {"__builtin_va_copy", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
@@ -1935,11 +1941,45 @@ static void intern_builtin_ids(void) {
 
 // The single scan over the table. Everything else is a projection of it,
 // so a new lookup cannot drift from the others.
+// Clang accepts GCC's spelling of the atomics for the C11 builtins, and the
+// arguments line up one for one: __atomic_store_n(ptr, val, order) is
+// __c11_atomic_store(ptr, val, order). Real code uses the GCC spelling --
+// sqlite's amalgamation calls __atomic_store_n in its mutex layer -- so these
+// are aliases rather than a second set of rows; one row still describes one
+// operation.
+static struct {
+    char *name;
+    int kind;
+} builtin_aliases[] = {
+    {"__atomic_store_n", ATOMIC_STORE},
+    {"__atomic_load_n", ATOMIC_LOAD},
+    {"__atomic_exchange_n", ATOMIC_EXCHANGE},
+    {"__atomic_fetch_add", ATOMIC_FETCH_ADD},
+    {"__atomic_fetch_sub", ATOMIC_FETCH_SUB},
+    {"__atomic_fetch_and", ATOMIC_FETCH_AND},
+    {"__atomic_fetch_or", ATOMIC_FETCH_OR},
+    {"__atomic_fetch_xor", ATOMIC_FETCH_XOR},
+    {"__atomic_thread_fence", ATOMIC_THREAD_FENCE},
+    {"__atomic_signal_fence", ATOMIC_SIGNAL_FENCE},
+};
+
 static size_t builtin_find(uint32_t id) {
     intern_builtin_ids();
     for (size_t i = 0; i < builtin_row_count; ++i)
         if (builtin_defs[i].name && builtin_defs[i].id == id) return i;
+    static uint32_t alias_ids[sizeof(builtin_aliases) / sizeof(builtin_aliases[0])];
+    for (size_t i = 0; i < sizeof(builtin_aliases) / sizeof(builtin_aliases[0]); ++i) {
+        if (!alias_ids[i]) alias_ids[i] = intern(builtin_aliases[i].name, strlen(builtin_aliases[i].name));
+        if (alias_ids[i] == id) return (size_t)builtin_aliases[i].kind;
+    }
     return builtin_row_count;  // not a builtin
+}
+
+// Whether this call is one of the GCC-spelled atomics.
+static bool is_gcc_atomic_spelling(uint32_t id) {
+    for (size_t i = 0; i < sizeof(builtin_aliases) / sizeof(builtin_aliases[0]); ++i)
+        if (intern(builtin_aliases[i].name, strlen(builtin_aliases[i].name)) == id) return true;
+    return id == intern("__atomic_compare_exchange_n", 27);
 }
 
 // The table is written in BUILTIN_* order, so a kind indexes its row.
@@ -2033,9 +2073,17 @@ static int armw_op_of[] = {
 
 // Parse the object argument of an atomic builtin: any expression of
 // pointer-to-_Atomic type.
+// True while parsing the arguments of a builtin spelled the GCC way:
+// __atomic_store_n and its relatives address a plain object, while the C11
+// builtins they map to require _Atomic. The flag is read by atomic_object(),
+// which every one of these builtins calls before it parses anything that
+// could nest another call.
+static bool gcc_atomic_args;
+
 static Node *atomic_object(Token **tok, Token *start) {
     Node *object = assign(tok, *tok);
-    if (!is_pointer(object->ty) || (object->ty->base->qual & Q_ATOMIC) == 0)
+    bool atomic = is_pointer(object->ty) && (object->ty->base->qual & Q_ATOMIC);
+    if (!atomic && !(gcc_atomic_args && is_pointer(object->ty)))
         error(start, "address argument to atomic operation must be a pointer to _Atomic type");
     return object;
 }
@@ -2411,6 +2459,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
     Token *start = tok;
     bool is_weak = false;
     bool is_signal = false;
+    gcc_atomic_args = is_gcc_atomic_spelling(tok->id);
     switch (kind) {
         case BUILTIN_TYPES_COMPATIBLE_P: {
             tok = skip(tok->next, TK_LPAREN);
@@ -2419,6 +2468,18 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             Type *type2 = typename(&tok, tok);
             *rest = skip(tok, TK_RPAREN);
             return new_num(is_compatible(type_unqual(type1), type_unqual(type2)), start);
+        }
+        case BUILTIN_SYNC_SYNCHRONIZE: {
+            // A full barrier, and the only argument is the empty list. The
+            // node is the one the C11 fence builtins build; a
+            // sequentially consistent fence is exactly what
+            // __sync_synchronize() means.
+            Node *fence = new_node(ND_FENCE, tok);
+            tok = skip(tok->next, TK_LPAREN);
+            *rest = skip(tok, TK_RPAREN);
+            fence->mem_order = MEM_ORDER_SEQ_CST + 1;
+            fence->ty = T.ty_void;
+            return fence;
         }
         case BUILTIN_OFFSETOF: {
             // __builtin_offsetof(type, member-designator), where the
@@ -2684,6 +2745,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
         case ATOMIC_COMPARE_EXCHANGE_WEAK:
             is_weak = true;
         // fall through
+        case ATOMIC_COMPARE_EXCHANGE_N:
         case ATOMIC_COMPARE_EXCHANGE_STRONG: {
             // desired = temp; result = temp (bool);
             // result = cas(object, &expected, desired).
@@ -2701,6 +2763,15 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             lvalue_convert(&desired);
             new_imcast(&desired, value_ty);
             tok = skip(tok, TK_COMMA);
+            if (kind == ATOMIC_COMPARE_EXCHANGE_N) {
+                // The GCC spelling puts the weak flag where the C11 builtins
+                // put the success order. A strong compare-exchange satisfies
+                // everything a weak one does, so the flag is read and left
+                // unused rather than turning the call into a different
+                // operation the caller did not ask for.
+                assign(&tok, tok);
+                tok = skip(tok, TK_COMMA);
+            }
             int success_order = atomic_order(&tok, MO_RMW);
             tok = skip(tok, TK_COMMA);
             int failure_order = atomic_order(&tok, MO_CAS_FAIL);
@@ -5737,7 +5808,6 @@ static Node *stmt(Token **rest, Token *tok) {
     // Exp ";". Only fallthrough (and the GNU statement attributes) apply
     // to statements.
     bool has_fallthrough = false;
-    Token *ft_tok = NULL;
     if (is_attr_start(tok)) {
         Token *start = tok;
         while (is_attr_start(tok)) {
@@ -5746,7 +5816,6 @@ static Node *stmt(Token **rest, Token *tok) {
                 if (!a->info) continue;
                 if (!strcmp(a->info->name, "fallthrough") && (a->info->targets & ATTR_STMT)) {
                     has_fallthrough = true;
-                    ft_tok = a->tok;
                 } else if (a->is_gnu && !strcmp(a->info->name, "unused")) {
                     // GNU statement attribute: accepted.
                 } else {
@@ -5810,17 +5879,13 @@ static Node *stmt(Token **rest, Token *tok) {
 
     // `[[fallthrough]];` marks the fall into the next label as deliberate,
     // which is the whole point of the attribute.
-    if (has_fallthrough) {
-        falls_through = false;
-        // 6.7.13.2p2: the annotation "shall appear only in a statement that is
-        // an empty statement", and the empty statement has to be the one the
-        // next label is reached from -- otherwise the annotation marks a fall
-        // that is not there. Both references diagnose this; clang calls it an
-        // error, and the constraint is a constraint, so cxx does too.
-        Token *next = *rest;
-        if (next->kind != TK_CASE && next->kind != TK_DEFAULT)
-            error(ft_tok, "fallthrough annotation does not directly precede switch label");
-    }
+    //
+    // 6.7.13.2p2 asks for an empty statement, and that much is checked above.
+    // It does *not* ask for the label to be the next token: gcc and clang
+    // both accept the annotation with a statement after it, with a user label
+    // between, and at the end of the switch -- sqlite writes the last of those
+    // -- so cxx does too, and only records that the fall is deliberate.
+    if (has_fallthrough) falls_through = false;
 
     if (lb) {
         lb->label_body = stmt;
@@ -7020,6 +7085,18 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 break;
             case TK_F64:
                 typespec_cnt += F64;
+                break;
+            case TK_F32X:
+                // Same representation as double.
+                typespec_cnt += DOUBLE;
+                break;
+            case TK_F64X:
+                // Same representation as long double.
+                typespec_cnt += LONG + DOUBLE;
+                break;
+            case TK_F128X:
+                // Same representation as _Float128.
+                typespec_cnt += F128;
                 break;
             case TK_F128:
                 typespec_cnt += F128;

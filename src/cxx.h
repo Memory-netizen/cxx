@@ -472,6 +472,11 @@ enum {
     TK_F32,
     TK_F64,
     TK_F128,
+    // The x-suffixed interchange types: same representation as double, long
+    // double and _Float128 respectively.
+    TK_F32X,
+    TK_F64X,
+    TK_F128X,
     TK_BOOL,
     TK_ENUM,
     TK_STRUCT,
@@ -975,6 +980,9 @@ enum {
     ATOMIC_FETCH_XOR,
     ATOMIC_COMPARE_EXCHANGE_WEAK,
     ATOMIC_COMPARE_EXCHANGE_STRONG,
+    // __atomic_compare_exchange_n: the C11 operation, with the weak flag as an
+    // argument rather than in the name.
+    ATOMIC_COMPARE_EXCHANGE_N,
     ATOMIC_THREAD_FENCE,
     ATOMIC_SIGNAL_FENCE,
     ATOMIC_IS_LOCK_FREE,
@@ -1066,6 +1074,8 @@ enum {
     BUILTIN_ISNORMAL,
     BUILTIN_SIGNBIT,
     BUILTIN_FPCLASSIFY,
+    // __sync_synchronize(): the GCC full barrier, an empty argument list.
+    BUILTIN_SYNC_SYNCHRONIZE,
     // __builtin_offsetof(type, member-designator): an integer constant
     // expression, so it can size an array whatever the header spells it as.
     BUILTIN_OFFSETOF,

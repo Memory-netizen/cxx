@@ -114,23 +114,23 @@ typedef struct {
 // eightbyte holding one integer member INTEGER.
 static void amd64_leaves(Type *ty, int off, Amd64Leaf *out, int *n, int max) {
     switch (ty->kind) {
-    case TY_STRUCT:
-    case TY_UNION:
-        for (Member *m = ty->members; m; m = m->next) amd64_leaves(m->ty, off + m->offset, out, n, max);
-        return;
-    case TY_ARRAY: {
-        int esz = ty->base->size;
-        if (esz <= 0) return;
-        for (int o = 0; o < ty->size; o += esz) amd64_leaves(ty->base, off + o, out, n, max);
-        return;
-    }
-    default:
-        if (*n < max) {
-            out[*n].off = off;
-            out[*n].ty = ty;
-            (*n)++;
+        case TY_STRUCT:
+        case TY_UNION:
+            for (Member *m = ty->members; m; m = m->next) amd64_leaves(m->ty, off + m->offset, out, n, max);
+            return;
+        case TY_ARRAY: {
+            int esz = ty->base->size;
+            if (esz <= 0) return;
+            for (int o = 0; o < ty->size; o += esz) amd64_leaves(ty->base, off + o, out, n, max);
+            return;
         }
-        return;
+        default:
+            if (*n < max) {
+                out[*n].off = off;
+                out[*n].ty = ty;
+                (*n)++;
+            }
+            return;
     }
 }
 
@@ -478,6 +478,13 @@ Target T_amd64 = {
         "#define __ATOMIC_SEQ_CST 5\n"
         "#define __BIGGEST_ALIGNMENT__ 16\n"
         "#define __BITINT_MAXWIDTH__ 128\n"
+        // The GCC spellings of the 128-bit integers. cxx models them as
+        // _BitInt(128), which the targets above already implement; the
+        // names are what real code writes.
+        "#define __int128 _BitInt(128)\n"
+        "#define __uint128 unsigned _BitInt(128)\n"
+        "#define __int128_t __int128\n"
+        "#define __uint128_t __uint128\n"
         "#define __BOOL_WIDTH__ 1\n"
         "#define __BYTE_ORDER__ __ORDER_LITTLE_ENDIAN__\n"
         "#define __CHAR16_TYPE__ unsigned short\n"

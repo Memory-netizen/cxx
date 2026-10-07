@@ -64,5 +64,3 @@ compile_commands.json
 *cache
 test.*
 cxx
-*.txt
-*.log

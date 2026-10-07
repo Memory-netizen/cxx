@@ -1258,10 +1258,58 @@ bad "reject va_arg outside a variadic function" <<'EOF'
 int f(int n) { va_list ap; va_start(ap, n); return va_arg(ap, int); }
 EOF
 
-bad "reject va_copy outside a variadic function" <<'EOF'
+# 7.16.1.1 asks for a va_list, not for a variadic *function*: the helper that
+# forwards one -- vprintf's shape -- has no parameter list of its own to be
+# variadic, and both gcc and clang accept va_arg and va_copy there. The
+# parameter is adjusted to a pointer (6.7.6.3p7), so the expansion has to read
+# the pointer out of the variable: reading its address instead made this
+# compile and then segfault.
+cat > "$tmp/valist_fwd.c" <<'EOF'
 #include <stdarg.h>
-void f(void) { va_list ap, aq; va_copy(aq, ap); }
+
+static int sum(int n, va_list ap) {
+    int s = 0;
+    for (int i = 0; i < n; i++) s += va_arg(ap, int);
+    return s;
+}
+
+static int first_char(va_list ap) { return va_arg(ap, char *)[0]; }
+
+static void copy_it(va_list dst, va_list src) { va_copy(dst, src); }
+
+static int run(int n, ...) {
+    va_list ap, saved;
+    va_start(ap, n);
+    va_copy(saved, ap);
+    int a = sum(1, ap);
+    copy_it(saved, saved);
+    int b = sum(2, saved);
+    va_end(saved);
+    va_end(ap);
+    return a + b;
+}
+
+static int run2(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int c = first_char(ap);
+    va_end(ap);
+    return c;
+}
+
+int main(void) {
+    if (run(2, 5, 6) != 16) return 1;
+    if (run2("x", "hello") != 'h') return 2;
+    return 0;
+}
 EOF
+if "$compiler" -w -o "$tmp/valist_fwd" "$tmp/valist_fwd.c" >/dev/null 2>&1 && "$tmp/valist_fwd"; then
+    echo "testing a va_list forwarded to a helper ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a va_list forwarded to a helper ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
 
 # --- 6.7.5 Function specifiers ----------------------------------------
 

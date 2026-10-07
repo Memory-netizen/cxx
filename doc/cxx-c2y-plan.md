@@ -333,6 +333,23 @@ VLA 的 `len` 就是 `vla_len` 指针的低 32 位（见缺陷 1），所以把*
 | **待修（4，已定性）** | **libpng 两处**：`PNG_IMAGE_SAMPLE_CHANNELS` 宏没展开（与 lua 同类），以及内联汇编报 `expected number in address space`；git 侧 60 个单元全挂在 `expected ‘X’ after top level declarator`，看起来是探针抽 flag 不完整（git 需要生成的 `command-list.h`/`version-def.h`，`make -n` 不生成它们），下一轮先修探针再谈 git |
 | **验收** | `test/conformance.sh` 119 → **120 passed / 0 gap**（新增「`__builtin_expect` 与 `offsetof` 当常量用」运行断言）；`doc/realworld.sh` 独立探针，`bash doc/realworld.sh ./cxx` 复现上表 |
 
+### R5 真实开源项目：第二轮 —— ✅ 八处修复，sqlite 只剩一个被丢掉的静态数组定义
+
+| | |
+|---|---|
+| **目标** | 把上一轮定性的四个缺陷修掉，并顺着 sqlite 的编译一路推进 |
+| **已修（1）** | **转发 `va_list` 的 codegen**：`va_list ap` 作为参数会被调整成指针，而 `va_list_addr()` 没做左值转换，irgen 拿到的是**指针变量槽的地址**而不是指针值，于是展开按 `__va_list_tag` 读了那个槽——编译通过、运行段错误（gcc/clang 正常）。修法：操作数是指针时先 `lvalue_convert`。顺带把上一轮退回的「非变参函数里禁止 `va_arg`/`va_copy`」诊断去掉：7.16.1.1 只要求 va_list，`vprintf` 型函数本来就该允许 |
+| **已修（2）** | **对象式宏别名不重扫描**：`#define setobj2n setobj` 是 lua/libpng 给函数式宏起别名的方式，而 cxx 把宏体当独立列表展开，于是内层 `setobj` 后面看不到调用点的 `(`，`setobj(L,a,b)` 成了隐式函数声明。修法：在当前位置跟随「宏体只是一个名字」的别名链（最多 16 步、沿途禁用，`#define A B`/`#define B A` 因此会停），链尾是函数式宏且后面跟着 `(` 时就在原地展开 |
+| **已修（3）** | **`"\\u00"` 被当成通用字符名**：转义后的反斜杠不能再起头 UCN，cxx 的对扫描把第二个反斜杠读了进去——这一处正是 sqlite 的第 214604 行 `jsonAppendRawNZ(pOut, "\\u00", 4)`。修法：非 UCN 的转义按两字符整对跳过 |
+| **已修（4）** | **`_Float32x` / `_Float64x` / `_Float128x`**：glibc 的 `<stdlib.h>` 用它们声明 `strtof32x` 等，没有这三个拼法就卡在系统头里。三者与 `double` / `long double` / `_Float128` 表示相同，按同样的表示接进声明符即可 |
+| **已修（5）** | **`__sync_synchronize()`**：GCC 的全屏障，cxx 已有 C11 fence 的降级路径，映射成 `seq_cst` 的 `ND_FENCE` |
+| **已修（6）** | **GCC 的 `__atomic_*` 家族**：与 C11 内建同形同名不同拼法，做成别名表（`__atomic_store_n` → `__atomic_store` 等）；`__atomic_compare_exchange_n` 的 `weak` 标志是参数而不是名字的一部分，单独给它一个 kind，读出该标志后按 strong 处理（strong 满足 weak 的一切）。另外这些 GCC 拼法取的是**普通对象**的地址，只有 C11 内建要求 `_Atomic`，所以检查要认识拼法 |
+| **已修（7）** | **`__int128` / `__int128_t` / `__uint128_t`**：cxx 用 `_BitInt(128)` 建模 128 位整数（乘法、移位、比较与 gcc/clang 逐位一致），缺的只是名字，于是在三个 64 位目标的预定义里补上这组拼法 |
+| **已修（8）** | **`{ "abc" }` 的花括号不是初始化器列表**：只有当字符串初始化的就是数组本身（元素类型相符）时才能拆括号，否则 `const char *a[] = { "so" };` 会被当成"用字符串初始化指针数组"而拒绝——两个元素时又正常，所以这个 bug 只咬单元素的那种写法，sqlite 的 `azEndings[]` 正是它。顺带把 `[[fallthrough]]` 的"必须紧邻标签"检查去掉：gcc 和 clang 都接受后跟语句、夹着用户标签、以及位于 switch 末尾（sqlite 三种都写了），cxx 原有的更严行为连 c2y 套件里的断言都是错的 |
+| **sqlite 现状** | 250k 行的 amalgamation **解析与 IR 生成全过（8 秒）**，只差 LLVM 校验器一处：`@aSyscall` 有引用没有定义。已排除预处理器（cxx 与 clang 的 `-E` 输出都保留该定义且提及次数相同），是 cxx 把那个文件作用域 `static` 数组定义丢掉了；使用者所在的函数都在输出里，所以不是"没被引用"这么简单，下一轮从 `check_unused_statics` 的可达性记录查起 |
+| **记分（本轮结束）** | zlib **15/15**；lua 31/35（别名修复 +3）；libpng 15/18；sqlite 0/1 但只差一处；tinycc 与 git 仍卡在探针的取 flag 环节（tinycc 需要先 configure，git 需要先生成 `command-list.h`，探针已加 `prepare` 但 git 仍需确认） |
+| **验收** | `test/conformance.sh` **120 passed / 0 gap**（新增「转发 va_list 到 helper」运行断言）；`test/c2y.sh` **101 passed / 0 gap**（fallthrough 那条断言改成与 gcc/clang 一致）；`doc/realworld.sh` 报出上表 |
+
 ### P3 `<stdmchar.h>`（7.26 / N3366）
 
 | | |

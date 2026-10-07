@@ -985,6 +985,45 @@ static Token *expand_macro(Token *dst, Token *list) {
 
         // Object-like macro application
         if (m->is_objlike) {
+            // A body that is nothing but a name is an alias for that name,
+            // and a chain of them ends either at a plain identifier or at a
+            // function-like macro whose arguments are still in the input:
+            // `setobj2n(L, a, b)` has to become `setobj(L, a, b)` expanded.
+            // The chain is followed here, in place, so the argument list is
+            // in reach; the names walked are disabled meanwhile, which is
+            // what makes `#define A B` / `#define B A` stop.
+            Macro *target = m;
+            int aliases = 0;
+            while (target->is_objlike && aliases < 16) {
+                Token *body = target->body;
+                if (!body || body->kind != TK_IDENT) break;
+                if (body->next && body->next->kind != TK_EOF) break;
+                if (is_disabled(body->id)) break;
+                Macro *next = find_macro(body);
+                if (!next || next == target) break;
+                push_disabled(target->id);
+                aliases++;
+                target = next;
+            }
+            if (aliases > 0 && !target->is_objlike && cur->next && cur->next->kind == TK_LPAREN &&
+                !is_disabled(target->id)) {
+                push_disabled(target->id);
+                MacroArg *args = read_macro_args(&cur, cur, target->params, target->is_variadic, target->va_args_id);
+                Token *sub = subst(target->body, args);
+                for (Token *t = sub; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
+
+                Token *alias_prev = dst;
+                dst = expand_macro(dst, sub);
+                pop_disabled();
+                while (aliases-- > 0) pop_disabled();
+                if (alias_prev->next) {
+                    alias_prev->next->is_leadingws = macro_name->is_leadingws;
+                    alias_prev->next->is_sol = macro_name->is_sol;
+                }
+                continue;
+            }
+            while (aliases-- > 0) pop_disabled();
+
             Token *prev = dst;
             push_disabled(cur->id);
             dst = expand_macro(dst, m->body);
