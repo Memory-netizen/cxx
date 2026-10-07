@@ -6907,7 +6907,7 @@ static Attr *attr_entry(Token **rest, Token *tok, bool is_gnu) {
         attr->args = tok;
         int depth = 0;
         for (;;) {
-            if (tok->kind == TK_EOF || tok->is_sol) error(start, "expected ')'");
+            if (tok->kind == TK_EOF) error(start, "expected ')'");
             if (tok->kind == TK_LPAREN || tok->kind == TK_LBRACKET || tok->kind == TK_LBRACE) depth++;
             if (tok->kind == TK_RPAREN || tok->kind == TK_RBRACKET || tok->kind == TK_RBRACE)
                 if (--depth == 0) break;
@@ -6927,7 +6927,7 @@ static Attr *attr_list_c23(Token **rest, Token *tok) {
     while (tok->kind != TK_RBRACKET || tok->next->kind != TK_RBRACKET) {
         if (cur != &dummy) tok = skip(tok, TK_COMMA);
         cur = cur->next = attr_entry(&tok, tok, false);
-        if (tok->kind == TK_EOF || tok->is_sol) error(start, "expected ']]'");
+        if (tok->kind == TK_EOF) error(start, "expected ']]'");
     }
     *rest = tok->next->next;
     return dummy.next;
@@ -6942,7 +6942,7 @@ static Attr *attr_list_gnu(Token **rest, Token *tok) {
     while (tok->kind != TK_RPAREN) {
         if (cur != &dummy) tok = skip(tok, TK_COMMA);
         cur = cur->next = attr_entry(&tok, tok, true);
-        if (tok->kind == TK_EOF || tok->is_sol) error(start, "expected ')'");
+        if (tok->kind == TK_EOF) error(start, "expected ')'");
     }
     tok = skip(tok, TK_RPAREN);
     *rest = tok->next;

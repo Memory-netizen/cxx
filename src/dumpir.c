@@ -926,14 +926,9 @@ static bool init_needs_inline(Initializer *init, Type *ty) {
         }
         return false;
     }
-    if (ty->kind == TY_ARRAY && ty->base->kind == TY_UNION) {
-        // An array whose elements initialize different members is written as
-        // a packed struct of per-element types, which is spelled out too.
-        Member *canon = union_canon_member(ty->base);
-        for (int i = 0; i < ty->len; i++) {
-            Initializer *c = init->child[i];
-            if (c->is_inited && c->mem && c->mem != canon) return true;
-        }
+    if (ty->kind == TY_ARRAY) {
+        for (int i = 0; i < ty->len; i++)
+            if (init_needs_inline(init->child[i], ty->base)) return true;
         return false;
     }
     return false;
@@ -994,17 +989,13 @@ static void print_init_ty(Initializer *init, Type *ty) {
         return;
     }
 
-    if (ty->kind == TY_ARRAY && ty->base->kind == TY_UNION) {
-        Member *canon = union_canon_member(ty->base);
+    if (ty->kind == TY_ARRAY) {
+        // An array has no padding between its elements, so a packed struct of
+        // per-element element types has its layout.
         fprintf(out_file, "<{ ");
         for (int i = 0; i < ty->len; i++) {
             if (i) fprintf(out_file, ", ");
-            Initializer *c = init->child[i];
-            Member *mem = (c->is_inited && c->mem) ? c->mem : canon;
-            if (!c->is_inited || mem == canon)
-                print_type(ty->base);
-            else
-                print_union_elem_ty(ty->base, mem);
+            print_init_ty(init->child[i], ty->base);
         }
         fprintf(out_file, " }>");
         return;
@@ -1060,50 +1051,22 @@ static void dump_init(Initializer *init, Type *ty) {
         return;
     }
 
-    if (ty->kind == TY_ARRAY && ty->base->kind == TY_UNION) {
-        // An array of unions whose elements initialize different
-        // members is emitted as a packed struct of per-element
-        // member-typed (padded) elements (as in clang).
-        bool mixed = false;
-        if (init && init->is_inited) {
-            Member *canon = union_canon_member(ty->base);
-            for (int i = 0; i < ty->len; i++) {
-                Initializer *c = init->child[i];
-                if (c->is_inited && c->mem && c->mem != canon) mixed = true;
-            }
+    if (ty->kind == TY_ARRAY && init_needs_inline(init, ty)) {
+        // The packed form, element by element, each with the type it was
+        // written as: `dump_init()` writes them in the order and the shape
+        // `init_needs_inline()` saw.
+        fprintf(out_file, "<{ ");
+        for (int i = 0; i < ty->len; i++) {
+            if (i) fprintf(out_file, ", ");
+            print_init_ty(init->child[i], ty->base);
         }
-        if (mixed) {
-            Member *canon = union_canon_member(ty->base);
-            fprintf(out_file, "<{ ");
-            for (int i = 0; i < ty->len; i++) {
-                if (i) fprintf(out_file, ", ");
-                Initializer *c = init->child[i];
-                Member *mem = (c->is_inited && c->mem) ? c->mem : canon;
-                if (!c->is_inited || mem == canon)
-                    print_type(ty->base);
-                else
-                    print_union_elem_ty(ty->base, mem);
-            }
-            fprintf(out_file, " }> <{ ");
-            for (int i = 0; i < ty->len; i++) {
-                if (i) fprintf(out_file, ", ");
-                Initializer *c = init->child[i];
-                if (!c->is_inited) {
-                    print_type(ty->base);
-                    fprintf(out_file, " zeroinitializer");
-                    continue;
-                }
-                Member *mem = c->mem ? c->mem : canon;
-                if (mem == canon)
-                    print_type(ty->base);
-                else
-                    print_union_elem_ty(ty->base, mem);
-                fprintf(out_file, " ");
-                dump_union_elem(ty->base, mem, c->child[mem->idx]);
-            }
-            fprintf(out_file, " }>");
-            return;
+        fprintf(out_file, " }> <{ ");
+        for (int i = 0; i < ty->len; i++) {
+            if (i) fprintf(out_file, ", ");
+            dump_init(init->child[i], ty->base);
         }
+        fprintf(out_file, " }>");
+        return;
     }
 
     print_init_ty(init, ty);

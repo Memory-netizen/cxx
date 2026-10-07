@@ -2932,6 +2932,121 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# A union initializer written through a member that is not the union's
+# canonical one is emitted as that member (clang's type-punning form), and the
+# type containing it then has to be spelled out the same way or LLVM reports
+# "element 0 of struct initializer doesn't match struct element type".
+# cpython's struct _object is exactly this shape: a union of an int64_t
+# refcount and a struct of three smaller fields.
+cat > "$tmp/punnedunion.c" <<'EOF'
+#include <stdint.h>
+struct _object {
+    __extension__ union {
+        int64_t ob_refcnt_full;
+        struct {
+            uint32_t ob_refcnt;
+            uint16_t ob_overflow;
+            uint16_t ob_flags;
+        };
+    };
+    void *ob_type;
+};
+struct _object none = { { 3221225472U }, 0 };
+struct _object flags = { { .ob_flags = 5 }, 0 };
+union named { int64_t full; struct { uint32_t a; uint16_t b, c; } inner; };
+union named y = { .inner = { 7, 8, 9 } };
+int main(void) {
+    if (none.ob_refcnt != 3221225472U) return 1;
+    if (none.ob_flags != 0) return 2;
+    if (flags.ob_flags != 5) return 3;
+    if (y.inner.a != 7 || y.inner.b != 8 || y.inner.c != 9) return 4;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/punnedunion" "$tmp/punnedunion.c" >/dev/null 2>&1 && "$tmp/punnedunion"; then
+    echo "testing a punned union in a named record ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a punned union in a named record ... FAILED"
+    "$compiler" -w -o "$tmp/punnedunion" "$tmp/punnedunion.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# The same through an array, where each element can write a different member:
+# a packed struct of per-element element types, which is what an array is.
+cat > "$tmp/punnedarray.c" <<'EOF'
+#include <stdint.h>
+struct slot {
+    int kind;
+    union {
+        int64_t wide;
+        struct { uint32_t lo; uint16_t mid, hi; } parts;
+    };
+};
+struct slot slots[] = {
+    { 1, { .wide = 9 } },
+    { 2, { .parts = { 0x11, 0x22, 0x33 } } },
+    { 3, { .parts = { 0x44, 0x55, 0x66 } } },
+};
+int main(void) {
+    if (slots[0].wide != 9) return 1;
+    if (slots[1].parts.lo != 0x11 || slots[1].parts.mid != 0x22 || slots[1].parts.hi != 0x33) return 2;
+    if (slots[2].parts.lo != 0x44 || slots[2].parts.hi != 0x66) return 3;
+    if (sizeof(slots) != 3 * sizeof(struct slot)) return 4;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/punnedarray" "$tmp/punnedarray.c" >/dev/null 2>&1 && "$tmp/punnedarray"; then
+    echo "testing a punned union in an array ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a punned union in an array ... FAILED"
+    "$compiler" -w -o "$tmp/punnedarray" "$tmp/punnedarray.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# An attribute's argument list may run over several lines. curl's
+# typecheck-gcc.h declares its warnings as
+#
+#   static void __attribute__((__warning__(
+#   "curl_easy_setopt expects a long argument for this option"))) id(void) ...
+#
+# and a token at the start of a line used to end the argument list, so every
+# curl_easy_setopt call was `expected ')'`.
+cat > "$tmp/attrmultiline.c" <<'EOF'
+static void __attribute__((__warning__(
+"an old function"))) __attribute__((__unused__)) __attribute__((__noinline__)) old_one(void)
+{
+    __asm__("");
+}
+void __attribute__((unused,
+                    noinline)) two(void);
+void __attribute__((unused, noinline)) two(void) {}
+int main(void) { two(); return 0; }
+EOF
+if "$compiler" -w -o "$tmp/attrmultiline" "$tmp/attrmultiline.c" >/dev/null 2>&1 && "$tmp/attrmultiline"; then
+    echo "testing an attribute list over several lines ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing an attribute list over several lines ... FAILED"
+    "$compiler" -w -o "$tmp/attrmultiline" "$tmp/attrmultiline.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# The list still has to be terminated: a missing `)` is reported, at EOF.
+cat > "$tmp/attrbad.c" <<'EOF'
+void __attribute__((unused g(void);
+EOF
+"$compiler" -w -c -o /dev/null "$tmp/attrbad.c" > "$tmp/log" 2>&1
+if grep -q "expected" "$tmp/log"; then
+    echo "testing a missing attribute close paren ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a missing attribute close paren ... FAILED"
+    head -2 "$tmp/log" | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then
