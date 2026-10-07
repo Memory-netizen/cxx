@@ -781,6 +781,9 @@ Target T_amd64 = {
         "#define __GNUC__ 7\n"
         "#define __GNUC_MINOR__ 0\n"
         "#define __GNUC_PATCHLEVEL__ 0\n"
+        // A program that reports which compiler built it reads this;
+        // both references define it as a string.
+        "#define __VERSION__ \"cxx (C2y)\"\n"
         "#define __STDC__ 1\n"
         "#define __UINT16_C(c) c\n"
         "#define __UINT16_C_SUFFIX__ \n"
@@ -902,6 +905,18 @@ Target T_amd64 = {
         "#define __unix__ 1\n"
         "#define __x86_64 1\n"
         "#define __x86_64__ 1\n"
+        // __SSE__, __SSE2__, __SSE_MATH__, __SSE2_MATH__, __MMX__ and
+        // __FXSR__ are deliberately absent, unlike in gcc and clang.
+        // They are true of the ABI -- floats travel in the xmm registers --
+        // but a header that sees __SSE2__ includes the compiler's intrinsic
+        // headers (<xmmintrin.h> and everything above it), and those are
+        // written in the vector extension cxx does not have: cpython's
+        // Python.h reaches xmmintrin.h that way, and the build stops inside
+        // it. Advertising a feature cxx cannot serve turns code that took
+        // the scalar path into a hard error, so they stay off for now.
+        // A flag the user asks for is a different matter: the macros that go
+        // with -msse4.2, -mavx2 and the like come from clang itself (see
+        // machine_flag_macros in main.c).
         "#define linux 1\n"
         "#define unix 1\n"
         "#define __alignof__ _Alignof\n"
@@ -911,8 +926,6 @@ Target T_amd64 = {
         "#define __has_embed __has_embed\n"
         "#define __has_include __has_include\n"
         "#define __has_include_next __has_include_next\n"
-        "#define __inline inline\n"
-        "#define __inline__ inline\n"
         "#define __signed__ signed\n"
         "#define __typeof typeof\n"
         "#define __typeof__ typeof\n"

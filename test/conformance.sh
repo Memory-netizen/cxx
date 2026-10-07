@@ -3047,6 +3047,673 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# --- variable length arrays ------------------------------------------
+# The bound of a variable length array is evaluated once, where the
+# declaration is reached: the size of the object and the counter every
+# later sizeof reads are that one value. cxx evaluated it twice -- once
+# into the counter, once more as the alloca's size -- which ran its side
+# effects twice (`char a[n++]` left n at n + 2) and, for a bound the irgen
+# branches on, asked for blocks the parse-time count had not reserved
+# (assert(blk_used < curf->num_blk), cpython's Modules/socketmodule.c).
+cat > "$tmp/vlaonce.c" <<'EOF'
+int main(void) {
+    int n = 3;
+    char a[n++];
+    a[0] = 1;
+    if (n != 4 || sizeof(a) != 3 || a[0] != 1) return 1;
+
+    int k = 0;
+    int c[3][k++ + 2];
+    if (k != 1 || sizeof(c) != 24 || sizeof(c[0]) != 8) return 2;
+
+    int m = 2;
+    char b[m > 4 ? m : 4];
+    if (sizeof(b) != 4) return 3;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/vlaonce" "$tmp/vlaonce.c" > "$tmp/log" 2>&1 && "$tmp/vlaonce"; then
+    echo "testing a variable length bound is evaluated once ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a variable length bound is evaluated once ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# A variably modified typedef evaluates its bound where the typedef is
+# declared, and every later use of the type reads the size it captured:
+# that is what both references do, and what makes `sizeof(T)` a value
+# rather than an uninitialized counter.
+cat > "$tmp/vlatd.c" <<'EOF'
+int main(void) {
+    int n = 5;
+    typedef int T[n];
+    n = 7;
+    if (sizeof(T) != 20) return 1;
+    T x;
+    x[0] = 1;
+    if (sizeof(x) != 20 || x[0] != 1) return 2;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/vlatd" "$tmp/vlatd.c" > "$tmp/log" 2>&1 && "$tmp/vlatd"; then
+    echo "testing a variable length typedef captures its bound ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a variable length typedef captures its bound ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# A partly initialized record costs the stack one frame per element
+# *written*, not one per element it has: the initializer's comma chain is
+# walked from its left end, and a `char path[PATH_MAX + 1]` member left
+# zero -- Python/crossinterp.c's struct _unpickle_context -- put 4097
+# frames there and overflowed the stack.
+cat > "$tmp/biginit.c" <<'EOF'
+struct big { int a; char path[4096 + 1]; int b; };
+struct outer { int x; struct big inner; int y; };
+struct outer g = { .x = 1, .inner = { .b = 7 }, .y = 2 };
+int main(void) {
+    struct outer l = { .x = 1, .inner = { .b = 7 }, .y = 2 };
+    if (l.x != 1 || l.inner.b != 7 || l.y != 2) return 1;
+    if (g.x != 1 || g.inner.b != 7 || g.y != 2) return 2;
+    for (int i = 0; i < 4097; i++) if (l.inner.path[i] != 0) return 3;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/biginit" "$tmp/biginit.c" > "$tmp/log" 2>&1 && "$tmp/biginit"; then
+    echo "testing a partly initialized large record ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a partly initialized large record ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# A variadic call spells its callee's type out, and the type has to be the
+# one the declaration of the callee is printed with: a record parameter is
+# one value per register piece there, not the record. LLVM rejected the
+# disagreement ("argument is not of expected type"), which is how
+# Python/codegen.c and Python/compile.c failed to build.
+cat > "$tmp/vcall.c" <<'EOF'
+struct loc { int a, b, c, d; };
+struct P { int x; };
+int err(struct P *p, struct loc l, const char *fmt, ...);
+int use(struct P *p) {
+    struct loc l = { 1, 2, 3, 4 };
+    return err(p, l, "x %d", 1);
+}
+EOF
+if "$compiler" -w -c -o /dev/null "$tmp/vcall.c" > "$tmp/log" 2>&1; then
+    echo "testing a record parameter before a variadic call ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a record parameter before a variadic call ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- noreturn --------------------------------------------------------
+# 6.7.13.3p2 allows the standard attribute only on the declaration of a
+# function, and clang reports a breach as an error. The GNU spelling is
+# ignored with a warning by both references, and both accept it on a
+# function pointer -- git's usage.c declares several that way.
+bad "standard noreturn on an object" <<'EOF'
+[[noreturn]] int v;
+EOF
+
+ok "GNU noreturn on an object is ignored" <<'EOF'
+int v __attribute__((noreturn));
+int main(void) { return 0; }
+EOF
+
+ok "noreturn on a function pointer object" <<'EOF'
+typedef void (*report_fn)(const char *);
+static report_fn usage_routine __attribute__((noreturn));
+int main(void) { return usage_routine == 0 ? 0 : 1; }
+EOF
+
+# --- converting an integer to a pointer keeps its value ---------------
+# LLVM's inttoptr zero-extends a narrower operand, so `(void *) -1` has to be
+# widened first: gcc and clang make it all ones, and that is the value
+# MAP_FAILED has and every mmap caller compares against. cxx used to
+# zero-extend it, so the comparison said success and the program wrote
+# through an unmapped address.
+cat > "$tmp/ptrconv.c" <<'EOF'
+int main(void) {
+    void *a = (void *) -1;
+    void *b = (void *) -1L;
+    void *c = (void *) (int) -1;
+    long l = -1;
+    void *d = (void *) l;
+    unsigned u = 0xFFFFFFFFu;
+    void *e = (void *) u;
+    if ((long)a != -1L) return 1;
+    if ((long)b != -1L) return 2;
+    if ((long)c != -1L) return 3;
+    if ((long)d != -1L) return 4;
+    if ((unsigned long)e != 0xFFFFFFFFUL) return 5;   /* unsigned stays unsigned */
+    if (a == (void *)0) return 6;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/ptrconv" "$tmp/ptrconv.c" > "$tmp/log" 2>&1 && "$tmp/ptrconv"; then
+    echo "testing an integer converted to a pointer ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing an integer converted to a pointer ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a void lvalue has nothing to load --------------------------------
+# `*pv` on a `void *` has type void (6.5.3.2p1) and may only appear where its
+# value is discarded: `i ? *pv : *pv` is DR 106, and cxx emitted `load void`,
+# which the backend refuses with "void type only allowed for function
+# results".
+ok "a void lvalue is not loaded" <<'EOF'
+void tst(void *pv, int i) { i ? *pv : *pv; }
+int main(void) { int x = 5; tst(&x, 1); tst(&x, 0); return x - 5; }
+EOF
+
+# --- a qualified return type loses its qualifier -----------------------
+# `const int f(void)` returns int (6.7.6.3), and `int *restrict f(void)` a
+# plain `int *`; the qualifier the pointer *points at* stays. gcc and clang
+# only mention the drop under -Wextra, but the type is unqualified either
+# way -- tinycc's tests2/150_return_qualifiers.c asserts exactly this.
+ok "a function's return type is unqualified" <<'EOF'
+const int cf(void);
+volatile int vf(void);
+int *restrict rf(void);
+const int *pcf(void);
+_Static_assert(__builtin_types_compatible_p(__typeof__(cf()) *, int *), "const");
+_Static_assert(__builtin_types_compatible_p(__typeof__(vf()) *, int *), "volatile");
+_Static_assert(__builtin_types_compatible_p(__typeof__(rf()) *, int **), "restrict");
+_Static_assert(__builtin_types_compatible_p(__typeof__(pcf()) *, const int **), "pointee kept");
+int main(void) { return 0; }
+EOF
+
+# --- one header, several spellings ------------------------------------
+# `#pragma once` and the include-guard shortcut key on the *file*, not on the
+# spelling that reached the compiler: "x.h", "./x.h" and "sub/../x.h" are one
+# header, and tinycc's tests2/18_include.c includes its header exactly that
+# way (cxx printed the header's output three times).
+mkdir -p "$tmp/inc/sub"
+cat > "$tmp/inc/once.h" <<'EOF'
+#pragma once
+extern int once_hits;
+static inline void once_bump(void) { once_hits++; }
+EOF
+cat > "$tmp/inc/guard.h" <<'EOF'
+#ifndef GUARD_H
+#define GUARD_H
+extern int guard_hits;
+static inline void guard_bump(void) { guard_hits++; }
+#endif
+EOF
+cat > "$tmp/inc/main.c" <<'EOF'
+#include "once.h"
+#include "./once.h"
+#include "sub/../once.h"
+#include "guard.h"
+#include "./guard.h"
+#include "sub/../guard.h"
+int once_hits, guard_hits;
+int main(void) {
+    once_bump();
+    guard_bump();
+    return (once_hits == 1 && guard_hits == 1) ? 0 : 1;
+}
+EOF
+if "$compiler" -w -o "$tmp/spellings" "$tmp/inc/main.c" > "$tmp/log" 2>&1 && "$tmp/spellings"; then
+    echo "testing one header under three spellings ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing one header under three spellings ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- bit-fields -------------------------------------------------------
+# A bit-field promotes by its width (6.3.1.1p2, "as restricted by the
+# width"): a field whose range fits in int is an int whatever its declared
+# type, which is what makes `u31 - 100` a signed comparison. gcc and clang
+# agree case by case; cxx answered unsigned int for every unsigned field.
+cat > "$tmp/bfpromo.c" <<'EOF'
+struct S {
+    unsigned u3 : 3, u31 : 31, u32 : 32;
+    int s31 : 31, s32 : 32;
+    unsigned long long ull31 : 31, ull33 : 33;
+};
+int main(void) {
+    struct S s = {0};
+    /* (x) - 100 < 0 is true only when x promoted to a signed type */
+    if (!((s.u3 - 100 < 0))) return 1;
+    if (!((s.u31 - 100 < 0))) return 2;
+    if (s.u32 - 100 < 0) return 3;
+    if (!((s.s31 - 100 < 0))) return 4;
+    if (!((s.s32 - 100 < 0))) return 5;
+    if (!((s.ull31 - 100 < 0))) return 6;
+    if (s.ull33 - 100 < 0) return 7;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/bfpromo" "$tmp/bfpromo.c" > "$tmp/log" 2>&1 && "$tmp/bfpromo"; then
+    echo "testing a bit-field promotes by its width ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a bit-field promotes by its width ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# And a store writes only the field's bits: everything above the width
+# belongs to the next field, so `s.x = ~0u` on an `unsigned x : 12` must
+# leave the four bits that `y : 7` lives in alone.
+cat > "$tmp/bfstore.c" <<'EOF'
+struct S { unsigned x : 12; unsigned char y : 7; unsigned z : 28; unsigned a : 4; unsigned b : 5; };
+static int low(unsigned char *p, int n, unsigned char *out) { for (int i = 0; i < n; i++) out[i] = p[i]; return 0; }
+int main(void) {
+    struct S s;
+    unsigned char *p = (unsigned char *)&s;
+    for (unsigned i = 0; i < sizeof s; i++) p[i] = 0;
+    s.x = ~0u;
+    if (p[0] != 0xFF || p[1] != 0x0F) return 1;   /* 12 bits, not 16 */
+    for (unsigned i = 0; i < sizeof s; i++) p[i] = 0;
+    s.y = ~0u;
+    /* y's byte-sized unit starts at bit 16: 00 00 7F, as gcc and clang have it */
+    if (p[1] != 0x00 || p[2] != 0x7F) return 2;   /* 7 bits, not 8 */
+    for (unsigned i = 0; i < sizeof s; i++) p[i] = 0;
+    s.b = ~0u;
+    if (p[8] != 0x1F) return 3;                   /* 5 bits, not 8 */
+    /* and a store must not disturb its neighbour */
+    for (unsigned i = 0; i < sizeof s; i++) p[i] = 0;
+    s.x = ~0u;
+    if (s.y != 0 || s.z != 0 || s.a != 0 || s.b != 0) return 4;
+    /* the values still read back */
+    for (unsigned i = 0; i < sizeof s; i++) p[i] = 0;
+    s.x = 0x123; s.y = 0x45; s.z = 0x555555; s.a = 6; s.b = 7;
+    if (s.x != 0x123 || s.y != 0x45 || s.z != 0x555555 || s.a != 6 || s.b != 7) return 5;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/bfstore" "$tmp/bfstore.c" > "$tmp/log" 2>&1 && "$tmp/bfstore"; then
+    echo "testing a bit-field store writes only its bits ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a bit-field store writes only its bits ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- .S files ---------------------------------------------------------
+# Assembler that the C preprocessor runs first: cpython ships
+# Python/asm_trampoline_x86_64.S, which picks its symbols with
+# `#ifdef __x86_64__`, and the driver used to answer `unknown file
+# extension`.
+cat > "$tmp/asm.S" <<'EOF'
+#ifdef __x86_64__
+    .globl cxxconf_asm_start
+cxxconf_asm_start:
+    mov $7, %eax
+    ret
+#else
+#error "this check is for x86-64"
+#endif
+EOF
+cat > "$tmp/asmuse.c" <<'EOF'
+int cxxconf_asm_start(void);
+int main(void) { return cxxconf_asm_start() == 7 ? 0 : 1; }
+EOF
+if "$compiler" -w -o "$tmp/asmuse" "$tmp/asmuse.c" "$tmp/asm.S" > "$tmp/log" 2>&1 && "$tmp/asmuse"; then
+    echo "testing assembler that the preprocessor runs first ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing assembler that the preprocessor runs first ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- an attribute cxx has never heard of is a warning -----------------
+# vector_size is one of them, and it has to stay compilable: glibc's own
+# <link.h> writes `typedef float La_x86_64_xmm __attribute__
+# ((__vector_size__ (16)))`, <execinfo.h> pulls it in, and a program that
+# merely includes <link.h> must still build (making it an error cost
+# cpython's Python/traceback.c and Modules/_ctypes/callproc.c).
+ok "an attribute cxx does not know is a warning" <<'EOF'
+typedef unsigned char v16 __attribute__((vector_size(16)));
+typedef unsigned char v16u __attribute__((__vector_size__(16)));
+int x __attribute__((frobnicate));
+int main(void) { return sizeof(v16) + sizeof(v16u) + sizeof(x) > 0 ? 0 : 1; }
+EOF
+
+ok "glibc's <link.h> still compiles" <<'EOF'
+#include <execinfo.h>
+#include <link.h>
+int main(void) { return 0; }
+EOF
+
+# --- machine flags ----------------------------------------------------
+# -m... is the backend's: clang is what turns cxx's IR into instructions, so
+# the flag is handed to it, and the macros that go with it are taken from
+# clang (a header that takes an AVX2 path while clang was told -mno-avx2
+# would generate the instructions the flag forbids). -m32 changes the target,
+# which cxx's own type model does not have: it is refused rather than
+# silently mis-compiled.
+cat > "$tmp/mflags.c" <<'EOF'
+int main(void) {
+#ifdef __AVX2__
+    return 0;
+#else
+    return 1;
+#endif
+}
+EOF
+if "$compiler" -w -mavx2 -o "$tmp/mflags" "$tmp/mflags.c" > "$tmp/log" 2>&1 && "$tmp/mflags"; then
+    echo "testing -mavx2 asks the backend and defines the macro ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -mavx2 asks the backend and defines the macro ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+cat > "$tmp/mflags3.c" <<'EOF'
+int main(void) {
+#ifdef __AVX2__
+    return 0;
+#else
+    return 1;
+#endif
+}
+EOF
+if "$compiler" -w -march=x86-64-v3 -o "$tmp/mflags3" "$tmp/mflags3.c" > "$tmp/log" 2>&1 && "$tmp/mflags3"; then
+    echo "testing -march=x86-64-v3 carries its feature set ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -march=x86-64-v3 carries its feature set ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# A flag that asks for nothing new leaves the baseline alone: cxx does not
+# advertise the x86 feature set by itself (see the amd64 target).
+cat > "$tmp/mflags4.c" <<'EOF'
+int main(void) {
+#ifdef __AVX2__
+    return 1;
+#else
+    return 0;
+#endif
+}
+EOF
+if "$compiler" -w -m64 -o "$tmp/mflags4" "$tmp/mflags4.c" > "$tmp/log" 2>&1 && "$tmp/mflags4"; then
+    echo "testing a neutral machine flag changes nothing ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a neutral machine flag changes nothing ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+if "$compiler" -m32 -c -o "$tmp/mflags32.o" "$tmp/mflags.c" > "$tmp/log" 2>&1; then
+    echo "testing -m32 is refused (no 32-bit x86 target) ... FAILED"
+    n_fail=$((n_fail + 1))
+else
+    if grep -q 'no 32-bit x86 target' "$tmp/log"; then
+        echo "testing -m32 is refused (no 32-bit x86 target) ... passed"
+        n_pass=$((n_pass + 1))
+    else
+        echo "testing -m32 is refused (no 32-bit x86 target) ... FAILED"
+        sed 's/^/    /' "$tmp/log" | head -4
+        n_fail=$((n_fail + 1))
+    fi
+fi
+
+# --- clang's operators in #if -----------------------------------------
+# __has_extension() and __building_module() are clang's, and clang's own
+# headers are written in terms of them: xmmintrin.h guards a block on
+# `!__building_module(_Builtin_intrinsics)` and hresetintrin.h one on
+# `__has_extension(gnu_asm)`. cxx answered "called object '0' is not a
+# function", which is one unknown identifier followed by its argument list.
+cat > "$tmp/hasext.c" <<'EOF'
+#if __has_extension(gnu_asm)
+#error "cxx implements no clang extension"
+#endif
+#if __building_module(_Builtin_intrinsics)
+#error "cxx builds no module"
+#endif
+#if !__building_module(anything) && !__has_extension(anything)
+int ok;
+#endif
+int main(void) { return 0; }
+EOF
+if "$compiler" -w -o "$tmp/hasext" "$tmp/hasext.c" > "$tmp/log" 2>&1 && "$tmp/hasext"; then
+    echo "testing __has_extension and __building_module in #if ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __has_extension and __building_module in #if ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- directives between macro arguments -------------------------------
+# A conditional may sit between the arguments of a macro invocation. gcc
+# and clang evaluate it there and the argument goes on; cxx used to cut the
+# invocation at the directive, and the collector then ran off the end of
+# the file looking for the `)` that closes it (cpython's
+# Python/jit_unwind.c writes its DWARF CIE and FDE through
+# DWRF_SECTION(name, ... #ifdef __x86_64__ ... #endif ...)).
+cat > "$tmp/macrocond.c" <<'EOF'
+#define SET(v, body) do { v += 1; body; } while (0)
+int main(void) {
+    int x = 0;
+    SET(x,
+        x += 10;
+#if 1
+        x += 100;
+#  if 0
+        x += 1000;
+#  else
+        x += 20;
+#  endif
+#elif 0
+        x += 10000;
+#else
+#    error "the branch that is not taken is not part of the argument"
+#endif
+        x += 200;
+    );
+    return x == 331 ? 0 : 1;
+}
+EOF
+if "$compiler" -w -o "$tmp/macrocond" "$tmp/macrocond.c" > "$tmp/log" 2>&1 && "$tmp/macrocond"; then
+    echo "testing a conditional between macro arguments ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a conditional between macro arguments ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# `__alignof__(object)` is the alignment of the object. An `aligned`
+# attribute or `_Alignas` raises it above the type's -- cpython's
+# Py_ALIGNED(64) buffer is asserted to be 64-aligned
+# (Modules/_testcapimodule.c), and cxx answered with the type's 1.
+cat > "$tmp/alignof.c" <<'EOF'
+__attribute__((aligned(64))) char global_buf[4];
+int main(void) {
+    _Alignas(64) char buf[4];
+    __attribute__((aligned(32))) int x;
+    if (__alignof__(buf) < 64) return 1;
+    if (__alignof__(x) < 32) return 2;
+    if (__alignof__(global_buf) < 64) return 3;
+    if (((unsigned long)buf % 64) != 0) return 4;
+    if (((unsigned long)&global_buf % 64) != 0) return 5;
+    /* a plain object still reports its type's alignment */
+    char plain[4];
+    if (__alignof__(plain) != 1) return 6;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/alignof" "$tmp/alignof.c" > "$tmp/log" 2>&1 && "$tmp/alignof"; then
+    echo "testing __alignof__ of an over-aligned object ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __alignof__ of an over-aligned object ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- the memory builtins ---------------------------------------------
+# __builtin_memset and its siblings are the library functions of the same
+# name. They are builtins here (so __has_builtin answers for them and an
+# address can be taken), and the header that declares the library function
+# is not needed to call one -- glibc's CPU_ZERO_S writes
+# `__builtin_memset (cpusetp, '\0', __size)`, which was an implicit
+# declaration of `__builtin_memset` (cpython's Modules/posixmodule.c).
+cat > "$tmp/membuiltin.c" <<'EOF'
+#if !__has_builtin(__builtin_memset) || !__has_builtin(__builtin_memcpy) || \
+    !__has_builtin(__builtin_memmove) || !__has_builtin(__builtin_memcmp)
+#error a memory builtin is missing
+#endif
+int main(void) {
+    char a[8], b[8];
+    __builtin_memset(a, 'a', 7);
+    a[7] = 0;
+    __builtin_memcpy(b, a, 8);
+    __builtin_memmove(b + 1, b, 3);
+    if (b[7] != 0 || b[1] != 'a') return 1;
+    if (__builtin_memcmp(b, "aaaa", 4) != 0) return 2;
+    if (__builtin_memcmp(b, "aaab", 4) >= 0) return 3;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/membuiltin" "$tmp/membuiltin.c" > "$tmp/log" 2>&1 && "$tmp/membuiltin"; then
+    echo "testing the memory builtins ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the memory builtins ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- parenthesized string initializers -------------------------------
+# `static const char name[] = (PREFIX "name");` is how cpython's
+# Modules/_testsinglephase.c writes one, and both references read the
+# parentheses as if they were not there -- including around a wide literal,
+# whose `const` sits on the array's element and used to be compared as a
+# difference in type.
+cat > "$tmp/parenstr.c" <<'EOF'
+#include <stddef.h>
+#include <uchar.h>
+static const char a[] = ("hello");
+static const char b[] = (("hi"));
+static const char c[] = ("ab" "cd");
+static const wchar_t d[] = (L"wide");
+static const char16_t e[] = u"u16";
+int main(void) {
+    return (a[0] == 'h' && b[0] == 'h' && c[2] == 'c' && d[0] == L'w' && e[0] == u'u') ? 0 : 1;
+}
+EOF
+if "$compiler" -w -o "$tmp/parenstr" "$tmp/parenstr.c" > "$tmp/log" 2>&1 && "$tmp/parenstr"; then
+    echo "testing a parenthesized string initializer ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a parenthesized string initializer ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- the ISO/GNU mode switch -----------------------------------------
+# An ISO mode defines __STRICT_ANSI__, a GNU one does not. Headers and
+# projects ask it whether GNU extensions are in play -- cpython's
+# Py_ARRAY_LENGTH() puts Py_BUILD_ASSERT_EXPR(), a comma expression, into
+# the array bound only when it is *not* defined, and a comma expression is
+# not an integer constant expression, so a constant bound came out
+# variably modified (Objects/typeobject.c).
+cat > "$tmp/strict.c" <<'EOF'
+#ifndef __STRICT_ANSI__
+#error __STRICT_ANSI__ is not defined in an ISO mode
+#endif
+int iso_mode;
+EOF
+cat > "$tmp/gnumode.c" <<'EOF'
+#ifdef __STRICT_ANSI__
+#error __STRICT_ANSI__ is defined in a GNU mode
+#endif
+int gnu_mode;
+EOF
+if "$compiler" -std=c11 -w -c -o /dev/null "$tmp/strict.c" > "$tmp/log" 2>&1 &&
+   "$compiler" -std=gnu11 -w -c -o /dev/null "$tmp/gnumode.c" >> "$tmp/log" 2>&1; then
+    echo "testing -std=c11 is strict and -std=gnu11 is not ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -std=c11 is strict and -std=gnu11 is not ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# __inline and __inline__ are the GNU spellings of `inline`, and gcc and
+# clang make them keywords rather than macros. As a macro the spelling is
+# re-expandable: expat's internal.h defines `inline` as `__inline`, so the
+# expansion came back as a plain identifier and byteswap.h's
+# `static __inline __uint16_t` no longer had a function specifier
+# (cpython's Modules/expat/xmltok.c and xmlrole.c).
+cat > "$tmp/inlkw.c" <<'EOF'
+#ifdef __inline__
+#error __inline__ is a macro
+#endif
+#define inline __inline
+static inline unsigned short swap(unsigned short x) { return x; }
+int main(void) { return swap(1) - 1; }
+EOF
+if "$compiler" -w -o "$tmp/inlkw" "$tmp/inlkw.c" > "$tmp/log" 2>&1 && "$tmp/inlkw"; then
+    echo "testing __inline is a keyword, not a macro ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __inline is a keyword, not a macro ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- more variable length arrays -------------------------------------
+# `sizeof` and `_Countof` of an object read the counter its declaration
+# wrote; there is no bound of their own to evaluate, and building the
+# expression around a null operand took the compiler down. The bound
+# `((void)sizeof(int), 4)` is the constant 4: the cast throws the value
+# away, and clang reads it the same way.
+cat > "$tmp/vlasz.c" <<'EOF'
+int main(void) {
+    int n = 3;
+    int a[n];
+    if (sizeof(a) != 3 * sizeof(int)) return 1;
+    if (sizeof(int[n]) != 3 * sizeof(int)) return 2;
+    if (_Countof(a) != 3) return 3;
+    int b[((void)sizeof(int), 4)];
+    if (sizeof(b) != 4 * sizeof(int)) return 4;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/vlasz" "$tmp/vlasz.c" > "$tmp/log" 2>&1 && "$tmp/vlasz"; then
+    echo "testing sizeof and _Countof of a variable length object ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing sizeof and _Countof of a variable length object ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# 6.7.6.2p2: a variably modified type belongs to a block scope. Taking such
+# a bound as a constant emitted the object with no type at all, which only
+# the backend noticed.
+bad "variably modified type at file scope" <<'EOF'
+int n;
+int a[n];
+EOF
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then

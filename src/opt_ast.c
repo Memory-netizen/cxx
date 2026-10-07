@@ -710,6 +710,13 @@ Node *fold_node(Node *node) {
             node->lhs = fold_node(node->lhs);
             node->rhs = fold_node(node->rhs);
             if (is_int_const(node->lhs) || is_fp_const(node->lhs)) return node->rhs;
+            // A cast to void throws the value away, and a constant under it
+            // has nothing else to lose. `((void)sizeof(int), 4)` is the shape
+            // cpython's Py_ARRAY_LENGTH() writes around its static assertion,
+            // and clang reads it as the constant 4.
+            if (node->lhs && (node->lhs->kind == ND_IMCAST || node->lhs->kind == ND_EXCAST) &&
+                node->lhs->ty->kind == TY_VOID && is_int_const(node->lhs->lhs))
+                return node->rhs;
             return node;
 
         // An asm statement's operands are read and written by the template,

@@ -19,6 +19,7 @@ typedef enum {
     FILE_NONE,
     FILE_C,
     FILE_ASM,
+    FILE_ASM_PP,  // .S: assembler the preprocessor runs first
     FILE_OBJ,
     FILE_AR,
     FILE_DSO,
@@ -95,6 +96,17 @@ static bool take_arg(char *arg) {
         if (!strcmp(arg, x[i])) return true;
     return false;
 }
+
+static void machine_flag_macros(void);
+
+// The -m... flags the user gave (-msse4.2, -mavx2, -march=..., -mno-...).
+// clang is the backend, so they are the backend's to honour: they are
+// collected in parse_args() and handed to both clang stages.
+static char **machine_args;
+static int num_machine;
+// True when one of them named the architecture (-march=/-mcpu=): the target's
+// own -march is only a default then, and the user's is the one that counts.
+static bool machine_sets_arch;
 
 static char *get_clang_resource_dir(void) {
     FILE *fp = popen("clang -print-resource-dir 2>/dev/null", "r");
@@ -649,11 +661,39 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
+        // Machine flags are the backend's (see machine_args). -m32 and -mx32
+        // change the *target*, which cxx's own type model does not have, so
+        // taking them would mean 64-bit IR assembled as 32-bit code -- they
+        // are refused rather than silently mis-compiled.
+        if (!strncmp(argv[i], "-m", 2) && argv[i][2]) {
+            if (!strcmp(argv[i], "-m32") || !strcmp(argv[i], "-mx32"))
+                fatal("%s: cxx has no 32-bit x86 target (use -target i386-unknown-linux-gnu)", argv[i]);
+            if (!strncmp(argv[i], "-march=", 7) || !strncmp(argv[i], "-mcpu=", 6)) machine_sets_arch = true;
+            if (!machine_args)
+                machine_args = vnew(8, sizeof(char *));
+            else
+                machine_args = vgrow(machine_args, (num_machine + 8) * sizeof(char *));
+            machine_args[num_machine++] = argv[i];
+            continue;
+        }
+
+        // An ISO mode defines __STRICT_ANSI__, a GNU one leaves it
+        // undefined: that is how headers and projects ask whether GNU
+        // extensions are in play. cpython's Py_ARRAY_LENGTH() puts
+        // Py_BUILD_ASSERT_EXPR() -- a comma expression -- into the array
+        // bound only when it is *not* defined, and a comma expression is
+        // not an integer constant expression, so the constant bound of
+        // `slotdefs_dups` came out variably modified (Objects/typeobject.c).
+        if (!strncmp(argv[i], "-std=", 5)) {
+            if (strncmp(argv[i] + 5, "gnu", 3)) cmd_define_macro("__STRICT_ANSI__=1");
+            continue;
+        }
+
         // These options are ignored for now.
-        if (!strncmp(argv[i], "-O", 2) || !strncmp(argv[i], "-g", 2) || !strncmp(argv[i], "-std=", 5) ||
-            !strcmp(argv[i], "-ffreestanding") || !strcmp(argv[i], "-fno-builtin") ||
-            !strcmp(argv[i], "-fno-omit-frame-pointer") || !strcmp(argv[i], "-fno-stack-protector") ||
-            !strcmp(argv[i], "-fno-strict-aliasing") || !strcmp(argv[i], "-m64") || !strcmp(argv[i], "-mno-red-zone"))
+        if (!strncmp(argv[i], "-O", 2) || !strncmp(argv[i], "-g", 2) || !strcmp(argv[i], "-ffreestanding") ||
+            !strcmp(argv[i], "-fno-builtin") || !strcmp(argv[i], "-fno-omit-frame-pointer") ||
+            !strcmp(argv[i], "-fno-stack-protector") || !strcmp(argv[i], "-fno-strict-aliasing") ||
+            !strcmp(argv[i], "-m64") || !strcmp(argv[i], "-mno-red-zone"))
             continue;
 
         if (argv[i][0] == '-' && argv[i][1] != '\0') fatal("unknown argument: %s", argv[i]);
@@ -882,6 +922,10 @@ static void print_dependencies(void) {
 
 // Stage 1: .c → .ll  (cc1: tokenize + preprocess + parse + irgen)
 static void cc1(void) {
+    // The machine flags' macro effects come from clang, and the preprocessor
+    // is about to run with whatever definitions are already queued.
+    machine_flag_macros();
+
     Token *tok = tokenize_file(base_file);
     if (!tok) fatal("%s: %s", base_file, strerror(errno));
 
@@ -921,23 +965,182 @@ static void cc1(void) {
     fclose(out);
 }
 
-// Stage 2: .ll → .s  (via clang)
+// One line of clang's macro table, as `-dM -E` prints it.
+typedef struct {
+    char *name;
+    char *value;
+} ClangMacro;
+
+// Ask clang for its own macro table with `extra` flags appended, and collect
+// the definitions. NULL when clang could not be run at all.
+static ClangMacro *clang_macros(char *extra, int *nout) {
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd), "clang -target %s %s-dM -E -x c /dev/null 2>/dev/null", T.triple, extra);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return NULL;
+
+    ClangMacro *out = vnew(64, sizeof(ClangMacro));
+    int n = 0;
+    char line[4096];
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, "#define ", 8)) continue;
+        char *name = line + 8;
+        char *end = name;
+        while (*end && !isspace((unsigned char)*end)) end++;
+        char *value = end;
+        while (*value && isspace((unsigned char)*value)) value++;
+        size_t vlen = strlen(value);
+        while (vlen && isspace((unsigned char)value[vlen - 1])) value[--vlen] = '\0';
+        *end = '\0';
+        if (!*name) continue;
+        out = vgrow(out, (n + 1) * sizeof(ClangMacro));
+        out[n].name = strdup(name);
+        out[n].value = strdup(value);
+        n++;
+    }
+    pclose(fp);
+    *nout = n;
+    return out;
+}
+
+// The macros cxx leaves undefined on purpose even though clang's own
+// baseline has them: the x86 feature set, which pulls in the intrinsic
+// headers (see the comment in the amd64 target). A -m flag that asks for the
+// instruction set must define them -- that is what the flag means.
+static const char *absent_feature_macros[] = {
+    "__SSE__", "__SSE2__", "__SSE_MATH__", "__SSE2_MATH__", "__MMX__", "__FXSR__",
+};
+
+static bool is_absent_feature(char *name) {
+    for (size_t i = 0; i < sizeof(absent_feature_macros) / sizeof(*absent_feature_macros); i++)
+        if (!strcmp(absent_feature_macros[i], name)) return true;
+    return false;
+}
+
+static ClangMacro *find_clang_macro(ClangMacro *m, int n, char *name) {
+    for (int i = 0; i < n; i++)
+        if (!strcmp(m[i].name, name)) return &m[i];
+    return NULL;
+}
+
+// The macros that go with the machine flags, taken from clang rather than
+// tabulated here: cxx's own predefines describe the target as cxx models it,
+// and a header that takes an SSE2 path while clang was told -mno-sse2 would
+// generate the instructions the flag forbids. Asking clang for its macro
+// table twice -- with and without the flags -- is exactly the difference the
+// flags make, whatever they are (`-march=native` and every CPU name
+// included).
+static void machine_flag_macros(void) {
+    if (!num_machine) return;
+
+    char extra[4096] = "";
+    for (int i = 0; i < num_machine; i++) {
+        if (strlen(extra) + strlen(machine_args[i]) + 2 >= sizeof(extra)) break;
+        strcat(extra, machine_args[i]);
+        strcat(extra, " ");
+    }
+
+    int nbase = 0, nwith = 0;
+    ClangMacro *base = clang_macros("", &nbase);
+    if (!base) return;
+    ClangMacro *with = clang_macros(extra, &nwith);
+    if (!with) return;
+
+    // Did the flags add anything? A flag that only takes things away
+    // (-mno-sse) or changes nothing at all (-m64, -mtune=...) says nothing
+    // about the feature set, while one that adds a feature carries the macros
+    // that feature implies -- the x86 ones cxx normally leaves out included.
+    bool adds = false;
+    for (int i = 0; i < nwith; i++) {
+        ClangMacro *b = find_clang_macro(base, nbase, with[i].name);
+        if (!b || strcmp(b->value, with[i].value)) adds = true;
+    }
+
+    char *out = vnew(64 * 1024, 1);
+    size_t n = 0;
+    char **kept = vnew(16, sizeof(char *));
+    int nkept = 0;
+
+    // Only what the flags themselves changed is ours to apply. A macro clang
+    // had before the flags and still has, spelled the same way, stays exactly
+    // as the target predefines it: cxx's __GNUC__ and __STDC_VERSION__ and
+    // the rest are its own, and respelling them as clang's would tell a
+    // header that this is clang (`__GNUC__ 4` makes glibc's
+    // __GNUC_PREREQ (7, 0) false, and <bits/floatn-common.h> then typedefs
+    // _Float32 over the keyword).
+    for (char *line = T.predef; line && *line;) {
+        char *eol = strchr(line, '\n');
+        size_t len = eol ? (size_t)(eol - line + 1) : strlen(line);
+        char name[256] = "";
+        bool is_define = sscanf(line, "#define %255s", name) == 1;
+        ClangMacro *w = is_define ? find_clang_macro(with, nwith, name) : NULL;
+        ClangMacro *b = is_define ? find_clang_macro(base, nbase, name) : NULL;
+        if (is_define && b && !w) {
+            // A macro these flags do not have: not predefined at all, rather
+            // than predefined and then undefined (which is what gcc and clang
+            // do, and why neither warns here).
+        } else if (b && w && strcmp(b->value, w->value)) {
+            out = vgrow(out, n + strlen(w->name) + strlen(w->value) + 16);
+            n += (size_t)sprintf(out + n, "#define %s %s\n", w->name, w->value);
+            kept = vgrow(kept, (nkept + 1) * sizeof(char *));
+            kept[nkept++] = w->name;
+        } else {
+            out = vgrow(out, n + len + 1);
+            n += (size_t)sprintf(out + n, "%.*s", (int)len, line);
+            if (is_define) {
+                kept = vgrow(kept, (nkept + 1) * sizeof(char *));
+                kept[nkept++] = name;
+            }
+        }
+        if (!eol) break;
+        line = eol + 1;
+    }
+
+    // And the ones the flags turned on, which the target does not predefine.
+    for (int i = 0; i < nwith; i++) {
+        ClangMacro *b = find_clang_macro(base, nbase, with[i].name);
+        if (b && !(adds && is_absent_feature(with[i].name))) continue;
+        bool have = false;
+        for (int j = 0; j < nkept && !have; j++) have = !strcmp(kept[j], with[i].name);
+        if (have) continue;
+        out = vgrow(out, n + strlen(with[i].name) + strlen(with[i].value) + 16);
+        n += (size_t)sprintf(out + n, "#define %s %s\n", with[i].name, with[i].value);
+    }
+
+    out[n] = '\0';
+    T.predef = out;
+}
+
+// Stage 2: .ll -> .s  (via clang)
 static void compile(char *input, char *output) {
     // Bare-metal triples default to a soft-float ABI, which clashes with
     // the "target-abi" module flag; pass the matching driver flags.
     char mabi[64] = "-mabi=";
     char march[64] = "-march=";
-    char *cmd[14] = {"clang", "-target", T.triple, "-S", "-fno-addrsig", "-Wno-override-module",
-                     "-x",    "ir",      input,    "-o", output};
-    int n = 11;
+    char *cmd[24];
+    int n = 0;
+    cmd[n++] = "clang";
+    cmd[n++] = "-target";
+    cmd[n++] = T.triple;
+    cmd[n++] = "-S";
+    cmd[n++] = "-fno-addrsig";
+    cmd[n++] = "-Wno-override-module";
+    cmd[n++] = "-x";
+    cmd[n++] = "ir";
+    cmd[n++] = input;
+    cmd[n++] = "-o";
+    cmd[n++] = output;
     if (T.clang_mabi) {
         strncat(mabi, T.clang_mabi, 56);
         cmd[n++] = mabi;
     }
-    if (T.clang_march) {
+    // The target's -march is a default; a -march=/-mcpu= the user gave
+    // replaces it (two -march options in one command line conflict).
+    if (T.clang_march && !machine_sets_arch) {
         strncat(march, T.clang_march, 56);
         cmd[n++] = march;
     }
+    for (int i = 0; i < num_machine && n < 23; i++) cmd[n++] = machine_args[i];
     cmd[n] = NULL;
     run_subprocess(cmd);
 }
@@ -946,7 +1149,19 @@ static void compile(char *input, char *output) {
 // directives the compiler emits, e.g. .prefalign, which older binutils
 // reject)
 static void assemble(char *input, char *output) {
-    char *cmd[] = {"clang", "-target", T.triple, "-x", "assembler", "-c", input, "-o", output, NULL};
+    char *cmd[16];
+    int n = 0;
+    cmd[n++] = "clang";
+    cmd[n++] = "-target";
+    cmd[n++] = T.triple;
+    for (int i = 0; i < num_machine && n < 13; i++) cmd[n++] = machine_args[i];
+    cmd[n++] = "-x";
+    cmd[n++] = "assembler";
+    cmd[n++] = "-c";
+    cmd[n++] = input;
+    cmd[n++] = "-o";
+    cmd[n++] = output;
+    cmd[n] = NULL;
     run_subprocess(cmd);
 }
 
@@ -967,6 +1182,7 @@ static FileType get_file_type(char *filename) {
     if (endswith(filename, ".o")) return FILE_OBJ;
     if (endswith(filename, ".c")) return FILE_C;
     if (endswith(filename, ".s")) return FILE_ASM;
+    if (endswith(filename, ".S")) return FILE_ASM_PP;
 
     fatal("<command line>: unknown file extension: %s", filename);
     return FILE_NONE;
@@ -1043,12 +1259,40 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        // Handle .S — assembler that the C preprocessor runs first: cpython
+        // ships Python/asm_trampoline_x86_64.S, which picks its symbols with
+        // `#ifdef __x86_64__`. clang does the two steps in one invocation,
+        // and it is the assembler cxx's own stage 3 uses anyway. Only the
+        // machine flags and the include paths are handed over: -D/-U reach
+        // cxx's own preprocessor as a text buffer.
+        if (type == FILE_ASM_PP) {
+            char *cmd[32];
+            int m = 0;
+            cmd[m++] = "clang";
+            cmd[m++] = "-target";
+            cmd[m++] = T.triple;
+            for (int j = 0; j < num_machine && m < 24; j++) cmd[m++] = machine_args[j];
+            for (int j = 0; j < num_include_paths && m < 24; j++) cmd[m++] = format("-I%s", include_paths[j]);
+            // When this ends in a link, the object goes to a temporary
+            // file: `-o` names the executable the linker is about to write.
+            char *obj = opt_E || opt_S || opt_c ? output : create_tmpfile();
+            cmd[m++] = opt_E ? "-E" : (opt_S ? "-S" : "-c");
+            cmd[m++] = input;
+            cmd[m++] = "-o";
+            cmd[m++] = obj;
+            cmd[m] = NULL;
+            run_subprocess(cmd);
+            if (!opt_E && !opt_S && !opt_c) ld_args[num_ldarg++] = obj;
+            continue;
+        }
+
         // Handle .s — assemble, unless -S stops here.
 
         if (type == FILE_ASM) {
             if (opt_S) continue;
-            assemble(input, output);
-            if (!opt_c) ld_args[num_ldarg++] = output;
+            char *obj = opt_c ? output : create_tmpfile();
+            assemble(input, obj);
+            if (!opt_c) ld_args[num_ldarg++] = obj;
             continue;
         }
 

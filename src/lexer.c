@@ -817,6 +817,8 @@ void convert_keywords(Token *tok) {
         {"__attribute", 0, TK_ATTR},
         {"__attribute__", 0, TK_ATTR},
         {"__extension__", 0, TK_EXTENSION},
+        {"__inline", 0, TK_INLINE},
+        {"__inline__", 0, TK_INLINE},
         {"__restrict", 0, TK_RESTRICT},
         {"__restrict__", 0, TK_RESTRICT},
         {"__thread", 0, TK_THREAD},

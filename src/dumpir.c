@@ -167,6 +167,8 @@ static void print_sym_name(uint32_t id) {
 }
 
 static bool is_agg(Type *ty);
+static int abi_param_count(Type *ty);
+static void print_param_type(Type *ty, int i, bool bare);
 
 // The ABI lowering is per target: it is enabled only where the target
 // supplies a classifier, so a target that has none keeps the plain
@@ -614,12 +616,30 @@ void dump_blk(Blk *b) {
                 Type *fty = ir->args[0].ty;
                 if (fty->kind == TY_PTR) fty = fty->base;
                 if (fty->is_variadic) {
+                    // The type has to be the one the declaration of the
+                    // callee spells, or LLVM rejects the call, so it goes
+                    // through the same lowering dump_fn applies: a record
+                    // parameter arrives as one value per piece rather than as
+                    // the record (cpython's _PyCompile_Error takes a
+                    // _Py_SourceLocation before its "..."). Types only: an
+                    // attribute here is "argument attributes invalid in
+                    // function type", so print_param_type is asked for the
+                    // bare form.
+                    bool first = true;
                     fprintf(out_file, "(");
-                    for (Type *p = fty->params; p; p = p->next) {
-                        print_type(p);
-                        if (p->next) fprintf(out_file, ", ");
+                    if (ir->is_sret && fty->ret) {
+                        fprintf(out_file, "ptr");
+                        first = false;
                     }
-                    if (fty->params) fprintf(out_file, ", ");
+                    for (Type *p = fty->params; p; p = p->next) {
+                        int cntt = abi_param_count(p);
+                        for (int k = 0; k < cntt; k++) {
+                            if (!first) fprintf(out_file, ", ");
+                            print_param_type(p, k, true);
+                            first = false;
+                        }
+                    }
+                    if (!first) fprintf(out_file, ", ");
                     fprintf(out_file, "...) ");
                 }
                 print_operand(ir->args[0]);
@@ -1318,11 +1338,18 @@ static int abi_param_count(Type *ty) {
     return agg_param_slots(ty, &c);
 }
 
-static void print_param_type(Type *ty, int i) {
+static void print_param_type(Type *ty, int i, bool bare) {
     if (abi_lowering() && is_agg(ty)) {
         AggClass c;
         T.classify_aggregate(ty, &c);
         if (c.npiece == 0) {
+            if (bare) {
+                // A copy is a pointer whatever the spelling, and a call's
+                // type list has no room for byval or align: clang writes a
+                // bare `ptr` there and the attribute goes on the operand.
+                fprintf(out_file, "ptr");
+                return;
+            }
             // SysV has the callee copy the argument, which the IR spells
             // byval; AAPCS64 and RISC-V have the caller copy it and pass a
             // plain pointer, so byval there would ask for a second copy.
@@ -1353,7 +1380,10 @@ static void print_param_type(Type *ty, int i) {
         return;
     }
     print_type(ty);
-    // A scalar parameter carries its mark after the type: i8 signext %0.
+    // A scalar parameter carries its mark after the type: i8 signext %0. In
+    // a call's type list it has none -- there it is an error -- and it is
+    // the operand that carries it.
+    if (bare) return;
     char *ext = ext_attr(ty);
     if (ext) fprintf(out_file, " %s", ext);
 }
@@ -1393,7 +1423,7 @@ void dump_fn(Sym *fn) {
         int cntt = abi_param_count(param);
         for (int k = 0; k < cntt; k++) {
             if (pi) fprintf(out_file, ", ");
-            print_param_type(param, k);
+            print_param_type(param, k, false);
             if (defined) fprintf(out_file, " %%tmp%d", pi);
             pi++;
         }

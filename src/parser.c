@@ -32,6 +32,8 @@ static void set_asm_name(Sym *var, char *name);
 static Node *declaration(Token **rest, Token *tok, Type *ty, SClass sclass, int align, int funcspec, Attr *attrs);
 
 static void attr_decl_apply(Attr *attrs, int *funcspec, int *align, bool gnu_only);
+static Node *parse_mem_builtin(Token **rest, Token *tok, int kind);
+static Attr *find_noreturn_attr(Attr *attrs);
 static void sym_attr_flags(Sym *var, Attr *attrs, bool gnu_only);
 static bool is_attr_start(Token *tok);
 static Token *skip_leading_attrs(Token *tok);
@@ -1351,16 +1353,37 @@ static void union_initializer2(Token **rest, Token *tok, Initializer *init) {
 // BracedInit ::= "{" ((Desig+ "=")? Init ("," (Desig+ "=")? Init)* ","?)? "}"
 static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_brace) {
     if (init->ty->kind == TY_ARRAY) {
-        bool braced_str = tok->kind == TK_LBRACE && tok->next->kind == TK_STRLIT && tok->next->next->kind == TK_RBRACE;
-        if (braced_str && !is_compatible(type_unqual(infer_strtype(tok->next)->base), type_unqual(init->ty->base)))
+        // A string literal may be parenthesized: `static const char name[] =
+        // (PREFIX "name")`, which is how cpython's Modules/_testsinglephase.c
+        // writes it, and gcc and clang read the parentheses as if they were
+        // not there. They are counted here and consumed with the literal;
+        // anything else inside the parentheses leaves `paren` at zero and
+        // falls through to the initializer-list paths below as before.
+        int paren = 0;
+        Token *str = tok;
+        while (str->kind == TK_LPAREN) {
+            str = str->next;
+            paren++;
+        }
+        if (paren) {
+            Token *t = str->kind == TK_STRLIT ? str->next : NULL;
+            for (int i = 0; t && i < paren; i++) t = t->kind == TK_RPAREN ? t->next : NULL;
+            if (!t) paren = 0;
+        }
+        Token *lit = paren ? str : tok;
+        bool braced_str = lit->kind == TK_LBRACE && lit->next->kind == TK_STRLIT && lit->next->next->kind == TK_RBRACE;
+        if (braced_str && !is_compatible(type_unqual(infer_strtype(lit->next)->base), type_unqual(init->ty->base)))
             braced_str = false;
-        if (tok->kind == TK_STRLIT || braced_str) {
+        if (lit->kind == TK_STRLIT || braced_str) {
+            tok = lit;
             bool has_brace = match(&tok, tok, TK_LBRACE);
             Type *ty = infer_strtype(tok);
-            if (!(is_char(init->ty->base) && is_char(ty->base)) && !is_compatible(ty, init->ty))
+            if (!(is_char(init->ty->base) && is_char(ty->base)) &&
+                !is_compatible(type_unqual(ty->base), type_unqual(init->ty->base)))
                 error(tok, "array of inappropriate type initialized from string constant");
             string_initializer(&tok, tok, init);
             if (has_brace) tok = skip(tok, TK_RBRACE);
+            for (int i = 0; i < paren; i++) tok = skip(tok, TK_RPAREN);
             *rest = tok;
             return;
         }
@@ -1531,12 +1554,20 @@ static Node *init_desg_expr(InitDesg *desg, Token *tok) {
 }
 
 static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token *tok) {
+    // An element or member whose initializer is empty writes nothing -- the
+    // caller's ND_MEMZERO covers it -- so it adds nothing to the chain. The
+    // chain is walked from its left end, one gen_expr frame per node, so
+    // leaving the empty ones in makes the stack cost of an object
+    // proportional to its size rather than to the number of elements
+    // actually initialized: a `char path[PATH_MAX + 1]` inside a partly
+    // initialized record is 4097 frames of a function that is otherwise
+    // four statements long.
     if (ty->kind == TY_ARRAY) {
         Node *node = new_node(ND_NOP, tok);
         for (int i = 0; i < ty->len; i++) {
             InitDesg desg2 = {desg, i, NULL, NULL};
             Node *rhs = create_lvar_init(init->child[i], ty->base, &desg2, tok);
-            node = new_binary(ND_COMMA, node, rhs, tok);
+            if (rhs->kind != ND_NOP) node = new_binary(ND_COMMA, node, rhs, tok);
         }
         return node;
     }
@@ -1547,7 +1578,7 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
             InitDesg desg2 = {desg, 0, mem, NULL};
             Node *rhs = create_lvar_init(init->child[mem->idx], mem->ty, &desg2, tok);
             add_type(rhs);
-            node = new_binary(ND_COMMA, node, rhs, tok);
+            if (rhs->kind != ND_NOP) node = new_binary(ND_COMMA, node, rhs, tok);
         }
         return node;
     }
@@ -1894,6 +1925,13 @@ BuiltinDef builtin_defs[NUM_BUILTINFN] = {
     [BUILTIN_ASSUME_ALIGNED] = {"__builtin_assume_aligned", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0,
                                 NULL, 0},
     [BUILTIN_UNREACHABLE] = {"__builtin_unreachable", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    // A BCLASS_SPECIAL row may carry a name that is no intrinsic: for these
+    // it is the library function the builtin is, which parse_mem_builtin()
+    // declares and calls.
+    [BUILTIN_MEMCPY] = {"__builtin_memcpy", BCLASS_SPECIAL, "memcpy", BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_MEMMOVE] = {"__builtin_memmove", BCLASS_SPECIAL, "memmove", BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_MEMSET] = {"__builtin_memset", BCLASS_SPECIAL, "memset", BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_MEMCMP] = {"__builtin_memcmp", BCLASS_SPECIAL, "memcmp", BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_ADD_OVERFLOW] = {"__builtin_add_overflow", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
                               0},
     [BUILTIN_SUB_OVERFLOW] = {"__builtin_sub_overflow", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
@@ -2932,6 +2970,11 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             *rest = skip(tok, TK_RPAREN);
             return new_num(size <= T.ty_nullptr->size, start);
         }
+        case BUILTIN_MEMCPY:
+        case BUILTIN_MEMMOVE:
+        case BUILTIN_MEMSET:
+        case BUILTIN_MEMCMP:
+            return parse_mem_builtin(rest, tok, kind);
         case BUILTIN_UNREACHABLE: {
             // GNU __builtin_unreachable(): the statement after which control
             // never arrives, and reaching it is undefined. cxx has no
@@ -3592,6 +3635,58 @@ static Member *get_struct_member(Member *mem, Token *tok) {
 // CompLit  ::= "(" SCSpec* TypeName ")" BracedInit
 // PostFix  ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident | "++" | "--"
 // ArgList  ::= AsExp ("," AsExp)*
+// The memory builtins. Each is the library function named in its table row,
+// and the call it builds is an ordinary one to it: the declaration the
+// program has in scope gives the call its prototype -- glibc's <string.h>
+// always declares these -- and one is declared here when it has not, since a
+// builtin is callable without including the header that declares it. The
+// symbol is not marked as a builtin, so irgen emits the call rather than
+// looking for an intrinsic.
+static Node *parse_mem_builtin(Token **rest, Token *tok, int kind) {
+    BuiltinDef *d = builtin_def(kind);
+    char *lib = d->intrinsic;
+    uint32_t id = intern(lib, strlen(lib));
+
+    // The library function's own prototype, used only when nothing in scope
+    // declares it: void *f(void *, const void *|int, size_t), or int for
+    // memcmp. The size parameter is the target's unsigned long, which is the
+    // width size_t has everywhere cxx targets.
+    Type *fty = func_type(kind == BUILTIN_MEMCMP ? T.ty_int : pointer_to(T.ty_void, 0));
+    Type *p = copy_type(pointer_to(T.ty_void, 0));
+    fty->params = p;
+    p = p->next = copy_type(kind == BUILTIN_MEMSET ? T.ty_int : pointer_to(T.ty_void, 0));
+    p->next = copy_type(T.ty_ulong);
+    fty->nparam = 3;
+    fty->name = tok;
+
+    // Look the name up as it is written, so a declaration from a header is
+    // the one that types the call. The identifier is only borrowed for the
+    // lookup: what the source says is still the builtin's spelling.
+    uint32_t saved = tok->id;
+    tok->id = id;
+    NameSpace *ns = find_ident(tok, true, false);
+    tok->id = saved;
+
+    Sym *sym;
+    if (ns) {
+        while (ns->prev) ns = ns->prev;
+        sym = ns->var;
+    } else {
+        sym = new_gvar(id, fty);
+        sym->is_function = true;
+        push_namespace(file_scope, id, SYM_FUNC, fty, tok)->var = sym;
+    }
+
+    Node *fn = new_var_node(sym, tok);
+    add_type(fn);
+    // The function designator decays to a pointer, which is the shape
+    // fncall() expects from postfix() and the one irgen reads the address
+    // out of: without it the conversion inside fncall() would load the
+    // function itself.
+    new_imcast(&fn, pointer_to(fn->ty, 0));
+    return fncall(rest, tok->next, fn);
+}
+
 static Node *postfix(Token **rest, Token *tok) {
     Node *node, *init = NULL;
     Token *start = tok;
@@ -3790,6 +3885,9 @@ static Node *unary(Token **rest, Token *tok) {
             Token *start = tok;
             Type *ty;
             bool tyname = false;
+            // The operand of the expression form, kept for __alignof__: an
+            // object's alignment is the object's, not its type's.
+            Node *operand = NULL;
             // See uneval_operand: the names this operand mentions are parked
             // until its type says whether the operand is evaluated at all.
             uint32_t park_mark = num_parked;
@@ -3810,6 +3908,7 @@ static Node *unary(Token **rest, Token *tok) {
                 else if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_FUNC)
                     node = node->lhs;
                 ty = node->ty;
+                operand = node;
             }
             uneval_operand = outer_uneval;
             if (ty->kind == TY_VLA)
@@ -3819,7 +3918,19 @@ static Node *unary(Token **rest, Token *tok) {
             if (ty->size < 0 && (ty->kind != TY_ARRAY && ty->kind != TY_VLA)) {
                 error(start, "invalid application of ‘%*.s’ to incomplete type", start->len, tok_text(start));
             }
-            if (start->kind == TK_ALIGNOF) return new_ulong(ty->align, start);
+            if (start->kind == TK_ALIGNOF) {
+                // `__alignof__(object)` is the alignment of the object, which
+                // an `aligned` attribute or `_Alignas` raises above the
+                // type's -- cpython asserts that its Py_ALIGNED(64) buffer is
+                // 64-aligned. The type form keeps the type's own alignment.
+                if (operand && operand->kind == ND_VAR) return new_ulong(MAX(operand->var->align, ty->align), start);
+                return new_ulong(ty->align, start);
+            }
+            // The bounds a type name registered are evaluated before the
+            // length is read. An *object* has registered none -- its bounds
+            // ran where it was declared -- so there is no chain here, and
+            // the length is the whole expression: a comma with a null left
+            // operand is not a node the rest of the compiler can walk.
             Node *size = NULL;
             if (tyname) {
                 size = new_node(ND_NOP, tok);
@@ -3832,7 +3943,8 @@ static Node *unary(Token **rest, Token *tok) {
                 if (ty->kind != TY_ARRAY && ty->kind != TY_VLA)
                     error(start, "‘_Countof’ requires an argument of array type");
                 if (ty->kind == TY_VLA) {
-                    return new_binary(ND_COMMA, size, new_var_node(ty->vla_cnt, start), start);
+                    Node *cnt = new_var_node(ty->vla_cnt, start);
+                    return size ? new_binary(ND_COMMA, size, cnt, start) : cnt;
                 }
                 if (ty->size < 0) error(start, "invalid application of ‘_Countof’ to incomplete type");
                 return new_ulong(ty->len, start);
@@ -3845,7 +3957,8 @@ static Node *unary(Token **rest, Token *tok) {
                     base_ty = base_ty->base;
                 }
                 Node *base_sz = new_ulong(base_ty->size, start);
-                return new_binary(ND_COMMA, size, new_binary(ND_MUL, vla_len, base_sz, start), start);
+                Node *len = new_binary(ND_MUL, vla_len, base_sz, start);
+                return size ? new_binary(ND_COMMA, size, len, start) : len;
             }
             if (ty->size < 0) error(start, "invalid application of ‘sizeof’ to incomplete type");
             return new_ulong(ty->size, start);
@@ -4648,7 +4761,10 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
     Node dummy, *cur = &dummy;
     do {
         Token *start = tok;
-        scope->vla_num = 0;
+        // The bounds registered here are the ones the declarator adds plus
+        // whatever a `typeof(int[n])` in the specifier part registered
+        // before it; the statement below evaluates each of them once, and
+        // the object's size then reads the counters they wrote.
         Type *ty = declarator(&tok, tok, basety);
         Token *var_name = ty->name;
         apply_postdecl_attrs(ty);
@@ -4673,7 +4789,16 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             // moves on; on anything else the attribute is ignored, which is
             // what gcc (-Wattributes) and clang (-Wignored-attributes) say.
             if (fspec & Q_NORETURN) {
-                if (is_funcptr(ty)) {
+                Attr *nr = find_noreturn_attr(attrs);
+                if (!nr) nr = find_noreturn_attr(ty->attrs);
+                if (nr && nr->info->ns == ATTR_NS_STD) {
+                    // 6.7.13.3p2: the standard attribute "shall be applied
+                    // only to the declaration of a function", and clang
+                    // treats a breach as an error wherever the attribute
+                    // lands -- on an object, on a typedef, or on a function
+                    // pointer object.
+                    error(nr->tok, "‘noreturn’ can only appear on functions");
+                } else if (is_funcptr(ty)) {
                     // A type of the pointer's: taken, and kept.
                 } else {
                     warning(WG_ATTRIBUTES, tok, "‘noreturn’ attribute ignored");
@@ -4700,6 +4825,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
 
         bool is_extern = sclass & SC_EXTERN || is_fn;
         Sym *var;
+        bool took_over = false;
         NameSpace *ns = find_ident(var_name, false, is_extern);
         uint32_t id = get_ident(var_name);
         if (ns) {
@@ -4708,8 +4834,18 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
                 diag_exit("note", ns->loc, "previous definition is here");
             }
             check_decl_compatile(ns, symkind, ty);
-            var = new_lvar(id, ty);
-            var->tok = var_name;
+            // A block-scope declaration of a function declares the function,
+            // which the outer declaration has already named -- there is no
+            // object here to give a slot to. The symbol it took over is the
+            // one every reference already resolves to; the file-scope path
+            // takes the same one over.
+            if (is_fn && ns->var) {
+                var = ns->var;
+                took_over = true;
+            } else {
+                var = new_lvar(id, ty);
+                var->tok = var_name;
+            }
         } else if (is_extern) {
             var = new_gvar(id, ty);
         } else if (is_static) {
@@ -4739,7 +4875,10 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             else
                 new_ns->lnk = LK_EXTERN;
         }
-        var->sclass = sclass;
+        // The symbol keeps the storage class of its first declaration (see
+        // the file-scope path): a block-scope `long g(void);` after
+        // `static long g(void);` must leave the function internal.
+        if (!took_over) var->sclass = sclass;
         var->align = MAX(align, ty->align);
         var->is_function = is_fn;
         var->funcspec |= fspec;
@@ -4822,9 +4961,16 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
                 save_expr->ty = T.ty_voidptr;
                 cur = cur->next = save_expr;
             }
-            Node *size = scope->vla_expr[0];
-            for (int i = 1; i < scope->vla_num; i++) {
-                size = new_binary(ND_MUL, size, scope->vla_expr[i], tok);
+            // The size comes from the counters the bound statements above
+            // wrote, not from the bounds themselves: those statements have
+            // already evaluated each bound, and reaching for the bound node
+            // again here would run its side effects a second time -- and ask
+            // for blocks the parse-time count did not reserve.
+            Node *size = NULL;
+            for (Type *t = var->ty; t->kind == TY_VLA; t = t->base) {
+                Node *cnt = new_var_node(t->vla_cnt, tok);
+                add_type(cnt);
+                size = size ? new_binary(ND_MUL, size, cnt, tok) : cnt;
             }
             Type *base_ty = var->ty;
             while (base_ty->kind == TY_VLA) base_ty = base_ty->base;
@@ -6196,6 +6342,16 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
                           "illegal initializer (only variables can be "
                           "initialized)");
                 push_namespace(scope, get_ident(ty->name), SYM_TYNAME, ty, ty->name);
+                // A variably modified typedef is where its bounds are
+                // evaluated: gcc and clang both capture the size there, and
+                // every later use of the type -- `sizeof(T)`, an object
+                // declaration's size -- reads the counter they wrote rather
+                // than running the bound again.
+                for (int i = 0; i < scope->vla_num; i++) {
+                    cur = cur->next = new_unary(ND_EXPR_STMT, scope->vla_expr[i], scope->vla_expr[i]->tok);
+                    add_type(cur);
+                }
+                scope->vla_num = 0;
             } else {
                 cur = cur->next = declaration(&tok, tok, basety, sclass, align, funcspec, attrs);
             }
@@ -6894,6 +7050,14 @@ static Attr *attr_entry(Token **rest, Token *tok, bool is_gnu) {
         // The GNU spelling lives in the gnu namespace; the C23 spelling
         // defaults to the standard namespace.
         info = attr_lookup(is_gnu ? "gnu" : ns, name);
+        // vector_size and ext_vector_type land here too, and staying a
+        // warning is deliberate: glibc's own <link.h> has
+        // `typedef float La_x86_64_xmm __attribute__ ((__vector_size__ (16)))`,
+        // which <execinfo.h> pulls in, and refusing it stops programs that
+        // merely include <link.h> from compiling (cpython's Python/traceback.c
+        // and Modules/_ctypes/callproc.c do). gcc and clang warn about
+        // attributes they do not know as well; that the vector is then a
+        // scalar is the documented cost of not having vector types (3.5.3).
         if (!info) warning(WG_ATTRIBUTES, start, "unknown attribute '%s' ignored", name);
     } else if (is_gnu) {
         error(tok, "expected attribute name");
@@ -7007,6 +7171,15 @@ static void attr_decl_apply(Attr *attrs, int *funcspec, int *align, bool gnu_onl
             *align = MAX(*align, (int)const_expr(&t, a->args->next));
         }
     }
+}
+
+// The `noreturn` attribute in a declaration, whichever spelling carried
+// it. The standard one is a constraint and clang reports it as an error;
+// the GNU one is ignored with a warning.
+static Attr *find_noreturn_attr(Attr *attrs) {
+    for (Attr *a = attrs; a; a = a->next)
+        if (a->info && !strcmp(a->info->name, "noreturn")) return a;
+    return NULL;
 }
 
 // The name for diagnostics: gnu attributes print with their namespace.
@@ -7888,6 +8061,11 @@ static Token *external_declaration(Token *tok) {
         Type *ty = declarator(&tok, tok, basety);
         apply_postdecl_attrs(ty);
         Token *var_name = ty->name;
+        // 6.7.6.2p2: a variably modified type needs a block scope, the bound
+        // being something that is evaluated rather than a constant. Taking
+        // one as a constant here emitted the object with no type at all
+        // (`global (null)`), and only the backend noticed.
+        if (is_vm_type(ty)) error(var_name, "variably modified ‘%s’ at file scope", str(var_name->id));
         NameSpace *ns = find_ident(var_name, false, false);
         Sym *var;
         bool is_fn = ty->kind == TY_FUNC;
@@ -7898,7 +8076,11 @@ static Token *external_declaration(Token *tok) {
             // See the same check in the block-scope declaration path: the
             // attribute is a type of function pointer's, or it is ignored.
             if (fspec & Q_NORETURN) {
-                if (is_funcptr(ty)) {
+                Attr *nr = find_noreturn_attr(attrs);
+                if (!nr) nr = find_noreturn_attr(ty->attrs);
+                if (nr && nr->info->ns == ATTR_NS_STD)
+                    error(nr->tok, "‘noreturn’ can only appear on functions");
+                else if (is_funcptr(ty)) {
                     // See the block-scope path above.
                 } else {
                     warning(WG_ATTRIBUTES, tok, "‘noreturn’ attribute ignored");

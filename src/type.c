@@ -335,7 +335,12 @@ Type *func_type(Type *return_ty) {
     // _Alignof(<function type>) is evaluated to 4.
     ty->size = 1;
     ty->align = 4;
-    ty->ret = return_ty;
+    // A qualified return type loses that qualifier (6.7.6.3: a function
+    // returns an unqualified type): `const int f(void)` is int, and
+    // `int *restrict f(void)` a plain `int *`, while `const int *f(void)`
+    // keeps the const it points at -- only the outermost qualifier goes.
+    // gcc and clang mention the drop under -Wextra, not by default.
+    ty->ret = type_unqual(return_ty);
     return ty;
 }
 
@@ -1054,11 +1059,32 @@ static Type *get_common_type(Type *ty1, Type *ty2) {
     return s1.ty;
 }
 
+// The type a bit-field takes part in the integer promotions with, or NULL
+// when the node is not a bit-field whose width decides one. 6.3.1.1p2
+// promotes such a field by "the width, for a bit-field": a signed field of
+// 32 bits still has int's range, an unsigned one of 31 does too, and an
+// unsigned one of 32 does not (it stays unsigned int). tinycc's
+// tests2/93_integer_promotion.c is this rule case by case.
+static Type *bitfield_type(Node *node) {
+    // The operand may already have been through the lvalue conversion, which
+    // wraps the member in ND_LVTOR: the member is one step down.
+    if (node->kind == ND_LVTOR) node = node->lhs;
+    if (node->kind != ND_MEMBER || !node->member->is_bitfield) return NULL;
+    Member *m = node->member;
+    int limit = m->ty->is_unsigned ? 31 : 32;
+    return m->bit_width <= limit ? T.ty_int : NULL;
+}
+
 void integer_promotion(Node **expr) {
     // _BitInt is never subject to the integer promotions (C23; clang keeps
     // _BitInt(3) in unary ops and varargs): only the mixed-operand usual
     // arithmetic conversions convert it.
     if ((*expr)->ty->kind & TY_BITINT) return;
+    Type *bf = bitfield_type(*expr);
+    if (bf) {
+        new_imcast(expr, bf);
+        return;
+    }
     Type *ty = get_common_type((*expr)->ty, T.ty_int);
     new_imcast(expr, ty);
 }
@@ -1109,7 +1135,13 @@ static void warn_sign_compare(Node *node) {
 }
 
 void usual_arith_conv(Node **lhs, Node **rhs) {
-    Type *ty = get_common_type((*lhs)->ty, (*rhs)->ty);
+    // The integer promotions come first (6.3.1.8p1), and for a bit-field
+    // that is the width promotion: taking the common type from the declared
+    // type instead makes `s.u31 - 100` unsigned, and the comparison comes out
+    // the other way round.
+    Type *lt = bitfield_type(*lhs);
+    Type *rt = bitfield_type(*rhs);
+    Type *ty = get_common_type(lt ? lt : (*lhs)->ty, rt ? rt : (*rhs)->ty);
     new_imcast(lhs, ty);
     new_imcast(rhs, ty);
 }

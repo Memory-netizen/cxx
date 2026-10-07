@@ -173,6 +173,14 @@ static Ref cast(Ref val, Type *src_ty, Type *target_ty) {
             n.ty = target_ty;
             return n;
         }
+        // The value of an integer converted to a pointer is that integer's
+        // value, and inttoptr zero-extends a narrower operand: widening to
+        // the pointer's width first -- signed or unsigned as the source is
+        // -- is what makes `(void *) -1` all ones (gcc and clang both) and
+        // `(unsigned) 0xFFFFFFFF` the 32-bit value it is. cxx used to
+        // zero-extend both, so the MAP_FAILED test every mmap caller writes
+        // came out false.
+        if (src_ty->size < T.ty_long->size) val = cast(val, src_ty, src_ty->is_unsigned ? T.ty_ulong : T.ty_long);
         Ref dst = TMP(tmp_id++, target_ty);
         new_ins(IR_INTTOPTR, dst, (Ref[]){val}, 1);
         return dst;
@@ -355,8 +363,17 @@ static void store(Ref val, Ref addr, int align, Member *mem) {
         Ref old_cleared = TMP(tmp_id++, ty);
         new_ins(IR_AND, old_cleared, (Ref[]){old, clear_mask}, 2);
 
-        // d. trunc new vlaue
+        // d. trunc new value, then mask it to the field's width: everything
+        // above the width belongs to the next field, and assigning ~0 to an
+        // `unsigned x : 12` must leave those four bits alone. Only the width
+        // says where they start, so the unit's own truncation is not enough.
         Ref trunc = cast(val, val.ty, ty);
+        if (width < total_bits) {
+            Ref mask = INT((1ULL << width) - 1);
+            Ref masked = TMP(tmp_id++, ty);
+            new_ins(IR_AND, masked, (Ref[]){trunc, mask}, 2);
+            trunc = masked;
+        }
 
         // e. shiht new value
         Ref dst_shifted;
@@ -1318,8 +1335,11 @@ static Ref gen_builtin_call(Node *node, int kind) {
     BuiltinDef *d = builtin_def(kind);
     if (!d) fatal("unknown builtin kind %d in irgen", kind);
 
-    // A builtin described by an intrinsic name needs no per-builtin code.
-    if (d->intrinsic) return gen_intrinsic_call(node, d, kind);
+    // A builtin described by an intrinsic name needs no per-builtin code. A
+    // BCLASS_SPECIAL row may carry a name instead of an intrinsic: the
+    // library function a memory builtin is, which parse_mem_builtin()
+    // already turned into an ordinary call.
+    if (d->cls == BCLASS_DECL && d->intrinsic) return gen_intrinsic_call(node, d, kind);
 
     // The bit-scanning family is a fixed prototype plus a short instruction
     // sequence, which is what a row with no intrinsic means here.
@@ -1482,6 +1502,13 @@ static Ref gen_expr(Node *node) {
             // `(0, t).a`, whose comma result is not an lvalue and so is
             // converted, came out as getelementptr on the loaded struct.
             if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) return addr;
+            // A void lvalue has no value to load: `*pv` on a `void *` has
+            // type void (6.5.3.2p1) and the only place it may appear is an
+            // expression whose value is discarded -- `i ? *pv : *pv` (DR
+            // 106), which tinycc's tests2/119_random_stuff.c has. Emitting
+            // the load produced `load void` and LLVM answered "void type
+            // only allowed for function results".
+            if (node->ty->kind == TY_VOID) return addr;
             return load(addr, node->ty, align, node->lhs->member);
         }
         case ND_VAR:
@@ -3087,7 +3114,20 @@ Module *irgen(Module *md) {
                         d.ty = pointer_to(T.ty_char, 0);
                         Ref gep = TMP(tmp_id++, pointer_to(shape, 0));
                         new_ins(IR_GEP, gep, (Ref[]){d, INT(0)}, 2);
-                        store(TMP(pn, shape), gep, shape->align, NULL);
+                        // A register piece may be wider than the object it
+                        // carries: `struct { char x[3]; }` travels as an i32,
+                        // and storing those four bytes over a three-byte slot
+                        // writes one byte past the parameter -- into whatever
+                        // the callee put next to it. Go through a temporary
+                        // of the piece's size and copy the object's bytes.
+                        if (shape->size > pt->size) {
+                            Ref tmp = TMP(tmp_id++, pointer_to(shape, 0));
+                            new_ins(IR_ALLOCA, tmp, (Ref[]){INT(shape->align)}, 1);
+                            store(TMP(pn, shape), tmp, shape->align, NULL);
+                            new_ins(IR_MEMCPY, R, (Ref[]){d, tmp, INT(pt->size)}, 3);
+                        } else {
+                            store(TMP(pn, shape), gep, shape->align, NULL);
+                        }
                     }
                     pn++;
                 }

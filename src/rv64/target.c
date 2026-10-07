@@ -435,6 +435,9 @@ Target T_rv64 = {
         "#define __GNUC__ 7\n"
         "#define __GNUC_MINOR__ 0\n"
         "#define __GNUC_PATCHLEVEL__ 0\n"
+        // A program that reports which compiler built it reads this;
+        // both references define it as a string.
+        "#define __VERSION__ \"cxx (C2y)\"\n"
         "#define __STDC__ 1\n"
         "#define __UINT16_C(c) c\n"
         "#define __UINT16_C_SUFFIX__ \n"
@@ -630,8 +633,6 @@ Target T_rv64 = {
         "#define __has_embed __has_embed\n"
         "#define __has_include __has_include\n"
         "#define __has_include_next __has_include_next\n"
-        "#define __inline inline\n"
-        "#define __inline__ inline\n"
         "#define __signed__ signed\n"
         "#define __typeof typeof\n"
         "#define __typeof__ typeof\n"

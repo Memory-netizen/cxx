@@ -375,6 +375,31 @@ Target T_arm64 = {
         "#define __ARM_ARCH 8\n"
         "#define __ARM_ARCH_ISA_A64 1\n"
         "#define __ARM_ARCH_PROFILE 'A'\n"
+        // The ARMv8-A feature set, as clang defines it for this
+        // triple. NEON and the IEEE half format are part of the
+        // architecture and the ABI here, and the vector headers gate
+        // their NEON paths on __ARM_NEON.
+        // The ACLE markers clang publishes for this triple: real
+        // headers ask `#if defined(__ARM_ACLE) && __ARM_ACLE >= ...`
+        // before using an intrinsic. (The SVE/SME ones --
+        // __ARM_NEON_SVE_BRIDGE, __ARM_STATE_ZA, __ARM_STATE_ZT0 --
+        // are deliberately absent: cxx has no SVE or SME.)
+        "#define __ARM_ACLE 202420\n"
+        "#define __ARM_ACLE_VERSION(year,quarter,patch) (100 * (year) + 10 * (quarter) + (patch))\n"
+        "#define __ARM_PREFETCH_RANGE 1\n"
+        "#define __ARM_FP 0xE\n"
+        "#define __ARM_FP16_ARGS 1\n"
+        "#define __ARM_FP16_FORMAT_IEEE 1\n"
+        "#define __ARM_NEON 1\n"
+        "#define __ARM_NEON_FP 0xE\n"
+        "#define __ARM_FEATURE_CLZ 1\n"
+        "#define __ARM_FEATURE_DIRECTED_ROUNDING 1\n"
+        "#define __ARM_FEATURE_DIV 1\n"
+        "#define __ARM_FEATURE_FMA 1\n"
+        "#define __ARM_FEATURE_IDIV 1\n"
+        "#define __ARM_FEATURE_LDREX 0xF\n"
+        "#define __ARM_FEATURE_NUMERIC_MAXMIN 1\n"
+        "#define __ARM_FEATURE_UNALIGNED 1\n"
 
         "#define __ARM_PCS_AAPCS64 1\n"
         "#define __ARM_SIZEOF_MINIMAL_ENUM 4\n"
@@ -675,6 +700,9 @@ Target T_arm64 = {
         "#define __GNUC__ 7\n"
         "#define __GNUC_MINOR__ 0\n"
         "#define __GNUC_PATCHLEVEL__ 0\n"
+        // A program that reports which compiler built it reads this;
+        // both references define it as a string.
+        "#define __VERSION__ \"cxx (C2y)\"\n"
         "#define __STDC__ 1\n"
         "#define __UINT16_C(c) c\n"
         "#define __UINT16_C_SUFFIX__ \n"
@@ -800,8 +828,6 @@ Target T_arm64 = {
         "#define __has_embed __has_embed\n"
         "#define __has_include __has_include\n"
         "#define __has_include_next __has_include_next\n"
-        "#define __inline inline\n"
-        "#define __inline__ inline\n"
         "#define __signed__ signed\n"
         "#define __typeof typeof\n"
         "#define __typeof__ typeof\n"

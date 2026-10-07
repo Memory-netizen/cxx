@@ -3,6 +3,10 @@
 
 struct tm *tm;
 
+// The identity of a file for the include-guard and #pragma once tables (its
+// definition is below, next to the tables it feeds).
+static uint32_t file_identity(char *path);
+
 enum {
     P_INCLUDE,
     P_INCLUDE_NEXT,
@@ -68,6 +72,8 @@ static uint32_t has_include_next_id;
 static uint32_t has_embed_id;
 static uint32_t has_c_attribute_id;
 static uint32_t has_attribute_id;
+static uint32_t has_extension_id;
+static uint32_t building_module_id;
 static uint32_t pragma_op_id;
 
 static Token *expand_macro(Token *dst, Token *list);
@@ -490,6 +496,37 @@ static Token *eval_has_c_attribute(Token *tok) {
 
 static Token *eval_has_attribute(Token *tok) { return eval_has_attr(tok, has_attribute_id, false, "__has_attribute"); }
 
+// __has_extension(x) and __building_module(x) are clang's operators, and
+// clang's own headers are written in terms of them: xmmintrin.h guards a
+// block on `!__building_module(_Builtin_intrinsics)`, hresetintrin.h one on
+// `__has_extension(gnu_asm)`. cxx builds no module and implements no clang
+// extension, so both answer 0 -- which is what clang itself says for a plain
+// translation unit and for every extension that was not asked for. The
+// argument is skipped parenthesized, so whatever is inside is not expanded.
+static Token *eval_zero_operator(Token *tok, uint32_t id) {
+    Token dummy = {};
+    Token *cur = &dummy;
+    while (tok) {
+        if (tok->kind == TK_IDENT && tok->id == id && tok->next && tok->next->kind == TK_LPAREN) {
+            Token *start = tok;
+            int depth = 0;
+            for (tok = tok->next; tok && tok->kind != TK_EOF; tok = tok->next) {
+                if (tok->kind == TK_LPAREN)
+                    depth++;
+                else if (tok->kind == TK_RPAREN && --depth == 0) {
+                    tok = tok->next;
+                    break;
+                }
+            }
+            cur = cur->next = ident_to_num(start, 0);
+            continue;
+        }
+        cur = cur->next = tok;
+        tok = tok->next;
+    }
+    return dummy.next;
+}
+
 // Evaluate a constant expression from a NULL-terminated token list
 // (used by #if and by the #embed limit parameter).
 static int64_t eval_const_tokens(Token *expr) {
@@ -501,6 +538,8 @@ static int64_t eval_const_tokens(Token *expr) {
     expr = eval_has_embed(expr);
     expr = eval_has_c_attribute(expr);
     expr = eval_has_attribute(expr);
+    expr = eval_zero_operator(expr, has_extension_id);
+    expr = eval_zero_operator(expr, building_module_id);
 
     // we replace remaining non-macro identifiers with "0"
     Token dummy2 = {};
@@ -1469,8 +1508,21 @@ static void detect_include_guard2(void) {
         guard = vnew(16, sizeof(guard[0]));
     else
         guard = vgrow(guard, num_guard + 1);
-    guard[num_guard].path = guard_macro->file->id;
+    guard[num_guard].path = file_identity(str(guard_macro->file->id));
     guard[num_guard++].macro = guard_macro;
+}
+
+// The identity of a file for the include-guard and #pragma once tables: its
+// canonical path, not the spelling that reached the compiler. The same
+// header arrives as "x.h", "./x.h" and "../dir/x.h", and those are one file
+// (tinycc's tests2/18_include.c includes its header exactly that way and
+// expects the `#pragma once` inside it to hold). Diagnostics keep printing
+// the spelling the program wrote; only these tables use the identity.
+static uint32_t file_identity(char *path) {
+    char *real = realpath(path, NULL);
+    uint32_t id = intern(real ? real : path, strlen(real ? real : path));
+    free(real);
+    return id;
 }
 
 static uint32_t *pragma_path;
@@ -1481,7 +1533,7 @@ static void add_pragma(Token *tok) {
         pragma_path = vnew(16, sizeof(pragma_path[0]));
     else
         pragma_path = vgrow(pragma_path, num_pragma + 1);
-    pragma_path[num_pragma++] = tok->file->id;
+    pragma_path[num_pragma++] = file_identity(str(tok->file->id));
 }
 
 static bool find_pragma(uint32_t file_id) {
@@ -1543,7 +1595,7 @@ static Token *new_linemarker(Token *tmpl, int line, uint32_t filename) {
 }
 
 static Token *include_file(Token **rest, Token *tok, char *path, Token *filename_tok) {
-    uint32_t file_id = intern(path, strlen(path));
+    uint32_t file_id = file_identity(path);
     for (int i = 0; i < num_guard; i++)
         if (guard[i].path == file_id && find_macro(guard[i].macro)) return NULL;
 
@@ -1605,6 +1657,106 @@ static void check_invalid_ident(Token *tok) {
         error(tok, "'%s' must be used within a preprocessing directive", str(tok->id));
 }
 
+// The conditional directives, in one place: the main loop needs them, and
+// so does the collector of a macro invocation's arguments -- a directive
+// may sit between the arguments (`DWRF_SECTION(CIE, ... #ifdef __x86_64__
+// ... #endif ...)` in cpython's Python/jit_unwind.c is one), and gcc and
+// clang evaluate it where it stands and go on collecting. `tok` is the
+// token after the `#`; the return value is where to carry on, or NULL when
+// this is not a conditional directive.
+static Token *cond_directive(Token *tok, Token *tk_hash, BlockState cur_state) {
+    if (tok->id == dt[P_IF].id) {
+        BlockState state = BLOCK_DEAD;
+        if (cur_state == BLOCK_ACTIVE) {
+            int64_t val = eval_const_expr(&tok, tok);
+            state = val ? BLOCK_ACTIVE : BLOCK_PENDING;
+        }
+        push_cond_incl(tk_hash, state);
+        return tok;
+    }
+    if (tok->id == dt[P_IFDEF].id) {
+        BlockState state = BLOCK_DEAD;
+        if (cur_state == BLOCK_ACTIVE) {
+            bool defined = find_macro(tok->next);
+            state = defined ? BLOCK_ACTIVE : BLOCK_PENDING;
+        }
+        push_cond_incl(tk_hash, state);
+        tok = skip_line(tok->next->next);
+        return tok;
+    }
+
+    if (tok->id == dt[P_IFNDEF].id) {
+        BlockState state = BLOCK_DEAD;
+        if (cur_state == BLOCK_ACTIVE) {
+            bool defined = find_macro(tok->next);
+            state = defined ? BLOCK_PENDING : BLOCK_ACTIVE;
+        }
+        push_cond_incl(tk_hash, state);
+        tok = skip_line(tok->next->next);
+        return tok;
+    }
+
+    if (tok->id == dt[P_ELIF].id) {
+        check_elif_else_valid(tok);
+        if (cur_state != BLOCK_PENDING) {
+            cond_incl->state = BLOCK_DEAD;
+        } else {
+            int64_t val = eval_const_expr(&tok, tok);
+            cond_incl->state = val ? BLOCK_ACTIVE : BLOCK_PENDING;
+        }
+        return tok;
+    }
+
+    if (tok->id == dt[P_ELIFDEF].id) {
+        check_elif_else_valid(tok);
+        if (cur_state != BLOCK_PENDING) {
+            cond_incl->state = BLOCK_DEAD;
+        } else {
+            bool defined = find_macro(tok->next);
+            cond_incl->state = defined ? BLOCK_ACTIVE : BLOCK_PENDING;
+        }
+        tok = skip_line(tok->next->next);
+        return tok;
+    }
+
+    if (tok->id == dt[P_ELIFNDEF].id) {
+        check_elif_else_valid(tok);
+        if (cur_state != BLOCK_PENDING) {
+            cond_incl->state = BLOCK_DEAD;
+        } else {
+            bool defined = find_macro(tok->next);
+            cond_incl->state = defined ? BLOCK_PENDING : BLOCK_ACTIVE;
+        }
+        tok = skip_line(tok->next->next);
+        return tok;
+    }
+
+    if (tok->id == dt[P_ELSE].id) {
+        check_elif_else_valid(tok);
+        cond_incl->else_seen = 1;
+        cond_incl->state = (cur_state == BLOCK_PENDING) ? BLOCK_ACTIVE : BLOCK_DEAD;
+        if (cond_incl->next->state == BLOCK_ACTIVE) tok = skip_line(tok->next);
+        return tok;
+    }
+
+    if (tok->id == dt[P_ENDIF].id) {
+        if (!cond_incl->next) error(tk_hash, "#endif without #if");
+        // A guarded file is one whose *guard* runs to the end of it. Any
+        // `#endif` that happens to be last would do instead with a looser
+        // test, and a file that does something after its guard -- tinycc's
+        // tcc.h selects TCC_SET_STATE below `#endif _TCC_H`, from
+        // `USING_GLOBALS` -- would then be skipped whole on the second
+        // read, its tail never re-evaluated.
+        bool closes_guard = guard_ifndef && cond_incl->if_tok == guard_ifndef;
+        cond_incl = cond_incl->next;
+        if (cond_incl->state == BLOCK_ACTIVE) tok = skip_line(tok->next);
+        if (closes_guard && tok->kind == TK_EOF) detect_include_guard2();
+        return tok;
+    }
+
+    return NULL;
+}
+
 // Visit all tokens in `tok` while evaluating preprocessing
 // macros and directives. `file` is the source file `tok` came from: with
 // -D/-U/-include the stream starts with the command line's own directives, so
@@ -1636,19 +1788,51 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
 
         BlockState cur_state = cond_incl->state;
 
-        // Concat token to buff until meet "#".
+        // Concat token to buff until meet "#" -- unless the "#" is inside
+        // parentheses, which means it is a directive between the arguments of
+        // a macro invocation and not the end of this segment. It is evaluated
+        // here (see cond_directive), and the branch it discards is not part
+        // of the argument, parentheses and commas included.
         if (!is_hash(tok)) {
             bool concat = (cur_state == BLOCK_ACTIVE);
             Token dummy2 = {}, *buf = &dummy2;
-            while (!is_hash(tok) && tok->kind != TK_EOF) {
-                if (concat) {
-                    tok->line_delta = line_delta;
-                    tok->filename = display_name;
-                    if (tok->kind == TK_ERR) error(tok, "%s", tok->msg);
-                    if (tok->kind == TK_WARN) warning(WG_CPP, tok, "%s", tok->msg);
-                    check_invalid_ident(tok);
-                    buf = buf->next = tok;
+            int level = 0;
+            while (tok->kind != TK_EOF) {
+                if (is_hash(tok)) {
+                    if (level == 0) break;
+                    Token *cont = cond_directive(tok->next, tok, cond_incl->state);
+                    if (!cont) {
+                        // Not a conditional. In a region that is not taken
+                        // it is skipped along with the rest of that region --
+                        // the usual one is an `#error` naming the
+                        // architecture the branch is for. In a region that
+                        // is taken there is nothing sensible to do with it
+                        // between two arguments, and the segment ends here
+                        // as it did before.
+                        if (cond_incl->state != BLOCK_ACTIVE) {
+                            tok = tok->next;
+                            continue;
+                        }
+                        break;
+                    }
+                    tok = cont;
+                    concat = (cond_incl->state == BLOCK_ACTIVE);
+                    continue;
                 }
+                if (!concat) {
+                    tok = tok->next;
+                    continue;
+                }
+                tok->line_delta = line_delta;
+                tok->filename = display_name;
+                if (tok->kind == TK_ERR) error(tok, "%s", tok->msg);
+                if (tok->kind == TK_WARN) warning(WG_CPP, tok, "%s", tok->msg);
+                check_invalid_ident(tok);
+                if (tok->kind == TK_LPAREN)
+                    level++;
+                else if (tok->kind == TK_RPAREN && level > 0)
+                    level--;
+                buf = buf->next = tok;
                 tok = tok->next;
             }
             buf->next = new_eof(tok);
@@ -1672,92 +1856,9 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
         tok->filename = display_name;
 
         // Preprocessing directives that may alter conditional‑frame state
-        if (tok->id == dt[P_IF].id) {
-            BlockState state = BLOCK_DEAD;
-            if (cur_state == BLOCK_ACTIVE) {
-                int64_t val = eval_const_expr(&tok, tok);
-                state = val ? BLOCK_ACTIVE : BLOCK_PENDING;
-            }
-            push_cond_incl(tk_hash, state);
-            continue;
-        }
-        if (tok->id == dt[P_IFDEF].id) {
-            BlockState state = BLOCK_DEAD;
-            if (cur_state == BLOCK_ACTIVE) {
-                bool defined = find_macro(tok->next);
-                state = defined ? BLOCK_ACTIVE : BLOCK_PENDING;
-            }
-            push_cond_incl(tk_hash, state);
-            tok = skip_line(tok->next->next);
-            continue;
-        }
-
-        if (tok->id == dt[P_IFNDEF].id) {
-            BlockState state = BLOCK_DEAD;
-            if (cur_state == BLOCK_ACTIVE) {
-                bool defined = find_macro(tok->next);
-                state = defined ? BLOCK_PENDING : BLOCK_ACTIVE;
-            }
-            push_cond_incl(tk_hash, state);
-            tok = skip_line(tok->next->next);
-            continue;
-        }
-
-        if (tok->id == dt[P_ELIF].id) {
-            check_elif_else_valid(tok);
-            if (cur_state != BLOCK_PENDING) {
-                cond_incl->state = BLOCK_DEAD;
-            } else {
-                int64_t val = eval_const_expr(&tok, tok);
-                cond_incl->state = val ? BLOCK_ACTIVE : BLOCK_PENDING;
-            }
-            continue;
-        }
-
-        if (tok->id == dt[P_ELIFDEF].id) {
-            check_elif_else_valid(tok);
-            if (cur_state != BLOCK_PENDING) {
-                cond_incl->state = BLOCK_DEAD;
-            } else {
-                bool defined = find_macro(tok->next);
-                cond_incl->state = defined ? BLOCK_ACTIVE : BLOCK_PENDING;
-            }
-            tok = skip_line(tok->next->next);
-            continue;
-        }
-
-        if (tok->id == dt[P_ELIFNDEF].id) {
-            check_elif_else_valid(tok);
-            if (cur_state != BLOCK_PENDING) {
-                cond_incl->state = BLOCK_DEAD;
-            } else {
-                bool defined = find_macro(tok->next);
-                cond_incl->state = defined ? BLOCK_PENDING : BLOCK_ACTIVE;
-            }
-            tok = skip_line(tok->next->next);
-            continue;
-        }
-
-        if (tok->id == dt[P_ELSE].id) {
-            check_elif_else_valid(tok);
-            cond_incl->else_seen = 1;
-            cond_incl->state = (cur_state == BLOCK_PENDING) ? BLOCK_ACTIVE : BLOCK_DEAD;
-            if (cond_incl->next->state == BLOCK_ACTIVE) tok = skip_line(tok->next);
-            continue;
-        }
-
-        if (tok->id == dt[P_ENDIF].id) {
-            if (!cond_incl->next) error(tk_hash, "#endif without #if");
-            // A guarded file is one whose *guard* runs to the end of it. Any
-            // `#endif` that happens to be last would do instead with a looser
-            // test, and a file that does something after its guard -- tinycc's
-            // tcc.h selects TCC_SET_STATE below `#endif _TCC_H`, from
-            // `USING_GLOBALS` -- would then be skipped whole on the second
-            // read, its tail never re-evaluated.
-            bool closes_guard = guard_ifndef && cond_incl->if_tok == guard_ifndef;
-            cond_incl = cond_incl->next;
-            if (cond_incl->state == BLOCK_ACTIVE) tok = skip_line(tok->next);
-            if (closes_guard && tok->kind == TK_EOF) detect_include_guard2();
+        Token *after = cond_directive(tok, tk_hash, cur_state);
+        if (after) {
+            tok = after;
             continue;
         }
 
@@ -2105,6 +2206,8 @@ void init_macros(void) {
     vaarg_id = intern("__VA_ARGS__", 11);
     vaopt_id = intern("__VA_OPT__", 10);
     once_id = intern("once", 4);
+    has_extension_id = intern("__has_extension", 15);
+    building_module_id = intern("__building_module", 17);
     has_include_id = intern("__has_include", 13);
     has_include_next_id = intern("__has_include_next", 18);
     has_embed_id = intern("__has_embed", 11);

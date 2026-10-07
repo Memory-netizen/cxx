@@ -1054,6 +1054,12 @@ enum {
     BUILTIN_ASSUME_ALIGNED,
     // __builtin_unreachable(): control never gets here.
     BUILTIN_UNREACHABLE,
+    // The memory builtins, which are the library functions of the same
+    // name: gcc and clang lower a call to one to a call to the other.
+    BUILTIN_MEMCPY,
+    BUILTIN_MEMMOVE,
+    BUILTIN_MEMSET,
+    BUILTIN_MEMCMP,
     BUILTIN_ADD_OVERFLOW,
     BUILTIN_SUB_OVERFLOW,
     BUILTIN_MUL_OVERFLOW,
