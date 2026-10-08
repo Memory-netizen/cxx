@@ -2557,13 +2557,46 @@ static void gen_do(Node *node) {
 static void gen_switch(Node *n) {
     Blk *merge_blk = new_blk();
     int i = 0;
-    for (Node *y = n->case_next; y; y = y->case_next) ++i;
-    curb->narg = i;
+    for (Node *y = n->case_next; y; y = y->case_next)
+        if (!y->is_range) ++i;
 
     Blk *brk = brk_blk;
     n->brk_blk = brk_blk = merge_blk;
 
     Ref cond = gen_stmt(n->cond);
+
+    // A case range cannot go into the switch, which matches single values: it
+    // becomes a pair of comparisons ahead of it, `lo <= x && x <= hi`, so a
+    // range as wide as the type costs two comparisons rather than a walk over
+    // its values. Labels never overlap, so the order among them does not
+    // matter.
+    for (Node *y = n->case_next; y; y = y->case_next) {
+        if (!y->is_range) continue;
+        Ref lo = cond.ty->size == 8 ? LONG(int128_to_i64(y->ival)) : INT(int128_to_i64(y->ival));
+        Ref hi = cond.ty->size == 8 ? LONG(int128_to_i64(y->ival_end)) : INT(int128_to_i64(y->ival_end));
+        lo.ty = cond.ty;
+        hi.ty = cond.ty;
+        Ref ge_lo = TMP(tmp_id++, bitint[1][1]);
+        new_ins(IR_CMP_LE, ge_lo, (Ref[]){lo, cond}, 2);
+        Ref le_hi = TMP(tmp_id++, bitint[1][1]);
+        new_ins(IR_CMP_LE, le_hi, (Ref[]){cond, hi}, 2);
+        Ref in_range = TMP(tmp_id++, bitint[1][1]);
+        new_ins(IR_AND, in_range, (Ref[]){ge_lo, le_hi}, 2);
+
+        Blk *next = new_blk();
+        curb->jmp.type = IR_JNZ;
+        curb->jmp.arg = in_range;
+        curb->succ1 = &curf->blks[y->blk_idx];
+        curb->succ2 = next;
+        add_pred(curb, curb->succ1);
+        add_pred(curb, curb->succ2);
+        curb = next;
+        insert_blk(curb);
+    }
+
+    // The block holding the switch is the one the range comparisons left off
+    // at, so the count goes with it.
+    curb->narg = i;
     curb->jmp.type = IR_SWITCH;
     curb->jmp.arg = cond;
 
@@ -2576,7 +2609,11 @@ static void gen_switch(Node *n) {
     add_pred(curb, curb->succ1);
 
     Node *y = n->case_next;
-    for (int j = 0; j < i; ++j) {
+    for (int j = 0; j < i;) {
+        if (y->is_range) {
+            y = y->case_next;
+            continue;
+        }
         // Case values must match the switch operand type: LONG stamps
         // T.ty_long, which is 32-bit on ILP32 targets while an 8-byte
         // cond is long long / _BitInt(64) (i64) there.
@@ -2586,6 +2623,7 @@ static void gen_switch(Node *n) {
         curb->succ[j] = &curf->blks[y->blk_idx];
         add_pred(curb, curb->succ[j]);
         y = y->case_next;
+        j++;
     }
 
     curb = unreach;

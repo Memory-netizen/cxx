@@ -25,6 +25,12 @@ static AttrInfo attrs[] = {
     // surrounding double underscores). They are accepted and otherwise
     // ignored: cxx does no cross-call optimisation, so they carry no
     // semantics yet.
+    // Run before `main` and after it returns, through the initializer arrays
+    // the ABI provides (llvm.global_ctors and llvm.global_dtors in LLVM's
+    // spelling). An optional argument is the priority; without one the
+    // function runs at 65535, the default both references use.
+    {"constructor", ATTR_NS_GNU, 1, ATTR_DECL},
+    {"destructor", ATTR_NS_GNU, 1, ATTR_DECL},
     {"const", ATTR_NS_GNU, 1, ATTR_DECL},
     {"pure", ATTR_NS_GNU, 1, ATTR_DECL},
     {"malloc", ATTR_NS_GNU, 1, ATTR_DECL},

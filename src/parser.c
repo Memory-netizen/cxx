@@ -56,6 +56,8 @@ static Node *expr(Token **rest, Token *tok);
 static Node *assign(Token **rest, Token *tok);
 static Node *cast(Token **rest, Token *tok);
 static Node *new_excast(Node *expr, Type *ty, Token *tok);
+static int64_t sizeof_value(Type *ty);
+static void designation(Token **rest, Token *tok, Initializer *init);
 static int64_t eval(Node *node);
 static int64_t eval2(Node *node, uint32_t *sym);
 static int64_t eval_rval(Node *node, uint32_t *sym);
@@ -250,15 +252,22 @@ static void enter_scope(void) {
     scope = sc;
 }
 
+// The stack pointer a scope saved, put back: the storage of the variable
+// length arrays it declared is released by this. It runs where a cleanup
+// handler of the same scope runs, and after it -- a handler may still name
+// the array.
+static Node *scope_sp_release(Scope *sc, Token *tok) {
+    if (!sc->sp_saved) return NULL;
+    Node *node = new_var_node(sc->stack_top, tok);
+    add_type(node);
+    lvalue_convert(&node);
+    node = new_unary(ND_SP_RESTORE, node, tok);
+    node->ty = T.ty_void;
+    return node;
+}
+
 static Node *leave_scope(Token *tok) {
-    Node *node = NULL;
-    if (scope->sp_saved) {
-        node = new_var_node(scope->stack_top, tok);
-        add_type(node);
-        lvalue_convert(&node);
-        node = new_unary(ND_SP_RESTORE, node, tok);
-        node->ty = T.ty_void;
-    }
+    Node *node = scope_sp_release(scope, tok);
     scope = scope->next;
     return node;
 }
@@ -459,6 +468,13 @@ static Node *cleanup_leaving(Scope *from, Scope *to, Token *tok) {
         if (scope_encloses(sc, to)) break;
         for (int i = sc->cleanup_num; i-- > 0;)
             chain = cleanup_add(chain, cleanup_call(sc->cleanups[i].var, sc->cleanups[i].fn, tok), tok);
+        // ... and the variable length arrays that scope declared go with it:
+        // their storage lives until the scope ends, and a jump out of it is
+        // one of the ways it ends. Leaving this to the statement at the end
+        // of the block lost the stack pointer whenever the jump went past
+        // that statement -- goto, break and continue all do.
+        Node *release = scope_sp_release(sc, tok);
+        if (release) chain = cleanup_add(chain, release, tok);
     }
     return chain;
 }
@@ -932,6 +948,9 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
 
 // Returns true if a given token represents a type.
 static bool is_typename(Token *tok, bool search_par) {
+    // Attributes say nothing about whether a type name follows, so they are
+    // skipped: a cast may spell them in front of the type it names.
+    tok = skip_leading_attrs(tok);
     if (TK_INLINE <= tok->kind && tok->kind <= TK_ALIGNAS) return true;
     return find_typedef(tok, search_par);
 }
@@ -997,6 +1016,7 @@ static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool is_par
 
 // TypeName ::= DeclSpecs AbsDeclr?
 static Type *typename(Token **rest, Token *tok) {
+    tok = skip_leading_attrs(tok);
     Type *ty = declspecs(&tok, tok, NULL, NULL, NULL, NULL);
     return abstract_declarator(rest, tok, ty, false);
 }
@@ -1080,6 +1100,28 @@ static Initializer *new_initializer(Type *ty, bool is_flexible) {
     return init;
 }
 
+// The innermost element type of an array, which is what a string literal
+// fills.
+static Type *array_leaf_type(Type *ty) {
+    while (ty->kind == TY_ARRAY) ty = ty->base;
+    return ty;
+}
+
+// Lay a string's characters into an array's innermost elements, in memory
+// order, stopping after n of them. `unit` is how many bytes one of those
+// elements takes, so a wide string fills them the same way.
+static void fill_char_leaves(Initializer *init, int unit, char *str, int *i, int n, Token *tok) {
+    if (init->ty->kind == TY_ARRAY) {
+        for (int k = 0; k < init->ty->len; k++) fill_char_leaves(init->child[k], unit, str, i, n, tok);
+        return;
+    }
+    if (*i >= n) return;
+    uint32_t v = 0;
+    memcpy(&v, str + (size_t)*i * unit, unit);
+    init->expr = new_num(v, tok);
+    (*i)++;
+}
+
 static void string_initializer(Token **rest, Token *tok, Initializer *init) {
     Type *ty = infer_strtype(tok);
     int arrlen = ty->len;
@@ -1087,6 +1129,22 @@ static void string_initializer(Token **rest, Token *tok, Initializer *init) {
 
     char *string = str(tok->id);
     int len = MIN(init->ty->len, arrlen);
+
+    // A character array of more than one dimension: the string fills the
+    // whole object, innermost elements first.
+    if (init->ty->base->kind == TY_ARRAY) {
+        Type *leaf = array_leaf_type(init->ty);
+        // One innermost array is what a string fills: `char c[2][2][2] =
+        // {"ab","cd"}` puts "ab" in c[0][0] and "cd" in c[0][1], which is
+        // what both references produce.
+        Type *deep = init->ty;
+        while (deep->base->kind == TY_ARRAY) deep = deep->base;
+        int n = MIN(deep->len, arrlen);
+        int i = 0;
+        fill_char_leaves(init, leaf->size, string, &i, n, tok);
+        *rest = tok->next;
+        return;
+    }
 
     switch (init->ty->base->size) {
         case 1: {
@@ -1127,7 +1185,14 @@ static void array_designator(Token **rest, Token *tok, Type *ty, int *begin, int
 
 static Member *struct_designator(Token **rest, Token *tok, Type *ty) {
     Token *start = tok;
-    tok = skip(tok, TK_DOT);
+    // `a: 1` is the obsolete GNU spelling of `.a = 1`; both references still
+    // take it, each with a warning of its own.
+    bool old_style = tok->kind == TK_IDENT;
+    if (old_style) {
+        warning(WG_DEFAULT, tok, "obsolete field designator ‘%.*s:’", tok->len, tok_text(tok));
+    } else {
+        tok = skip(tok, TK_DOT);
+    }
     if (tok->kind != TK_IDENT) error(tok, "expected a field designator");
 
     for (Member *mem = ty->members; mem; mem = mem->next) {
@@ -1150,6 +1215,8 @@ static Member *struct_designator(Token **rest, Token *tok, Type *ty) {
 
         // Regular struct member
         if (mem->name->id == tok->id) {
+            // The colon is left in place: designation() tells the obsolete
+            // spelling from the modern one by it, and the modern one has `=`.
             *rest = tok->next;
             return mem;
         }
@@ -1160,6 +1227,10 @@ static Member *struct_designator(Token **rest, Token *tok, Type *ty) {
 }
 
 // Desig ::= "[" (ConstExp | ConstRangeExp) "]" | "." Ident
+// The obsolete GNU field designator `a: 1`, which the initializer parsers
+// have to recognize before calling designation().
+static bool is_old_designator(Token *tok) { return tok->kind == TK_IDENT && tok->next->kind == TK_COLON; }
+
 static void designation(Token **rest, Token *tok, Initializer *init) {
     if (tok->kind == TK_LBRACKET) {
         if (init->ty->kind != TY_ARRAY) error(tok, "array index in non-array initializer");
@@ -1172,7 +1243,8 @@ static void designation(Token **rest, Token *tok, Initializer *init) {
         return;
     }
 
-    if (tok->kind == TK_DOT && init->ty->kind == TY_STRUCT) {
+    bool old_desig = is_old_designator(tok);
+    if ((tok->kind == TK_DOT || old_desig) && init->ty->kind == TY_STRUCT) {
         Member *mem = struct_designator(&tok, tok, init->ty);
         designation(&tok, tok, init->child[mem->idx]);
         init->expr = NULL;
@@ -1180,16 +1252,20 @@ static void designation(Token **rest, Token *tok, Initializer *init) {
         return;
     }
 
-    if (tok->kind == TK_DOT && init->ty->kind == TY_UNION) {
+    if ((tok->kind == TK_DOT || old_desig) && init->ty->kind == TY_UNION) {
         Member *mem = struct_designator(&tok, tok, init->ty);
         init->mem = mem;
         designation(rest, tok, init->child[mem->idx]);
         return;
     }
 
-    if (tok->kind == TK_DOT) error(tok, "field name not in struct or union initializer");
+    if (tok->kind == TK_DOT || old_desig) error(tok, "field name not in struct or union initializer");
 
-    tok = skip(tok, TK_AS);
+    // `.a = 1` has the `=`, the obsolete `a: 1` has only the colon.
+    if (tok->kind == TK_COLON)
+        tok = skip(tok, TK_COLON);
+    else
+        tok = skip(tok, TK_AS);
     initializer2(rest, tok, init, false);
 }
 
@@ -1265,7 +1341,7 @@ static void array_initializer2(Token **rest, Token *tok, Initializer *init, int 
         Token *start = tok;
         if (comma) tok = skip(tok, TK_COMMA);
         comma = true;
-        if (tok->kind == TK_LBRACKET || tok->kind == TK_DOT) {
+        if (tok->kind == TK_LBRACKET || tok->kind == TK_DOT || is_old_designator(tok)) {
             *rest = start;
             return;
         }
@@ -1282,7 +1358,7 @@ static void struct_initializer1(Token **rest, Token *tok, Initializer *init) {
     while (!consume_end(rest, tok)) {
         if (!first) tok = skip(tok, TK_COMMA);
         first = false;
-        if (tok->kind == TK_DOT) {
+        if (tok->kind == TK_DOT || is_old_designator(tok)) {
             mem = struct_designator(&tok, tok, init->ty);
             designation(&tok, tok, init->child[mem->idx]);
             mem = mem->next;
@@ -1306,7 +1382,7 @@ static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Mem
         Token *start = tok;
         if (comma) tok = skip(tok, TK_COMMA);
         comma = true;
-        if (tok->kind == TK_LBRACKET || tok->kind == TK_DOT) {
+        if (tok->kind == TK_LBRACKET || tok->kind == TK_DOT || is_old_designator(tok)) {
             *rest = start;
             return;
         }
@@ -1325,7 +1401,7 @@ static void union_initializer1(Token **rest, Token *tok, Initializer *init) {
     while (!consume_end(rest, tok)) {
         if (!first) tok = skip(tok, TK_COMMA);
         first = false;
-        if (tok->kind == TK_DOT) {
+        if (tok->kind == TK_DOT || is_old_designator(tok)) {
             mem = struct_designator(&tok, tok, init->ty);
             init->mem = mem;
             designation(&tok, tok, init->child[mem->idx]);
@@ -1378,7 +1454,12 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
             tok = lit;
             bool has_brace = match(&tok, tok, TK_LBRACE);
             Type *ty = infer_strtype(tok);
-            if (!(is_char(init->ty->base) && is_char(ty->base)) &&
+            // The character type a string literal fits is the array's
+            // innermost element, not the outermost array's: gcc and clang
+            // take `char m[2][3] = {"abc"}` for that reason. They refuse the
+            // bare `char x[2][3] = "abc"`, which cxx accepts -- a deliberate
+            // divergence, recorded in the plan.
+            if (!(is_char(array_leaf_type(init->ty)) && is_char(ty->base)) &&
                 !is_compatible(type_unqual(ty->base), type_unqual(init->ty->base)))
                 error(tok, "array of inappropriate type initialized from string constant");
             string_initializer(&tok, tok, init);
@@ -1669,12 +1750,14 @@ static void mount_gvar_data(Initializer *dst, Initializer *src) {
 bool in_static_init;
 
 static void eval_gvar_data(Initializer *init, Type *ty) {
-    // A whole-aggregate copy from a constexpr source mounts the source's
-    // children at the matching positions (the element-wise evaluation
-    // below then folds their expressions).
+    // A whole-aggregate copy from a constexpr source -- or from the object a
+    // compound literal names, which is a static object of its own -- mounts
+    // the source's children at the matching positions (the element-wise
+    // evaluation below then folds their expressions).
     if (init->expr && (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT || ty->kind == TY_UNION)) {
         Node *root = elem_root(init->expr);
-        if (root->kind == ND_VAR && (root->var->sclass & SC_CONSTEXPR) && root->var->init) {
+        if (root->kind == ND_VAR && ((root->var->sclass & SC_CONSTEXPR) || root->var->is_compliteral) &&
+            root->var->init) {
             Initializer *src = constexpr_elem(init->expr, root->var->init);
             mount_gvar_data(init, src);
             init->expr = NULL;
@@ -3704,6 +3787,7 @@ static Node *postfix(Token **rest, Token *tok) {
         if (is_file_scope() || sclass & SC_STATIC) {
             uint32_t uid = new_unique_varname(intern(".compoundliteral", 16));
             var = new_gvar(uid, ty);
+            var->is_compliteral = true;
             // The object a compound literal names has no linkage, so at file
             // scope it is emitted as a local symbol: without that, two
             // translation units that each have one both define
@@ -3881,6 +3965,7 @@ static Node *unary(Token **rest, Token *tok) {
         }
         case TK_ALIGNOF:
         case TK_COUNTOF:
+
         case TK_SIZEOF: {
             Token *start = tok;
             Type *ty;
@@ -3961,7 +4046,7 @@ static Node *unary(Token **rest, Token *tok) {
                 return size ? new_binary(ND_COMMA, size, len, start) : len;
             }
             if (ty->size < 0) error(start, "invalid application of ‘sizeof’ to incomplete type");
-            return new_ulong(ty->size, start);
+            return new_ulong(sizeof_value(ty), start);
         }
         // [GNU] labels-as-values
         case TK_AND: {
@@ -3981,11 +4066,31 @@ static Node *unary(Token **rest, Token *tok) {
     return postfix(rest, tok);
 }
 
+// 6.7.2.1p18: the size of a record with a flexible array member is as if the
+// member were omitted. cxx completes that member on the record an initializer
+// produced, so the completed size is what the type carries; the declared one
+// is that less the member. Before an initializer completes anything the
+// member is a zero-length array, and nothing is taken off.
+static int64_t sizeof_value(Type *ty) {
+    if ((ty->kind == TY_STRUCT || ty->kind == TY_UNION) && ty->is_flexible) {
+        Member *mem = ty->members;
+        while (mem && mem->next) mem = mem->next;
+        if (mem && mem->ty->size > 0) return ty->size - mem->ty->size;
+    }
+    return ty->size;
+}
+
 static Node *new_excast(Node *expr, Type *ty, Token *tok) {
     add_type(expr);
     lvalue_convert(&expr);
 
-    if (!is_void(ty) && !is_scalar(ty)) error(tok, "scalar or void type is required in here");
+    if (!is_void(ty) && !is_scalar(ty)) {
+        // A cast to the operand's own type converts nothing, and C allows it
+        // for an aggregate too: `(struct S)s` where s already is one. There
+        // is nothing for the back end to do, so the operand stands.
+        if (is_compatible(expr->ty, ty)) return expr;
+        error(tok, "scalar or void type is required in here");
+    }
     if (!is_void(ty) && !is_scalar(expr->ty)) error(tok, "scalar type is required in here");
     if (is_flonum(expr->ty) && is_pointer(ty)) error(tok, "cannot cast floating-point value to pointer type");
     if (is_flonum(ty) && is_pointer(expr->ty)) error(tok, "cannot cast pointer to floating-point type");
@@ -4001,7 +4106,11 @@ static Node *new_excast(Node *expr, Type *ty, Token *tok) {
 
     Node *node = new_node(ND_EXCAST, tok);
     node->lhs = expr;
-    node->ty = ty;
+    // The result is a value, not an lvalue, so its top-level qualifiers are
+    // gone: `(float const)x` has type `float`. A `_Generic` selector written
+    // with a qualified cast therefore matches the unqualified association,
+    // which is what both references do.
+    node->ty = type_unqual(ty);
     return node;
 }
 
@@ -5499,15 +5608,23 @@ static void check_label(uint32_t label, Token *tok) {
     }
 }
 
-static void check_case(int64_t val, Token *tok) {
-    Node *cur = cur_sw->case_next;
-    while (cur) {
-        if (int128_to_i64(cur->ival) == val) {
-            diag("error", tok, "duplicate case value ‘%ld’", val);
-            diag_exit("note", cur->tok, "previous case defined here");
+// A case label is a value or a closed range, and no two of them may overlap
+// (6.8.4.2p2 rules out a duplicate; gcc and clang also report an overlap).
+// Comparing ranges as ranges is what keeps a wide one cheap: walking the
+// values of `case -9223372036854775807LL-1LL ... -1LL` never ended.
+static void check_case(int64_t lo, int64_t hi, bool is_range, Token *tok) {
+    for (Node *cur = cur_sw->case_next; cur; cur = cur->case_next) {
+        int64_t clo = int128_to_i64(cur->ival);
+        int64_t chi = cur->is_range ? int128_to_i64(cur->ival_end) : clo;
+        if (hi < clo || chi < lo) continue;
+        if (chi == clo && hi == lo) {
+            diag("error", tok, "duplicate case value ‘%ld’", lo);
+        } else {
+            diag("error", tok, "case label range ‘%ld ... %ld’ overlaps ‘%ld ... %ld’", lo, hi, clo, chi);
         }
-        cur = cur->case_next;
+        diag_exit("note", cur->tok, "previous case defined here");
     }
+    (void)is_range;
 }
 
 // Label ::= Ident ":"
@@ -5580,7 +5697,7 @@ static Node *label(Token **rest, Token *tok) {
             val1 = eval_ty(val1, cur_sw->cond->ty);
             check_fallthrough(tk_case);
             if (tok->kind == TK_COLON) {
-                check_case(val1, tk_case);
+                check_case(val1, val1, false, tk_case);
                 Node *node = new_node(ND_CASE, tk_case);
                 note_jump_scope(node, scope);
                 node->ival = int128_set_i(val1);
@@ -5607,20 +5724,25 @@ static Node *label(Token **rest, Token *tok) {
             // specified") diagnose this and carry on with a case that
             // matches nothing, so this warns rather than fails.
             if (val2 < val1) warning(WG_DEFAULT, tk_case, "empty case range specified");
-            for (int64_t i = val1; i <= val2; i++) {
-                check_case(i, tk_case);
-                Node *node = new_node(ND_CASE, tk_case);
-                note_jump_scope(node, scope);
-                node->ival = int128_set_i(i);
-                if (idx < 0 && cur_fn) {
-                    idx = cur_fn->num_lbl++;
-                    cnt_blk(1);
-                }
-                node->blk_idx = idx;
-                node->case_next = cur_sw->case_next;
-                cur_sw->case_next = node;
-                cur = cur->label_ring = node;
+            check_case(val1, val2, true, tk_case);
+            // One label for the whole range: the back end compares against
+            // both ends instead of enumerating them.
+            Node *node = new_node(ND_CASE, tk_case);
+            note_jump_scope(node, scope);
+            node->ival = int128_set_i(val1);
+            node->ival_end = int128_set_i(val2);
+            node->is_range = true;
+            if (idx < 0 && cur_fn) {
+                idx = cur_fn->num_lbl++;
+                cnt_blk(1);
+                // The back end puts a comparison ahead of the switch for this
+                // label, and that comparison needs a block of its own.
+                cnt_blk(1);
             }
+            node->blk_idx = idx;
+            node->case_next = cur_sw->case_next;
+            cur_sw->case_next = node;
+            cur = cur->label_ring = node;
             tok = skip(tok, TK_COLON);
             continue;
         }
@@ -5767,7 +5889,7 @@ static bool asm_name_is(char *name, char *s, int len) {
 // the input -- and the labels come after the input half of every `+` operand
 // in the constraint string, which is the distance between the two.
 static char *asm_tmpl_conv(Token *tok, char *src, AsmOperand *ops, Node **labels, int nlabels, uint32_t label_base,
-                           bool dialects) {
+                           bool dialects, bool module_asm) {
     int nops = 0;
     for (AsmOperand *x = ops; x; x = x->next) nops++;
 
@@ -5779,8 +5901,11 @@ static char *asm_tmpl_conv(Token *tok, char *src, AsmOperand *ops, Node **labels
         char c = src[i];
         if (c == '$') {
             // LLVM's own operand marker: one written in the template is two.
+            // A file-scope statement is not an inline one -- it becomes
+            // `module asm`, whose text reaches the assembler as written, and
+            // the assembler reads `$` as the immediate prefix.
             buf[o++] = '$';
-            buf[o++] = '$';
+            if (!module_asm) buf[o++] = '$';
             i++;
             continue;
         }
@@ -6136,7 +6261,7 @@ static Node *asm_stmt(Token **rest, Token *tok) {
     // belong to the extended form. clang keeps `{a|b}` in a basic statement
     // and rewrites it in an extended one, operands or not.
     node->asm_tmpl = asm_tmpl_conv(start, tmpl, ops, node->asm_labels, node->asm_nlabels, nouts + nins + nplus,
-                                   sect > 0 && T.asm_dialect_alt);
+                                   sect > 0 && T.asm_dialect_alt, false);
     return node;
 }
 
@@ -6165,11 +6290,11 @@ static Token *asm_decl(Token *tok) {
     tok = skip(tok, TK_RPAREN);
     tok = skip(tok, TK_SEMI);
 
-    // The template is still rewritten -- `%%` is one per cent, and a dollar
-    // sign is still doubled for LLVM -- but there are no operands for `%0` to
-    // name, and a number LLVM cannot resolve aborts its backend rather than
-    // diagnosing it, so a reference to one has to be caught here.
-    char *t = asm_tmpl_conv(start, tmpl, NULL, NULL, 0, 0, false);
+    // The template is still rewritten -- `%%` is one per cent -- but it goes
+    // to the assembler as it stands, so a dollar sign stays one. There are no
+    // operands for `%0` to name, and a number LLVM cannot resolve aborts its
+    // backend rather than diagnosing it, so a reference is caught here.
+    char *t = asm_tmpl_conv(start, tmpl, NULL, NULL, 0, 0, false, true);
     if (!curm->masm)
         curm->masm = vnew(4, sizeof(char *));
     else
@@ -7259,6 +7384,16 @@ static void apply_postdecl_attrs(Type *ty) {
 }
 
 // Set the per-symbol flags for declaration attributes.
+// The priority an initializer attribute carries: its argument, or the
+// default both gcc and clang use.
+static int attr_prio(Attr *a) {
+    if (!a->args || a->args->next->kind == TK_RPAREN) return 65535;
+    Token *t;
+    int prio = (int)const_expr(&t, a->args->next);
+    if (prio < 0 || prio > 65535) error(a->tok, "priority for ‘%s’ must be between 0 and 65535", a->info->name);
+    return prio;
+}
+
 static void sym_attr_flags(Sym *var, Attr *attrs, bool gnu_only) {
     for (Attr *a = attrs; a; a = a->next) {
         if (!a->info) continue;
@@ -7276,7 +7411,11 @@ static void sym_attr_flags(Sym *var, Attr *attrs, bool gnu_only) {
             var->is_maybe_unused = true;
         else if (!strcmp(a->info->name, "unused"))
             var->is_unused = true;
-        else if (!strcmp(a->info->name, "cleanup")) {
+        else if (!strcmp(a->info->name, "constructor")) {
+            if (var->is_function) var->ctor_prio = attr_prio(a);
+        } else if (!strcmp(a->info->name, "destructor")) {
+            if (var->is_function) var->dtor_prio = attr_prio(a);
+        } else if (!strcmp(a->info->name, "cleanup")) {
             // The handler is looked up where one can run -- an automatic
             // object at block scope -- and the attribute is diagnosed as
             // ignored everywhere else, so all this keeps is the argument.
@@ -8501,6 +8640,14 @@ static void check_unused_statics(void) {
 
     for (uint32_t i = ns; i-- > 0;) {
         Sym *sym = syms[i];
+        // A function that runs at startup or shutdown is called by the
+        // platform rather than by the program: nothing references it, and a
+        // static one must still be emitted.
+        if (sym->is_function && (sym->ctor_prio || sym->dtor_prio)) {
+            sym->is_reachable = true;
+            work[n++] = sym;
+            continue;
+        }
         if (!is_user_global(sym) || (sym->sclass & (SC_STATIC | SC_CONSTEXPR))) continue;
         // A block-scope static is reached through the function that owns it,
         // not from outside, so it is not a root.

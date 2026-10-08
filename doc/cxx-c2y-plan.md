@@ -464,6 +464,272 @@ VLA 的 `len` 就是 `vla_len` 指针的低 32 位（见缺陷 1），所以把*
 | **记分（`doc/realworld.sh` 全量探针）** | **git 567/567 保持全过**；**cpython 368/385 → 377/385**（本轮修好的 9 个单元：`Modules/socketmodule.c`、`Python/crossinterp.c`（这两个是崩溃）、`Python/codegen.c`、`Python/compile.c`、`Python/pythonrun.c`、`Python/getcompiler.c`、`Objects/typeobject.c`、`Modules/expat/xmltok.c`、`Modules/expat/xmlrole.c`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21 不变 |
 | **剩余阻塞项** | **cpython 8**（按性质分两类）。环境类 4 个：`Python/pystrhex.c`（`implicit declaration of function ‘__builtin_shufflevector’`）、`Modules/Hacl_Hash_Blake2s_Simd128.c`、`Modules/Hacl_Hash_Blake2b_Simd256.c`、`Modules/_testcapimodule.c`（`static assertion failed: __extension__ __alignof__(buf) >= 64`）——这四个都要 `vector_size` 向量类型，而它们之所以被启用，是因为这棵树的 `pyconfig.h` 是安装时用宿主 clang 配置出来的（它声明「本编译器有 `__builtin_shufflevector`、有 64 字节对齐的 SIMD」），cxx 本身不支持向量类型。真正的缺陷 4 个：`Modules/posixmodule.c`（`implicit declaration of function ‘__builtin_memset’`）、`Python/jit_unwind.c`（`premature end of input`）、`Modules/_testsinglephase.c`（`array initializer must be an initializer list`），以及（R14 复查后更正）`Modules/_ctypes/_ctypes_test.c` —— 它在 `__GNUC__` 下包含 `<complex.h>`，而 glibc 的 `bits/cmathcalls.h` 用 `_Mdouble_complex_`（`double _Complex`）声明函数，属于本计划 **有意不做** 的 `_Complex` 缺口，不是新缺陷 |
 
+### R33 统一拆除：VLA 的存储在每一条出口边上释放 —— ✅ `79_vla_continue` 转绿（tests2 102）
+
+R32 把问题和设计定下来后，这一轮把它做了。改动只有一处，因为探查发现 cxx 已经有一个“按作用域深度收拾”的入口：
+
+```
+cleanup_leaving(from, to, tok)      —— 所有 goto / break / continue / return 唯一的拆链入口
+```
+
+它一直只收拾 cleanup 处理函数，而 VLA 的 SP 回收是 `leave_scope()` 返回的一个节点、由调用方追加在**块末**——所以任何从旁边跳过去的路径都漏掉它。
+
+| | |
+|---|---|
+| **修法** | 抽出 `scope_sp_release(sc, tok)`（`leave_scope` 也改用它），并在 `cleanup_leaving` 里——**同一个作用域的 cleanup 之后**——追加该作用域的释放。于是同一套拆除同时负责：处理函数按声明逆序跑，然后把栈指针放回去；跨作用域时内层先、外层后。顺序与块末那条路径（先 cleanup 后 `leave_scope`）一致 |
+| **实测（修前 → 修后）** | `goto` 跳出 VLA 作用域后再声明一个：**drift(-16) → same**（两家都是 same）；cleanup 的四个边界用例逐行不变；**`79_vla_continue` 转绿**（它的 `continue` 正好跳过了块末的那条释放） |
+| **顺序的依据** | 块末那条路径的注释本来就写着“leaving the block destroys its objects, most recently declared first, **and before the stack pointer of a variable length one is put back**”；这一轮只是把同一句话搬到了另外四条路径上 |
+| **验收** | **tests2 101 → 102 通过 / 4 败**；`test/conformance.sh` **206 → 208 passed / 0 gap**（两条新断言：goto/break/continue 三条路径上的释放；处理函数能读到同块的数组）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+
+#### 为什么 `122_vla_reuse` 还是红的（已把机制量出来）
+
+它考的不是“出口边释放”，而是**重新到达同一个声明时同址**——而且那个循环**从不离开函数作用域**，所以出口边的释放对它无效。量出来的事实：
+
+| 形状 | gcc | clang | cxx |
+|---|---|---|---|
+| `goto` 回到**两个声明之间**（a 仍在生命期内） | a 完好，b 回同址 | 同 | **同**（已一致） |
+| 重新到达声明（嵌套块标签 + 流出，`122` 的形状） | **同址** | **同址** | 漂移 ❌ |
+| 每轮打印 address（size 逐轮变化 1..4） | **地址与 size 无关**（固定槽） | 同 | 每轮 -16 |
+| size 不可推断上界的循环 | **也会漂移** | **也会漂移** | 漂移 |
+
+结论：两家在这里靠的是**优化器把 VLA 的空间提升成固定槽位**（所以地址与 size 无关），这不是语言保证；size 不可推断时它们也漂移。
+所以 `122` 考的是优化产物。要跟它一致，可行且安全的做法是：
+
+- 每个 VLA 声明一个“槽位 + 槽位大小”，在**函数序言里**初始化（这正是 R31 那个“标志没处放”的真正解法：序言是循环外的唯一位置）；
+- 声明处：`size <= 槽位大小` 就复用槽位，否则分配并记下新槽位（**只长不缩**）。`122` 的 size 前 100 次单调增长、之后循环，而它从第 100 次才开始比较，所以能对上；
+- 这与两家仍有一个可观测差异（首轮 size 从小到大时，它们地址恒定、cxx 会随之移动）——属于优化差异，写在这里，不冒充语言合规性。
+
+#### 剩下的 tests2（4 个）
+
+`122_vla_reuse`（上面那个槽位机制）、`90_struct-init`（区间设计符只求值一次，见 R31）、`95_bitfields`（跨 64 位位域 + 位域上的 `aligned(16)`）、`82_attribs_position`（`int (ATTR *)(void)`）。
+
+| | |
+|---|---|
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。本轮把 VLA 的存储释放并入了每一条出口边的统一拆除（探针里七棵树都是顺流路径，没有 `goto`/`continue` 跳出 VLA 作用域的形状），变化在 **tests2 101 → 102** 与 `test/conformance.sh` 206 → 208 |
+
+### R32 局部变量生命周期：一次测量、一个缺口、一套统一机制的设计（待实现）
+
+问题：“goto 不能跳进 VLA 所在作用域”这条规则，对 `cleanup` 变量是否也成立？两套生命周期管理是否应该合一？
+
+#### 测量（gcc / clang / cxx 同一段源码）
+
+| 用例 | gcc | clang | cxx |
+|---|---|---|---|
+| goto 跳入 **VLA** 作用域 | 拒绝 | 拒绝 | **拒绝**（报文与 clang 逐字相同） |
+| goto 跳入 **cleanup** 作用域 | **接受**（处理函数运行，看到不定值） | 拒绝 | **接受**（同 gcc） |
+| switch case 跳入 **VLA** 作用域 | 拒绝 | 拒绝 | **拒绝** |
+| goto 跳过 cleanup 声明（向前跳） | **接受**（处理函数运行，不定值） | 拒绝 | **接受** |
+| cleanup 在 break / continue / goto / return 上 | 运行 | 运行 | **运行**（三家逐行一致） |
+| 同一作用域两个 cleanup 的顺序 | 逆序 | 逆序 | **逆序** |
+| 嵌套作用域：内层先/外层后 | 一致 | 一致 | **一致** |
+| **goto 跳出 VLA 作用域**（随后又声明一个 VLA） | 地址**相同** | 地址**相同** | **漂移（-16）** ❌ |
+| cleanup 计算机制：使用同作用域早先声明的 VLA | 一致 | 一致 | **一致** |
+
+结论一：**该规则不适用于 cleanup**。C11 6.8.6.1p1 只约束**变长修饰类型**；gcc 对 cleanup 两种跳法都接受（处理函数照跑，
+看到的是不确定值），clang 用与 VLA 相同的话术拒绝。cxx 现在是“VM 类型学 clang、cleanup 学 gcc”——这是个**可守但必须写明的选择**，
+它不是从标准推出来的。cxx 实现上也确实只有 VLA 这一边：`check_vm_jump()` 遍历的是 `vm_decls`，里面只有变长声明。
+
+结论二：**应该合一，而且缺口不在约束检查、在退出模型**。上表最后两行是决定性的：
+
+- cxx 的 cleanup 是**边上动作**（`cleanup_scope_chain()` 在每条跳转边上拼链）——break/continue/goto/return/嵌套顺序全对；
+- cxx 的 VLA 是**尾随语句**（`leave_scope()` 返回一个 restore 节点，由调用方追加在块末）——于是**任何非顺流而出的边都跳过了它**，
+  栈指针不回收，下一个 VLA 往上漂（测出 -16）。**这也正是 `122_vla_reuse` 的真正根因**——R29 我攻的是“重新进入声明”，而它缺的是“退出边上的回收”；
+  R31 那个“静态/局部标志”之所以难以安放，也是因为它的**重置点本就在退出边上**，而那条边在当前模型里根本不存在。
+
+#### 设计：一个作用域一张“拆除表”，所有出口边统一回收
+
+1. **每个作用域一张有序表**（按声明顺序），项目有两种：`回收 VLA 栈到保存的 SP`、`调用 cleanup 处理函数(&var)`。
+   现在这两件事分属 `scope->cleanups` 和 `scope->sp_saved/stack_top`，互不相知；合一后顺序就是声明顺序的逆序，与两家一致（表中 E/G/H/L）。
+2. **所有出口边都走同一个回收器**：自然流出块尾、`break`、`continue`、`goto`（部分回收到目标作用域的深度）、`return`、跳出 `switch` 体。
+   cleanup 已经是这个模型（所以它全对）；VLA 只要把尾随的那一条换成“块尾这条边”，就能修好上表里唯一的❌。
+3. **重新进入同一作用域的声明**（`goto` 向后跳回，122_vla_reuse）：出口边上的回收把 SP 放回作用域保存值，
+   再进入声明时分配就落在同一位置；而“跳回本作用域内部、未经过出口边”的情形，声明自己要先 restore 再 alloca——
+   它需要的“是否已保存”标志，**重置点就是作用域的出口边**（第 2 步刚好给出了唯一的位置）。
+4. **约束检查从同一份数据里读**：`check_vm_jump()` 的“作用域 + 序号”就是回收器算深度用的同一份数据；
+   VM 类型必须报错（标准），而 cleanup 要不要报错是一个**写在这里的选择**（目前：学 gcc，不报）。
+
+#### 还没量的一个角落（留给下一步）
+
+`goto` 向后跳回到某个 VLA 声明**之前**，而该作用域里后面还有另一个 VLA（它的声明不会被重新执行）：
+重执行前一个声明时把 SP 放回作用域保存值，会把后一个的存储也“释放”。两家分别怎么做、是否可观测，
+还没测；实现前先把它量出来，再决定回收器在这种边上停在哪一层。
+
+#### 收益
+
+一次修好：上表那个 ❌（goto 跳出 VLA 作用域后栈指针不回收，真实误编译）、`122_vla_reuse`、`79_vla_continue` 剩下的差异，
+并且 R31 那个“标志没处放”的尴尬会自然消失。
+
+### R31 柔性成员对象的 `sizeof`（附一次精确的回退）—— ✅ 与两家一致，并改正了 cxx 自己套件里的两条断言
+
+**（1）落地：柔性成员对象的 `sizeof`**
+
+实测（同一段源码）：
+
+```
+struct A { int a; char b[]; };   struct A ga = {1, "abc"};
+typedef struct { char a, b[]; } B;   B gb = {'f','o','o',0};
+gcc, clang: sizeof(ga) = 4, sizeof(gb) = 1, sizeof(struct A) = 4
+cxx 修前:  sizeof(ga) = 8, sizeof(gb) = 4
+```
+
+C11 6.7.2.1p18：带柔性数组成员的记录，其大小“如同该成员被省略”。cxx 把成员补全到初始化器产生的记录上（对象存储因此装得下那些元素），
+而这个“补全后的大小”就跑到了 `sizeof` 里。修法：`sizeof` 读的是补全后的大小减去那个成员（未补全时它是零长数组，减零）。
+修后三家完全一致（`4 1 4`），且小型复现中数据依然在（`strcmp(g65.b, "oo")` 为 0）。
+
+**（2）改正了 cxx 自己套件里的两条断言（请审阅）**
+
+`test/initializer.c` 里有四处 `sizeof(g65)/sizeof(g66)`（两个位置各两条），写的是 **4 和 7**，
+也就是 cxx 修前那个与两家不同的值。实测 `T65`（`struct { char a, b[]; }`）在 gcc/clang 下 `sizeof(g65) = 1`、`sizeof(g66) = 1`
+（两个对象都是 `T65`），所以改成 **1/1**，并加了一段注释说明依据。数据本身没变（`strcmp` 那几条仍然通过）。
+这是本轮唯一一处**改测试断言**，理由是它针的是与两家都不符的行为。
+
+**（3）回退掉的：区间设计符只求值一次**
+
+`int dd[] = {[0 ... 1] = ++c, [2 ... 3] = ++c};` 两家给 `1 1 2 2`，而 cxx 是 `1 2 3 4`。我写了一版（第一个元素存入临时变量、
+其余读它），**单独验证通过**：最小复现与 gcc 一致（`1 1 2 2 | c=2`）。但 `90_struct-init` 随即**调到垃圾指针崩溃**：
+那个用例里的表是**块作用域 static**，而“这是静态初始化器吗”的标志对它没生效，于是区间走了临时变量路径、静态数据里存进了一个局部地址。
+**二分确认**：把临时分支关掉，用例立即恢复（只剩区间那一行差异），于是**当场回退**。
+结论：错的不是“只求值一次”，而是**静态/局部的判断**——下一步要在解析块作用域 static 时把标志真正置上。
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` **206 passed / 0 gap**；`make test` exit 0（含改正后的两条断言）；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净；tests2 **101 通过 / 5 败**（`90_struct-init` 剩一行） |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。本轮修的是柔性成员对象的 `sizeof`（探针里七棵树没有这种形状），变化在 `test/conformance.sh` 206/0 与改正后的 cxx 自己套件；tests2 仍 101/5 |
+
+### R30 静态初始化器里的复合字面量 —— ✅ `90_struct-init` 从“跑崩”到“只差两行”
+
+**（1）落地的修复：静态初始化器里的复合字面量**
+
+上一轮让这个用例编得过了，但它在 `test_compound_with_relocs` **调了一个空函数指针**（gdb：`rip = 0`）。
+最小复现：
+
+```c
+static struct Wrap global_wrap[] = { ((struct Wrap) {one}), two };
+```
+
+cxx 的 `global_wrap[0].func` 是 **NULL**，两家是函数地址。原因：文件作用域的复合字面量被做成一个匿名全局对象，而元素是它的**值拷贝**；
+拷贝只在源是 `constexpr` 时才会“挂接源的初始化器树”，于是元素保留了自己的表达式、折出 0。修法：给复合字面量的对象打上标记，它也算合法的源。
+修后与两家逐字节一致，用例从“跑崩”变成“跑完、只差两行”。
+
+**（2）试过又收回的：柔性数组对象的 `sizeof`**
+
+第一行差异是 `gw` 的 `sizeof`（cxx 30字节、两家 22）：初始化器把柔性成员补全到记录副本上、同时把它的大小加进了 `ty->size`。
+我加了一个“`sizeof` 时把末成员的大小减回去”的助手，但 cxx 自己的套件立刻报 **`sizeof(g65) => 4 expected but got 1`**：
+“成员补全”与“大小补全”是两个独立步骤，不总是同时发生，减法假设了它们一起。**当场回退**，
+正确做法（留给后续）：在补全记录的地方同时记下**声明时的大小**，`sizeof` 读它。
+
+**（3）`90_struct-init` 剩下的两行（都已定位）**
+
+- `gw` 的 `sizeof`（上面那条）；
+- `int dd[] = {[0 ... 1] = ++c, [2 ... 3] = ++c};`：两家输出 `1 1 2 2`（**区间设计符的表达式只求值一次**），cxx 是 `1 2 3 4`（每个元素求一次）。修法：区间设计符先求值到一个临时变量，再分配给各元素。
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` **205 → 206 passed / 0 gap**（新增：静态初始化器里的复合字面量，含数组元素与单独对象两种）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净；tests2 仍 **101 通过 / 5 败** |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21。本轮修的是**静态初始化器里的复合字面量**（它的对象在“值拷贝”时被折成 0，全局表里的函数指针是 NULL），探针里七棵树没有这种形状（真有的话早就崩了），所以记分不动；变化在 `test/conformance.sh` 205 → 206，tests2 仍 101/5（`90_struct-init` 从“跑崩”到“只差两行”）。**中途 `sizeof` 那一版把 cxx 自己的 `sizeof(g65)` 打坏**（4 期望、1 实际），当场回退并重跑全套确认恢复 |
+
+### R29 柔性数组成员的类型身份（附一次收回的 VLA 尝试）—— ✅ `90_struct-init` 从“编不过”到“跑得起来”
+
+**（1）先说收回的那个：VLA 存储复用**
+
+`122_vla_reuse`（`goto` 回到同一块，十万次）与 `79_vla_continue`（循环体内 VLA）都要求地址稳定。
+看 IR 很清楚：cxx 把 `stacksave` 和 `alloca` 放在循环头，**每圈都重新保存并往上分配**，地址于是一路漂；
+clang 的形状是“一次保存 + 回边上一次 restore”。
+
+我试了一版：重新进入声明时先把栈指针 restore 到**作用域**保存的值。编译通过、两个用例却没变（因为编码只发一次保存），
+而且它在语义上是**错的**：同一作用域里先前的 VLA 会被一并释放。**当场回退**（回退时还误删了一个括号，
+把 `alloca` 变成了“只有作用域第一个 VLA 才分配”，当场修回）。
+**正确做法（留给后续）**：每个 VLA 声明自己一个保存位 + 一个“是否已保存”的标志，
+`flag ? (stackrestore(sp), 0) : 0; sp = stacksave(); flag = 1;`；标志必须在**循环外**初始化，而解析器在声明处发不出这样的位置——
+这就是下一步的入口。
+
+**（2）本轮落地的：柔性数组成员的类型身份**
+
+`90_struct-init` 第 415 行 `foo(&gw, &phdr)` 报“incompatible types when passing argument”。
+原因：`struct W` 末尾是 `struct S s[]`，cxx 把**不完整的柔性成员写成零长数组**，
+而带初始化器的对象会得到一份“把成员补全”的**记录副本**（`int[0]` 对 `int[N]`），
+于是同一个 `struct W *` 不接受同一个 `struct W` 对象的地址。
+修法：柔性记录的**末成员**按元素类型比，不比长度。**实测**：最小复现与两家一致（`sum=33 s1=20` / `empty.n=3`）。
+`90_struct-init` 因此**从“第 415 行编不过”变成“编过、跑得起来”**（然后在运行时段错误，那是该用例的下一个问题）。
+
+| | |
+|---|---|
+| **验收** | tests2 仍 **101 通过 / 5 败**（本轮是把一个用例从编译失败推到运行时）；`test/conformance.sh` **204 → 205 passed / 0 gap**（新增：指向柔性记录的指针，含“初始化过”与“没初始化”两种对象）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21。本轮修的是**柔性数组成员的类型身份**（同一个 `struct W *` 此前不接受同一个 `struct W` 对象的地址），探针里七棵树没有这种形状（真有的话早就编不过了），所以记分不动；变化在 `test/conformance.sh` 204 → 205，而 tests2 仍是 101/5（`90_struct-init` 从“第 415 行编不过”推到“编过、跑得起来”） |
+
+### R28 `case lo ... hi`：一个标签，不是一堆值 —— ✅ 修掉编译器挂死，`118_switch` 转绿
+
+上一轮看剩下失败时发现 `118_switch` **编译不完**（`timeout` 到点都没出来）。原因很直接：
+解析器把 `case lo ... hi:` **展开成每个值一个 case 节点**，而那个测试里有 `case -9223372036854775807LL-1LL ... -1LL:`——
+9×10^18 次循环，顺带每次还要做一次重复检查。
+
+| | |
+|---|---|
+| **修法** | `Node` 上加 `ival_end` / `is_range`：一个标签存**两端**。重复检查改成按**区间**比（相交就报，报“区间重叠”）；后端在 switch 前面发一对比较：`lo <= x && x <= hi`——宽度如同类型本身的区间也只花两条比较，而不是一次遍历 |
+| **连带修掉的两处** | （a）`new_blk()` 报 `blk_used < curf->num_blk`：块预算是解析期定的，每个区间标签多需**一个**块（比较落空的那个），在解析时一并计上；（b）`narg` 写在了**区间比较之前**的块上，而 switch 落在最后一个新块里，于是打印出 `switch ... [ ]`——**空的**，`case 0` 全部落到 default |
+| **为什么（b）能被发现** | 因为这一轮新写的断言里**同时有单值 case 与区间 case**：tinycc 那个用例只有区间，拿它当验证是不够的 |
+| **验收** | **tests2 100 → 101 通过 / 5 败**（`118_switch` 转绿）；`test/conformance.sh` **203 → 204 passed / 0 gap**（新增：跨整个 `long long` 的区间 + 单值 case 混用）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净；与 gcc/clang 输出逐字节一致 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21。本轮修的是**区间 case 标签**（此前跨整个 `long long` 的区间会让编译器挂死），探针里七棵树没有这种形状（真有的话早就编不完了），所以记分不动；变化在 `doc/tcctests.sh` **100 → 101 通过 / 5 败**与 `test/conformance.sh` 203 → 204 |
+
+### R27 条件运算符的类型与字符串初始化 —— ✅ `94_generic` 转绿（tests2 100）
+
+上一轮把三个用例推到了新入口，这一轮从入口往下做。主体是**条件运算符的类型**（C11 6.5.15p6），顺序很重要：
+
+| 顺序 | 规则 | 实测依据 |
+|---|---|---|
+| 1 | **空指针常量先**：一边是空指针常量时，结果取**另一边**的类型 | `0 ? (long *)0 : (void *)0` 是 `long *`——gcc 对 `void *:` 分支直接报“不匹配任何关联”，反证了结果类型 |
+| 2 | 空指针常量 = 整数常量 0，或**它转到无限定 `void *`**；`(void const *)0` 不是 | 用例里的注释写的就是“like gcc but not clang, don't treat (void* const as the null-ptr constant”，而 gcc/clang 实测两家都不当它是 |
+| 3 | 否则两边都是指针时，结果是**指向复合类型的指针**，且该类型带两边**限定符的并集**；一边是 `void *` 时结果就是限定的 `void *` | `0?(long volatile*)0:(long const*)0` 是 `long const volatile *`；`0?(int volatile*)0:(void const*)1` 是 `void const volatile *` |
+| 4 | 不完整数组类型被另一边**补全**（6.2.7p3） | `0?(int (*)[])0:(int (*)[4])0` 是 `int (*)[4]`——不补全就会**同时匹配** `[4]` 与 `[5]` 两个关联 |
+
+另一半是**字符串初始化嵌套字符数组**（C11 6.7.9p14）：cxx 只看最外层数组的元素类型，看到 `char[3]` 而不是 `char` 就报错。
+现在它把字符填到**最内层的一个数组**里。
+
+**两处刻意的差异（都是实测后留下的，不是遗漏）**：
+
+- `char x[2][3] = "abc"`（字符串直接作为整个对象的初始化式）：两家**拒绝**，cxx **接受**。
+  我试过加上“必须在花括号里”的限制，但 `90_struct-init` 第 273 行那个形状**单独拿出来 gcc 也拒绝**，说明它依赖的不是这条界线，于是收回了限制。多接受一种写法是有意为之。
+- `char c[2][2][2] = {"ab","cd"}`：两家会**跨元素延续**（`a b c d 0 0 0 0`，即 "ab" 进 `c[0][0]`、"cd" 进 `c[0][1]`），cxx 是 `a b 0 0 c d 0 0`（"cd" 进了 `c[1][0]`）。
+  这是花括号省略（brace elision）在多维字符数组上的一个角落，已记录待后续。
+
+| | |
+|---|---|
+| **验收** | **tests2 99 → 100 通过 / 6 败**（`94_generic` 转绿；`90_struct-init` 从 273 行推到 **415 行**）；`test/conformance.sh` **201 → 203 passed / 0 gap**（两条新断言：条件运算符的四条类型规则；字符串初始化任意维字符数组）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21。**中途这一轮一度把 sqlite 打成 0/1、cpython 打成 379/385**：条件运算符的空指针分支只改了类型、没转换值，IR 里出现 `phi ptr [ %x, … ], [ 0, … ]`，clang 报“integer/byte constant must have integer/byte type”。是**全量探针抓到的**（单元测试全绿），修好后重跑回到基线。变化在 `doc/tcctests.sh` **99 → 100 通过 / 6 败**与 `test/conformance.sh` 201 → 203 |
+
+### R26 四个语法缺口（放宽而不放松）—— ✅ 三个用例各自推进一大步，未转绿
+
+这一轮专门挑“报错很早、但实际上合法”的几处补上，四个改动各自很小，但合起来让三个用例从“第一行就报错”变成“跑到很后面”。
+
+| # | 缺口 | 修法与依据 |
+|---|---|---|
+| 1 | **转换不了任何东西的强制转换被拒** | `(struct S)s`（`s` 已经是 `struct S`）合法——C 要求强转目标是标量型，但“转成自己”不是转换。修法：目标与操作数类型兼容时直接返回操作数（后端无事可做） |
+| 2 | **类型名前面的属性看不到** | `((ATTR int (*)(void))p)()`（`ATTR` = `__attribute__((noinline))`）：判断 `(` 是不是强转的探查不认得属性。修法：`is_typename()` 与 `typename()` 都先 `skip_leading_attrs()` |
+| 3 | **过时的 GNU 字段设计符 `{a: 1}`** | gcc/clang 仍接受（各自警告），而 cxx 只认 `.a = 1`。修法：`struct_designator()` 同时接受两种写法（冒号留给 `designation()` 判断），四处派发点（两个初始化循环 + 两个结构/联合循环）都认得它 |
+| 4 | **强转丢顶层限定符** | C11 6.5.4p5 + 6.3.2.1p2：强转的结果是**非左值**，类型是名字所指类型的**无限定版本**。所以 `(float const)x` 的类型是 `float`，`_Generic` 选择表达式看到的就是它（用例里的注释写的就是这句）。修法：`new_excast()` 的结果类型过 `type_unqual()` |
+| **验收** | `test/conformance.sh` **198 → 201 passed / 0 gap**（三条新断言：空转换 + 强转丢限定符；过时设计符（含嵌套）；类型名前的属性）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净；tests2 仍 **99 通过 / 7 败**（三个用例各自推进：`90_struct-init` 从第 168 行到 273 行，`94_generic` 从 88 行到 95 行，`82_attribs_position` 从 46 行到 51 行） |
+| **下一步的入口（都已定位）** | `90_struct-init`：`char m1[][2][3] = {..., "abc"}`—字符串初始化嵌套字符数组；`94_generic`：`0?(long volatile*)0:(long const*)0` 的结果类型应是 `long const volatile *`（条件运算符合并两支的限定符，C11 6.5.15p6）；`82_attribs_position`：`int (ATTR *)(void)`—属性在 `*` 前面 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与上一轮相同**：git 567/567；cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21。本轮补的是**四处语法放宽**（空转换、类型名前的属性、过时设计符、强转丢限定符）：七棵树里没有这几种形状（真有的话早就编译失败了），所以记分不动；变化在 `test/conformance.sh` 198 → 201，而 tests2 仍是 99/7（三个用例各推进一大步，见上） |
+
+### R25 两件事：文件作用域 asm 的 `$` 与初始化函数 —— ✅ tests2 97 → 99
+
+**（1）`98_al_ax_extend`：文件作用域 asm 被当成了内联 asm**
+
+`asm("...movl $0x1234ABCD, %eax;...");` 在文件作用域，变成 LLVM 的 `module asm`——那是**直接交给汇编器的文本**。
+cxx 用的是内联 asm 的转义（LLVM 在内联模板里用 `$` 做操作数标记，所以一个字面 `$` 写作 `$$`），于是汇编器收到的是
+`$$0x1234ABCD`，它把那当成**符号名**，链接报 `R_X86_64_32 ... $0x1234ABCD`。修法：`asm_tmpl_conv()` 加一个“这是 module asm”的参数，
+文件作用域不再加倍（内联 asm 照旧，已验证 `__asm__ volatile("movl $42, %0")` 仍然正常）。实测：与 gcc 逐字节一致（`0000ABCE`）
+
+**（2）`108_constructor`：`__attribute__((constructor))` / `((destructor))` 根本没实现**
+
+| | |
+|---|---|
+| **实现** | 属性表里加两条（GNU 命名空间）；`Sym` 上加 `ctor_prio`/`dtor_prio`（带参数就是优先级，没有就是 65535，两家都是这个默认值）；导出时用 LLVM 的初始化数组——`@llvm.global_ctors` / `@llvm.global_dtors`，`appending global [N x { i32, ptr, ptr }]`，按优先级排序（插入排序，相同优先级保持声明顺序） |
+| **一个坑** | 第一版下来 IR 报 `use of undefined value '@testc'`：**静态的构造函数被当成“无人引用的定义”丢掉了**。它确实没人引用——是平台调的。修法：可达性分析把带这两个属性的函数当根 |
+| **实测** | `108_constructor` 逐行对上；优先级版本（`constructor(101)` + 默认 + `destructor`）与 gcc/clang 完全一致：`a b main c` |
+| **验收** | **tests2 97 → 99 通过 / 7 败**；`test/conformance.sh` **196 → 198 passed / 0 gap**（两条新断言：带 `$` 的文件作用域 asm；构造/析构函数与优先级）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与上一轮相同**：git 567/567；cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21。本轮是**两处能力补齐**（文件作用域 asm 的 `$`、构造/析构函数）：七棵树里没有用带 `$` 立即数的文件作用域 asm（用了的话链接就失败了，早就会发现），也没有用构造/析构函数（用了的话函数根本不会跑），所以记分不动；变化在 `doc/tcctests.sh` **97 → 99 通过 / 7 败**（`98_al_ax_extend`、`108_constructor` 转绿）与 `test/conformance.sh` 196 → 198 |
+
 ### R24 数组类型上的限定符归于元素 —— ✅ 两个用例转绿（C11 6.7.3p9）
 
 `39_typedef` 报“`ca` 重新声明为冲突类型”，`100_c99array-decls` 报“restrict requires a pointer”——两者共用一条规则：

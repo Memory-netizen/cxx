@@ -627,6 +627,9 @@ struct Sym {
 
     // Global variable or function
     bool is_function;
+    // The anonymous object a compound literal names. Its initializer is
+    // static, so another static initializer may copy its value.
+    bool is_compliteral;
     // A block-scope `static`: the object belongs to one function. The
     // unused-object walk reports it, but it stays in the output the way
     // clang leaves it there -- only a file-scope one is left out.
@@ -675,6 +678,12 @@ struct Sym {
     // handler can run -- an automatic object at block scope -- so a misplaced
     // attribute costs nothing but its warning.
     Attr *cleanup_attr;
+
+    // __attribute__((constructor)) / ((destructor)): the function runs at
+    // startup or at shutdown. The value is its priority -- 65535 when the
+    // attribute named none -- and zero means it is not one of them.
+    int ctor_prio;
+    int dtor_prio;
 
     // Attribute flags
     bool is_deprecated;
@@ -943,6 +952,11 @@ struct Node {
         Fp128 fpval;  // ND_NUM floating constants
         Int128 ival;  // ND_NUM integer constants
     };
+    // A case range: `ival` is the low end and this the high one. `is_range`
+    // tells them apart, since a range of one value is still a range as far as
+    // the back end is concerned.
+    Int128 ival_end;
+    bool is_range;
     Node *label_ring;
     Node *label_body;
     // The cleanup handlers this jump has to run first, as one expression in

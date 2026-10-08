@@ -78,6 +78,7 @@ static const char *ty_str[] = {
 };
 
 static const char *asm_name_of(uint32_t id);
+static void print_sym_name(uint32_t id);
 
 // The name a reference uses is the name the symbol is *emitted* under, asm
 // label included: glibc redirects fcntl to fcntl64 with __asm__, and printing
@@ -159,6 +160,42 @@ static const char *asm_name_of(uint32_t id) {
     for (int i = 0; i < num_asm_names; i++)
         if (asm_names[i].id == id) return asm_names[i].name;
     return NULL;
+}
+
+// The functions that run at startup (`ctors`) or at shutdown, in priority
+// order, as the initializer array LLVM expects. Nothing is printed when there
+// are none, so a program without the attribute emits what it always did.
+static void dump_init_array(const char *name, bool ctors) {
+    int n = 0;
+    for (Sym *fn = curm->fns; fn; fn = fn->next)
+        if (ctors ? fn->ctor_prio : fn->dtor_prio) n++;
+    if (!n) return;
+
+    // Priority order, by insertion sort: the list is short and this keeps
+    // equal priorities in declaration order.
+    Sym **sorted = vnew(n, sizeof(Sym *));
+    int k = 0;
+    for (Sym *fn = curm->fns; fn; fn = fn->next)
+        if (ctors ? fn->ctor_prio : fn->dtor_prio) sorted[k++] = fn;
+    for (int i = 1; i < n; i++) {
+        Sym *x = sorted[i];
+        int p = ctors ? x->ctor_prio : x->dtor_prio;
+        int j = i - 1;
+        while (j >= 0 && (ctors ? sorted[j]->ctor_prio : sorted[j]->dtor_prio) > p) {
+            sorted[j + 1] = sorted[j];
+            j--;
+        }
+        sorted[j + 1] = x;
+    }
+
+    fprintf(out_file, "\n@%s = appending global [%d x { i32, ptr, ptr }] [", name, n);
+    for (int i = 0; i < n; i++) {
+        fprintf(out_file, "%s{ i32, ptr, ptr } { i32 %d, ptr @", i ? ", " : "",
+                ctors ? sorted[i]->ctor_prio : sorted[i]->dtor_prio);
+        print_sym_name(sorted[i]->id);
+        fprintf(out_file, ", ptr null }");
+    }
+    fprintf(out_file, "]\n");
 }
 
 static void print_sym_name(uint32_t id) {
@@ -1530,4 +1567,11 @@ void dump_module(Module *md, FILE *out) {
     if (md->data) fprintf(out_file, "\n");
 
     for (Sym *fn = md->fns; fn; fn = fn->next) dump_fn(fn);
+
+    // `__attribute__((constructor))` and `((destructor))`: the pointers the
+    // platform runs at startup and at shutdown, which LLVM carries as
+    // appending arrays of { priority, function, data }. A lower priority runs
+    // first, so the entries are sorted; the default is 65535.
+    dump_init_array("llvm.global_ctors", true);
+    dump_init_array("llvm.global_dtors", false);
 }

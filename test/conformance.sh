@@ -3175,6 +3175,419 @@ static report_fn usage_routine __attribute__((noreturn));
 int main(void) { return usage_routine == 0 ? 0 : 1; }
 EOF
 
+# --- a VLA's storage is released on every way out of its scope --------
+# C11 6.2.4p6: the storage lasts until the block is left, and goto, break and
+# continue leave it just as falling off the end does. cxx released it with a
+# statement at the end of the block, so a jump past that statement leaked the
+# stack pointer and the next declaration landed lower every pass -- measured
+# as a sixteen-byte drift per pass where gcc and clang come back to the same
+# address. The release now travels with the cleanup handlers, which were
+# always built per jump.
+cat > "$tmp/vlaleave.c" <<'EOF'
+#include <stdio.h>
+static int failures;
+static void check(const char *what, void *first, void *now) {
+    if (first != now) {
+        printf("%s: drift %ld\n", what, (long)((char *)now - (char *)first));
+        failures++;
+    }
+}
+int main(void) {
+    int n = 4;
+    /* goto out of the block */
+    void *p = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        {
+            int a[n];
+            a[0] = pass;
+            if (pass == 0) p = a;
+            goto out;
+        }
+    out:;
+    }
+    /* the address only matches if the release ran */
+    {
+        int b[n];
+        b[0] = 9;
+        check("goto", p, b);
+    }
+    /* continue out of the block, inside a loop */
+    {
+        void *q = 0;
+        for (int i = 0; i < 2; i++) {
+            {
+                int c[n];
+                c[0] = i;
+                if (i == 0) q = c;
+                else check("continue", q, c);
+                continue;
+            }
+        }
+    }
+    /* break out of the block */
+    {
+        void *r = 0;
+        for (int i = 0; i < 2; i++) {
+            {
+                int d[n];
+                d[0] = i;
+                if (i == 0) r = d;
+                break;
+            }
+        }
+        int e[n];
+        e[0] = 1;
+        check("break", r, e);
+    }
+    return failures ? 1 : 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/vlaleave" "$tmp/vlaleave.c" > "$tmp/log" 2>&1 && "$tmp/vlaleave"; then
+    echo "testing a VLA released on every way out of its scope ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a VLA released on every way out of its scope ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a handler runs before the array it names goes away ---------------
+# The release is part of the same teardown as the cleanup calls, and runs
+# after them: a handler of the same block may still read the array.
+cat > "$tmp/vlaclean.c" <<'EOF'
+#include <stdio.h>
+static int seen;
+static void h(int *p) { seen = p[0]; }
+int main(void) {
+    int n = 4;
+    {
+        int a[n];
+        a[0] = 1234;
+        __attribute__((cleanup(h))) int x = a[0];
+        (void)x;
+    }
+    if (seen != 1234) {
+        printf("handler saw %d\n", seen);
+        return 1;
+    }
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/vlaclean" "$tmp/vlaclean.c" > "$tmp/log" 2>&1 && "$tmp/vlaclean"; then
+    echo "testing a handler reading the array of its own block ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a handler reading the array of its own block ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a compound literal inside a static initializer ----------------
+# The object a compound literal names has static storage, and copying its
+# *value* into another static object is what gcc and clang do: the element
+# keeps the relocation. cxx mounted the copy only from a `constexpr` source,
+# so the element kept its expression and folded to zero --
+# `global_wrap[0].func` was NULL and tinycc's tests2/90_struct-init.c called
+# through it.
+cat > "$tmp/complit.c" <<'EOF'
+struct wrap { void (*func)(void); int n; };
+static int calls;
+static void one(void) { calls += 1; }
+static void two(void) { calls += 2; }
+static struct wrap table[] = {((struct wrap){one, 1}), ((struct wrap){two, 2})};
+static struct wrap single = ((struct wrap){one, 7});
+int main(void) {
+    if (!table[0].func || !table[1].func) return 1;
+    table[0].func();
+    table[1].func();
+    if (calls != 3) return 2;
+    if (table[0].n != 1 || table[1].n != 2) return 3;
+    if (!single.func) return 4;
+    single.func();
+    if (calls != 4 || single.n != 7) return 5;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/complit" "$tmp/complit.c" > "$tmp/log" 2>&1 && "$tmp/complit"; then
+    echo "testing a compound literal in a static initializer ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a compound literal in a static initializer ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a flexible array member keeps its record the same type ----------
+# cxx leaves an incomplete flexible member a zero-length array and completes a
+# copy of the record when an initializer gives it elements. Comparing the
+# members by length made the two records different types, so `struct W *`
+# refused the address of an object of that same `struct W` -- tinycc's
+# tests2/90_struct-init.c is where that showed up (`struct W` ends in
+# `struct S s[]`, and `gw` is initialized).
+cat > "$tmp/fam.c" <<'EOF'
+struct S { int a; };
+struct W { int n; struct S s[]; };
+struct W gw = {2, {{10}, {20}}};
+static void want(struct W *w) { w->n = 3; }
+static int sum(struct W *w) { return w->n + w->s[0].a + w->s[1].a; }
+int main(void) {
+    struct W empty = {1};
+    want(&gw);
+    if (sum(&gw) != 33) return 1;
+    if (gw.s[1].a != 20) return 2;
+    /* the same type, with or without elements in the initializer */
+    want(&empty);
+    if (empty.n != 3) return 3;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/fam" "$tmp/fam.c" > "$tmp/log" 2>&1 && "$tmp/fam"; then
+    echo "testing a pointer to a record with a flexible array member ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a pointer to a record with a flexible array member ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a case range is a range, not a list of values --------------------
+# `case lo ... hi:` is one label compared against both ends. Expanding it into
+# one label per value made tinycc's tests2/118_switch.c -- which has a range
+# over the whole of `long long` -- walk 9e18 values, and the compiler never
+# finished.
+cat > "$tmp/caserange.c" <<'EOF'
+static int digits(long long n) {
+    switch (n) {
+    case 1LL ... 9LL: return 1;
+    case 10LL ... 99LL: return 2;
+    case 100LL ... 999LL: return 3;
+    case -9223372036854775807LL - 1LL ... -1LL: return -1;
+    case 0: return 0;
+    }
+    return 4;
+}
+static int small(int n) {
+    switch (n) {
+    case 0 ... 3: return 1;
+    case 4 ... 7: return 2;
+    default: return 3;
+    }
+}
+int main(void) {
+    if (digits(5) != 1 || digits(42) != 2 || digits(500) != 3) return 1;
+    if (digits(1000) != 4) return 2;
+    if (digits(-9223372036854775807LL - 1LL) != -1 || digits(-1) != -1) return 3;
+    if (digits(0) != 0) return 4;
+    if (small(0) != 1 || small(3) != 1 || small(4) != 2 || small(7) != 2 || small(8) != 3) return 5;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/caserange" "$tmp/caserange.c" > "$tmp/log" 2>&1 && "$tmp/caserange"; then
+    echo "testing a case range over the whole of long long ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a case range over the whole of long long ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- the conditional operator's type (C11 6.5.15p6) -------------------
+# In order: a null pointer constant takes the other arm's type; two pointers
+# to compatible types make a pointer to the composite type, which carries the
+# qualifiers of *both*; one arm pointing at void makes the result a qualified
+# void pointer; and an incomplete array type is completed by the other arm.
+# tinycc's tests2/94_generic.c walks through every one of them.
+cat > "$tmp/condty.c" <<'EOF'
+_Static_assert(_Generic(0 ? (long *)0 : (void *)0, long *: 1, default: 0), "a null constant takes the other type");
+_Static_assert(_Generic(0 ? (long *)0 : 0, long *: 1, default: 0), "an integer zero likewise");
+_Static_assert(_Generic(0 ? (long volatile *)0 : (long const *)0, long const volatile *: 1, default: 0),
+               "the qualifiers of both arms combine");
+_Static_assert(_Generic(0 ? (int volatile *)0 : (void const *)1, const volatile void *: 1, default: 0),
+               "a void arm makes the result a qualified void pointer");
+_Static_assert(_Generic(0 ? (int volatile *)0 : (void const *)0, const volatile void *: 1, default: 0),
+               "a qualified void pointer is not a null pointer constant");
+_Static_assert(_Generic(0 ? (int (*)[])0 : (int (*)[4])0, int (*)[4]: 1, default: 0),
+               "an incomplete array type is completed by the other arm");
+int main(void) { return 0; }
+EOF
+if "$compiler" -w -o "$tmp/condty" "$tmp/condty.c" > "$tmp/log" 2>&1; then
+    echo "testing the conditional operator's pointer types ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the conditional operator's pointer types ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a string initializes a character array of any rank ----------------
+# C11 6.7.9p14 gives a string literal to an array of character type, and gcc
+# and clang read that as the innermost elements: `char m[2][3] = {"abc"}` fills
+# the whole element in order. tinycc's tests2/90_struct-init.c writes
+# `static char m1[][2][3] = {..., "abc"}`. cxx also takes the bare form
+# `char x[2][3] = "abc"`, which both references refuse: a deliberate
+# divergence, recorded in the plan.
+cat > "$tmp/strarr.c" <<'EOF'
+static char a[2][3] = {"abc"};
+static char b[][2][3] = {{{1, 2, 3}, {4, 5, 6}}, {{7}, 8}, "xyz"};
+static char c[2][2][2] = {"abcd"};
+static char d[2][3] = {{"ab"}, {"cd"}};
+int main(void) {
+    if (a[0][0] != 'a' || a[0][2] != 'c' || a[1][0] != 0 || a[1][2] != 0) return 1;
+    if (b[2][0][0] != 'x' || b[2][0][2] != 'z' || b[2][1][0] != 0) return 2;
+    /* one innermost array per string */
+    if (c[0][0][0] != 'a' || c[0][0][1] != 'b') return 3;
+    if (c[0][1][0] != 0 || c[1][1][1] != 0) return 6;
+    if (b[0][0][0] != 1 || b[1][1][0] != 8) return 4;
+    if (d[1][1] != 'd' || d[1][2] != 0) return 5;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/strarr" "$tmp/strarr.c" > "$tmp/log" 2>&1 && "$tmp/strarr"; then
+    echo "testing a string initializing a character array of any rank ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a string initializing a character array of any rank ... FAILED"
+    sed 's/^/    /' "$tmp/log" "$tmp/log2" 2>/dev/null | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a cast that converts nothing, and a cast that drops qualifiers --
+# `(struct S)s` where s already is a struct S is allowed (C says a cast needs
+# a scalar type, but a conversion to the operand's own type is none), and a
+# cast produces a value, so its top-level qualifiers are gone: `(float
+# const)x` has type float, which is what a _Generic selector sees. tinycc's
+# tests2/90_struct-init.c and 94_generic.c are both about this.
+cat > "$tmp/castqual.c" <<'EOF'
+struct S { int a, b; };
+static struct S id(struct S s) { return (struct S)s; }
+static int pick(void) {
+    /* the qualifier is not part of the value's type */
+    return _Generic((float const)1.0f, float: 1, default: 0);
+}
+int main(void) {
+    struct S v = {1, 2};
+    if (id(v).a != 1 || id(v).b != 2) return 1;
+    if (pick() != 1) return 2;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/castqual" "$tmp/castqual.c" > "$tmp/log" 2>&1 && "$tmp/castqual"; then
+    echo "testing a no-op cast and the qualifiers a cast drops ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a no-op cast and the qualifiers a cast drops ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- obsolete GNU field designators -----------------------------------
+# `{a: 1}` is what gcc and clang still accept for `{.a = 1}` (each warns).
+# tinycc's tests2/90_struct-init.c writes both spellings in one file.
+cat > "$tmp/olddes.c" <<'EOF'
+struct S { int a, b; int c[2]; };
+struct S v = {a: 1, b: 2, c: {3, 4}};
+struct S w = {.a = 5, .b = 6, .c = {7, 8}};
+struct t { struct S s; int n; };
+struct t u = {s: {a: 9}, n: 10};
+int main(void) {
+    if (v.a != 1 || v.b != 2 || v.c[0] != 3 || v.c[1] != 4) return 1;
+    if (w.a != 5 || w.c[1] != 8) return 2;
+    if (u.s.a != 9 || u.s.b != 0 || u.n != 10) return 3;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/olddes" "$tmp/olddes.c" > "$tmp/log" 2>&1 && "$tmp/olddes"; then
+    echo "testing obsolete GNU field designators ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing obsolete GNU field designators ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- attributes in front of a type name -------------------------------
+# `((ATTR int (*)(void))p)()` names its type with an attribute first, and a
+# type name may open with one. tinycc's tests2/82_attribs_position.c has it.
+cat > "$tmp/attrname.c" <<'EOF'
+#define ATTR __attribute__((__noinline__))
+static int actual(void) { return 42; }
+int main(void) {
+    void *p = (void *)&actual;
+    int a = ((ATTR int (*)(void))p)();
+    return a == 42 ? 0 : 1;
+}
+EOF
+if "$compiler" -w -o "$tmp/attrname" "$tmp/attrname.c" > "$tmp/log" 2>&1 && "$tmp/attrname"; then
+    echo "testing attributes in front of a type name ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing attributes in front of a type name ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a file-scope asm statement reaches the assembler verbatim --------
+# LLVM doubles a dollar sign in an *inline* asm template ($ is its operand
+# marker there), but a `module asm` string is the assembler's own text. cxx
+# doubled it everywhere, so `movl $0x1234ABCD, %eax` arrived as
+# `$$0x1234ABCD`: the assembler read a symbol name and the link failed on a
+# relocation. tinycc's tests2/98_al_ax_extend.c is this statement.
+cat > "$tmp/asmdecl.c" <<'EOF'
+extern int write(int, void *, int);
+asm(".text;"
+    ".globl us;.globl ss;"
+    "us:;ss:;"
+    "movl $0x1234ABCD, %eax;"
+    "ret;");
+unsigned short us(void);
+short ss(void);
+int main(void) {
+    char buf[32];
+    int n = 0;
+    unsigned v = us() + 1;
+    for (int i = 28; i >= 0; i -= 4) buf[n++] = "0123456789ABCDEF"[(v >> i) & 15];
+    buf[n++] = '\n';
+    write(1, buf, n);
+    /* the value is 0x1234ABCD + 1, truncated to the function's return type */
+    return (unsigned short)(0x1234ABCD + 1) == (unsigned short)v ? 0 : 1;
+}
+EOF
+if "$compiler" -w -o "$tmp/asmdecl" "$tmp/asmdecl.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/asmdecl" 2>/dev/null)" = "0000ABCE" ]; then
+    echo "testing a file-scope asm statement with a dollar sign ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a file-scope asm statement with a dollar sign ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- __attribute__((constructor)) and ((destructor)) ------------------
+# The platform calls these before `main` and after it returns, through the
+# initializer arrays LLVM spells llvm.global_ctors / llvm.global_dtors. A
+# lower priority runs first. tinycc's tests2/108_constructor.c uses the
+# default priority; the ordering is what the argument is for.
+cat > "$tmp/ctors.c" <<'EOF'
+extern int write(int, void *, int);
+static void out(const char *s, int n) { write(1, (void *)s, n); }
+static void __attribute__((constructor(101))) first(void) { out("first ", 6); }
+static void __attribute__((constructor)) second(void) { out("second ", 7); }
+static void __attribute__((destructor)) last(void) { out("last\n", 5); }
+int main(void) {
+    out("main ", 5);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/ctors" "$tmp/ctors.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/ctors" 2>/dev/null)" = "first second main last" ]; then
+    echo "testing constructor and destructor functions ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing constructor and destructor functions ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
 # --- a qualifier on an array type qualifies the element ---------------
 # C11 6.7.3p9, kept by C23: "If the specification of an array type includes
 # any type qualifiers, the element type is so-qualified, not the array type."

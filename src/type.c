@@ -645,6 +645,16 @@ bool is_compatible(Type *t1, Type *t2) {
                 if (m1->name->id != m2->name->id) return false;
                 if (m1->is_align != m2->is_align) return false;
                 if (m1->align != m2->align) return false;
+                // The last member of a record with a flexible array member
+                // stands for whatever the initializer gave it: cxx leaves the
+                // declared one a zero-length array and completes a copy, and
+                // the two are the same type as far as the record is
+                // concerned. Comparing the lengths would reject
+                // `void f(struct W *)` for an object of that very type.
+                if (t1->is_flexible && !m1->next && !m2->next && is_array(m1->ty) && is_array(m2->ty)) {
+                    if (!is_compatible(m1->ty->base, m2->ty->base)) return false;
+                    continue;
+                }
                 if (!is_compatible(m1->ty, m2->ty)) return false;
             }
             pop_cmp();
@@ -977,6 +987,19 @@ static IntSpec int_spec(Type *ty) {
     }
     if (ty->size < 4) return (IntSpec){32, false, T.ty_int};
     return (IntSpec){ty->size * 8, ty->is_unsigned, ty};
+}
+
+// 6.3.2.3p3: a null pointer constant is an integer constant expression with
+// the value 0, or such an expression cast to `void *` -- *unqualified* void,
+// which is what makes `(void const *)0` an ordinary pointer. n1570's
+// footnote and tinycc's tests2/94_generic.c both single that out.
+static bool is_null_ptr_const(Node *node) {
+    if (!is_null_constant(node)) return false;
+    // An integer constant expression is one; a cast to `void *` is one only
+    // when the void is unqualified. `is_null_constant()` takes the qualified
+    // form as well, and gcc and clang do not.
+    if (!is_pointer(node->ty)) return true;
+    return node->ty->qual == 0 && node->ty->base->qual == 0;
 }
 
 static Type *get_common_type(Type *ty1, Type *ty2) {
@@ -1351,6 +1374,43 @@ void add_type(Node *node) {
             lvalue_convert(&node->els);
             if (is_void(node->then->ty) || is_void(node->els->ty)) {
                 node->ty = T.ty_void;
+            } else if ((is_null_ptr_const(node->then) && is_pointer(node->els->ty)) ||
+                       (is_null_ptr_const(node->els) && is_pointer(node->then->ty))) {
+                // 6.5.15p6, first case: a null pointer constant takes the
+                // other arm's type, qualifiers included. The constant itself
+                // has to be converted: leaving it an integer put `0` where
+                // the IR wanted a pointer.
+                if (is_pointer(node->then->ty)) {
+                    node->ty = node->then->ty;
+                    new_imcast(&node->els, node->ty);
+                } else {
+                    node->ty = node->els->ty;
+                    new_imcast(&node->then, node->ty);
+                }
+            } else if (is_pointer(node->then->ty) && is_pointer(node->els->ty) && node->then->ty->base &&
+                       node->els->ty->base &&
+                       (is_void(node->then->ty->base) || is_void(node->els->ty->base) ||
+                        is_compatible(type_unqual(node->then->ty->base), type_unqual(node->els->ty->base)))) {
+                // 6.5.15p6: a pointer to the composite type, which carries
+                // the qualifiers of both pointed-to types. Taking either arm
+                // as it stands loses the other's: `long volatile *` or
+                // `long const *` instead of `long const volatile *`. One arm
+                // pointing at void makes the result a qualified `void *`.
+                Type *base = is_void(node->then->ty->base) ? node->then->ty->base : node->els->ty->base;
+                if (!is_void(node->then->ty->base) && !is_void(node->els->ty->base)) {
+                    base = node->then->ty->base;
+                    // 6.2.7p3: the composite of an incomplete array type and
+                    // a complete one is the complete one, so `int (*)[]` and
+                    // `int (*)[4]` give `int (*)[4]` rather than a type that
+                    // matches every length.
+                    if (is_array(base) && base->len < 0 && is_array(node->els->ty->base) &&
+                        node->els->ty->base->len >= 0)
+                        base = node->els->ty->base;
+                }
+                uint32_t q = node->then->ty->base->qual | node->els->ty->base->qual;
+                node->then->ty = pointer_to(type_qual(base, q), node->then->ty->qual);
+                node->els->ty = pointer_to(type_qual(base, q), node->els->ty->qual);
+                node->ty = node->then->ty;
             } else {
                 usual_arith_conv(&node->then, &node->els);
                 node->ty = node->then->ty;
