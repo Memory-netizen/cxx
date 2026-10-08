@@ -369,12 +369,17 @@ static void count_arg_regs(Type *ty, AggClass *c, int *gp, int *sse) {
 static Ref load(Ref addr, Type *type, int align, Member *mem) {
     if (mem && mem->is_bitfield) {
         Type *ty = mem->unit_ty;
+        // The unit's width, not its size: a _BitInt's size is rounded up to
+        // what the target holds while its width is what the shifts have to
+        // agree with -- `shl i72 %x, 63` on a field that reaches bit 71 drops
+        // the field itself.
+        int unit_bits = is_bitint128(ty) ? bitint_width(ty) : ty->size * 8;
         Ref dst = TMP(tmp_id++, ty);
         new_ins(IR_LORD, dst, (Ref[]){addr, INT(align)}, 2);
         Ref shl = TMP(tmp_id++, ty);
-        new_ins(IR_SHL, shl, (Ref[]){dst, INT(ty->size * 8 - mem->bit_width - mem->bit_offset)}, 2);
+        new_ins(IR_SHL, shl, (Ref[]){dst, INT(unit_bits - mem->bit_width - mem->bit_offset)}, 2);
         Ref shr = TMP(tmp_id++, ty);
-        new_ins(IR_SHR, shr, (Ref[]){shl, INT(ty->size * 8 - mem->bit_width)}, 2);
+        new_ins(IR_SHR, shr, (Ref[]){shl, INT(unit_bits - mem->bit_width)}, 2);
         return cast(shr, ty, type);
     } else if (type->kind == TY_VLA) {
         return addr;
@@ -394,7 +399,7 @@ static void store(Ref val, Ref addr, int align, Member *mem) {
 
         int width = mem->bit_width;
         int boff = mem->bit_offset;
-        int total_bits = ty->size * 8;
+        int total_bits = is_bitint128(ty) ? bitint_width(ty) : ty->size * 8;
         // A constant written at the unit's own width: INT() is an int32_t, so
         // the masks of a field wider than four bytes would be truncated to
         // their low half (the clear mask's is zero, which wipes exactly the
@@ -409,10 +414,28 @@ static void store(Ref val, Ref addr, int align, Member *mem) {
         uint64_t width_mask = (width >= 64) ? ~0ULL : (1ULL << width) - 1;
 
         // b. clear mask
-        int64_t mask = (int64_t)(width_mask << boff);
-        uint64_t clear_mask_val = ~mask;
-        if (total_bits < 64) clear_mask_val &= (1ULL << total_bits) - 1;
-        Ref clear_mask = wide_unit ? LONG(clear_mask_val) : INT(clear_mask_val);
+        //
+        // A unit wider than eight bytes (see get_unit_ty) carries masks that
+        // no longer fit in 64 bits. A Ref's immediate is an int32_t, so they
+        // travel as iN constants instead.
+        Ref clear_mask, width_mask_ref;
+        if (ty->size > 8) {
+            Int128 wm = int128_set_ui(width_mask);
+            Int128 unit_mask = int128_sub(int128_shl(int128_set_ui(1), total_bits), int128_set_ui(1));
+            Int128 cm = int128_and(int128_not(int128_shl(wm, boff)), unit_mask);
+            Con cc = {.type = CBits128, .bits.i128 = cm};
+            clear_mask = newcon(&cc, curm);
+            clear_mask.ty = ty;
+            Con wc = {.type = CBits128, .bits.i128 = wm};
+            width_mask_ref = newcon(&wc, curm);
+            width_mask_ref.ty = ty;
+        } else {
+            int64_t mask = (int64_t)(width_mask << boff);
+            uint64_t clear_mask_val = ~mask;
+            if (total_bits < 64) clear_mask_val &= (1ULL << total_bits) - 1;
+            clear_mask = wide_unit ? LONG(clear_mask_val) : INT(clear_mask_val);
+            width_mask_ref = wide_unit ? LONG(width_mask) : INT(width_mask);
+        }
 
         // c. clear old value
         Ref old_cleared = TMP(tmp_id++, ty);
@@ -424,9 +447,8 @@ static void store(Ref val, Ref addr, int align, Member *mem) {
         // says where they start, so the unit's own truncation is not enough.
         Ref trunc = cast(val, val.ty, ty);
         if (width < total_bits) {
-            Ref mask = wide_unit ? LONG(width_mask) : INT(width_mask);
             Ref masked = TMP(tmp_id++, ty);
-            new_ins(IR_AND, masked, (Ref[]){trunc, mask}, 2);
+            new_ins(IR_AND, masked, (Ref[]){trunc, width_mask_ref}, 2);
             trunc = masked;
         }
 

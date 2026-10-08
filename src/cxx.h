@@ -977,6 +977,13 @@ struct Initializer {
     Node *expr;
     Con *val;
 
+    // A side effect that runs where this element is initialized, whatever
+    // the element's own initializer ends up being. A range designator
+    // evaluates its initializer once and every element of the range reads
+    // the temporary it stored into; a later designator may overwrite one of
+    // those elements, and the evaluation must not go with it.
+    Node *pre;
+
     // For aggregate type
     Initializer **child;
 

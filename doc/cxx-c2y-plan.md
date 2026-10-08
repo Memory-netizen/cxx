@@ -160,6 +160,29 @@
 | **测试固化** | `doc/signcmp.sh`：17 行形状 × 三家，带 `ok/MISMATCH` 判定与旗标一节（默认沉默、`-Wsign-compare` 开、`-Wno-` 与 `-w` 关，以及 gcc/clang 的 `-Wextra` 计数）；`test/conformance.sh` 增一条带旗标的检查（2 条警告、默认 0、`-Wno` 0） |
 | **验证** | `make test` exit 0（conformance 98/0、c2y 74/0、0 FAILED）、arm64 与 rv64 各 51 passed、`doc/probes.sh` 与 `doc/fall.sh` 不变。**rv32 本轮未重跑**（改动是公共代码，之前 51 passed / 1 skipped） |
 
+### T2 以 cxx 为宿主编出的 tcc 不能字节级自我复现 —— ✅ 已修（根因：`指针 - unsigned`，见 R39）
+
+R37 量到：cxx 编的 tcc 通过 `test1`/`test2`/`test3`（三级自举）与边界检查运行，
+但 `tccb`（`-b` 自编译的两个可执行文件必须逐字节相等）失败，而同一目标在 gcc 宿主树里通过。
+归因：同一份 `tcc.c`、同一个运行库，gcc 编的 tcc 与 cxx 编的 tcc 输出相差 369528 字节；
+`int main(){return 42;}` 这样的输入也差 32 字节（入口点偏移不同）。**R38 缩小到的范围（已确证）**：
+
+| 环节 | 结果 |
+|---|---|
+| 预处理（`-E`） | **逐字节相同**（1045025 字节）——不是预处理差异 |
+| 目标文件（`-c`，无链接） | **逐字节相同**（706370 字节）；小输入也相同 —— **代码生成一致** |
+| 链接产物 | 差 32 字节，入口点 `0x401b50` vs `0x401b30`；节表/程序头数目相同，`_start` 等代码**逐字节相同**，只是整体平移 |
+| 平移的来源 | `.eh_frame` 段**大小不同**（gcc 侧 `0x24`、cxx 侧 `0x0c`）——少了一个 FDE，后续节因此整体后移 `0x18`（`.text` 对齐后易位 `0x20`） |
+| 两棵树的 `libtcc1.a` | 9 个成员**逐字节相同**；`lib/*.o` 大小也一致 —— **不是运行库差异** |
+| 同一棵树内（cxx 编的 tcc 与它编出的 tcc） | 对同一输入产出的**目标文件相同**，链接产物不同 —— 差异在**链接阶段** |
+
+结论：tcc 的**代码生成对自己怎么被编译不敏感**（目标文件一致），但它的**链接器**
+在 cxx 编出来时会丢一个 `.eh_frame` 条目（或合并得不同），于是产物整体平移、`tccb` 的 `cmp` 不再相等。
+
+**下一步**：用 `readelf --debug-dump=frames` 对比两个链接产物，看是哪个函数的 FDE 没了（应该在 `_start`/crt
+一带），再回到 `tccelf.c` 的 `.eh_frame` 合并与重定位那几行，看 cxx 编译它时哪一个表达式行为不同。
+实验脉绝对不要放 `/tmp`（这台 WSL 会清），用 `~/t2/`。
+
 ### G1 `__attribute__((cleanup(f)))`（GNU 变量属性）—— ✅ 已完成
 
 | | |
@@ -463,6 +486,244 @@ VLA 的 `len` 就是 `vla_len` 指针的低 32 位（见缺陷 1），所以把*
 | **验收** | `test/conformance.sh` **160 → 171 passed / 0 gap**（十一条新断言）：变长边界只求值一次（三种形状 + 运行时取值）、变长 typedef 在声明处捕获、`sizeof`/`_Countof` 变长对象、部分初始化的超大记录（4097 字节数组，运行时校验零填充）、变长调用前的记录形参、`[[noreturn]]` 在对象上是 error／GNU 拼写是警告／函数指针接受、`-std=c11` 是严格模式而 `-std=gnu11` 不是、文件作用域的变长修改类型被拒、`__inline` 是关键字。全套复跑：c2y 101/0、arm64 51、rv64 51、rv32 51(+1 skipped)、`doc/probes.sh` 全部基线（c2ycov 109/2、selfhost 21/0/0、asm 68/0 …）、`doc/bootstrap.sh` 仍是 **cxx2 = cxx3 = cxx4 逐字节相同**（说明调用类型表、初始化器链与关键字表的改动没有动摇不动点）。`clang-format-21 --dry-run --Werror` 干净。另外 **`make test` 由红转绿**：本轮开始时 `[[noreturn]] int v;` 是**失败**的——R11 把这条诊断从 error 降成了警告，但 `test/error.sh` 仍然要求它报错；本轮把**标准拼写**恢复成 error（GNU 拼写保持警告，函数指针仍接受），与 clang 一致 |
 | **记分（`doc/realworld.sh` 全量探针）** | **git 567/567 保持全过**；**cpython 368/385 → 377/385**（本轮修好的 9 个单元：`Modules/socketmodule.c`、`Python/crossinterp.c`（这两个是崩溃）、`Python/codegen.c`、`Python/compile.c`、`Python/pythonrun.c`、`Python/getcompiler.c`、`Objects/typeobject.c`、`Modules/expat/xmltok.c`、`Modules/expat/xmlrole.c`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21 不变 |
 | **剩余阻塞项** | **cpython 8**（按性质分两类）。环境类 4 个：`Python/pystrhex.c`（`implicit declaration of function ‘__builtin_shufflevector’`）、`Modules/Hacl_Hash_Blake2s_Simd128.c`、`Modules/Hacl_Hash_Blake2b_Simd256.c`、`Modules/_testcapimodule.c`（`static assertion failed: __extension__ __alignof__(buf) >= 64`）——这四个都要 `vector_size` 向量类型，而它们之所以被启用，是因为这棵树的 `pyconfig.h` 是安装时用宿主 clang 配置出来的（它声明「本编译器有 `__builtin_shufflevector`、有 64 字节对齐的 SIMD」），cxx 本身不支持向量类型。真正的缺陷 4 个：`Modules/posixmodule.c`（`implicit declaration of function ‘__builtin_memset’`）、`Python/jit_unwind.c`（`premature end of input`）、`Modules/_testsinglephase.c`（`array initializer must be an initializer list`），以及（R14 复查后更正）`Modules/_ctypes/_ctypes_test.c` —— 它在 `__GNUC__` 下包含 `<complex.h>`，而 glibc 的 `bits/cmathcalls.h` 用 `_Mdouble_complex_`（`double _Complex`）声明函数，属于本计划 **有意不做** 的 `_Complex` 缺口，不是新缺陷 |
+
+### R41 成员上的 GNU `aligned` 属性 —— ✅ 与两家一致含位域成员（`95_bitfields` 再进一步）
+
+R40 定位到的第二处，这一轮修好了。
+
+| | |
+|---|---|
+| 病灶 | 成员解析处调 `declspecs(&tok, tok, NULL, &align, NULL, NULL)`（`src/parser.c`）——**对齐度与属性表两个出参都是 NULL**，于是说明符位置的 `__attribute__((aligned(N)))` 被读进来又丢掉；只有声明符之后的写法走 `mem->ty->attrs` 那一支 |
+| 修法一 | 接住 attrs 并 `attr_decl_apply(mem_attrs, &mem_funcspec, &align, true)` |
+| 修法二 | 显式对齐的**位域**还要从它的对齐开始：gcc 把 `__attribute__((aligned(16))) char a : 4;` 放在记录的第 16 字节，而不是紧跟前一个字段 |
+| 修法三 | `align` 现在混了两个来源，而 **`_Alignas` 用在位域上仍须报错**（gcc 也报）：用 `alignas_align` 保留 `declspecs` 给出的那个值，两处 `'_Alignas' cannot be applied to a bit-field` 看它 |
+
+| 最小探测 | gcc / clang | cxx 修前 | cxx 修后 |
+|---|---|---|---|
+| `struct { char a; __attribute__((aligned(16))) int b; };` | 16 / 32 | 4 / 8 | **16 / 32** |
+| `struct { __attribute__((aligned(16))) char a : 4; };` | 16 / 16 | 1 / 1 | **16 / 16** |
+| `struct { char a; int b; };`（对照） | 4 / 8 | 4 / 8 | 4 / 8 |
+| `_Alignas(16) char a : 4;` | 报错 | 报错 | **报错** |
+| 声明符之后的写法 | 16 / 32 | 16 / 32 | 16 / 32 |
+
+#### `95_bitfields` 剩下的 12 行（已定位到宏组合，价值低）
+
+差异全在 **"PACKED - WITH ALIGN"** 的 TEST 2 / TEST 3 上：期望 `align/size : 1 12` 与 `1 7`，
+cxx 给 `1 11` 与 `1 6`（少一字节），位图因此在高位字节上不同。
+但我把 `packed`、`aligned`、位域上的 `aligned`各种直接组合写成最小用例后，**三家逐行一致**（`P1..P5`、`T1..T3`），
+说明触发点在该用例宏组合的细节里（`SELF` 自包含 + `M`/`P`/`A`/`ALIGN`/`PACK` 的展开），不再深追。
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` **212 → 214 passed / 0 gap**（两条新增：成员 `aligned` 的四种形状 + 位域对齐落在第 16 字节 + 声明符之后的写法；以及 `_Alignas` 在位域上被拒）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；tests2 仍 **104 通过 / 2 败**；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | @@SCORE@@ |
+
+### R40 跨过八字节边界的位域（`95_bitfields` 的主体）—— ✅ 打包形形已与两家一致
+
+tinycc 的 `95_bitfields.c` TEST 2 是一个 `packed` 记录：`long long z:63` 前面有 `int x:12` + `char y:6`，
+于是 `z` 从第 18 位开始、到第 81 位结束——**起步在一个八字节单元内、结束在下一个**。
+
+| | |
+|---|---|
+| 原因 | 单元宽度由 `min_bytes_for_bits(bit_offset + width)` 决定，而它到 8 字节就停了；于是单元只有 8 字节而字段需要 9，读取的移位量算成 `64 - 63 - 2 = -1`，LLVM 对移位量取模 64，`z` 读回 `0xc000000000000000`（两家是 `123456789abcdef0`） |
+| 修法一 | `min_bytes_for_bits` 超过 64 位后返回 `(bits + 7) / 8`；`get_unit_ty` 超过 8 字节时取 `bitint[bytes * 8][is_unsigned]`——cxx 已经有 `_BitInt` 到 128 位（`bitint[129][2]`），`bit_offset <= 7` 且字段不超 64 位，所以最远 9 字节 |
+| 修法二 | 这类单元的掩码不再装得进 64 位，而 `Ref` 的立即数只有 `int32_t`，所以掩码改走 `newcon()` 的 **iN 常量**（`CBits128`） |
+| 修法三 | 移位量要用单元的**位宽**而非 `size * 8`：`_BitInt` 的 size 会向目标粒度取整（`_BitInt(72)` 在 x86-64 上 size 是 16），而只有 72 位存在——用 128 算出 `shl i72 ..., 63` 会把字段自己丢掉。现用 `bitint_width()` |
+
+验证：TEST 2 的四行输出（`bits in use` / `bits as set` / `values` / `align/size : 1 11`）**与 gcc、clang 逐字节相同**。
+
+#### `95_bitfields` 为什么还是红的（已定位到另一处）
+
+剩下的差异全在“WITH ALIGN”变体上（`A` = `__attribute__((aligned(16)))`），而它不是位域问题：
+
+| 最小探测 | gcc / clang | cxx |
+|---|---|---|
+| `struct { char a; A int b; };` | align 16, size 32 | **align 4, size 8** |
+| `struct { A char a : 4; };` | align 16, size 16 | **align 1, size 1** |
+
+即 **cxx 完全忽略成员上的 GNU `aligned` 属性**。位置已找到：成员解析处调用
+`declspecs(&tok, tok, NULL, &align, NULL, NULL)`（`src/parser.c` 约 6877 行），**`align` 和 `attrs` 两个出参都给了 NULL**，于是说明符位置的
+`__attribute__((aligned(N)))` 被读进来又丢掉；而声明符之后的写法（`int b __attribute__((aligned(16)))`）走 `mem->ty->attrs` 那一支，是有效的。
+下一步：把 attrs 接住并 `attr_decl_apply(attrs, NULL, &align, true)`，再回到 `95_bitfields` 验证。
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` **211 → 212 passed / 0 gap**（新增：跨八字节边界的位域：`sizeof`、写入后的字节、读回值、指针读写、负值、邻居字段）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；tests2 仍 **104 通过 / 2 败**；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。本轮改的是位域单元与其掩码/移位量：七棵树里没有跨八字节边界的位域（有的话会读出错值），而**自举逐字节不变**说明对不跨界的位域路径毫无影响；变化在 `test/conformance.sh` 211 → 212。 |
+
+### R39 一个真实的误编译：`指针 - unsigned`（T2 的根因）—— ✅ tcc 字节级自举恢复
+
+**（1）从自举失败到一个表达式**
+
+R38 把 T2 缩到了“目标文件相同、链接产物不同”，这一轮再往下挖：
+
+- 预处理输出**相同**；
+- `-c` 目标文件**逐字节相同**（两个 tcc 编 `tcc.c`）；
+- 链接产物相差 32 字节，而差异在 **`.eh_frame_hdr`**：gcc 侧 `0x24`（= 12 字节头 + 3 条表项），cxx 侧 `0x0c`（**表项数为 0**）；
+- 这个表是 tcc 自己的链接器写的：`tccdbg.c:tcc_eh_frame_hdr()`。
+
+把它的解析循环**原样抠出来**，喂真实的 `.eh_frame` 字节，用 gcc 与 cxx 各编一遍：
+
+```
+gcc: count=3
+cxx: count=0        (trace：cie version=0 —— 应为 1)
+```
+
+**（2）根因：索引在自己的类型里取负，再被零扩展**
+
+最小复现（`~/t2/mini.c`）：
+
+```c
+unsigned char *rd = data + 56;
+unsigned int cie_offset = 28;
+unsigned char *cie = rd - cie_offset + 4;   /* 应为 data+32 */
+```
+
+| | `cie - data` |
+|---|---|
+| gcc | **32** |
+| cxx（修前） | **4294967328**（= 2³² + 32），随后解引用直接段错误 |
+
+cxx 为它生成的 IR：
+
+```llvm
+%tmp13 = sub i32 0, %tmp12        ; -28，在 32 位里取负
+%tmp14 = zext i32 %tmp13 to i64   ; 零扩展 → 4294967268   ❌
+%tmp15 = getelementptr i8, ptr %tmp11, i64 %tmp14
+```
+
+修法在 `new_sub()` 的 `ptr - num` 分支（`src/parser.c`）：指针减法的整数操作数是 `ptrdiff_t`，
+先 `lvalue_convert` + `new_imcast(&rhs, T.ty_long)` 再取负 —— 与同一函数里 `ptr - ptr` 分支已有的写法一致，符号就从源类型来了。
+修后：`mini` 与 `mini2`（`int`/`unsigned int`/`unsigned long`/再 `+4`/解引用/循环上界）全部与 gcc 一致，抽出的解析循环 `count=3`。
+
+**（3）端到端验证：tcc 自己的自举测试**
+
+用修好的 cxx 重建 tinycc（`./configure --cc=$HOME/cxx/cxx && make -j8`）后：
+
+| 目标 | 修前 | 修后 |
+|---|---|---|
+| `test1` / `test2` / `test3` | OK | **OK** |
+| `tccb`（`-b` 自编译两个可执行文件必须 `cmp` 相等） | **失败** | **`Exe Bound-Test OK`**，`tccb1 == tccb2` 逐字节相同 |
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` **210 → 211 passed / 0 gap**（新增：指针减 `unsigned int`/`int`/`unsigned long`、再 `+4`、解引用、用作循环上界）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；tests2 仍 **104 通过 / 2 败**；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。本轮修的是指针减法的索引类型，七棵树里没有 `指针 - unsigned` 这种形状（真有的话会直接错位崩掉），所以记分不动；收获在两处：tinycc 自己的全套测试从“卡在 `tccb`”到 `------- ALL TESTS PASSED --------`，以及 `test/conformance.sh` 210 → 211。 |
+| **tinycc 自己的全套测试** | `make -C tests test CC=gcc`（参考用 gcc 编，被测的是 cxx 编出的 tcc）：**exit 0**，末行 `------- ALL TESTS PASSED --------`（含 `test1/2/3`、`test1b` 边界检查、`test4` 对象/链接输出、`tccb` 字节级自我复现） |
+
+### R37 两项验证：多 VLA 的地址偏移；cxx 编出的 tcc 能否通过自己的自举测试
+
+#### （一）多个 VLA 声明时第 2、3 个的地址偏移
+
+三家同一段源码，测量（`~/lifetest/vla*.c`）：
+
+| 形状 | gcc | clang | cxx |
+|---|---|---|---|
+| 一个作用域三个 **运行时长度**的 VLA（`int a[i],b[j],c[k]`，i=3,j=5,k=7） | b-a=32 c-b=32 | 32 / 32 | **32 / 32**（完全一致） |
+| 同一形状但长度是**常量**（`a[3],b[5],c[7]`） | **-12 / -32**（向上） | 20 / 32 | **20 / 28**（紧致，无填充） |
+| 循环体内三个 VLA，每轮都离开块 | 稳定 | 稳定 | **稳定**（moved=0/0/0） |
+| 长度逐轮变大（`n,2n,3n`）的循环 | 16/16,16/32,32/48,32/48 | 同 | **同（逐字节一致）** |
+| `goto` 回块内（三个 VLA，回到块外标签） | 稳定 | 稳定 | **稳定** |
+
+结论：**运行时长度时三家逐字节一致**；每个 VLA 都单独 `stacksave`/分配，第 2、3 个的偏移就是它们的大小（按对齐向上取整），
+且在循环里**每轮回到同一位置**（这正是 R33 那个出口边释放的作用，之前每轮漂一个数组大小）。
+与两家的差别只在**常量长度时的对齐/填充策略**（cxx 紧致、clang 按 8 位、gcc 往上摆），那是不可观测的布局差异；
+而 `122_vla_reuse` 那种“跳回本作用域内部、从不离开”的形状仍然漂移（两家靠优化器提升成固定槽位，见 R33）。
+
+#### （二）cxx 编出的 tcc 跑自己的自举测试
+
+做法：`cp -a ~/rw/tinycc ~/tccboot && cd ~/tccboot && ./configure --cc=$HOME/cxx/cxx && make -j8`
+—— **configure 与 make 均成功**，`tcc`（515KB）与 `libtcc1.a` 都是 cxx 编出来的。然后跑 tinycc 自己的测试：
+
+```
+make -C tests test1 test2 test3 CC=gcc      # 参考用 $(CC)，自举链用 $(TCC)
+```
+
+| 目标 | 内容 | 结果 |
+|---|---|---|
+| `test1` | cxx 编的 tcc 跑 tcctest | **Auto Test OK** |
+| `test2` | 它编译 tcc，再跑 tcctest | **Auto Test2 OK** |
+| `test3` | 它编译 tcc 再编译 tcc（三级），再跑 tcctest | **Auto Test3 OK** |
+| `test1b` | 边界检查（`-b`）运行结果 | **Auto Bound-Test OK** |
+| `tccb` | **字节级自我复现**：`tcc -b tcc.c` 与“那个产物再 `-b tcc.c`”两个可执行文件必须 `cmp` 相等 | **失败** ❌（同一目标在 gcc 宿主树里通过：`Exe Bound-Test OK`） |
+
+**归因（已做到可复现的最小形式）**：同一份 `tcc.c`、**同一个 `libtcc1.a`**（gcc 宿主树的），两个不同的 tcc（一个 gcc 编的、一个 cxx 编的）各自编译，输出差 **369528 字节**；
+甚至 `int main(){return 42;}` 这样的输入也差（cxx 侧 3523 字节、gcc 侧 3555 字节，**入口点差 32 字节**）。两边的节表与符号数相同，
+差异在链接进去的内容上。而 gcc 宿主树里的自举是**不动点**（`tcc` 编的与它自己编的逐字节相同）——
+所以这不是 tcc 自身的不确定性，而是**cxx 编译 `tcc.c` 改变了 tcc 的代码生成行为**（系统性、可复现）。
+
+**结论**：**功能自举通过**（三级链 + 边界检查，输出与 gcc 参考逐行一致），
+**字节级自我复现不过**——已开为工作项 T2。
+
+**附：一个预处理器差异（已知，与 clang 同病）**：`tests/tcctest.c:70-77` 故意写了
+
+```c
+#define funnyname 42test.h
+#define incdir tests/
+#define incname < incdir funnyname >
+#include incname
+```
+
+它要求展开成 `<tests/42test.h>`（8.1 节 `< h-char-sequence >` 在不是单一头文件名记号时先宏展开）。
+gcc 把展开后的记号**直接拼接**，cxx 与 clang 一样插了空格，于是报 `tests/ 42test.h: cannot open file`。
+因此用 cxx 当宿主跑这套测试时，参考那一步必须用 gcc（`CC=gcc`）；这条差异已记在此处供后续取舍。
+
+| | |
+|---|---|
+| **记分（`doc/realworld.sh` 全量探针）** | 本轮未动代码（只做验证），七棵树记分与 R35 相同：**git 567/567、cpython 381/385**、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21 |
+
+### R35 区间设计符只求值一次（第二次，这次定位到底）—— ✅ `90_struct-init` 全文匹配（tests2 103）
+
+R31 写过一版，最小复现对了（`1 1 2 2`），但 `90_struct-init` 一跑就崩，当时只做了二分、没做诊断，于是回退。这一次把崩溃定位到底了。
+
+**（1）现象与定位**
+
+崩在 `test_multi_relocs`，`rip = 0x7568`（一个垃圾函数指针）。把那张表单独抠出来编译，IR 里一目了然：
+
+```llvm
+%tmp5 = alloca ptr, align 8      ; [0 ... 3] 的临时量
+%tmp6 = alloca ptr, align 8      ; [1 ... 2] 的临时量
+...
+store ptr null, ptr %tmp11       ; [1] = 0 覆盖了该元素，同时也把它身上的赋值带走了
+%tmp14 = load ptr, ptr %tmp6     ; [2] 读的是**从未写过**的临时量
+store ptr %tmp14, ptr %tmp13
+```
+
+原因：临时量的赋值被挂在**区间的第一个元素**上，而后面的 `[1] = 0` 会用新初始化器整个覆盖那个元素——
+赋值跟着一起消失，而读它的元素还在。临时量里是栈上的垃圾，于是调到 `0x7568`。
+
+**（2）修法：赋值挂在“元素”而不是“元素的初始化器”上**
+
+`Initializer` 新增 `Node *pre`：在该元素位置上跑的副作用，不受元素自身初始化器被覆盖的影响。
+`create_lvar_init` 在数组分支里把它插在该元素之前；区间里**每个**元素（包括第一个）都读那个临时量。于是：
+
+- `[1] = 0` 只能覆盖“读临时量”这件事，写临时量的副作用照旧发生；
+- 评估位置不变，所以 `{[0 ... 1] = ++c, [2 ... 3] = ++c}` 的侧效果交错顺序与 gcc 一致（不是“全部先算完再赋值”）；
+- 静态初始化器走原路（`static_init_ctx`，在 `gvar_initializer` ——文件作用域、块作用域 static、复合字面量三条静态路径的共同入口）：它没有临时量可写，也不需要——它的表达式必须是常量，每个元素拿到的都是同一个常量。
+
+**（3）连带修掉的一个 IR 缺陷**
+
+新写的赋值直接拿 `first->expr` 去存，而 cxx 的初始化器把 **lvalue 留在类型转换下面**、由 `create_lvar_init` 负责在赋值处插 load，
+于是 `{ [6 ... 10] = elt }` 把 `elt` 的**地址**存进了临时量（IR 里是 `trunc ptr %tmp24 to i8`，clang 直接报 “invalid cast opcode”）。
+那段惯用法提成 `init_rvalue()`，`create_lvar_init` 与新代码共用。另外，区间元素读临时量时也要先 `lvalue_convert`——
+逗号表达式不是 lvalue，`create_lvar_init` 的标量分支就不会再帮忙插 load。
+
+**（4）同一轮的第二件：声明符中间的属性**
+
+`82_attribs_position` 报 “expected ‘)’ before ‘*’”：它要求 `int(ATTR *)(void)`（`ATTR` 在 `(` 与 `*` 之间）能被读成“指向函数的指针”。
+GNU 允许属性出现在声明符的任何位置，`abstract_declarator()` 开头少了一步 `skip_leading_attrs()`（R26 给 `is_typename`/`typespec`
+加过同样的一步）。加上后 `82_attribs_position` 全文匹配（tests2 103 → 104），并顺手删了一条重复的 `designation` 原型。
+
+| | |
+|---|---|
+| **验收** | **tests2 102 → 104 通过 / 2 败**（`90_struct-init` 与 `82_attribs_position` 均全文匹配）；`test/conformance.sh` **208 → 210 passed / 0 gap**（两条新断言：区间设计符的断言同时钉住三件事——单次求值、从变量取值（不是地址）、后置设计符覆盖后副作用仍在；以及声明符中间的属性）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。本轮两处改动各自在探针里都没有对应形状：区间设计符出现在初始化器里（七棵树里没有用 GNU 区间设计符的对象），声明符中间的属性也没有；变化在 **tests2 102 → 104** 与 `test/conformance.sh` **208 → 210** |
+
+#### 剩下的 tests2（2 个，差异已量）
+
+- `95_bitfields`：三行差异全在**宽于 64 位的位域单元**上——`0x123456789abcdef0` 被写成 `0xc000000000000000`（高位丢失），
+  最后两行的十六进制串少了 16 字节。扩展点在 `src/type.c` 的 `wide_unit`/`width_mask`（R21 只做到 64 位）与 `store_piece()`（R17）。
+- `122_vla_reuse`：槽位机制，R33 已写明实现方案。
 
 ### R33 统一拆除：VLA 的存储在每一条出口边上释放 —— ✅ `79_vla_continue` 转绿（tests2 102）
 
@@ -1593,6 +1854,60 @@ bash doc/probes.sh ./cxx        # 四轮探针 + 关键字全量比对
 ```
 
 - 涉及 IR 的项用 `clang -std=c2y -O0 -S -emit-llvm` 逐条对照（`doc/c2ycov4.sh` 是模板）。
+
+### 4.1 工程注意：探路脚本与后台作业（用血换来的两条）
+
+**（一）探路脚本里的任何编译器调用都必须加 `timeout`。**
+
+反面教材：第 R25 / R28 两轮为了“看一眼 `118_switch` 为什么失败”，脚本里写了裸调用
+
+```bash
+~/cxx/cxx -w -o /tmp/x_118_switch 118_switch.c     # 没有 timeout
+```
+
+而当时 cxx 正好在那个用例的超大 `case ... ` 区间上**死循环展开**。于是 WSL 里留下两个
+`cxx ... -cc1` 进程，各占满一个核，分别跑了 **6 小时 10 分**和 **3 小时 11 分**，直到人来问
+“后台有一个 6 小时的进程是什么”才被发现。更要命的是：它们加载的是**修复之前**的二进制映像，
+所以后来把死循环修好，对这两个进程毫无作用。
+
+规定：
+
+```bash
+timeout 60 ~/cxx/cxx ...        # 单文件编译、最小复现
+timeout 600 bash doc/tcctests.sh ./cxx
+timeout 3000 bash doc/probes.sh ./cxx
+timeout 7200 bash doc/realworld.sh ./cxx
+```
+
+长跑一律 `timeout` 包住并由后台作业跑；**不要把长命令的输出接给 `tail`**（会没有输出可看），
+写进 `/tmp/*.log` 之后再看。
+
+**（二）`job_kill` 之后要复查 WSL 侧的进程：包装进程被杀 ≠ 子进程被杀。**
+
+同一事件里，第 R28 轮那次（作业 `pwsh-272`）我确实执行过取消，日志也回了 “killed”，
+但被终止的只是 **PowerShell 侧的包装进程**；`wsl -d Ubuntu -- bash -lc "..."` 那棵进程树
+（`bash → cxx → cxx -cc1`）已经和它脱开，继续跑。第 R25 轮那次（`pwsh-174`）甚至没人注意到
+它还挂在后台 —— 它在“完成”通知里才现身。
+
+规定：取消作业之后，按下面这套动作确认，再继续下一件事。
+
+```bash
+# 1) 看有没有长跑残留（按存活时间倒序）
+ps -u memory -o pid,ppid,etimes,pcpu,stat,cmd --sort=-etimes | head -20
+
+# 2) 先 TERM 脚本包装进程，再 KILL 它派生的编译器，最后复查
+kill -TERM <bash wrapper pid>
+kill -KILL <cxx / cxx -cc1 pid>
+ps -u memory -o pid,etimes,pcpu,cmd --sort=-etimes | grep -E 'cxx|probes|realworld|tcctests' | grep -v grep || echo '(clean)'
+uptime      # 负载应当回落
+```
+
+排查时的判据：`etimes`（存活秒数）远大于该作业的预期耗时、`pcpu` 贴近 100%、命令行里是你
+**早先**那轮脚本生成的临时输出路径（`/tmp/x_118_switch`、`/tmp/y118` 这种），三条同时成立
+就是僵尸，不必再等。
+
+代价说明：这两个进程与后来的每一轮全量探针**抢核**，是前几轮扫描偏慢的直接原因；负载从
+`~3.1` 回落到 `~1` 也印证了这一点。
 
 ---
 

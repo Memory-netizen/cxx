@@ -3175,6 +3175,258 @@ static report_fn usage_routine __attribute__((noreturn));
 int main(void) { return usage_routine == 0 ? 0 : 1; }
 EOF
 
+# --- a GNU aligned attribute on a member ---------------------------
+# `__attribute__((aligned(16))) int b;` is a member attribute: it raises the
+# member's alignment and with it the record's. cxx parsed it and dropped it --
+# the member loop passed NULL for both the alignment and the attribute list of
+# declspecs, so only the post-declarator spelling reached the member. An
+# explicitly aligned bit-field also starts on its alignment (gcc puts
+# `__attribute__((aligned(16))) char a : 4;` at byte 16), while `_Alignas`
+# stays refused on a bit-field, which is what gcc does too.
+cat > "$tmp/memalign.c" <<'EOF'
+#include <stdio.h>
+#define A __attribute__((aligned(16)))
+struct S1 { int x : 12; char y : 6; long long z : 63; A char a : 4; long long b : 2; };
+struct S2 { char a; A int b; };
+struct S3 { char a; int b; };
+struct S4 { A char a : 4; };
+int main(void) {
+    if (__alignof__(struct S1) != 16 || sizeof(struct S1) != 32) {
+        printf("S1 %d %d\n", __alignof__(struct S1), (int)sizeof(struct S1));
+        return 1;
+    }
+    if (__alignof__(struct S2) != 16 || sizeof(struct S2) != 32) {
+        printf("S2 %d %d\n", __alignof__(struct S2), (int)sizeof(struct S2));
+        return 2;
+    }
+    if (__alignof__(struct S3) != 4 || sizeof(struct S3) != 8) {
+        printf("S3 %d %d\n", __alignof__(struct S3), (int)sizeof(struct S3));
+        return 3;
+    }
+    if (__alignof__(struct S4) != 16 || sizeof(struct S4) != 16) {
+        printf("S4 %d %d\n", __alignof__(struct S4), (int)sizeof(struct S4));
+        return 4;
+    }
+    /* the aligned bit-field really is at byte 16 of S1 */
+    struct S1 s;
+    unsigned char *q = (unsigned char *)&s;
+    for (int i = 0; i < (int)sizeof s; i++) q[i] = 0;
+    s.a = -1;
+    if (q[16] != 0x0f) { printf("a at %d = %02x\n", 16, q[16]); return 5; }
+    for (int i = 0; i < 16; i++)
+        if (q[i]) { printf("stray byte %d = %02x\n", i, q[i]); return 6; }
+    /* the post-declarator spelling must keep working */
+    struct S5 { char a; int b __attribute__((aligned(16))); };
+    if (__alignof__(struct S5) != 16 || sizeof(struct S5) != 32) {
+        printf("S5 %d %d\n", __alignof__(struct S5), (int)sizeof(struct S5));
+        return 7;
+    }
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/memalign" "$tmp/memalign.c" > "$tmp/log" 2>&1 && "$tmp/memalign"; then
+    echo "testing a GNU aligned attribute on a member ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a GNU aligned attribute on a member ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# `_Alignas` on a bit-field is still an error, as in gcc.
+cat > "$tmp/alnbf.c" <<'EOF'
+struct S { _Alignas(16) char a : 4; };
+EOF
+if "$compiler" -w -c -o "$tmp/alnbf.o" "$tmp/alnbf.c" > "$tmp/log" 2>&1; then
+    echo "testing _Alignas on a bit-field is refused ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+else
+    if grep -q "_Alignas' cannot be applied to a bit-field" "$tmp/log"; then
+        echo "testing _Alignas on a bit-field is refused ... passed"
+        n_pass=$((n_pass + 1))
+    else
+        echo "testing _Alignas on a bit-field is refused ... FAILED (wrong message)"
+        sed 's/^/    /' "$tmp/log" | head -3
+        n_fail=$((n_fail + 1))
+    fi
+fi
+
+# --- a bit-field that reaches past the widest unit ------------------
+# A packed record can put a 63-bit field at bit offset 2, so the field begins
+# in one eight-byte unit and ends in the next (bit 81). cxx chose a unit of
+# min_bytes_for_bits(bit_offset + width) bytes, but that helper stopped at 8,
+# so the unit was too small: the load's shift amount came out as
+# 64 - 63 - 2 = -1, which LLVM takes modulo 64, and the field read back as
+# 0xc000000000000000. The unit is a _BitInt past eight bytes now, and the
+# shift amounts come from the unit's width rather than its size (a _BitInt's
+# size is rounded up to what the target holds: _BitInt(72) has size 16).
+# tinycc's tests2/95_bitfields.c TEST 2 measures exactly this.
+cat > "$tmp/widebf.c" <<'EOF'
+#include <stdio.h>
+#include <string.h>
+struct __attribute__((packed)) S {
+    int x : 12;
+    char y : 6;
+    long long z : 63;
+    char a : 4;
+    long long b : 2;
+};
+static void dump(void *p, int s) {
+    for (int i = s; --i >= 0;)
+        printf("%02X", ((unsigned char *)p)[i]);
+    printf("\n");
+}
+int main(void) {
+    struct S s;
+    memset(&s, 0, sizeof s);
+    if (sizeof s != 11) { printf("size %d\n", (int)sizeof s); return 1; }
+    s.x = -1, s.y = -1, s.z = -1, s.a = -1, s.b = -1;
+    printf("set  : "), dump(&s, sizeof s);
+    s.x = 3, s.y = 30, s.z = 0x123456789abcdef0LL, s.a += 5, ++s.a, s.b = 2;
+    printf("value: "), dump(&s, sizeof s);
+    if (s.x != 3 || s.y != 30 || s.z != 0x123456789abcdef0LL || s.a != 5 || s.b != -2) {
+        printf("read : %d %d %llx %d %d\n", s.x, s.y, (unsigned long long)s.z, s.a, s.b);
+        return 2;
+    }
+    /* the same field through a pointer, and a second field past the first */
+    struct S *p = &s;
+    if (p->z != 0x123456789abcdef0LL) { printf("ptr: %llx\n", (unsigned long long)p->z); return 3; }
+    p->z = -1;
+    if (p->z != -1) { printf("neg: %llx\n", (unsigned long long)p->z); return 4; }
+    if (p->x != 3) { printf("neighbour: %d\n", p->x); return 5; }
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/widebf" "$tmp/widebf.c" > "$tmp/log" 2>&1 && "$tmp/widebf"; then
+    echo "testing a bit-field past the widest unit ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a bit-field past the widest unit ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- pointer minus an unsigned integer -----------------------------
+# The integer operand of a pointer subtraction is converted to a ptrdiff_t
+# before the subtraction; cxx negated it in its own type and then widened the
+# result by its (unsigned) type, so the offset came out as 2**32 - n. Found
+# through tinycc: its tcc_eh_frame_hdr() does `cie = rd - cie_offset + 4` with
+# an `unsigned int cie_offset`, and the cxx-built tcc then read every CIE at a
+# wild address, counted no frame descriptors, wrote an empty .eh_frame_hdr,
+# and no longer reproduced itself (work item T2).
+cat > "$tmp/ptrsub.c" <<'EOF'
+#include <stdio.h>
+int main(void) {
+    static unsigned char buf[256];
+    unsigned char *data = buf;
+    unsigned char *rd = data + 56;
+    unsigned int u = 28;
+    int s = 28;
+    unsigned long ul = 28;
+    if ((long)((rd - u) - data) != 28) { printf("unsigned int: %ld\n", (long)((rd - u) - data)); return 1; }
+    if ((long)((rd - s) - data) != 28) { printf("int: %ld\n", (long)((rd - s) - data)); return 2; }
+    if ((long)((rd - ul) - data) != 28) { printf("unsigned long: %ld\n", (long)((rd - ul) - data)); return 3; }
+    if ((long)((rd - u + 4) - data) != 32) { printf("then +4: %ld\n", (long)((rd - u + 4) - data)); return 4; }
+    /* and the value must be usable as an address */
+    buf[56 - 28] = 9;
+    unsigned char *at = rd - u;
+    if (*at != 9) { printf("deref: %d\n", *at); return 5; }
+    /* the same shape one past the end, as a loop bound */
+    unsigned char *end = data + 100;
+    long n = 0;
+    for (unsigned char *q = rd - u; q < end; q += 8) n++;
+    if (n != 9) { printf("loop: %ld\n", n); return 6; }
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/ptrsub" "$tmp/ptrsub.c" > "$tmp/log" 2>&1 && "$tmp/ptrsub"; then
+    echo "testing pointer minus an unsigned integer ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing pointer minus an unsigned integer ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- an attribute anywhere in a declarator -------------------------
+# GNU allows the attribute between the type and the `*`, or between the `(`
+# of a nested declarator and its own declarator -- tinycc's
+# tests2/82_attribs_position.c is written to check exactly that, with
+# `int(ATTR *)(void)`. cxx read the attribute as part of the type and then
+# asked for the `)` it was looking at.
+cat > "$tmp/attrib.c" <<'EOF'
+#define ATTR __attribute__((__noinline__))
+static int actual_function(void) { return 42; }
+int main(void) {
+    void *fp = &actual_function;
+    int a = ((ATTR int (*)(void))fp)();
+    int b = ((int(ATTR *)(void))fp)();
+    if (a != 42 || b != 42)
+        return 1;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/attrib" "$tmp/attrib.c" > "$tmp/log" 2>&1 && "$tmp/attrib"; then
+    echo "testing an attribute in the middle of a declarator ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing an attribute in the middle of a declarator ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a range designator evaluates its initializer once ----------------
+# `int dd[] = {[0 ... 1] = ++c, [2 ... 3] = ++c}` leaves 1 1 2 2: gcc reads
+# the expression once per range and gives every element of the range that
+# value. cxx read it once per element and left 1 2 3 4. The evaluation hangs
+# on the element rather than on the element's initializer, so a later
+# designator overwriting that element cannot take it away -- which is what
+# tinycc's tests2/90_struct-init.c does with `[1 ... 2] = &sys_ni` followed
+# by `[1] = 0`, and what made the second element of that range read an
+# unwritten temporary and call through whatever was on the stack.
+cat > "$tmp/range.c" <<'EOF'
+#include <stdio.h>
+typedef void (*fptr)(void);
+static int calls;
+static void one(void) { calls += 1; }
+static void two(void) { calls += 2; }
+static void ni(void) { calls += 100; }
+int main(void) {
+    int c = 0;
+    int dd[] = {[0 ... 1] = ++c, [2 ... 3] = ++c};
+    if (c != 2) { printf("c=%d\n", c); return 1; }
+    if (dd[0] != 1 || dd[1] != 1 || dd[2] != 2 || dd[3] != 2) {
+        printf("dd=%d %d %d %d\n", dd[0], dd[1], dd[2], dd[3]);
+        return 2;
+    }
+    /* the value comes from a variable, so the temporary holds a value and
+       not the variable's address */
+    int elt = 7;
+    struct T { unsigned char s[16]; unsigned char a; };
+    struct T t = {{[1 ... 5] = 9, [6 ... 10] = elt, [4 ... 7] = elt + 1}, 1};
+    if (t.s[0] != 0 || t.s[1] != 9 || t.s[4] != 8 || t.s[7] != 8 || t.s[8] != 7 ||
+        t.s[11] != 0 || t.a != 1) {
+        printf("s=%d %d %d %d %d\n", t.s[1], t.s[4], t.s[7], t.s[8], t.s[11]);
+        return 3;
+    }
+    /* a later designator overrides one element of the range, and the
+       evaluation still happens: the other elements keep its value */
+    const fptr tab[4] = {[0 ... 3] = ni, [1] = 0, [2] = one};
+    for (int i = 0; i < 4; i++)
+        if (tab[i]) tab[i]();
+    if (calls != 201) { printf("calls=%d\n", calls); return 4; }
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/range" "$tmp/range.c" > "$tmp/log" 2>&1 && "$tmp/range"; then
+    echo "testing a range designator's single evaluation ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a range designator's single evaluation ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
 # --- a VLA's storage is released on every way out of its scope --------
 # C11 6.2.4p6: the storage lasts until the block is left, and goto, break and
 # continue leave it just as falling off the end does. cxx released it with a

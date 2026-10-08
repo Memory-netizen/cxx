@@ -57,7 +57,13 @@ static Node *assign(Token **rest, Token *tok);
 static Node *cast(Token **rest, Token *tok);
 static Node *new_excast(Node *expr, Type *ty, Token *tok);
 static int64_t sizeof_value(Type *ty);
+static Node *init_rvalue(Node *expr);
 static void designation(Token **rest, Token *tok, Initializer *init);
+static void designation_range(Token **rest, Token *tok, Initializer *init, int begin, int end);
+// True while a static initializer is being parsed: its expressions have to be
+// constants, so a range designator has no temporary to evaluate into -- and
+// needs none, since every element gets the same constant.
+static bool static_init_ctx;
 static int64_t eval(Node *node);
 static int64_t eval2(Node *node, uint32_t *sym);
 static int64_t eval_rval(Node *node, uint32_t *sym);
@@ -928,7 +934,16 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
     if (is_arith(lhs->ty) && is_arith(rhs->ty)) return new_binary(ND_SUB, lhs, rhs, tok);
 
     // ptr - num
-    if (is_pointer(lhs->ty) && is_integer(rhs->ty)) return new_add(lhs, new_unary(ND_NEG, rhs, rhs->tok), tok);
+    if (is_pointer(lhs->ty) && is_integer(rhs->ty)) {
+        // The index of a pointer subtraction is a ptrdiff_t. Negating in the
+        // operand's own type and widening afterwards loses the sign for an
+        // unsigned operand: `unsigned char *p; unsigned int n = 28;` gave
+        // `p + 4294967268` because the negated i32 was zero-extended to the
+        // index width. Converted first, the negation happens there.
+        lvalue_convert(&rhs);
+        new_imcast(&rhs, T.ty_long);
+        return new_add(lhs, new_unary(ND_NEG, rhs, rhs->tok), tok);
+    }
 
     if (!is_pointer(lhs->ty) || !is_pointer(rhs->ty) ||
         !is_compatible(type_unqual(lhs->ty->base), type_unqual(rhs->ty->base)))
@@ -990,6 +1005,9 @@ static Type *pointers(Token **rest, Token *tok, Type *ty) {
 // ArrAbsDeclr  ::= DirAbsDeclr? ArrDimen
 // FuncAbsDeclr ::= DirAbsDeclr? "(" ParamList? ")"
 static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool is_param) {
+    // An attribute may sit anywhere a declarator may: `int(ATTR *)(void)` is
+    // a pointer to a function, with the attribute between the two.
+    tok = skip_leading_attrs(tok);
     ty = pointers(&tok, tok, ty);
 
     if (tok->kind == TK_LPAREN &&
@@ -1226,6 +1244,57 @@ static Member *struct_designator(Token **rest, Token *tok, Type *ty) {
     return NULL;
 }
 
+// The elements an array range designator covers. The initializer is read
+// once and every element gets the value it produced: gcc gives
+// `{[0 ... 1] = ++c}` the pair 1 1 rather than 1 2, which is what tinycc's
+// tests2/90_struct-init.c measures. The first element carries the assignment
+// and the others read the temporary it stored into.
+static void designation_range(Token **rest, Token *tok, Initializer *init, int begin, int end) {
+    Token *tok2 = tok;
+    if (begin < end && !static_init_ctx) {
+        Initializer *first = init->child[begin];
+        designation(&tok2, tok, first);
+        if (first->expr) {
+            Node *val = init_rvalue(first->expr);
+            Sym *tmp = new_lvar(intern("", 0), val->ty);
+            Node *dst = new_var_node(tmp, val->tok);
+            add_type(dst);
+            Node *store = new_binary(ND_AS, dst, val, val->tok);
+            store->ty = val->ty;
+            first->pre = store;
+            for (int i = begin; i <= end; i++) {
+                Node *use = new_var_node(tmp, first->tok);
+                add_type(use);
+                lvalue_convert(&use);
+                init->child[i]->expr = use;
+                init->child[i]->is_inited = true;
+            }
+            *rest = tok2;
+            return;
+        }
+    }
+    for (int i = begin; i <= end; i++) designation(&tok2, tok, init->child[i]);
+    *rest = tok2;
+}
+
+// A scalar initializer expression as a value. cxx keeps the lvalue underneath
+// the conversion the target type asked for, so the load belongs here rather
+// than at the assignment site -- which is where a hand-built assignment would
+// otherwise store an address.
+static Node *init_rvalue(Node *expr) {
+    add_type(expr);
+    Node *lval = expr;
+    if (lval->kind == ND_IMCAST && !lval->is_lvalue) lval = lval->lhs;
+    if (lval->is_lvalue && is_scalar(lval->ty)) {
+        lvalue_convert(&lval);
+        if (expr->kind == ND_IMCAST)
+            expr->lhs = lval;
+        else
+            expr = lval;
+    }
+    return expr;
+}
+
 // Desig ::= "[" (ConstExp | ConstRangeExp) "]" | "." Ident
 // The obsolete GNU field designator `a: 1`, which the initializer parsers
 // have to recognize before calling designation().
@@ -1237,7 +1306,7 @@ static void designation(Token **rest, Token *tok, Initializer *init) {
         int begin, end;
         array_designator(&tok, tok, init->ty, &begin, &end);
         Token *tok2;
-        for (int i = begin; i <= end; i++) designation(&tok2, tok, init->child[i]);
+        designation_range(&tok2, tok, init, begin, end);
 
         array_initializer2(rest, tok2, init, end + 1, true);
         return;
@@ -1310,7 +1379,7 @@ static void array_initializer1(Token **rest, Token *tok, Initializer *init) {
             array_designator(&tok, tok, init->ty, &begin, &end);
 
             Token *tok2;
-            for (int j = begin; j <= end; j++) designation(&tok2, tok, init->child[j]);
+            designation_range(&tok2, tok, init, begin, end);
             tok = tok2;
             i = end;
             continue;
@@ -1648,6 +1717,8 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
         for (int i = 0; i < ty->len; i++) {
             InitDesg desg2 = {desg, i, NULL, NULL};
             Node *rhs = create_lvar_init(init->child[i], ty->base, &desg2, tok);
+            Node *pre = init->child[i]->pre;
+            if (pre) rhs = rhs->kind == ND_NOP ? pre : new_binary(ND_COMMA, pre, rhs, tok);
             if (rhs->kind != ND_NOP) node = new_binary(ND_COMMA, node, rhs, tok);
         }
         return node;
@@ -1678,19 +1749,7 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
     // address-based memcpy form). The target conversion may wrap the
     // expression in ND_IMCAST; the lvalue (and the constexpr fold)
     // lives underneath.
-    if (is_scalar(init->ty)) {
-        add_type(rhs);
-        Node *lval = rhs;
-        if (lval->kind == ND_IMCAST && !lval->is_lvalue) lval = lval->lhs;
-        // Only scalar lvalues load (arrays decay to their address).
-        if (lval->is_lvalue && is_scalar(lval->ty)) {
-            lvalue_convert(&lval);
-            if (rhs->kind == ND_IMCAST)
-                rhs->lhs = lval;
-            else
-                rhs = lval;
-        }
-    }
+    if (is_scalar(init->ty)) rhs = init_rvalue(rhs);
     Node *node = new_binary(ND_INIT, lhs, rhs, tok);
     add_type(node);
     return node;
@@ -1872,7 +1931,10 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
 // embedded to .data section. It is a compile error if an
 // initializer list contains a non-constant expression.
 static void gvar_initializer(Token **rest, Token *tok, Sym *var) {
+    bool outer_static = static_init_ctx;
+    static_init_ctx = true;
     Initializer *init = initializer(rest, tok, var->ty, &var->ty);
+    static_init_ctx = outer_static;
 
     eval_gvar_data(init, var->ty);
     var->init = init;
@@ -6812,7 +6874,19 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             continue;
         }
         int align = 0;
-        Type *basety = declspecs(&tok, tok, NULL, &align, NULL, NULL);
+        int mem_funcspec = 0;
+        Attr *mem_attrs = NULL;
+        Type *basety = declspecs(&tok, tok, NULL, &align, &mem_funcspec, &mem_attrs);
+        // An attribute in the specifier position belongs to the member:
+        // `__attribute__((aligned(16))) int b;` and
+        // `__attribute__((aligned(16))) char a : 4;` both raise the member's
+        // alignment, and with it the record's. Both out-parameters used to be
+        // NULL here, so the attribute was parsed and dropped -- only the
+        // post-declarator spelling reached mem->ty->attrs.
+        // Only `_Alignas` is refused on a bit-field; the GNU attribute is
+        // accepted, so remember which value came from where.
+        int alignas_align = align;
+        attr_decl_apply(mem_attrs, &mem_funcspec, &align, true);
         int i = 0;
         Token *start = tok;
 
@@ -6838,7 +6912,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             Member *mem = emalloc(sizeof(Member));
 
             if (match(&tok, tok, TK_COLON)) {
-                if (align) error(start, "'_Alignas' cannot be applied to a bit-field");
+                if (alignas_align) error(start, "'_Alignas' cannot be applied to a bit-field");
                 mem->ty = basety;
                 if (is_memconst(basety)) ty->qual |= Q_MEMCONST;
                 mem->align = mem->ty->align;
@@ -6881,7 +6955,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             }
 
             if (match(&tok, tok, TK_COLON)) {
-                if (align) error(start, "'_Alignas' cannot be applied to a bit-field");
+                if (alignas_align) error(start, "'_Alignas' cannot be applied to a bit-field");
                 mem->is_bitfield = true;
                 mem->bit_width = const_expr(&tok, tok);
                 if (mem->bit_width == 0) error(mem_name, "zero width for bit-field ‘%s’", str(mem_name->id));
@@ -6908,14 +6982,24 @@ static Type *get_unit_ty(int bytes, bool is_unsigned) {
     if (bytes == 2) return is_unsigned ? T.ty_ushort : T.ty_short;
     if (bytes == 4) return is_unsigned ? T.ty_uint : T.ty_int;
     // 8 bytes on every target: long is only 4 bytes on ILP32.
-    return is_unsigned ? T.ty_ullong : T.ty_llong;
+    if (bytes == 8) return is_unsigned ? T.ty_ullong : T.ty_llong;
+    // Wider than anything the target has: a packed field can start in one
+    // eight-byte unit and end in the next (a 63-bit field at bit offset 2
+    // reaches bit 65), and _BitInt is what reaches past eight bytes.
+    // bit_offset is at most 7 and a field is at most 64 bits, so 9 bytes is
+    // as far as this goes.
+    return bitint[bytes * 8][is_unsigned];
 }
 
 static int min_bytes_for_bits(int bits) {
     if (bits <= 8) return 1;
     if (bits <= 16) return 2;
     if (bits <= 32) return 4;
-    return 8;
+    if (bits <= 64) return 8;
+    // The field crosses an eight-byte boundary: the unit has to cover all of
+    // it. Stopping at 8 here made the unit too small for the field, and the
+    // load shifted by a negative amount.
+    return (bits + 7) / 8;
 }
 
 static void layout_struct(Type *ty, bool is_union) {
@@ -6983,6 +7067,10 @@ static void layout_struct(Type *ty, bool is_union) {
                 // The field must not cross its unit's boundary.
                 while (s + width > (s / unit + 1) * unit) s = (s / unit + 1) * unit;
             }
+            // An explicitly aligned bit-field starts where its alignment
+            // says: gcc puts `__attribute__((aligned(16))) char a : 4;` at
+            // byte 16 of the record, not directly after the field before it.
+            if (mem->is_align && mem_align > 1) s = ALIGN_UP(s, (uint64_t)mem_align * 8);
             mem->offset = s / 8;
             mem->bit_offset = s % 8;
             // The access unit is the smallest one covering the field's
