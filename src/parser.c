@@ -64,6 +64,21 @@ static void designation_range(Token **rest, Token *tok, Initializer *init, int b
 // constants, so a range designator has no temporary to evaluate into -- and
 // needs none, since every element gets the same constant.
 static bool static_init_ctx;
+
+// Statements a function runs before its body. A variable length array's
+// declaration needs a slot of its own (see the VLA case in the declarator
+// loop) and that slot starts NULL; the prologue is the one place outside any
+// loop where that can be stored. Filled while the body is parsed, prepended
+// to it when the definition is complete.
+static Node *fn_prologue_first, *fn_prologue_last;
+
+// The reuse guards of the VLA declarations in the function being parsed, and
+// how many there were. With a single one the guard stands; with more the
+// objects of the other declarations are alive behind it, so the guards are
+// turned off once the count is known (see the end of a function definition).
+static Node **fn_vla_guards;
+static int fn_vla_guard_num;
+static int fn_vla_decls;
 static int64_t eval(Node *node);
 static int64_t eval2(Node *node, uint32_t *sym);
 static int64_t eval_rval(Node *node, uint32_t *sym);
@@ -899,6 +914,8 @@ static void swap(Node **lhs, Node **rhs) {
     *lhs = *rhs;
     *rhs = tmp;
 }
+
+static Node *new_num(int64_t val, Token *tok);
 
 static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
     add_type(lhs);
@@ -4800,7 +4817,13 @@ static int64_t eval2(Node *node, uint32_t *sym) {
             // and keeping this test also preserves the accepted form
             // `int *p = g.a.a;` where the member is an array.
             if (node->ty->kind != TY_ARRAY) error(node->tok, "invalid initializer");
-            return eval_rval(node->lhs, sym) + node->member->offset;
+            // A member's array begins at the member's offset; one a
+            // subscript produced begins at the element's stride. Only the
+            // first has a member -- reading one off an ND_SUBACCESS is what
+            // used to crash on `int m[2][3]; int *p = m[1];`.
+            int64_t base = eval_rval(node->lhs, sym);
+            if (node->kind == ND_MEMBER) return base + node->member->offset;
+            return base + eval(node->rhs) * node->ty->size;
         }
         case ND_VAR:
             // A constexpr variable with a scalar constant initializer is
@@ -5131,6 +5154,57 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
                 Node *save_expr = new_binary(ND_AS, sp, save, tok);
                 save_expr->ty = T.ty_voidptr;
                 cur = cur->next = save_expr;
+            }
+            // Re-entering the declaration without leaving the scope -- a
+            // jump back into the block, which is tinycc's 122_vla_reuse --
+            // would otherwise walk the stack down one array per pass. The
+            // first execution records where this object starts, and later
+            // ones put the stack pointer back there before allocating, so
+            // the address depends on the size alone: the same shape gcc and
+            // clang get by hoisting the array into the frame.
+            Sym *vla_base = new_lvar(intern("", 0), T.ty_voidptr);
+            {
+                Node *zero = new_node(ND_NULLPTR, tok);
+                zero->ty = T.ty_voidptr;
+                Node *dst = new_var_node(vla_base, tok);
+                add_type(dst);
+                Node *init = new_binary(ND_AS, dst, zero, tok);
+                init->ty = T.ty_voidptr;
+                Node *st = new_unary(ND_EXPR_STMT, init, tok);
+                if (fn_prologue_last)
+                    fn_prologue_last = fn_prologue_last->next = st;
+                else
+                    fn_prologue_first = fn_prologue_last = st;
+            }
+            {
+                Node *test = new_var_node(vla_base, tok);
+                add_type(test);
+                lvalue_convert(&test);
+                Node *slot = new_var_node(vla_base, tok);
+                add_type(slot);
+                lvalue_convert(&slot);
+                Node *back = new_unary(ND_SP_RESTORE, slot, tok);
+                back->ty = T.ty_void;
+                Node *iff = new_node(ND_IF, tok);
+                iff->cond = test;
+                iff->then = new_unary(ND_EXPR_STMT, back, tok);
+                cnt_blk(2);  // gen_if: then / merge
+                if (!fn_vla_guards)
+                    fn_vla_guards = vnew(4, sizeof(Node *));
+                else
+                    fn_vla_guards = vgrow(fn_vla_guards, fn_vla_guard_num + 4);
+                fn_vla_guards[fn_vla_guard_num++] = iff;
+                fn_vla_decls++;
+                cur = cur->next = iff;
+            }
+            {
+                Node *save = new_node(ND_SP_SAVE, tok);
+                save->ty = T.ty_voidptr;
+                Node *dst = new_var_node(vla_base, tok);
+                add_type(dst);
+                Node *keep = new_binary(ND_AS, dst, save, tok);
+                keep->ty = T.ty_voidptr;
+                cur = cur->next = keep;
             }
             // The size comes from the counters the bound statements above
             // wrote, not from the bounds themselves: those statements have
@@ -7070,7 +7144,10 @@ static void layout_struct(Type *ty, bool is_union) {
             // An explicitly aligned bit-field starts where its alignment
             // says: gcc puts `__attribute__((aligned(16))) char a : 4;` at
             // byte 16 of the record, not directly after the field before it.
-            if (mem->is_align && mem_align > 1) s = ALIGN_UP(s, (uint64_t)mem_align * 8);
+            // The floor counts too -- under `#pragma pack(push,1)` the
+            // alignment is capped to one byte and the field still moves to
+            // the next byte boundary.
+            if (mem->is_align) s = ALIGN_UP(s, (uint64_t)mem_align * 8);
             mem->offset = s / 8;
             mem->bit_offset = s % 8;
             // The access unit is the smallest one covering the field's
@@ -8480,7 +8557,24 @@ static Token *external_declaration(Token *tok) {
 
             tmp3->var = tmp2->var = tmp->var = new_string_literal(var->id, fn_name);
 
+            fn_prologue_first = fn_prologue_last = NULL;
+            fn_vla_guard_num = 0;
+            fn_vla_decls = 0;
             var->body = compound_stmt2(&tok, tok, true);
+            // More than one variable length array in the function: the reuse
+            // guard of each would free the objects of the others, which are
+            // still alive. Only a lone one keeps its guard.
+            if (fn_vla_decls > 1) {
+                for (int i = 0; i < fn_vla_guard_num; i++) {
+                    fn_vla_guards[i]->cond = new_num(0, tok);
+                    add_type(fn_vla_guards[i]->cond);
+                }
+            }
+            if (fn_prologue_first) {
+                fn_prologue_last->next = var->body->body;
+                var->body->body = fn_prologue_first;
+                fn_prologue_first = fn_prologue_last = NULL;
+            }
 
             var->locals = reverse_list(Sym, locals, next);
 

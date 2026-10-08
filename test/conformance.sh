@@ -3175,6 +3175,350 @@ static report_fn usage_routine __attribute__((noreturn));
 int main(void) { return usage_routine == 0 ? 0 : 1; }
 EOF
 
+# --- -funsigned-char / -fsigned-char keep the macros in step -------
+# The switch is implementation-defined (6.2.5) and has three visible effects:
+# plain char's signedness, the __CHAR_UNSIGNED__ macro, and <limits.h>'s
+# CHAR_MIN/CHAR_MAX -- glibc derives the last from the macro. cxx used to flip
+# only the first, so `-funsigned-char` reported CHAR_MIN as -128; and it
+# rejected -fno-signed-char, which both references read as -funsigned-char.
+# `signed char` and `unsigned char` are separate types and must not move.
+cat > "$tmp/charsign.c" <<'EOF'
+#include <stdio.h>
+#include <limits.h>
+int main(void) {
+    char c = -1;
+    signed char sc = -1;
+    unsigned char uc = 255;
+#ifdef __CHAR_UNSIGNED__
+    int macro = 1;
+#else
+    int macro = 0;
+#endif
+    printf("%s %d %d %d %d %d\n", c < 0 ? "s" : "u", macro, (int)CHAR_MIN, (int)CHAR_MAX,
+           (int)sc, (int)uc);
+    return 0;
+}
+EOF
+charsign_case() { # charsign_case <flags> <expected>
+    rm -f "$tmp/charsign"
+    if "$compiler" $1 -w -o "$tmp/charsign" "$tmp/charsign.c" > "$tmp/log" 2>&1 &&
+       [ "$("$tmp/charsign")" = "$2" ]; then
+        echo "testing char signedness with '$1' ... passed"
+        n_pass=$((n_pass + 1))
+    else
+        echo "testing char signedness with '$1' ... FAILED (wanted '$2', got '$("$tmp/charsign" 2>/dev/null)')"
+        sed 's/^/    /' "$tmp/log" | head -3
+        n_fail=$((n_fail + 1))
+    fi
+}
+charsign_case "-fsigned-char"   "s 0 -128 127 -1 255"
+charsign_case "-funsigned-char" "u 1 0 255 -1 255"
+charsign_case "-fno-signed-char" "u 1 0 255 -1 255"
+
+# --- a constant condition keeps only the arm it takes ---------------
+# cxx emitted both arms. The arm not taken can hold an asm whose operand is
+# not a constant for an immediate constraint, and LLVM validates every
+# function before it optimises, so it refused the whole translation unit even
+# though nothing could reach it. ffmpeg writes exactly this
+# (`if (__builtin_constant_p(s)) asm(.. "i" ..) else asm(.. "c" ..)`, in
+# libavcodec/x86/mathops.h) and 176 of its objects stopped there. gcc emits
+# only the arm taken.
+#
+# A function that defines a label keeps both arms: a goto, asm goto included,
+# can still name a label inside the one that would go.
+cat > "$tmp/constcond.c" <<'EOF'
+#include <stdio.h>
+static int taken(void) {
+    int x = 1;
+    if (0) { x = 100; }
+    if (1) { x = x + 1; }
+    if (0) { x = 100; } else { x = x + 1; }
+    return x;
+}
+/* the ffmpeg shape: only the arm with the constant operand may survive */
+static inline int shift_it(int a, int s) {
+    if (__builtin_constant_p(s))
+        __asm__("shrl %1, %0\n\t" : "+r"(a) : "i"(-s & 0x1F));
+    else
+        __asm__("shrl %1, %0\n\t" : "+r"(a) : "c"((unsigned char)(-s)));
+    return a;
+}
+static int with_label(int x) {
+    if (0) { goto out; }
+    x += 1;
+    return x;
+out:
+    return 42;
+}
+int main(void) {
+    /* -s & 0x1F for s = 7 is 25, so 0x80u >> 25 is 0 and (1u << 25) >> 25 is
+       1; both references print these. */
+    if (taken() != 3) return 1;
+    if (shift_it(0x80u, 7) != 0) return 2;
+    if (with_label(1) != 2) return 3;
+    if (shift_it(1u << 25, 7) != 1) return 4;
+    if (shift_it(0xffu, 4) != 0) return 5;
+    printf("%d %d %d\n", taken(), shift_it(0x80u, 7), with_label(1));
+    printf("%d %d\n", shift_it(1u << 25, 7), shift_it(0xffu, 4));
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/constcond" "$tmp/constcond.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/constcond")" = "3 0 2
+1 0" ]; then
+    echo "testing a constant condition keeps only the arm it takes ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a constant condition keeps only the arm it takes ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- the address of an array a subscript produced -------------------
+# A static initializer may name the row of a multidimensional array:
+# `static int *p = m[1];`. The constant evaluator's shared ND_SUBACCESS /
+# ND_MEMBER tail read `node->member->offset` unconditionally, and a subscript
+# has no member -- so this dereferenced NULL and killed cxx with SIGSEGV.
+# It is the crash behind 27 of FFmpeg's failing objects, whose MPEG
+# translation units build static tables out of such rows.
+cat > "$tmp/rowaddr.c" <<'EOF'
+#include <stdio.h>
+static int m[2][3] = {{1, 2, 3}, {4, 5, 6}};
+static int *p = m[1];
+static int *r = m[0];
+static int (*q)[3] = &m[0];
+static char c[2][4] = {"abc", "def"};
+static char *cp = c[1];
+struct S { int a[3]; };
+static struct S s = {{7, 8, 9}};
+static int *t = s.a;
+int main(void) {
+    if (p != m[1] || r != m[0] || t != s.a || cp != c[1]) return 1;
+    if (p[0] != 4 || p[2] != 6 || r[0] != 1) return 2;
+    if (cp[0] != 'd' || cp[2] != 'f') return 3;
+    if (t[0] != 7 || (*q)[1] != 2) return 4;
+    printf("%d %d %d %s\n", p[0], r[0], t[2], cp);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/rowaddr" "$tmp/rowaddr.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/rowaddr")" = "4 1 9 def" ]; then
+    echo "testing the address of an array a subscript produced ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the address of an array a subscript produced ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a sign difference between pointed-to types ---------------------
+# gcc's and clang's -Wpointer-sign, which is in -Wall: the pointed-to types
+# differ only in signedness, and both references convert and carry on. cxx
+# refused the file. FFmpeg has two of these and its build stopped on them
+# (av_strcasecmp(standard.name, s->standard) with __u8[32] against a
+# `const char *`, and av_fast_malloc(&c->y, &c->y_size, ...) with `int *`
+# against an `unsigned int *`).
+cat > "$tmp/ptrsign.c" <<'EOF'
+#include <stdio.h>
+static char *take(const char *s) { return (char *)s; }
+static int takeu(unsigned int *n) { return (int)*n; }
+int main(void) {
+    unsigned char u[4] = "abc";
+    int n = 5;
+    char *r = take(u);                 /* unsigned char * for const char * */
+    if (takeu(&n) != 5) return 1;      /* int * for unsigned int * */
+    if (r[0] != 'a') return 2;
+    return 0;
+}
+EOF
+if "$compiler" -Wpointer-sign -o "$tmp/ptrsign" "$tmp/ptrsign.c" > "$tmp/log" 2>&1 &&
+   "$tmp/ptrsign" && [ "$(grep -c 'differ in signedness' "$tmp/log")" = 2 ]; then
+    echo "testing a sign difference between pointed-to types ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a sign difference between pointed-to types ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# -Wno-pointer-sign silences it ...
+cat > "$tmp/ptrsign2.c" <<'EOF'
+void take(const char *s);
+int main(void) { unsigned char u[4] = "abc"; take(u); return 0; }
+EOF
+if "$compiler" -Wno-pointer-sign -c -o "$tmp/ptrsign2.o" "$tmp/ptrsign2.c" > "$tmp/log" 2>&1 &&
+   ! grep -q 'differ in signedness' "$tmp/log"; then
+    echo "testing -Wno-pointer-sign silences it ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -Wno-pointer-sign silences it ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# ... while a mismatch that is not a sign difference stays an error.
+cat > "$tmp/ptrbad.c" <<'EOF'
+void g(double *);
+int main(void) { int x = 0; g(&x); return 0; }
+EOF
+if "$compiler" -c -o "$tmp/ptrbad.o" "$tmp/ptrbad.c" > "$tmp/log" 2>&1; then
+    echo "testing a real pointer mismatch is still refused ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+elif grep -q 'incompatible types when passing argument' "$tmp/log"; then
+    echo "testing a real pointer mismatch is still refused ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a real pointer mismatch is still refused ... FAILED (wrong message)"
+    sed 's/^/    /' "$tmp/log" | head -3
+    n_fail=$((n_fail + 1))
+fi
+
+# --- packed and an aligned bit-field together ----------------------
+# `#pragma pack(push,1)` caps a member's alignment, but an explicitly aligned
+# bit-field still starts at the next boundary that alignment asks for -- one
+# byte, here. `long long z:63` ends at bit 81 and `a` moves to bit 88, so the
+# record is 12 bytes and not 11. tinycc's tests2/95_bitfields.c keeps its
+# "PACKED - WITH ALIGN" sections under exactly this pragma.
+cat > "$tmp/packalign.c" <<'EOF'
+#include <stdio.h>
+#pragma pack(push, 1)
+struct P {
+    int x : 12;
+    char y : 6;
+    long long z : 63;
+    __attribute__((aligned(16))) char a : 4;
+    long long b : 2;
+};
+#pragma pack(pop)
+struct Q {
+    int x : 12;
+    char y : 6;
+    long long z : 63;
+    __attribute__((aligned(16))) char a : 4;
+    long long b : 2;
+};
+struct R {
+    int x : 12;
+    char y : 6;
+    long long z : 63;
+    char a : 4;
+    long long b : 2;
+};
+int main(void) {
+    if (__alignof__(struct P) != 1 || sizeof(struct P) != 12) {
+        printf("P %d %d\n", __alignof__(struct P), (int)sizeof(struct P));
+        return 1;
+    }
+    if (__alignof__(struct Q) != 16 || sizeof(struct Q) != 32) {
+        printf("Q %d %d\n", __alignof__(struct Q), (int)sizeof(struct Q));
+        return 2;
+    }
+    if (__alignof__(struct R) != 8 || sizeof(struct R) != 24) {
+        printf("R %d %d\n", __alignof__(struct R), (int)sizeof(struct R));
+        return 3;
+    }
+    /* the field really is at byte 11 of P and byte 16 of Q */
+    struct P p;
+    unsigned char *q = (unsigned char *)&p;
+    for (int i = 0; i < (int)sizeof p; i++) q[i] = 0;
+    p.a = -1;
+    if (q[11] != 0x0f) { printf("P.a at 11 = %02x\n", q[11]); return 4; }
+    struct Q s;
+    q = (unsigned char *)&s;
+    for (int i = 0; i < (int)sizeof s; i++) q[i] = 0;
+    s.a = -1;
+    if (q[16] != 0x0f) { printf("Q.a at 16 = %02x\n", q[16]); return 5; }
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/packalign" "$tmp/packalign.c" > "$tmp/log" 2>&1 && "$tmp/packalign"; then
+    echo "testing packed with an aligned bit-field ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing packed with an aligned bit-field ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a VLA's address depends on its size alone ---------------------
+# Jumping back into the scope of a variable length array re-executes its
+# declaration without leaving the block, so a fresh alloca per pass walks the
+# stack down one array at a time. gcc and clang hoist the array into the frame
+# (they can bound `n % 100 + 1`); cxx records where the object started on the
+# first execution and puts the stack pointer back there before allocating, so
+# the address is a function of the size. tinycc's tests2/122_vla_reuse.c
+# measures exactly this: it records the address per size over the first
+# hundred passes and compares on every later one.
+cat > "$tmp/vlareuse.c" <<'EOF'
+#include <stdio.h>
+int main(void) {
+    int n = 0, first = 1;
+    int *p[101];
+    if (0) {
+    lab:;
+    }
+    int x[n % 100 + 1];
+    if (first == 0) {
+        if (&x[0] != p[n % 100 + 1]) {
+            printf("ERROR: %p %p\n", (void *)&x[0], (void *)p[n % 100 + 1]);
+            return 1;
+        }
+    } else {
+        p[n % 100 + 1] = &x[0];
+        first = n < 100;
+    }
+    x[0] = 1;
+    x[n % 100] = 2;
+    n++;
+    if (n < 20000)
+        goto lab;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/vlareuse" "$tmp/vlareuse.c" > "$tmp/log" 2>&1 && "$tmp/vlareuse"; then
+    echo "testing a VLA's address depends on its size alone ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a VLA's address depends on its size alone ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- several VLAs in one scope must not overlap --------------------
+# The reuse slot is only sound when the function declares a single VLA: with
+# two, restoring one declaration's base frees the object of the other, which
+# is still alive. cxx turns the guard off when the function has more than one,
+# which leaves the plain stack discipline -- objects below one another, never
+# overlapping, as the sizes grow from pass to pass.
+cat > "$tmp/vlamulti.c" <<'EOF'
+#include <stdio.h>
+int main(void) {
+    for (int r = 1; r <= 6; r++) {
+        int a[r], b[2 * r], c[3 * r];
+        a[0] = 11;
+        b[0] = 22;
+        c[0] = 33;
+        if ((char *)a <= (char *)b || (char *)b <= (char *)c)
+            return 1;                        /* declared order, downward */
+        if ((char *)a - (char *)b < 2 * r * (int)sizeof(int))
+            return 2;                        /* a and b must not overlap */
+        if ((char *)b - (char *)c < 3 * r * (int)sizeof(int))
+            return 3;                        /* b and c must not overlap */
+        if (a[0] != 11 || b[0] != 22 || c[0] != 33)
+            return 4;
+    }
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/vlamulti" "$tmp/vlamulti.c" > "$tmp/log" 2>&1 && "$tmp/vlamulti"; then
+    echo "testing several VLAs in one scope do not overlap ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing several VLAs in one scope do not overlap ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
 # --- a GNU aligned attribute on a member ---------------------------
 # `__attribute__((aligned(16))) int b;` is a member attribute: it raises the
 # member's alignment and with it the record's. cxx parsed it and dropped it --

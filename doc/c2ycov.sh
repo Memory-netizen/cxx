@@ -12,7 +12,7 @@ if [ ! -x "$compiler" ]; then echo "no compiler at $1" >&2; exit 2; fi
 
 tmp=`mktemp -d /tmp/cxx-c2y-XXXXXX`
 trap 'rm -rf $tmp' EXIT
-n_pass=0; n_fail=0
+n_pass=0; n_fail=0; n_gap=0
 
 run() {
     cat > "$tmp/t.c"
@@ -20,6 +20,17 @@ run() {
         echo "PASS  $1"; n_pass=$((n_pass+1))
     else
         echo "FAIL  $1"; sed 's/^/          /' "$tmp/log" | head -3; n_fail=$((n_fail+1))
+    fi
+}
+# A probe the plan deliberately does not implement: it fails, and that is the
+# documented answer (section 0: _Complex / _Imaginary and the two headers that
+# need them). Counted apart so the summary does not read as a regression.
+gap() {
+    cat > "$tmp/t.c"
+    if "$compiler" -w -S -emit-llvm -o /dev/null "$tmp/t.c" > "$tmp/log" 2>&1; then
+        echo "PASS  $1"; n_pass=$((n_pass+1))
+    else
+        echo "GAP   $1  (deliberately out of scope: _Complex, plan section 0)"; n_gap=$((n_gap+1))
     fi
 }
 ok() {
@@ -534,12 +545,20 @@ fi
 echo
 echo "### 6. standard headers (7.1.2) and feature macros (6.10.10)"
 
-for h in assert.h complex.h ctype.h errno.h fenv.h float.h inttypes.h \
+for h in assert.h ctype.h errno.h fenv.h float.h inttypes.h \
          iso646.h limits.h locale.h math.h setjmp.h signal.h stdalign.h \
          stdarg.h stdatomic.h stdbit.h stdbool.h stdckdint.h stdcountof.h \
          stddef.h stdint.h stdio.h stdlib.h stdmchar.h stdnoreturn.h \
-         string.h tgmath.h threads.h time.h uchar.h wchar.h wctype.h; do
+         string.h threads.h time.h uchar.h wchar.h wctype.h; do
     ok "include <$h>" <<EOF
+#include <$h>
+EOF
+done
+
+# The two headers that need _Complex: the plan keeps them out of scope on
+# purpose (section 0), so they are counted as known gaps rather than failures.
+for h in complex.h tgmath.h; do
+    gap "include <$h>" <<EOF
 #include <$h>
 EOF
 done
@@ -587,5 +606,9 @@ for m in __STDC_VERSION__ __STDC_HOSTED__ __STDC_NO_COMPLEX__ \
 done
 
 echo
-echo "c2ycov: $n_pass passed, $n_fail failed"
+if [ "$n_gap" -gt 0 ]; then
+    echo "c2ycov: $n_pass passed, $n_fail failed, $n_gap known gap(s)"
+else
+    echo "c2ycov: $n_pass passed, $n_fail failed"
+fi
 [ $n_fail -eq 0 ]

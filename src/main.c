@@ -248,11 +248,13 @@ static struct {
     {"rv64", &T_rv64},
     {"riscv64", &T_rv64},
     {"riscv64-unknown-linux-gnu", &T_rv64},
+    {"riscv64-linux-gnu", &T_rv64},
 
     {"rv32", &T_rv32},
     {"riscv32", &T_rv32},
     {"rv32bare", &T_rv32b},
     {"riscv32-none-elf", &T_rv32b},
+    {"riscv32-linux-gnu", &T_rv32},
 
     {NULL, NULL},
 };
@@ -298,6 +300,7 @@ static const struct {
     {"literal-range", WG_LITERAL_RANGE},
     {"sign-compare", WG_SIGN_COMPARE},
     {"discarded-qualifiers", WG_DISCARDED_QUALIFIERS},
+    {"pointer-sign", WG_POINTER_SIGN},  // gcc's and clang's name
     {"implicit-const-int-float-conversion", WG_CONST_INT_FLOAT_CONVERSION},
     {"implicit-function-declaration", WG_IMPLICIT_FUNCTION_DECLARATION},
 };
@@ -494,8 +497,15 @@ static void parse_args(int argc, char **argv) {
             continue;
         }
 
-        if (!strcmp(argv[i], "-fsigned-char")) {
+        // -fno-signed-char is the same request written the other way round,
+        // which is how both references read it.
+        if (!strcmp(argv[i], "-fsigned-char") || !strcmp(argv[i], "-fno-unsigned-char")) {
             T.ty_char->is_unsigned = false;
+            continue;
+        }
+
+        if (!strcmp(argv[i], "-fno-signed-char")) {
+            T.ty_char->is_unsigned = true;
             continue;
         }
 
@@ -920,11 +930,42 @@ static void print_dependencies(void) {
         }
 }
 
+// Plain char's signedness is visible to a header through this macro: glibc's
+// <limits.h> derives CHAR_MIN and CHAR_MAX from __CHAR_UNSIGNED__, so a
+// compiler that flips the language and leaves the macro alone has the two
+// disagreeing -- `-funsigned-char` still reported CHAR_MIN as -128. The ARM
+// and RISC-V targets predefine it, since their ABIs make plain char unsigned;
+// a flag that overrides the target has to add or drop it, which is what this
+// does, after the machine flags have had their say and before the preprocessor
+// runs. gcc and clang keep the language, the macro and <limits.h> in step.
+static void char_sign_macro(void) {
+    bool want = T.ty_char->is_unsigned;
+    bool have = strstr(T.predef, "#define __CHAR_UNSIGNED__") != NULL;
+    if (want == have) return;
+
+    char *out = vnew(strlen(T.predef) + 32, 1);
+    size_t n = 0;
+    for (char *line = T.predef; line && *line;) {
+        char *eol = strchr(line, '\n');
+        size_t len = eol ? (size_t)(eol - line + 1) : strlen(line);
+        if (strncmp(line, "#define __CHAR_UNSIGNED__", 24)) {
+            memcpy(out + n, line, len);
+            n += len;
+        }
+        if (!eol) break;
+        line = eol + 1;
+    }
+    if (want) n += (size_t)sprintf(out + n, "#define __CHAR_UNSIGNED__ 1\n");
+    out[n] = '\0';
+    T.predef = out;
+}
+
 // Stage 1: .c → .ll  (cc1: tokenize + preprocess + parse + irgen)
 static void cc1(void) {
     // The machine flags' macro effects come from clang, and the preprocessor
     // is about to run with whatever definitions are already queued.
     machine_flag_macros();
+    char_sign_macro();
 
     Token *tok = tokenize_file(base_file);
     if (!tok) fatal("%s: %s", base_file, strerror(errno));

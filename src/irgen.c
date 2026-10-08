@@ -3190,7 +3190,19 @@ Module *irgen(Module *md) {
         // rest per construct); allocate the array once and fill it in
         // generation order. Label blocks take [0, num_lbl).
         fn->blks = emalloc(fn->num_blk * sizeof(Blk));
-        for (int i = 0; i < fn->num_blk; i++) fn->blks[i].pred = vnew(2, sizeof(Blk *));
+        for (int i = 0; i < fn->num_blk; i++) {
+            // Start every block empty. The printer walks each block's phi
+            // list and there is no phi for most of them, so the field has to
+            // be NULL -- and this array does not always arrive zeroed: a
+            // debug print showed the first function's copy holding pool
+            // pointers (phi0/head0 below the array, inside the same pool)
+            // while later functions got nil. emalloc itself is calloc-based
+            // (src/util.c), so something wrote into pool space that had not
+            // been handed out yet. Zeroing here clears the victim; the
+            // overrun that put the data there is still open.
+            memset(&fn->blks[i], 0, sizeof(Blk));
+            fn->blks[i].pred = vnew(2, sizeof(Blk *));
+        }
         blk_used = fn->num_lbl;
         fn->start = new_blk();
         fn->end = new_blk();

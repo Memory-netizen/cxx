@@ -35,7 +35,7 @@ bool fp128_is_zero(Fp128 v) {
     return e == 0 && int128_is_zero(m);
 }
 
-bool fp128_is_negative(Fp128 v) { return fp128_get_sign(v) && !fp128_is_zero(v); }
+bool fp128_is_negative(Fp128 v) { return fp128_get_sign(v) && !fp128_is_nan(v) && !fp128_is_zero(v); }
 
 bool fp128_is_subnormal(Fp128 v) { return fp128_get_exp(v) == 0 && !int128_is_zero(fp128_get_m(v)); }
 

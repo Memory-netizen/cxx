@@ -487,6 +487,369 @@ VLA 的 `len` 就是 `vla_len` 指针的低 32 位（见缺陷 1），所以把*
 | **记分（`doc/realworld.sh` 全量探针）** | **git 567/567 保持全过**；**cpython 368/385 → 377/385**（本轮修好的 9 个单元：`Modules/socketmodule.c`、`Python/crossinterp.c`（这两个是崩溃）、`Python/codegen.c`、`Python/compile.c`、`Python/pythonrun.c`、`Python/getcompiler.c`、`Objects/typeobject.c`、`Modules/expat/xmltok.c`、`Modules/expat/xmlrole.c`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21 不变 |
 | **剩余阻塞项** | **cpython 8**（按性质分两类）。环境类 4 个：`Python/pystrhex.c`（`implicit declaration of function ‘__builtin_shufflevector’`）、`Modules/Hacl_Hash_Blake2s_Simd128.c`、`Modules/Hacl_Hash_Blake2b_Simd256.c`、`Modules/_testcapimodule.c`（`static assertion failed: __extension__ __alignof__(buf) >= 64`）——这四个都要 `vector_size` 向量类型，而它们之所以被启用，是因为这棵树的 `pyconfig.h` 是安装时用宿主 clang 配置出来的（它声明「本编译器有 `__builtin_shufflevector`、有 64 字节对齐的 SIMD」），cxx 本身不支持向量类型。真正的缺陷 4 个：`Modules/posixmodule.c`（`implicit declaration of function ‘__builtin_memset’`）、`Python/jit_unwind.c`（`premature end of input`）、`Modules/_testsinglephase.c`（`array initializer must be an initializer list`），以及（R14 复查后更正）`Modules/_ctypes/_ctypes_test.c` —— 它在 `__GNUC__` 下包含 `<complex.h>`，而 glibc 的 `bits/cmathcalls.h` 用 `_Mdouble_complex_`（`double _Complex`）声明函数，属于本计划 **有意不做** 的 `_Complex` 缺口，不是新缺陷 |
 
+### R50 `-funsigned-char` / `-fsigned-char` 与宏的同步性 —— ✅ 修好三处不一致（3 × 4 单元 + 交叉目标逐格与两家一致）
+
+问题：`-funsigned-char` 到底有没有同步影响 `CHAR_MIN` / `CHAR_MAX` / `__CHAR_UNSIGNED__`。修改前的实测：
+
+| 编译器 | `-funsigned-char` 下 | 语言侧 | `__CHAR_UNSIGNED__` | `CHAR_MIN` | `CHAR_MAX` |
+|---|---|---|---|---|---|
+| gcc | | unsigned | 1 | 0 | 255 |
+| clang | | unsigned | 1 | 0 | 255 |
+| **cxx（修前）** | | unsigned | **未定义** | **-128** | **127** |
+
+三处不一致，全在 `src/main.c`：
+
+| # | 现象 | 原因 |
+|---|---|---|
+| 1 | `__CHAR_UNSIGNED__` 从不定义 | 该宏只在 **arm64/rv32/rv64 的 `target.c` 预定义里**（它们的 ABI 就是无符号），而命令行覆盖只翻转了 `T.ty_char->is_unsigned`，没碰它 |
+| 2 | `CHAR_MIN`/`CHAR_MAX` 不跟 | glibc 的 `<limits.h>` 从 `__CHAR_UNSIGNED__` 推出这两个值，所以 #1 一修它就跟了（实测证实：只加宏就变成 0/255） |
+| 3 | `-fno-signed-char` 被拒 | 两家都把它当 `-funsigned-char` 的另一种写法，cxx 报 `unknown argument` |
+
+| | |
+|---|---|
+| 修法 | `src/main.c`：新增 `char_sign_macro()`，在 `cc1()` 里 `machine_flag_macros()` 之后、预处理之前调用：按 `T.ty_char->is_unsigned` 给 `T.predef` **加上或删掉** `#define __CHAR_UNSIGNED__ 1`；`-fno-signed-char` 按无符号处理 |
+| 为何放在那里 | 机器字段会重写 `T.predef`，得让它先说完；同时必须在预处理之前，否则头文件看不到 |
+| 不受影响 | `signed char` / `unsigned char` 是独立类型，两家都不动，cxx 也不动（断言里同时验了 `sc == -1`、`uc == 255`） |
+| 交叉目标 | arm64/riscv64 的 ABI 本来就是无符号：默认 `__CHAR_UNSIGNED__` 为 1、`-fsigned-char` 后为 0——与 clang **逐格相同** |
+
+**验证矩阵**（修后，程序实际看到的值）：
+
+| 编译器 | 模式 | 语言 | `__CHAR_UNSIGNED__` | `CHAR_MIN` | `CHAR_MAX` |
+|---|---|---|---|---|---|
+| gcc / clang / cxx | 默认 | signed | 0 | -128 | 127 |
+| gcc / clang / cxx | `-fsigned-char` | signed | 0 | -128 | 127 |
+| gcc / clang / cxx | `-funsigned-char` | unsigned | 1 | 0 | 255 |
+| gcc / clang / cxx | `-fno-signed-char` | unsigned | 1 | 0 | 255 |
+
+**已知小差异**：`cxx -dM -E` 的输出不反映这些宏 —— 它走的是另一条宏列表路径（连交叉目标自带的 `__CHAR_UNSIGNED__` 也不显示，而 `#ifdef` 能看到）。
+程序侧行为是对的，`-dM` 的展示另计。
+
+| | |
+|---|---|
+**固化成探针**：`doc/d4.sh` 重写为这一组断言（本机 5 行：默认 / `-fsigned-char` / `-funsigned-char` / `-fno-signed-char` /
+两个方向相反的同时给出；交叉 4 行：aarch64 与 riscv64 各自的默认与 `-fsigned-char`），
+并加入 `doc/probes.sh` 的每轮名单。它读宏用 `#ifdef` 而不是 `-dM -E`（后者在 cxx 上看不到目标预定义），
+并对不认 `-target` 的编译器（gcc）直接跳过交叉行，而不是报成失败。三家实测：cxx 9/0、clang 9/0、gcc 5/0。
+
+**顺带修掉一个三元组缺口**：探针里用 `-target riscv64-linux-gnu` 时 cxx 报 `unknown target`，
+而它只认 `riscv64-unknown-linux-gnu`（两家都认前者）。目标别名表里补上 `riscv64-linux-gnu` 与 `riscv32-linux-gnu`。
+
+| **验收** | `test/conformance.sh` **222 → 225 passed / 0 gap**（三条新增：`-fsigned-char` / `-funsigned-char` / `-fno-signed-char` 各自的语言侧、宏侧、`<limits.h>` 与两个固定类型）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；tests2 仍 **106 通过 / 0 失败**；`doc/probes.sh` 全部基线（含新加的 `d4`），**cxx2 = cxx3 = cxx4 逐字节相同**。 |
+
+### R49 FFmpeg 的 `"i"` 约束：常量条件的未选中分支不该发射 —— ✅ 2004 → 2216 个目标文件，该类错误归零
+
+R46/R47 后剩下的最大一类失败是 **245 行 `invalid operand for inline asm constraint 'i'`**（分布在 176 个目标文件上）。
+它没有 `file:line` 前缀，而 cxx 源码里也没有这个字符串——是 **LLVM 报的**。
+
+**（1）定位**：从 `make` 的下一行取出真正失败的 176 个目标文件（`libavcodec/4xm.c` 等），
+用 `-cc1 -cc1-output` 把 IR 单独存下来再喂给 clang，得到确切的一行：
+
+```llvm
+%tmp11 = call i32 asm "shrl $1, $0\0A\09", "=r,i,0,~{dirflag},~{fpsr},~{flags}"(i32 %tmp10, i32 %tmp7)
+```
+
+`i` 约束的操作数 `%tmp10` 是 **运行时值**。源头在 `libavcodec/x86/mathops.h`：
+
+```c
+static inline uint32_t NEG_USR32(uint32_t a, int8_t s){
+    if (__builtin_constant_p(s))
+        __asm__ ("shrl %1, %0\n\t" : "+r" (a) : "i" (-s & 0x1F));
+    else
+        __asm__ ("shrl %1, %0\n\t" : "+r" (a) : "c" ((uint8_t)(-s)));
+    return a;
+}
+```
+
+**（2）根因**：cxx 对 `__builtin_constant_p` 的语义是对的（参数→ 0、字面量→ 1，与 clang 逐条一致），
+问题在它把**两个分支都发射出去**：条件已经折叠成常量 0，
+`"i"` 那一支不可达，但 LLVM 在优化之前会校验模块里每一个函数，
+于是整个翻译单元被拒。gcc 的汇编里只剩 `shrl %cl, %eax`（`"c"` 那一支），
+clang 也一样——**两家都丢掉了未选中的分支**。
+
+| | |
+|---|---|
+| 修法 | `fold_ast` 的 `ND_IF` 分支：条件折叠成整数常量时，只保留取值的那一支；没有 `else` 时换成空语句 |
+| 为何是**原地**替换 | 语句链遍历 `next` 时不写回返回值，“返回另一个节点”会被丢掉——调试打印显示折叠确实执行了（`labels=0`、`kind=ND_NUM`、整数），IR 却依然两个块。现在把选中的分支整体拷贝到 `if` 节点上（`next` 保留） |
+| 安全边界 | **函数里有标签就不折**（`Sym.labels`）：`goto`、`asm goto` 都可以命名被丢弃分支里的标签。最初的写法是遍历子树找 `ND_LABEL`，而 `Node` 的语句字段与表达式字段**共用 union**，盲目遍历会把一个整数当指针（崩在 `n = 0x4a`），于是改用函数级判据 |
+| 验收 | `libavcodec/4xm.c` 等原本失败的单元逐个通过；**FFmpeg 目标文件 2004 → 2216**，崩溃仍为 **0**，该类错误归零；下一个主要类别是类型不匹配 14+8+4 |
+| `"i"` 约束本身 | 它没问题：`__asm__("..." : "+r"(a) : "i"(7))` 两家都通过，修后 cxx 也通过（`test/conformance.sh` 新增的断言里有这一条） |
+
+| | |
+|---|---|
+| **验收（本轮改了代码，全部重跑）** | `test/conformance.sh` **221 → 222 passed / 0 gap**（新增：常量条件只保留取值分支，含 ffmpeg 的 `__builtin_constant_p` 形状、两个运行值与一个含标签的函数；期望值是先用 gcc/clang 实测再写死的）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；tests2 仍 **106 通过 / 0 失败**；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。 |
+| **FFmpeg（`doc/ffmpeg.sh`）** | 崩溃 0，目标文件 **2216**；剩余类别：类型不匹配 14+8+4、`a type specifier is required` 13、非法 IR 2（`%union.SyncQueueFrame` 与 `Elementtype`）、`redefinition of type` 1、`lvalue required in ‘asm’ statement` 1、常量类型不匹配 1 |
+
+### R48 工作目录收拾：`~/` 下 2249 个零散文件 + 24 个实验目录 —— ✅ 归档完毕，两个探针搬进仓库
+
+多轮积累下来，`~/` 直接摆着 **2251 个零散文件**（1364 个 `.sh`、851 个 `.py`、其余 `.c/.h/.ll/.log`）
+加 **24 个实验目录**。收拾前先核对了依赖：把 `doc/*.sh`、`test/*.sh`、`Makefile` 里的 `$HOME/...` 引用全部列出，
+**只有 `$HOME/rw`（探针源码树）与 `$HOME/cxxwork`**，没有任何探针依赖这些零散文件（计划文档里也没有）。
+
+| | |
+|---|---|
+| 新布局 | `~/cxxwork/active/`（当前轮脚本）、`logs/`（构建与探针日志）、`repro/`（最小复现）、`archive/`（归档），见 **§4.2** |
+| 移动 | 2249 个文件 → `archive/loose/`（16M）；24 个目录 → `archive/dirs/`（117M，含 `cxx_head` `qbe` `projects` `tccmix` `tccgcc` `tccboot` `tinycc` `chibicc` 等） |
+| 原则 | **只移动、不删除**；`archive/` 确认后整个删掉即可。`download`（Windows 挂载）、`book`、`computer`、`pdf2zh_files` 不属于本项目，未动 |
+| 结果 | `~/` 剩 7 个目录（`cxx` 仓库、`cxxwork`、`rw` 源码树，加 4 个不属于本项目的），**零散文件 0** |
+
+**长期重复运行的探针属于仓库**，所以把两天来一直用临时脚本跑的两套搬进了 `doc/`：
+
+| 探针 | 做什么 | 首次运行结果 |
+|---|---|---|
+| `doc/ffmpeg.sh` | 用 cxx 跑 FFmpeg 自己的 configure（由它决定哪些可选代码路存在）再 `make -k`，报告目标文件数、崩溃数与诊断分布 | 崩溃 0，目标文件 2004 |
+| `doc/kernel.sh` | `make defconfig` + `make CC=cxx`，报告停在哪里 | 停在 syncconfig：`unknown assembler invoked`（内核自己的 `scripts/as-version.sh` 认不出 cxx） |
+
+两者都各自带 `timeout`（§4.1 第一条），日志默认落在 `~/cxxwork/logs/{ffmpeg,kernel}/`，可用 `FF_SRC`/`K_SRC`/`FF_JOBS`/`K_JOBS` 等环境变量改路径。
+
+| | |
+|---|---|
+| **验收** | 本轮**未改编译器代码**（只动了工作目录与探针），所以 `test/conformance.sh` 221/0、`make test`¡、c2y 101/0、四个后端套件与 tests2 106/0 均不变；两个新探针 `bash -n` 通过，`doc/kernel.sh` 实跑复现了内核的停点 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**（块数组归零后仍成立）；tests2 仍 **106 通过 / 0 失败**。 |
+
+### R47 FFmpeg 最后一处崩溃：未归零的块数组 —— ✅ 崩溃 27 → 0（但根因尚未查清）
+
+R46 留下的那 1 处（`libavfilter/bbox.c`）崩在 **IR 打印器**：`dump_blk` 的 phi 循环读到一个垃圾 Phi 节点。
+命名的好运在于：**`bbox.c` + `bbox.h` 脱离 FFmpeg 树就能复现**（`bbox.h` 只依赖 `<stdint.h>`），而 gcc 编它正常。
+
+**gdb 给出的位置**：`fn->start == b`——**崩在函数的第一个块**（首块通常没有 phi），`num_blk = 5` 正常。
+
+| | |
+|---|---|
+| 修法 | `fn->blks` 建好后**逐个块显式归零**（原来只设了 `pred`），再装上 `pred` 数组 |
+| 验证 | 加上归零：`bbox.c` **3/3 正常**；撤掉归零重编：**3/3 SIGSEGV**——因果确定 |
+| FFmpeg 效果 | 崩溃 **27 → 0**，目标文件 2003 → **2004**；原本崩的 `bbox.o` `flvdec.o` `mpegvideo.o` `h263dec.o` 均可编译（剩下的是别的诊断） |
+
+#### 根因追查：一个被推翻的初判，和一条尚未查清的线索
+
+初判是“`emalloc` 不归零”，写进了代码注释。**这个初判是错的**，已更正：
+`src/util.c:191` 与 `:197` 用的都是 **`calloc`**（连池子本身也是 `calloc(1, POOL_SIZE)`），而且池子只单向推进、从不回绕。
+
+那为什么还是脏的？加一行临时打印（已删）看刚分配完的数组：
+
+```
+[dbg] num_blk=5  sizeof(Blk)=120 blks=0x7e904a89ed50 phi0=0x7e904a891010 num_pred0=0 head0=0x7e904a890b60
+[dbg] num_blk=48 sizeof(Blk)=120 blks=0x7e904a8a1820 phi0=(nil)          num_pred0=0 head0=(nil)
+[dbg] num_blk=2  sizeof(Blk)=120 blks=0x721e438514b0 phi0=(nil)          num_pred0=0 head0=(nil)
+```
+
+第一个函数的那份**一到手就脏**，而两个指针都落在**同一池的更低地址**上——那是早先分配出去的对象的地址；
+后面的函数则是 `nil`。池子只单向推进，所以这块空间应该还没被分配过——
+**说明有东西写进了尚未分配的池空间**，即某处**越界写**。
+
+本轮的归零**清掉的是受害区域**，不是那个越界写本身。它已写进代码注释与本节，
+列为**独立线索：用 ASan 构一个 cxx（`-fsanitize=address`）跑 `bbox.c` 与自举流程，应能直接定位。
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` 221 passed / 0 gap（本轮未新增：该缺陷依赖堆状态，无法写成确定性断言，取证靠 FFmpeg 与上面的 3/3 对照）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**（块数组归零后仍成立）；tests2 仍 **106 通过 / 0 失败**。 |
+| **FFmpeg（尚未纳入 `realworld.sh`）** | 崩溃 **0**，目标文件 **2004**；剩余失败面：`asm` 的 `"i"` 约束 **245**、类型不匹配 14+8+4、`a type specifier is required` 13、非法 IR 1、`lvalue required in ‘asm’ statement` 1 |
+
+### R46 FFmpeg 的 27 处编译器崩溃 —— ✅ 修到剩 1 处（目标文件 1997 → 2003）
+
+R45 记下的 FFmpeg 失败面里，**27 处 `killed by signal 11`** 是编译器自己崩溃，优先级最高。它们分布在 24 个目标文件上，
+全是 MPEG 相关的大文件（`mpegvideo*` `flv*` `h26x*` `rv*` 等）。
+
+**（1）定位**：先把日志放到 `~/fflogs/`（R38 已记过 `/tmp` 会被清，这次自己踩了一次），
+从 `make` 的下一行（`common.mak:81: <path>.o] Error 1`）取出真正崩溃的目标文件；
+崩溃发生在 **`cc1` 子进程**里（gdb 默认跟的是驱动，`set follow-fork-mode child` 也跟错链），
+所以直接按驱动的 `-cc1 -cc1-input … -cc1-output …` 形式单进程调用：
+
+```
+#0  eval2 (node=..., sym=...) at src/parser.c:4820
+        return eval_rval(node->lhs, sym) + node->member->offset;
+#2  eval_gvar_data (init=..., ty=...) at src/parser.c:1935
+#3  gvar_initializer ... #4 external_declaration ...
+```
+
+**（2）根因**：
+
+```c
+case ND_SUBACCESS:
+case ND_MEMBER: {
+    ...
+    if (node->ty->kind != TY_ARRAY) error(node->tok, "invalid initializer");
+    return eval_rval(node->lhs, sym) + node->member->offset;   // 崩在这里
+}
+```
+
+两个 case 共用同一段尾巴，而那段尾巴**无条件读 `node->member->offset`**——
+`ND_SUBACCESS` 根本没有 member，只要下标的结果类型本身是数组（多维数组的一行）就会空指针解引用：
+
+```c
+static int m[2][3];  static int *p = m[1];   /* SIGSEGV */
+```
+
+而 `&m[1][0]`、`struct { int a[3]; } s; int *p = s.a;` 都正常——区别就在下标这一支。
+
+| | |
+|---|---|
+| 修法 | 尾巴先取基址，再按节点种类加偏移：`ND_MEMBER` 加 `member->offset`，`ND_SUBACCESS` 加 `eval(node->rhs) * node->ty->size`（元素自身的步长，多维也对） |
+| 验证 | 最小复现编过，且 `p`/`r`/`q`/`t` 的运行值与 gcc **逐字节一致**（`p=4 5 6 r=1 t=7 q=2`，含 `char[2][4]` 与结构成员数组） |
+| 效果 | FFmpeg：崩溃 **27 → 1**，目标文件 **1997 → 2003**；失败面里 `invalid operand for inline asm constraint 'i'` 升到 245（因为更多文件走到了那一步） |
+
+**（3）剩下的那 1 处崩溃（已定位，留给下一轮）**：`libavfilter/bbox.c`，崩在 **IR 打印器**：
+
+```
+#0  dump_blk (b=...) at src/dumpir.c:436   print_operand(p->arg[i])
+p = { result = { type = 4025040960, val = 32767, ty = 0x0 }, arg = 0x6fb,
+      blk = 0x5555555ebe28 <ty_int_>, num_arg = 4, next = 0x1100000001 }
+```
+
+即某个 **Phi 节点是未初始化/已被复用的**（`arg` 是个小值、`next` 是垃圾）。
+把 `bbox.c` 里那个宏展开成等价的独立片段（嵌套循环 + `goto` 出来 + 指针递进）**编得过**，
+所以触发点还需 FFmpeg 的具体上下文；下一步用预处理后的 `.i` 逐个函数削减。
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` **220 → 221 passed / 0 gap**（新增：`m[1]`/`m[0]`/`&m[0]`/`c[1]`/`s.a` 五种行地址，含运行值）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**；tests2 仍 **106 通过 / 0 失败**。本轮修的是常量求值器里一个空指针解引用，七棵树里没有 `int m[2][3]; int *p = m[1];` 这种形状；变化在 `test/conformance.sh` 220 → 221 与 FFmpeg 的崩溃 27 → 1。 |
+| **FFmpeg（尚未纳入 `realworld.sh`）** | 崩溃 27 → 1，目标文件 1997 → **2003**；剩余失败：`asm` 的 `"i"` 约束 **245**、类型不匹配 14+8+4、`a type specifier is required` 13、非法 IR 1、`lvalue required in ‘asm’ statement` 1、以及上面那 1 处崩溃 |
+
+### R45 新两棵树：Linux 内核与 FFmpeg —— ✅ 修掉 `-Wpointer-sign` 的严格性差异（FFmpeg 22 → 1997 个目标文件）
+
+下载了`linux-6.12`（1.6G 树）与 `ffmpeg-7.1`（101M 树）到 `~/rw/`，各自尝试构建。
+
+#### （一）FFmpeg：被一条严格性差异卡住，修后推进两个数量级
+
+`./configure --cc=$HOME/cxx/cxx` **exit 0**（只有一句“未知编译器，无法选最优 CFLAGS”）；
+CFLAGS 落在 `-std=c17 -fPIC -pthread -g -Wall -Wno-unused-const-variable`。构建在 **22 个目标文件**时停下：
+
+```
+libavdevice/v4l2.c:717:44:       av_strcasecmp(standard.name, s->standard)
+libavfilter/af_adeclick.c:365:27 av_fast_malloc(&c->y, &c->y_size, ...)
+   均为 error: incompatible types when passing argument
+```
+
+两处都是**指向类型只差符号**：`__u8[32]`（即 `unsigned char *`）传给 `const char *`，
+`int *` 传给 `unsigned int *`。gcc/clang 用 `-Wpointer-sign`（在 `-Wall` 里）**警告并照常转换**，
+而 `is_assignable()` 只在指向类型 `is_compatible` 时接受（`int` 与 `unsigned int` 不兼容），于是报错。
+
+| | |
+|---|---|
+| 修法 | `src/type.c` 新增 `sign_only_difference()`（同尺寸、符号不同、排除枚举），`is_assignable()` 在最后一步之前收下它并给出 `WG_POINTER_SIGN` 警告；与已有的 `WG_DISCARDED_QUALIFIERS` 同一形状（警告并接受） |
+| 警告组 | 表已用满 24 位（`WG_ALL = (1u<<25)-1`，位 24 是 discarded-qualifiers），所以 `WG_ALL` 扩到 `(1u<<26)-1`，新组 `WG_POINTER_SIGN = 1u << 25`，名字取两家共用的 `-Wpointer-sign` |
+| 不变的部分 | 真正的不匹配（`int *` → `double *`）仍然是 **error**，与 gcc 一致 |
+
+**修后重跑** `make -k -j8`：**1997 个目标文件**（从 22）。剩下的失败面（按数量）：
+
+| 数量 | 诊断 |
+|---|---|
+| **223** | `invalid operand for inline asm constraint 'i'` —— 内联 asm 的 `"i"`（立即数）约束，目前主要阻塞点 |
+| **27** | `cxx killed by signal 11` —— **编译器自己崩溃**，无论如何都是缺陷 |
+| 13 | `incompatible types when passing argument`（非符号差异的真实不匹配） |
+| 13 | `a type specifier is required for all declarations` |
+| 5 / 4 | `incompatible types when assigning` / `initializing` |
+| 2 | `expected identifier or ‘(’` |
+| 1 | `'%tmp7' defined with type 'ptr' but expected '%union.SyncQueueFrame'` —— **非法 IR** |
+| 1 | `redefinition of type`；1 × `lvalue required in ‘asm’ statement` |
+
+#### （二）Linux 内核：卡在 kconfig 的汇编器探测上
+
+`make defconfig` 成功（它用宿主 gcc 构建 `scripts/`）；随后 `make -j8 CC=$HOME/cxx/cxx` 在 **syncconfig** 阶段停下：
+
+```
+/home/memory/cxx/cxx: unknown assembler invoked
+scripts/Kconfig.include:51: Sorry, this assembler is not supported.
+```
+
+那句话是**内核自己的** `scripts/as-version.sh` 说的（cxx 二进制里没有这个字符串，已用 `strings` 核实）：
+它调 `$(CC)` 当汇编器用、从版本输出里认名字，而 cxx 的 `-v`/`--version` 输出它认不出来。这是**驱动层的兼容性差距**（不是 C 语言层），下一步可以先看它到底在等什么格式。
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` **217 → 220 passed / 0 gap**（三条新增：符号差异两处各告警且编译通过；`-Wno-pointer-sign` 静默；真实不匹配仍拒）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；tests2 仍 **106 通过 / 0 失败**；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**——本轮改的是一条诊断的严重程度，七棵树里没有这种形状；变化在 `test/conformance.sh` 217 → 220 与下面的 FFmpeg 两个数量级。 |
+| **新树（本轮引入，尚未纳入 `realworld.sh`）** | FFmpeg：**22 → 1997 个目标文件**，上表为剩余失败面；Linux 6.12：defconfig 通过，目标构建卡在 kconfig 的汇编器探测 |
+
+### R44 探针全量扫描：41 个脚本里的两处异常 —— ✅ 一处修正、一处因探针树被改坏
+
+tests2 全绿后，回过头检查验证网本身：`doc/` 下共 **41 个探针脚本**，而 `doc/probes.sh` 只驱动 12 个，
+我每轮又只看它的末八行（`c2ycov*` 那几行一直被截掉）。于是把剩下的全跑一遍（各带 `timeout`）。
+
+| 结果 | |
+|---|---|
+| 全部通过 | **36 个**（alias asm bootstrap c2ycov2 c2ycov3 c2ycov4 c2ycov5 cleanup d4 driver e12 e3c e3 effects fall inline kw minbug narrow ped selfbuild selfhost shift2 shift3 shift signcmp suite t1 tent uf vlaparam vmgoto wall warn wgroups worder） |
+| 异常 1 | `c2ycov: 109 passed, 2 failed` —— 失败的是 `<complex.h>` 与 `<tgmath.h>`，而它们正是§0 里**有意不做**的那两个头（`_Complex`） |
+| 异常 2 | `pycxx` —— cpython 源树的 `configure` 报语法错误 |
+
+**异常 1 的修正**：`doc/c2ycov.sh` 没有 `conformance.sh`/探针习惯的“已知缺口”概念，把它们算成失败。
+新增 `gap()`（与 `ok()` 并列）并在头文件循环之后单独探测这两个头；汇总行因此变为
+`c2ycov: 109 passed, 0 failed, 2 known gap(s)`——与 `c2ycov2` 的“3 library gap(s)”同一口径。
+（顺带踩到一个 shell 坑：`printf ... | gap` 会让函数跑在子 shell 里，计数器丢失；改用 here-doc。）
+
+**异常 2 的诊断**：`~/rw/cpython` 是 git 树，`git status` 显示 **`M configure`、`M configure.ac`**，
+`bash -n configure` 报 `syntax error near unexpected token \`;;'`。看 diff：有人（很可能是早前为绕开某处而做的手术）
+从 `configure.ac` 删掉了 `if test "$Py_LTO" = 'true'; then case $ac_cv_cc_name in clang) ... esac fi` 整块，
+但生成物 `configure` 里只删了一半，残留的 `else case e in ... esac fi` 碎片让整个脚本无法解析。
+探针 `doc/pycxx.sh` 的目的正是“让 cpython 自己的 feature test 决定哪些可选代码路存在”（现有的 `pyconfig.h` 来自一次 clang 配置，
+于是打开了 `_Py_HAVE_EFFICIENT_BUILTIN_SHUFFLEVECTOR` 等 cxx 服务不了的 SIMD 单元，报告却把账算在 cxx 头上）。
+处理：把两个被改的文件备份到 `/tmp/cpython-edits/`，再 `git checkout -- configure configure.ac` 恢复跟踪版本（`bash -n` 重新通过），
+然后按探针本意重跑 `bash doc/pycxx.sh ./cxx`。
+
+| | |
+|---|---|
+| **验收** | 36 个探针脚本全部通过；`doc/c2ycov.sh` 改后 **109 passed, 0 failed, 2 known gap(s)**（`c2ycov2` 34/0/3 不变）；cxx 本身未改代码，`test/conformance.sh` 217/0、tests2 106/0 与七棵树记分均不变 |
+| **`pycxx`（configure + build cpython）** | 探针现在能跑了：**configure exit 0**（日志 `~/rw/pycxx/configure.log`），`make -k -j8` 建出 **289 个目标文件**后失败（exit 2），三类：① `check-clean-src`（Makefile:950）——源树里有上一次构建留下的产物，与 cxx 无关；② `Modules/_blake2` 与 `Modules/_hmac` 链接失败（`ld returned 1 exit status`）——它们依赖 HACL 的 SIMD 单元，而后者编不过；③ 冻结模块步骤（`Python/frozen_modules/*.h`）报 **`Python init error: interpreter already initialized`** ×5——这是 cxx 编出的 `_freeze_module` 运行时的症状，是一条新线索。**另一个发现**：configure 选了 `_Py_HACL_CAN_COMPILE_VEC128 1` 与 `VEC256 1`——cxx 对 `vector_size`/`ext_vector_type` 是“警告并忽略”（§0 已记的有意差异），于是 cpython 的特性测试**误以为向量可用**，把 SIMD 路径打开了。下一步：先清源树再跑一次，把①排除掉，再看②③ 在干净树上是否依然如此 |
+
+### R43 `#pragma pack` 下的对齐位域 —— ✅ `95_bitfields` 全文匹配，**tests2 全绿（106 / 0）**
+
+R40/R41/R42 后只剩下 `95_bitfields` 的 12 行，全在 **"PACKED - WITH ALIGN"** 两段上。之前我把
+`packed`/`aligned`/位域对齐的各种直接组合写成最小用例，三家都一致，所以以为触发点在宏展开细节里——**错在我看了错的块**。
+
+**定位过程**：
+
+1. 让 gcc/clang 各自跑一遍这个用例：**gcc 与 `.expect` 逐字节一致**，而 **clang 与 cxx 差的是同一那 12 行**——
+   说明这不是 cxx 自己的怪癖，而是 gcc 的一条我们两家都没实现的规则。
+2. 把 gcc 的 `-E` 输出摆出来看四个 TEST 2 块：第 3、4 块的 *struct 文本完全相同*，而 `.expect` 对它们要求不同的结果——
+   于是去看源文件本身：第 **105 行 `# pragma pack(push,1)`**、第 **129 行 `# pragma pack(pop)`**——PACKED 那几段在自己的 pragma 里，
+   而不是靠 `__attribute__((packed))`。
+
+| | |
+|---|---|
+| 规则 | `#pragma pack(N)` 把成员的对齐**压到 N**（这里 N=1），但**显式加了 `aligned` 的位域仍然要从该对齐开始**——即 1 字节边界。`long long z:63` 到第 81 位结束，`a` 因此落在第 88 位，记录是 **12** 字节而不是 11 |
+| 修法 | R41 写的是 `if (mem->is_align && mem_align > 1) s = ALIGN_UP(s, mem_align * 8);`——**漏了底档**。去掉 `> 1` 即可：对齐是 1 字节时也要对到 8 位 |
+| 为何没被最小用例发现 | 我的最小用例用 `__attribute__((packed))`，而**属性与 pragma 在 gcc 里不同**：`packed` 属性会被成员的 `aligned(16)` 盖过（我的 P1 探测：16/32），`#pragma pack` 不会（压到 1） |
+
+| | |
+|---|---|
+| **验收** | **tests2 全绿：105 → 106 通过 / 0 失败**（参考实现 gcc 能复现的 106 个用例全部通过）；`test/conformance.sh` **216 → 217 passed / 0 gap**（新增：`#pragma pack(push,1)` + `aligned(16)` 位域的 **1/12**、同一声明不加 pragma 的 **16/32**、以及无 `aligned` 的 **8/24**，并验证字段真在第 11 与第 16 字节）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。本轮改的是 `#pragma pack` 下位域的起始位置，七棵树里没有这种组合；变化在 **tests2 全绿（106/0）** 与 `test/conformance.sh` 216 → 217。 |
+
+### R42 VLA 的地址只取决于它的长度 —— ✅ `122_vla_reuse` 转绿（tests2 **105**）
+
+`122_vla_reuse` 要求比 R33 笔记里写的更严：它在前 100 轮把**每个长度对应的地址记下来**，
+之后每一轮都拿 `&x[0]` 与 `p[n % 100 + 1]` 比较，所以地址必须是**长度的单值函数**。
+gcc/clang 靠把 `n % 100 + 1` 推出上界 100 、把数组提升进帧实现；cxx 没有值域分析，于是换一种等价的、不需要上界的做法。
+
+| | |
+|---|---|
+| 机制 | 每个 VLA 声明一个属于自己的 `base` 槽：**首次执行记下当时的栈指针**，以后每次到达都先 `stackrestore(base)` 再 `alloca`——地址因此是 `base - round_up(size)`，只与长度有关 |
+| `base` 的初值 | 必须是 NULL，而存它的地方只能在**循环外**——就是函数序言。这正是 R31 那个“标志没处放”的症结：现在解析器把这些存储收集起来（`fn_prologue_*`），在函数定义完成时插到体首 |
+| 守卫 | `if (base) stackrestore(base);` —— 手搭的 `ND_IF` 必须 `cnt_blk(2)`（gen_if: then / merge），否则 `new_blk()` 断言立到报错 |
+
+**（重要）我自己的第一版是不安全的，被基准测量抓住了**：
+
+回退到“自己的 base”会释放它之后分配的一切，而 **多个 VLA 的对象是同时存活的**。
+`vla3size`（`int a[n], b[2n], c[3n];` 在循环里）的对距从与 gcc 逐字节相同的 `32/48` 变成了 `32/32`——
+即 **c 的区间压进了 b**。修正：守卫只在**函数内只有一个 VLA 声明**时生效（那时它后面没有别的动态对象）；
+数量要到体解析完才知道，所以守卫先发出、在函数定义收尾时把 `>1` 的那些的条件换成常量 0。
+于是：`122`（一个）与 `79_vla_continue`（一个）用新机制，多声明的保持原来的纯栈式分配。
+
+| 验证 | 结果 |
+|---|---|
+| `122_vla_reuse` | **OK** |
+| `79_vla_continue` | MATCHES（无回归） |
+| `vla3size`（多 VLA） | **32/48**，与 gcc 逐字节相同（不再重叠） |
+| `vla3loop` / `vla3goto` | 每轮同址（moved=0/0/0） |
+
+| | |
+|---|---|
+| **验收** | **tests2 104 → 105 通过 / 1 败**（只剩 `95_bitfields` 的 PACKED-WITH-ALIGN 宏组合）；`test/conformance.sh` **214 → 216 passed / 0 gap**（两条新增：地址只取决于长度（`122` 的形状，20000 轮）；同一作用域多个 VLA 不重叠）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**——本轮动了 VLA 的分配路径，而 cxx 自己的源码里没有会走到那个守卫的形状（一个函数里只有一个 VLA），所以逐字节不变；变化在 **tests2 104 → 105** 与 `test/conformance.sh` 214 → 216。 |
+
 ### R41 成员上的 GNU `aligned` 属性 —— ✅ 与两家一致含位域成员（`95_bitfields` 再进一步）
 
 R40 定位到的第二处，这一轮修好了。
@@ -516,7 +879,7 @@ cxx 给 `1 11` 与 `1 6`（少一字节），位图因此在高位字节上不�
 | | |
 |---|---|
 | **验收** | `test/conformance.sh` **212 → 214 passed / 0 gap**（两条新增：成员 `aligned` 的四种形状 + 位域对齐落在第 16 字节 + 声明符之后的写法；以及 `_Alignas` 在位域上被拒）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；tests2 仍 **104 通过 / 2 败**；`clang-format-21 --dry-run --Werror` 干净 |
-| **记分（`doc/realworld.sh` 全量探针）** | @@SCORE@@ |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**——这一条对本轮尤其有意义：改的是布局，而 cxx 自己的源码里没有会因此改变布局的成员对齐；变化在 `test/conformance.sh` 212 → 214。 |
 
 ### R40 跨过八字节边界的位域（`95_bitfields` 的主体）—— ✅ 打包形形已与两家一致
 
@@ -1910,6 +2273,22 @@ uptime      # 负载应当回落
 `~3.1` 回落到 `~1` 也印证了这一点。
 
 ---
+
+
+### 4.2 临时文件的落点（本轮起生效）
+
+`~/` 下曾经堆着 2249 个零散脚本（多轮累积的 `rNN_*.sh` / `*.py`），清理时全部移进了归档。
+从那以后按用途分开，方便一次性收拾：
+
+| 目录 | 放什么 |
+|---|---|
+| `~/cxxwork/active/` | 本轮正在用的脚本（`rNN_*.sh`、补丁脚本） |
+| `~/cxxwork/logs/` | 构建与探针日志（`logs/ffmpeg/make.log` 之类） |
+| `~/cxxwork/repro/` | 要留下的最小复现目录（`bbox`、`vla` 等） |
+| `~/cxxwork/archive/` | 归档，确认后整个删掉即可 |
+
+**要长期重复运行**的探针不属于这里，属于仓库：`doc/*.sh`（FFmpeg 与内核的两套也应尽快搬进去）。
+本轮清理只做移动、没有删除；`~/download` 等不属于本项目的目录未被触碰。
 
 ## 5. 已完成的批次（存档）
 

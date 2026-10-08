@@ -1871,7 +1871,10 @@ enum {
     // five cpython units. clang calls it
     // -Wincompatible-pointer-types-discards-qualifiers.
     WG_DISCARDED_QUALIFIERS = 1u << 24,
-    WG_ALL = (1u << 25) - 1,
+    // gcc's and clang's -Wpointer-sign: the pointed-to types differ only in
+    // signedness. Both references convert and carry on.
+    WG_POINTER_SIGN = 1u << 25,
+    WG_ALL = (1u << 26) - 1,
     // Groups that -Wall does not enable.
     WG_OFF_DEFAULT = WG_IMPLICIT_FALLTHROUGH | WG_FLOAT_CONVERSION | WG_SIGN_COMPARE,
 };

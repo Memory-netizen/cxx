@@ -825,6 +825,17 @@ static char *asop_msg[] = {
 // itself may report. A transparent union parameter asks this of each of its
 // members in turn, and takes the first that answers yes, so the question has
 // to be separable from the diagnostic that ends the other cases.
+// Two integer types that differ only in signedness: what -Wpointer-sign
+// reports. An enumeration is left out -- gcc has -Wenum-conversion for that
+// -- and so is anything whose size differs, which is a real mismatch.
+static bool sign_only_difference(Type *a, Type *b) {
+    a = type_unqual(a);
+    b = type_unqual(b);
+    if (a->kind == TY_ENUM || b->kind == TY_ENUM) return false;
+    if (!is_integer(a) || !is_integer(b)) return false;
+    return a->size == b->size && a->is_unsigned != b->is_unsigned;
+}
+
 bool is_assignable(Type *dst, Node *src, int ctx) {
     add_type(src);
     Type *src_ty = src->ty;
@@ -851,6 +862,15 @@ bool is_assignable(Type *dst, Node *src, int ctx) {
                 warning(WG_DISCARDED_QUALIFIERS, src->tok, "%s discards qualifiers", asop_msg[ctx]);
             return true;
         }
+    }
+
+    // A sign difference between the pointed-to types is -Wpointer-sign in
+    // both references: they diagnose it and convert anyway. ffmpeg passes
+    // `unsigned char *` where a `const char *` is wanted, and `int *` for an
+    // `unsigned int *`; refusing the file over either stopped its build.
+    if (is_pointer(dst) && is_pointer(src_ty) && sign_only_difference(dst->base, src_ty->base)) {
+        warning(WG_POINTER_SIGN, src->tok, "pointer targets in %s differ in signedness", asop_msg[ctx]);
+        return true;
     }
 
     if (is_nullptr(dst) && is_null_constant(src)) return true;

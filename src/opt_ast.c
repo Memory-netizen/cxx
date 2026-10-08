@@ -633,6 +633,12 @@ static void check_shift_count(Node *node) {
         warning(WG_SHIFT_COUNT_OVERFLOW, node->tok, "shift count >= width of type");
 }
 
+// Whether the function being folded defines any label. A goto -- an asm goto
+// included -- names its target by label, so a branch may only be dropped when
+// there is no label in the function for it to name. The parser keeps the ring
+// on the function's Sym.
+static bool fn_has_labels;
+
 Node *fold_node(Node *node) {
     if (!node) return NULL;
 
@@ -733,7 +739,41 @@ Node *fold_node(Node *node) {
             node->lhs = fold_node(node->lhs);
             return node;
 
-        case ND_IF:
+        case ND_IF: {
+            node->cond = fold_node(node->cond);
+            node->then = fold_node(node->then);
+            if (node->els) node->els = fold_node(node->els);
+            // A condition that folded to a constant decides the branch here,
+            // and only the branch that is taken is kept. Both references do
+            // this: gcc's assembly for ffmpeg's
+            // `if (__builtin_constant_p(s)) asm(.. "i" ..) else asm(.. "c" ..)`
+            // holds just the second asm. Leaving the other in is not harmless
+            // -- LLVM validates every function before it optimises, so an asm
+            // whose operand is not constant for an immediate constraint fails
+            // the whole module even though nothing can reach it. That is 176
+            // objects of ffmpeg's build, reported without a file name.
+            //
+            // A branch that defines a label stays, however: a goto, including
+            // one from an asm goto, can still name it.
+            if (!fn_has_labels && node->cond && node->cond->kind == ND_NUM && node->cond->ty &&
+                is_integer(node->cond->ty)) {
+                Node *taken = int128_is_zero(node->cond->ival) ? node->els : node->then;
+                if (!taken) {
+                    // No else: the dead arm is the whole statement, and what
+                    // is left of it is an empty one.
+                    taken = new_node(ND_COMP_STMT, node->tok);
+                    taken->ty = node->ty;
+                }
+                // The chosen arm takes the `if`'s place in place: a statement
+                // list folds its `next` chain without writing the result
+                // back, so returning a different node would be dropped.
+                Node *next = node->next;
+                *node = *taken;
+                node->next = next;
+            }
+            return node;
+        }
+
         case ND_WHILE:
         case ND_DO:
             node->cond = fold_node(node->cond);
@@ -857,6 +897,7 @@ Node *fold_node(Node *node) {
 void fold_ast(Module *prog) {
     for (Sym *fn = prog->fns; fn; fn = fn->next) {
         if (!fn->is_defined) continue;
+        fn_has_labels = fn->labels != NULL;
         fold_node(fn->body);
     }
 }
