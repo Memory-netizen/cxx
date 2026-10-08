@@ -2,6 +2,17 @@
 #define __CXX_STDATOMIC_H
 
 #include <stddef.h>
+/* 7.17.6 names the least/fast/intptr/intmax families, which <stdint.h>
+ * declares. char16_t and char32_t come from <uchar.h>, which is a hosted
+ * header: a bare-metal target has <stdint.h> but no <uchar.h>, so the
+ * character names below are only defined where the header exists. */
+#include <stdint.h>
+#if defined(__has_include)
+#if __has_include(<uchar.h>)
+#include <uchar.h>
+#define __CXX_HAVE_UCHAR_H 1
+#endif
+#endif
 
 typedef enum memory_order {
   memory_order_relaxed = __ATOMIC_RELAXED,
@@ -29,10 +40,41 @@ typedef _Atomic(unsigned long)      atomic_ulong;
 typedef _Atomic(long long)          atomic_llong;
 typedef _Atomic(unsigned long long) atomic_ullong;
 
-/* 7.17.6 Atomic integer types (the implementation provides size_t and
- * ptrdiff_t from <stddef.h>) */
+/* 7.17.6 Atomic integer types. The whole of Table 7.6, in its order: the
+ * character types, then every least/fast width, then the pointer-sized and
+ * widest ones -- `atomic_uintptr_t` and `atomic_int_least64_t` are what
+ * FFmpeg spells, and a header that omits them turns a declaration into
+ * "a type specifier is required". */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L && defined(__CXX_HAVE_UCHAR_H)
+typedef _Atomic(char8_t)            atomic_char8_t;
+#endif
+#ifdef __CXX_HAVE_UCHAR_H
+typedef _Atomic(char16_t)           atomic_char16_t;
+typedef _Atomic(char32_t)           atomic_char32_t;
+#endif
+typedef _Atomic(wchar_t)            atomic_wchar_t;
+typedef _Atomic(int_least8_t)       atomic_int_least8_t;
+typedef _Atomic(uint_least8_t)      atomic_uint_least8_t;
+typedef _Atomic(int_least16_t)      atomic_int_least16_t;
+typedef _Atomic(uint_least16_t)     atomic_uint_least16_t;
+typedef _Atomic(int_least32_t)      atomic_int_least32_t;
+typedef _Atomic(uint_least32_t)     atomic_uint_least32_t;
+typedef _Atomic(int_least64_t)      atomic_int_least64_t;
+typedef _Atomic(uint_least64_t)     atomic_uint_least64_t;
+typedef _Atomic(int_fast8_t)        atomic_int_fast8_t;
+typedef _Atomic(uint_fast8_t)       atomic_uint_fast8_t;
+typedef _Atomic(int_fast16_t)       atomic_int_fast16_t;
+typedef _Atomic(uint_fast16_t)      atomic_uint_fast16_t;
+typedef _Atomic(int_fast32_t)       atomic_int_fast32_t;
+typedef _Atomic(uint_fast32_t)      atomic_uint_fast32_t;
+typedef _Atomic(int_fast64_t)       atomic_int_fast64_t;
+typedef _Atomic(uint_fast64_t)      atomic_uint_fast64_t;
+typedef _Atomic(intptr_t)           atomic_intptr_t;
+typedef _Atomic(uintptr_t)          atomic_uintptr_t;
 typedef _Atomic(size_t)             atomic_size_t;
 typedef _Atomic(ptrdiff_t)          atomic_ptrdiff_t;
+typedef _Atomic(intmax_t)           atomic_intmax_t;
+typedef _Atomic(uintmax_t)          atomic_uintmax_t;
 
 /* 7.17.1 Lock-free property macros. The __CLANG_ATOMIC_*_LOCK_FREE /
  * __GCC_ATOMIC_*_LOCK_FREE values are predefined per target (all 2

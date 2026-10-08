@@ -43,6 +43,9 @@ static bool opt_dump_raw_tokens;
 
 static char *opt_o;
 static char *opt_MF;
+// -Wa,<options> collected for the assembly stage; see the argument loop.
+static char *asm_args[16];
+static int num_asmarg;
 static char *opt_MT;
 
 char *base_file;
@@ -199,6 +202,8 @@ static void add_dirafter(void) {
 static FileType parse_opt_x(char *s) {
     if (!strcmp(s, "c")) return FILE_C;
     if (!strcmp(s, "assembler")) return FILE_ASM;
+    // The spelling the kernel's scripts use; gcc and clang accept both.
+    if (!strcmp(s, "assembler-with-cpp")) return FILE_ASM_PP;
     if (!strcmp(s, "none")) return FILE_NONE;
     fatal("<command line>: unknown argument for -x: %s", s);
     return FILE_NONE;
@@ -622,6 +627,34 @@ static void parse_args(int argc, char **argv) {
         // error: accepting every -W* and discarding it is how a typo like
         // -Wno-bogus-option used to pass unnoticed, and gcc and clang both
         // reject it.
+        // -Wp,<options> hands options to the preprocessor and -Wa,<options>
+        // to the assembler. Neither is a warning switch, though both start
+        // with -W: `-Wa,--version` used to be read as -W + "a,--version" and
+        // rejected as an unknown warning group. The kernel runs exactly that
+        // (scripts/as-version.sh) and passes -Wp,-MMD,$(depfile) on every
+        // compile, which failed the same way.
+        if (!strncmp(argv[i], "-Wp,", 4)) {
+            // The inner options carry their own dash: -Wp,-MMD,file.
+            char *p = argv[i] + 4;
+            if (*p == '-') p++;
+            // The dependency writers are the ones cxx has: -Wp,-MD,file and
+            // -Wp,-MMD,file are what -MD/-MMD with -MF file spell.
+            if (!strncmp(p, "MD", 2) || !strncmp(p, "MMD", 3)) {
+                if (p[1] == 'M') opt_MM = true;
+                opt_MD = true;
+                char *file = strchr(p, ',');
+                if (file && file[1]) opt_MF = file + 1;
+                continue;
+            }
+            fatal("-Wp,%s: unsupported preprocessor option", p);
+        }
+
+        if (!strncmp(argv[i], "-Wa,", 4)) {
+            char *a = argv[i] + 4;
+            if (num_asmarg < (int)(sizeof(asm_args) / sizeof(asm_args[0]))) asm_args[num_asmarg++] = a;
+            continue;
+        }
+
         if (!strncmp(argv[i], "-W", 2)) {
             const char *name = argv[i] + 2;
             bool off = !strncmp(name, "no-", 3);
@@ -1195,7 +1228,16 @@ static void assemble(char *input, char *output) {
     cmd[n++] = "clang";
     cmd[n++] = "-target";
     cmd[n++] = T.triple;
-    for (int i = 0; i < num_machine && n < 13; i++) cmd[n++] = machine_args[i];
+    for (int i = 0; i < num_machine && n < 11; i++) cmd[n++] = machine_args[i];
+    // One -Wa, argument holding everything the user wrote, which is how clang
+    // spells the same thing.
+    char wa[1024] = "-Wa";
+    for (int i = 0; i < num_asmarg; i++) {
+        if (strlen(wa) + strlen(asm_args[i]) + 2 >= sizeof(wa)) break;
+        strcat(wa, ",");
+        strcat(wa, asm_args[i]);
+    }
+    if (num_asmarg) cmd[n++] = wa;
     cmd[n++] = "-x";
     cmd[n++] = "assembler";
     cmd[n++] = "-c";

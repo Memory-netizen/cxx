@@ -996,6 +996,12 @@ static uint32_t typequal(Token **rest, Token *tok) {
             qual |= Q_VOLATILE;
         else if (tok->kind == TK_RESTRICT)
             qual |= Q_RESTRICT;
+        else if (tok->kind == TK_ATOMIC)
+            // 6.7.3p1 lists _Atomic with the other three, and as a qualifier
+            // it designates an atomic type: `int * _Atomic p` is an atomic
+            // pointer. The specifier form `_Atomic(T)` sets the same bit, so
+            // everything downstream reads it the same way.
+            qual |= Q_ATOMIC;
         else
             break;
         tok = tok->next;

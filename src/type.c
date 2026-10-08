@@ -836,6 +836,32 @@ static bool sign_only_difference(Type *a, Type *b) {
     return a->size == b->size && a->is_unsigned != b->is_unsigned;
 }
 
+// The type a pointer conversion compares, with the one qualifier level that
+// may differ stripped off.
+//
+// 6.7.3p9: a qualifier written on an array type belongs to its element, not to
+// the array. So the top level of `const uint8_t[256]` is the element, and
+// `const uint8_t (*)[256]` is a qualified version of `uint8_t (*)[256]` --
+// which is what ffmpeg's `luty = v->curr_luty` assigns across and what
+// `const double (*const ctables)[256] = lsbf ? a : b` initializes with.
+//
+// Exactly one level: the `const int` of a `const int *` is part of the
+// pointed-to type, and C keeps `int **` and `const int **` incompatible.
+static Type *pointee_unqual(Type *ty) {
+    ty = type_unqual(ty);
+    if (!is_array(ty)) return ty;
+    Type *elem = type_unqual(ty->base);
+    if (elem == ty->base) return ty;
+    // The array stays -- its length is still compared -- and only the
+    // element's qualifier goes.
+    Type *copy = copy_type(ty);
+    copy->base = elem;
+    return copy;
+}
+
+// The qualifiers of that same top level, for the superset test.
+static int pointee_qual(Type *ty) { return is_array(ty) ? ty->base->qual : ty->qual; }
+
 bool is_assignable(Type *dst, Node *src, int ctx) {
     add_type(src);
     Type *src_ty = src->ty;
@@ -855,10 +881,10 @@ bool is_assignable(Type *dst, Node *src, int ctx) {
     // references report that and compile it anyway, so it is a diagnostic
     // here too rather than a refusal.
     if (is_pointer(dst) && is_pointer(src_ty)) {
-        bool agrees = is_compatible(type_unqual(dst->base), type_unqual(src_ty->base));
+        bool agrees = is_compatible(pointee_unqual(dst->base), pointee_unqual(src_ty->base));
         bool void_pair = (is_objptr(dst) && is_voidptr(src_ty)) || (is_objptr(src_ty) && is_voidptr(dst));
         if (agrees || void_pair) {
-            if (!BIT_SUPERSET(dst->base->qual, src_ty->base->qual))
+            if (!BIT_SUPERSET(pointee_qual(dst->base), pointee_qual(src_ty->base)))
                 warning(WG_DISCARDED_QUALIFIERS, src->tok, "%s discards qualifiers", asop_msg[ctx]);
             return true;
         }

@@ -487,6 +487,153 @@ VLA 的 `len` 就是 `vla_len` 指针的低 32 位（见缺陷 1），所以把*
 | **记分（`doc/realworld.sh` 全量探针）** | **git 567/567 保持全过**；**cpython 368/385 → 377/385**（本轮修好的 9 个单元：`Modules/socketmodule.c`、`Python/crossinterp.c`（这两个是崩溃）、`Python/codegen.c`、`Python/compile.c`、`Python/pythonrun.c`、`Python/getcompiler.c`、`Objects/typeobject.c`、`Modules/expat/xmltok.c`、`Modules/expat/xmlrole.c`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21 不变 |
 | **剩余阻塞项** | **cpython 8**（按性质分两类）。环境类 4 个：`Python/pystrhex.c`（`implicit declaration of function ‘__builtin_shufflevector’`）、`Modules/Hacl_Hash_Blake2s_Simd128.c`、`Modules/Hacl_Hash_Blake2b_Simd256.c`、`Modules/_testcapimodule.c`（`static assertion failed: __extension__ __alignof__(buf) >= 64`）——这四个都要 `vector_size` 向量类型，而它们之所以被启用，是因为这棵树的 `pyconfig.h` 是安装时用宿主 clang 配置出来的（它声明「本编译器有 `__builtin_shufflevector`、有 64 字节对齐的 SIMD」），cxx 本身不支持向量类型。真正的缺陷 4 个：`Modules/posixmodule.c`（`implicit declaration of function ‘__builtin_memset’`）、`Python/jit_unwind.c`（`premature end of input`）、`Modules/_testsinglephase.c`（`array initializer must be an initializer list`），以及（R14 复查后更正）`Modules/_ctypes/_ctypes_test.c` —— 它在 `__GNUC__` 下包含 `<complex.h>`，而 glibc 的 `bits/cmathcalls.h` 用 `_Mdouble_complex_`（`double _Complex`）声明函数，属于本计划 **有意不做** 的 `_Complex` 缺口，不是新缺陷 |
 
+### R54/R55 Fujitsu 测试集接入 + `_Atomic` 作为限定符 —— ✅ 探针就位，首轮样本 125/170
+
+#### （一）`_Atomic` 是限定符（6.7.3p1）
+
+`typequal()`（`src/parser.c:990`）只认 `const`/`volatile`/`restrict`，所以 `int * _Atomic p` 报
+`expected ‘,’ before ‘_Atomic’`，而两家都接受。作为限定符它指定的是**原子类型**：
+`int * _Atomic p` 里原子的是指针本身。新增一行接上 `Q_ATOMIC`——与说明符形式 `_Atomic(T)` 置的是同一位，
+所以下游的原子读写路径原样生效。验证：`int * _Atomic`、`int * _Atomic *`、`const _Atomic int *`、
+`struct S * _Atomic` 四种写法与 gcc/clang 一致，运行值 `5 7 8`。
+
+#### （二）Fujitsu Compiler Test Suite 接入探针
+
+`~/compiler-test-suite`（fujitsu/compiler-test-suite）：**C/0000 … C/0202 共 204 个目录、37190 个 C 测试**。
+它自带的跑法是 LLVM test-suite（CMake + Ninja + lit），所以探针直接做 lit 要做的事：
+`lit.local.cfg` 的 `single_source` 意味着每个 `.c` 是独立程序，
+而判定是**与参考编译器逐字节对比 stdout 与退出码**。
+
+> 一个值得记下的错误：第一版探针把 `traditional_output` 读成“stdout 必须为空”，
+> 结果 569/802 被判为失败。实测 `C/0000/0000_0000.c` 成功时打印 `OK`——参考实现才是唯一诚实的判据。
+
+`doc/fujitsu.sh`：默认每个目录取一个（每个主题都碰到，两分钟），`FJ_LIMIT=0` 跑全量；
+`FJ_DIRS` 选目录，`FJ_JOBS` 并行，`FJ_REF` 选参考编译器（空则退化为“无输出 + 零退出”）；
+OpenMP 测试跳过（cxx 没有 OpenMP，它自己的 CMake 也会关掉），参考编译器编不出来的计入 `reffail` 而不算 cxx 的账。
+
+**首轮样本结果**（192 个测试，一个目录一个）：
+
+| | |
+|---|---|
+| 通过 | **125 / 170**（跳过 20 个 OpenMP，参考编译器编不出 2 个） |
+| 编译失败 | 43 |
+| 退出码不同 / 输出不同 | 1 / 1 |
+| **崩溃** | **1** |
+
+失败的诊断分布（前几类）：
+
+| 数量 | 诊断 |
+|---|---|
+| **13** | `invalid suffix ‘X’ on constant` —— 疑似 C23 数字分隔符（`1'000`） |
+| **9** | `a type specifier is required for all declarations` |
+| **7** | `expected ‘X’ after top level declarator` |
+| **4** | `too many arguments to function ‘X’; expected 0` —— 空括号 `f()` 被当成无参数 |
+| 1 | `cxx killed by signal 11` —— **崩溃** |
+| 1 | `incompatible types when passing argument` / `when assigning` / `implicit declaration` |
+| 1 | `#error "not defined macros in float.h"` |
+
+这些都是下一轮的直接工作项（崩溃优先）。
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` **233 → 234 passed / 0 gap**（`_Atomic` 限定符一条，四种写法加运行值）；`test/c2y.sh` 101/0；`make test` exit 0；`bash -n doc/fujitsu.sh` 通过 |
+| **Fujitsu（`doc/fujitsu.sh`）** | 首轮样本：**125 / 170**，失败面见上表 |
+| **磁盘** | 发行版已迁到 D: \uff08`wsl --manage Ubuntu --move`），C: 从 5.8 GB 回到 **160.6 GB**；但 `--move` 是块级拷贝，VHDX 仍是 **155 GB 实占**（客户机只用 ~30 GB）——压缩命令见 `compact-wsl-disk.ps1` |
+
+### R52/R53 FFmpeg 剩余失败面的三个真缺口 —— ✅ 24 个原子类型名 + 数组元素限定符（一处修好 ~15 个文件）
+
+（R52 是 A.3.4 预解析方案的评估，见文末 §7；本节是 R53）
+
+R49 后 FFmpeg 剩下的失败面（类型不匹配 26、`a type specifier is required` 13、
+`lvalue required in ‘asm’` 1、`expected identifier` 1 等）逐类取代表文件与 gcc/clang 对照，
+**七个代表文件全是 cxx 独有的失败**（两家都通过）。本轮修掉两类。
+
+#### （一）`<stdatomic.h>` 缺 24 个 7.17.6 类型名
+
+草案 Table 7.6（类型名等价表）列了 **38** 个名字，cxx 只有前 14 个加 `size_t`/`ptrdiff_t`；
+缺的是 `char16_t`/`char32_t`/`wchar_t` 那一行、**八个 `least`**、**八个 `fast`**、`intptr_t`/`uintptr_t`、`intmax_t`/`uintmax_t`，共 **24** 个。
+FFmpeg 的 `libavformat/fifo.c`、`allformats.c`、`libavcodec/refstruct.c` 写的就是 `atomic_uintptr_t` 与
+`atomic_int_least64_t`，缺了就是 `a type specifier is required for all declarations`。
+
+| | |
+|---|---|
+| 修法 | `include/stdatomic.h` 按草案顺序补齐整张表（名字与直接类型逐字照抄），并加 `<stdint.h>`（`least`/`fast`/`intptr`/`intmax` 一族从它来） |
+| `<uchar.h>` 是 hosted 头 | `char16_t`/`char32_t` 靠它，而**裸机目标没有**：第一版无条件 include 把 `test/atomic.c` 在 rv32 上弄挂了（`uchar.h: cannot open file`）。改用 `__has_include` 守住（实测：它在 cxx 上对主机报 yes、对 rv32 报 no） |
+| `char8_t` | C23 才有，按标准用 `__STDC_VERSION__ >= 202311L` 守 |
+
+#### （二）数组里的限定符：一个 bug，三种形状，~15 个文件
+
+26 个“类型不匹配”里有三种形状是**合法的“加限定符”**，而 cxx 报错：
+
+```c
+luty = v->curr_luty;                                 /* vc1_mc.c:225  uint8_t (*)[256]      */
+bitalloc_tables[i][j] = bitalloc_dst - off[i];       /* dcaenc.c:193  uint16_t (*)[2]       */
+const double (*const ctables)[256] = lsbf ? a : b;   /* dsd.c:106     double[CTABLES][256]  */
+```
+
+6.7.3p9：写在数组类型上的限定符属于**元素**，所以 `const uint8_t (*)[256]` 就是 `uint8_t (*)[256]` 的限定版本，
+赋值就是普通的“加限定符”。cxx 用 `is_compatible()` 判断指向类型是否一致，而它要求限定符**相等**（`type.c:568`），
+于是拒绝。gcc/clang 全部接受且不说一句。
+
+| | |
+|---|---|
+| 修法 | `is_assignable()` 的“指向类型是否一致”改用 `pointee_unqual()`：只剥掉**数组元素那一层**的限定符，数组本身（包括长度）仍然要比；同一层的限定符也用于“丢失限定符”警告的超集判断 |
+| **一次踩坑** | 第一版把数组换成了它的元素，于是 `int[4]` 与 `int[3]` 都变成 `int`，**长度检查失效**——`test/c2y.sh` 的“VLA 匹配任意长度”那条定訖（它同时要求错误绑定被诊断）直接抓住，已改正 |
+| 保留的水线 | 指针**下面**的限定符属于指向类型，必须一致：`int **` 与 `const int **` 仍然不兼容（C 的著名规则），实测仍被拒绝 |
+| 验证 | 三种形状与两个陷阱写成断言；代表文件 `vc1_mc.c` `dcaenc.c` `dsd.c` `motion_est.c` 全部通过 |
+
+**还没动的两类**（已定位）：`libavutil/utils.c:105` 的 `"+m"(state)`（`state` 是**数组**，
+cxx 说 `lvalue required in ‘asm’ statement`，两家都接受）与 `libavfilter/vf_curves.c:591` 的声明符列表中间放
+`av_unused(version)`（GNU 属性）。
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` **229 → 233 passed / 0 gap**（新增：38 个原子类型名各用一遍加运行值、数组内加限定符、指针下方的陷阱仍被拒、丢失限定符仍告警）；`test/c2y.sh` 101/0；`make test` exit 0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **FFmpeg（`doc/ffmpeg.sh`）** | @@FFMPEG@@ |
+| **记分（`doc/realworld.sh` 全量探针）** | @@SCORE@@ |
+
+### R51 内核阻塞点的追查：驱动层的 `-Wp,` / `-Wa,` / `-x` —— ✅ 三类选项现已支持，内核剩下一个**结构性**选择
+
+R48 把内核停点定位到 `scripts/as-version.sh`。本轮把它两个脚本读完并逐条量了一遍：
+
+| 内核的检查 | 脚本要求 | cxx 的实测 |
+|---|---|---|
+| `cc-version.sh` | `$(CC) -E -P -x c -` 输出 `GCC x.y.z` 或 `Clang x.y.z`，再与 `min-tool-version.sh` 比（gcc 最低 **5.1.0**） | **`GCC 70000`** —— 过门（cxx 的 `__GNUC__` 是 7） |
+| `as-version.sh` | `$(CC) -Wa,--version -c -x assembler-with-cpp /dev/null` 的第一行要以 `GNU assembler` 开头；或者命令行里有 `-fintegrated-as` 时直接短路成 `LLVM 0` | **两者都不满足** ⇒ `unknown assembler invoked` |
+| `ld-version.sh` | 对 `$(LD)` 做同样的事 | 未到（卡在上一步） |
+
+**顺手挖出的驱动层缺口**：`as-version.sh` 的命令在 cxx 上报的不是“不认识汇编器”，而是
+`cxx: fatal error: unknown warning group: -Wa,--version`——`-W` 分支把**所有** `-W…` 当成警告组，
+而 `-Wa,`（汇编器选项）、`-Wp,`（预处理器选项）都以 `-W` 开头。内核每一次编译都传 `-Wp,-MMD,$(depfile)`（Makefile 里 **7** 处），
+Kbuild 另传 `-Wa,--fatal-warnings`——这两类在 cxx 上全部直接报错。
+
+| | |
+|---|---|
+| 修法 | `src/main.c`：在 `-W` 分支**之前**接住 `-Wp,` 与 `-Wa,`。`-Wp,-MD,file` / `-Wp,-MMD,file` 就是 `-MD`/`-MMD` + `-MF file` 的另一种写法（cxx 自己写依赖文件），直接映射；`-Wa,` 收集后以一个 `-Wa,a,b` 传给汇编阶段（clang 的集成汇编器本就接受这个形式）；两者之外的内层选项**按名拒绝**，不静默丢弃（静默忽略 `-Wp,-Dfoo` 会改变程序） |
+| 另一处 | `parse_opt_x()` 认 `assembler` 但不认 `assembler-with-cpp`，而后者正是内核用的拼法，也就是 cxx 早已有的 `FILE_ASM_PP`（`.S`：先跑预处理器）——接上即可 |
+| 细节 | `-Wp,`/`-Wa,` 的内层选项**自带连字符**（`-Wp,-MMD,file`），解析时要先跳一个 `-` |
+
+**修后实测**：`-Wa,--fatal-warnings` 、`-Wp,-MMD,file`、`-Wp,-MD,file` 均通过且依赖文件内容正确（`e.o: \ e.c`）；
+`-x assembler-with-cpp` 通过且宏真的先跑；不支持的 `-Wp,-Dfoo=1` 报 `unsupported preprocessor option`。
+
+#### 剩下的阻塞点是一个**身份选择**，不宜硬凑
+
+`as-version.sh` 的两条出路，对应 cxx 的两种自我描述：
+
+1. **自称 GCC**（现状）⇒ 内核不传 `-fintegrated-as`（它在 `scripts/Makefile.clang:28`，只在认定为 clang 时生效）⇒
+   必须让 `-Wa,--version` 打出 **GNU assembler** 的版本行——而 cxx 实际用的是 clang 的集成汇编器，打这个行就是说谎。
+2. **自称 Clang**（定义 `__clang__`）⇒ 内核走 clang 路径、传 `-fintegrated-as`、脚本直接短路成 `LLVM 0`——
+   而这与 cxx 的**实际后端一致**（它就是 clang），但会动到头文件的特性门（`__GNUC_PREREQ` 等），影响面远超内核。
+
+因此本轮**不改**身份，只把事实记录下来：内核要么接受一个“自称 GCC 但用 clang 汇编”的编译器（需要 `-Wa,--version` 回答 GNU 版本），
+要么 cxx 改叫 clang。两者都是可以做的工程决定，但都不是一行代码的事，留给下一次讨论。
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` **225 → 229 passed / 0 gap**（四条新增：`-Wp,-MMD,file` 写出并内容正确、`-Wa,` 到达汇编器、不支持的 `-Wp,` 按名拒绝、`-x assembler-with-cpp` 先跑宏）；`make test` exit 0；c2y 101/0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
+| **内核（`doc/kernel.sh`）** | 停点不变（syncconfig 的 `as-version.sh`），但三类选项现已支持，下一步只剩身份决定 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；tests2 仍 **106 通过 / 0 失败**；`doc/probes.sh` 全部基线（含 `d4` 9/0），**cxx2 = cxx3 = cxx4 逐字节相同**。 |
+
 ### R50 `-funsigned-char` / `-fsigned-char` 与宏的同步性 —— ✅ 修好三处不一致（3 × 4 单元 + 交叉目标逐格与两家一致）
 
 问题：`-funsigned-char` 到底有没有同步影响 `CHAR_MIN` / `CHAR_MAX` / `__CHAR_UNSIGNED__`。修改前的实测：
@@ -2343,3 +2490,78 @@ IR 从 4 条降到 2 条（`icmp/fcmp ne` + `zext`），与 `clang -O0` 逐字�
 | `doc/asm.sh` | GNU asm 语句的三家对照（判决 + 运行结果 + 一条参考实现互相矛盾的信息行） |
 | `doc/realworld.sh` | 真实项目编译记分（`$RW` 下的 lua/zlib/libpng/sqlite/tinycc/git/cpython，各项目自己的 flag，报 N/M 与 top 诊断） |
 | `doc/selfhost.sh`、`doc/selfbuild.sh`、`doc/bootstrap.sh` | 自举记分板（cc1 + LLVM 收不收）、两阶段自举（编译 → 链接 → cxx2 能做什么）、三代自举链（cxx2 → cxx3 → cxx4 不动点，`--suites` 加跑保真度对照） |
+
+## 7. 可选方案评估：外部定义的一次预解析（is_fndef）
+
+> 起因：A.3.4 的 「f中文文法」写着
+> `function-definition: attribute-specifier-sequence_opt declaration-specifiers declarator function-body`。
+> 如果先读一遍「属性序列 + 声明说明符 + 声明符」、丢掉中间结果，
+> 就能在**读参数列表之前**得到“这是定义还是声明”，从而取消现在那些“事后认领”。
+> 本节只做评估，不实施；结论在最后。
+
+### 7.1 现状：四处“事后认领”
+
+现在分发发生在 `external_declaration()`（`src/parser.c:8442`），判据是 `tok->kind == TK_LBRACE`——
+而参数列表在**那之前**就已经读完了，所以参数总是按“函数原型作用域”解析，事后再补：
+
+| # | 代码 | 作用 |
+|---|---|---|
+| 1 | `proto_locals` + `adopt_proto_locals()`（8060–8070，调用在 8543） | 参数类型的 VM 计数器、隐藏栈指针在声明符期间被**摘下**，定义时再**接回**到 `locals` 头部（irgen 把它们当前置条目读） |
+| 2 | `proto_scope` + `adopt_proto_vla_exprs()`（8053、8072–8079，调用在 8513） | 把原型作用域里注册的 VLA 边界表达式搬进函数作用域（每次调用在函数体开头求值） |
+| 3 | `param_syms` + `note_param_sym()`/`param_sym_of()`（8022–8044，8187 与 8527） | 原型作用域已消失，所以定义时要把“边界表达式里命名了前面参数”的引用重新指向函数体看到的那个符号 |
+| 4 | `ty->params` 的不完整类型检查（8450–8459） | “定义的参数必须完整、声明的不必”——注释里写明它**原本在 `func_param()` 里**，因为那时分不清而误伤声明，才搬到这里 |
+
+还有一处**语义错位**作为佐证：`func_param()` 对每个参数都传 `is_param=true`（8129），
+于是 `[*]`、数组声明符里的限定符等 6.7.6.2p5 规则在定义里也被当成合法——
+实测三家都拒绝 `int defn(int a[*]) { ... }`（cxx 也拒绝，但靠的是另一条路径）。
+
+### 7.2 提案能删掉什么
+
+若在 `external_declaration()` 入口先跑一次 `is_fndef()`，则定义的参数列表**从第一个参数起**就落在函数自己的作用域里：
+
+- 7.1 的 **1、2、3 三套机制直接消失**（约 55 行加四个调用点）：符号不需要“摘下再接回”，
+  VLA 边界不需要搬家，参数引用不需要重指；`locals` 头部的顺序也自然成立。
+- 7.1 的 **4 可以搬回 `func_param()`**，回到它本来该在的位置（那不是一个“定义才有”的补丁，而是参数自己的规则）。
+- `is_param` 的语义也归位：定义的顶层参数不再是“原型作用域”，`[*]` 与限定符规则自然不适用。
+- 用户指出的那条事实也因此变成代码里的结构：**除了定义顶层，其余所有参数列表都是函数原型作用域**。
+
+### 7.3 代价与风险
+
+**（一）重复解析的开销（已测）**
+
+预解析只重复「属性序列 + 声明说明符 + 声明符」，不重复函数体。对一个**只有原型**的文件，它就是全部开销，因此可以直接量：
+
+| 文件（4000 条声明） | 仅预处理 | +解析/折叠 | 解析+折叠 |
+|---|---|---|---|
+| `proto.c`（4000 个原型） | 969 ms | 1024 ms | **55 ms** |
+| `defs.c`（4000 个微型定义） | 2629 ms | 2811 ms | 182 ms |
+| `sqlite3.c`（26.9 万行） | 5279 ms | 5771 ms | **492 ms** |
+
+即：**4000 个声明符约 55 ms**，换到 sqlite3.c 这种真实翻译单元上，
+多一遍预解析约为 **总时间的 1%**（55 ms / 5771 ms），占解析阶段本身约 10%。
+（注：预处理占绝大头——sqlite3.c 的 5771 ms 里有 5279 ms 在预处理）。
+
+另一项成本是**内存**：cxx 的分配器从不回收，被丢弃的那一遍的型别与符号会留在 arena 里，量级与声明符本身相当。
+
+**（二）需要新增的机制**
+
+1. **静默模式**：预解析不能重发警告（否则每条声明的警告都会出现两次），
+   但语法错误该报的还得报，且不能报两次。
+2. **回滚**：符号表、作用域栈、VLA 注册、标签环都要能撤销。
+   现有的 `proto_locals` 就是同一个技巧的局部版本，可以推广，但那本身也是一套机制。
+3. **判据规则**：“下一个 token 不是 `{` 就是声明”——这在 cxx **当前成立**，
+   因为 cxx 不支持 K&R 式定义（已核实：源码里没有任何 K&R 路径）。
+   但一旦要加 K&R，判据就要扩成“`{` 或参数声明列表的起始”，而“参数声明列表的起始”正是一个声明说明符的起始——
+   与“空声明”不可区分，所以 K&R 与本方案天然冲突。
+4. **其他边界**：`asm` 标签、`__attribute__` 序列、`static inline` 等都已在被预读的那段里，不需要额外处理；
+   但定义的**重定义/类型冲突**诊断（`check_decl_compatile`、`redefinition of`）8461–8475）仍在第二遍做，不受影响。
+
+### 7.4 结论（本轮不实施）
+
+| 维度 | 判断 |
+|---|---|
+| 能不能简化 | **能**：7.1 的 1/2/3 三套机制（约 55 行）直接消失，第 4 项回到它该在的位置，`is_param` 语义归位 |
+| 性能 | 多一遍声明符解析：**真实文件上约 1% 总时间**（已测，见 7.3），不是瓶颈（瓶颈是预处理） |
+| 代价 | 一套“静默 + 回滚”机制，以及一个与 K&R 天然冲突的判据 |
+| 建议 | **作为可选方案保留，不立即实施**。两个触发条件：① 原型作用域这块逻辑再次变复杂（比如又多一类 VM 类型规则）；② 要加 K&R 式定义——那时反正要动判据，一并做更划算 |
+| 实测口令 | `~/cxxwork/repro/preparse/` 下的 `proto.c`/`defs.c` 生成脚本与 `cxx -dump-tokens` / `-ast-dump` 对比（本节的数字由此得出） |

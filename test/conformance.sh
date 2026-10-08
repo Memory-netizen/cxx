@@ -3175,6 +3175,236 @@ static report_fn usage_routine __attribute__((noreturn));
 int main(void) { return usage_routine == 0 ? 0 : 1; }
 EOF
 
+# --- _Atomic as a type qualifier -------------------------------------
+# 6.7.3p1 lists _Atomic with const, volatile and restrict, and as a qualifier
+# it designates an atomic type: `int * _Atomic p` makes the pointer itself the
+# atomic object. cxx's typequal() knew the other three only, so the
+# declaration died with "expected ',' before '_Atomic'" while gcc and clang
+# took it. The bit is the one the specifier form `_Atomic(T)` sets, so the
+# atomic load/store path behind it applies unchanged.
+cat > "$tmp/atomicq.c" <<'EOF'
+#include <stdatomic.h>
+#include <stdio.h>
+int * _Atomic ap;                 /* an atomic pointer */
+_Atomic int ai;                   /* the specifier form, unchanged */
+int * _Atomic * aap;
+const _Atomic int *cap;
+struct S { int a; };
+struct S * _Atomic sp;
+int main(void) {
+    int x = 5;
+    struct S s = {9};
+    ap = &x;
+    sp = &s;
+    atomic_store(&ai, 7);
+    if (atomic_load(&ai) != 7) return 1;
+    if (ap != &x) return 2;
+    if (sp->a != 9) return 3;
+    if (sizeof(ap) != sizeof(int *)) return 4;
+    (void)aap; (void)cap;
+    printf("%d %d %zu\n", *ap, atomic_load(&ai), sizeof(ap));
+    return 0;
+}
+EOF
+if "$compiler" -std=c23 -w -o "$tmp/atomicq" "$tmp/atomicq.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/atomicq")" = "5 7 8" ]; then
+    echo "testing _Atomic as a type qualifier ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing _Atomic as a type qualifier ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- adding a qualifier inside an array -----------------------------
+# 6.7.3p9 puts a qualifier written on an array type on the element, so
+# `const uint8_t (*)[256]` is a qualified version of `uint8_t (*)[256]` and the
+# assignment is the ordinary "add a qualifier" conversion. cxx compared the
+# pointee with is_compatible(), which wants the qualifiers equal, and refused
+# -- three shapes of it across ~15 of FFmpeg's files:
+#
+#   vc1_mc.c:225   luty = v->curr_luty;                  uint8_t (*)[256]
+#   dcaenc.c:193   bitalloc_tables[i][j] = dst - offset; uint16_t (*)[2]
+#   dsd.c:106      const double (*const c)[256] = a ? t1 : t2;
+#
+# The trap stays: a qualifier below a pointer is part of the pointed-to type,
+# so `const int **` and `int **` remain different types.
+cat > "$tmp/pointee_qual.c" <<'EOF'
+#include <stdint.h>
+#include <stdio.h>
+static double t1[2][256], t2[2][256];
+static uint16_t tab[3][2];
+static int *ints[2];
+int main(void) {
+    const double (*const ctables)[256] = 1 ? t1 : t2;   /* dsd.c:106 */
+    const uint8_t (*luty)[256];
+    uint8_t (*cur)[256] = 0;
+    const uint16_t (*bt)[2] = tab - 0;                  /* dcaenc.c:193 */
+    const int *const *cp = (const int *const *)ints;    /* adding below: fine */
+    luty = cur;                                         /* vc1_mc.c:225 */
+    if (ctables != t1 && ctables != t2) return 1;
+    if (luty != cur) return 2;
+    if (bt != tab) return 3;
+    (void)cp;
+    printf("%d %d\n", (int)sizeof(*ctables), (int)sizeof(*luty));
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/pointee_qual" "$tmp/pointee_qual.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/pointee_qual")" = "2048 256" ]; then
+    echo "testing a qualifier added inside an array ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a qualifier added inside an array ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# The qualifiers below a pointer still have to match.
+cat > "$tmp/pointee_bad.c" <<'EOF'
+int g(int **p) { const int **q = p; (void)q; return 0; }
+EOF
+if "$compiler" -w -c -o "$tmp/pointee_bad.o" "$tmp/pointee_bad.c" > "$tmp/log" 2>&1; then
+    echo "testing the qualifier trap below a pointer ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+elif grep -q 'incompatible types when initializing' "$tmp/log"; then
+    echo "testing the qualifier trap below a pointer ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the qualifier trap below a pointer ... FAILED (wrong message)"
+    sed 's/^/    /' "$tmp/log" | head -3
+    n_fail=$((n_fail + 1))
+fi
+
+# Dropping one inside an array is the direction that discards, and it warns.
+cat > "$tmp/pointee_drop.c" <<'EOF'
+#include <stdint.h>
+void f(const uint8_t (*src)[256]) { uint8_t (*dst)[256] = src; (void)dst; }
+EOF
+if "$compiler" -c -o "$tmp/pointee_drop.o" "$tmp/pointee_drop.c" > "$tmp/log" 2>&1 &&
+   grep -q 'discards qualifiers' "$tmp/log"; then
+    echo "testing a qualifier dropped inside an array warns ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a qualifier dropped inside an array warns ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- every atomic_ name 7.17.6 requires ------------------------------
+# The draft's Table 7.6 lists 38 type names. cxx's <stdatomic.h> had 14 of
+# them plus size_t/ptrdiff_t; the whole char16_t/char32_t/wchar_t row, the
+# eight least, the eight fast, intptr/uintptr and intmax/uintmax were missing,
+# so `atomic_uintptr_t refcount;` was "a type specifier is required for all
+# declarations". That is three of FFmpeg's files, and the names come from
+# <stdint.h> and <uchar.h>, which the header now includes.
+cat > "$tmp/atomic_names.c" <<'EOF'
+#include <stdatomic.h>
+#include <stdio.h>
+atomic_bool v1; atomic_char v2; atomic_schar v3; atomic_uchar v4;
+atomic_short v5; atomic_ushort v6; atomic_int v7; atomic_uint v8;
+atomic_long v9; atomic_ulong v10; atomic_llong v11; atomic_ullong v12;
+atomic_char16_t v13; atomic_char32_t v14; atomic_wchar_t v15;
+atomic_int_least8_t v16; atomic_uint_least8_t v17;
+atomic_int_least16_t v18; atomic_uint_least16_t v19;
+atomic_int_least32_t v20; atomic_uint_least32_t v21;
+atomic_int_least64_t v22; atomic_uint_least64_t v23;
+atomic_int_fast8_t v24; atomic_uint_fast8_t v25;
+atomic_int_fast16_t v26; atomic_uint_fast16_t v27;
+atomic_int_fast32_t v28; atomic_uint_fast32_t v29;
+atomic_int_fast64_t v30; atomic_uint_fast64_t v31;
+atomic_intptr_t v32; atomic_uintptr_t v33;
+atomic_size_t v34; atomic_ptrdiff_t v35;
+atomic_intmax_t v36; atomic_uintmax_t v37;
+/* each name has to be the atomic of its direct type, and usable */
+_Static_assert(sizeof(atomic_uintptr_t) == sizeof(uintptr_t), "atomic_uintptr_t");
+_Static_assert(sizeof(atomic_int_least64_t) == sizeof(int_least64_t), "atomic_int_least64_t");
+int main(void) {
+    atomic_store(&v33, (uintptr_t)0x1234);
+    atomic_store(&v22, (int_least64_t)-7);
+    atomic_store(&v14, (char32_t)0x41);
+    if (atomic_load(&v33) != 0x1234) return 1;
+    if (atomic_load(&v22) != -7) return 2;
+    if (atomic_load(&v14) != 0x41) return 3;
+    printf("%zu %zu\n", sizeof(atomic_uintptr_t), sizeof(atomic_int_least64_t));
+    return 0;
+}
+EOF
+if "$compiler" -std=c23 -w -o "$tmp/atomic_names" "$tmp/atomic_names.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/atomic_names")" = "8 8" ]; then
+    echo "testing every atomic_ type name of 7.17.6 ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing every atomic_ type name of 7.17.6 ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- -Wp, -Wa, and -x assembler-with-cpp ----------------------------
+# None of these is a warning switch, though all three start with -W or look
+# like a -W argument. cxx read `-Wa,--version` as -W + "a,--version" and
+# refused it as an unknown warning group; the kernel runs exactly that in
+# scripts/as-version.sh and passes -Wp,-MMD,$(depfile) on every compile
+# (seven times in its Makefiles) and -Wa,--fatal-warnings in its Kbuild.
+# Both references hand the first to the assembler and the second to the
+# preprocessor. -Wp,-MD,file / -Wp,-MMD,file are what -MD/-MMD with -MF file
+# spell, which is how cxx already writes dependencies.
+cat > "$tmp/wp.c" <<'EOF'
+int x;
+int f(void) { return x; }
+EOF
+rm -f "$tmp/wp.d"
+if "$compiler" -Wp,-MMD,"$tmp/wp.d" -c -o "$tmp/wp.o" "$tmp/wp.c" > "$tmp/log" 2>&1 &&
+   grep -q 'wp.o' "$tmp/wp.d" 2>/dev/null && grep -q 'wp.c' "$tmp/wp.d" 2>/dev/null; then
+    echo "testing -Wp,-MMD,file writes a dependency file ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -Wp,-MMD,file writes a dependency file ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -3
+    n_fail=$((n_fail + 1))
+fi
+
+if "$compiler" -Wa,--fatal-warnings -c -o "$tmp/wp.o" "$tmp/wp.c" > "$tmp/log" 2>&1; then
+    echo "testing -Wa, options reach the assembler ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -Wa, options reach the assembler ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -3
+    n_fail=$((n_fail + 1))
+fi
+
+# An option cxx cannot honour is refused by name, never dropped: a silently
+# ignored -Wp,-D would change the program.
+printf '#include <stdio.h>\nint main(void) { return 0; }\n' > "$tmp/wp2.c"
+if "$compiler" -Wp,-Dfoo=1 -c -o "$tmp/wp2.o" "$tmp/wp2.c" > "$tmp/log" 2>&1; then
+    echo "testing an unsupported -Wp, option is refused ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+elif grep -q 'unsupported preprocessor option' "$tmp/log"; then
+    echo "testing an unsupported -Wp, option is refused ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing an unsupported -Wp, option is refused ... FAILED (wrong message)"
+    sed 's/^/    /' "$tmp/log" | head -3
+    n_fail=$((n_fail + 1))
+fi
+
+# -x assembler-with-cpp is the name of the mode cxx already has: the
+# preprocessor runs first, then the assembler, which is what a .S file is.
+cat > "$tmp/wp3.s" <<'EOF'
+#define VALUE 42
+.globl answer
+answer:
+	.long VALUE
+EOF
+if "$compiler" -x assembler-with-cpp -c -o "$tmp/wp3.o" "$tmp/wp3.s" > "$tmp/log" 2>&1; then
+    echo "testing -x assembler-with-cpp ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -x assembler-with-cpp ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -3
+    n_fail=$((n_fail + 1))
+fi
+
 # --- -funsigned-char / -fsigned-char keep the macros in step -------
 # The switch is implementation-defined (6.2.5) and has three visible effects:
 # plain char's signedness, the __CHAR_UNSIGNED__ macro, and <limits.h>'s
