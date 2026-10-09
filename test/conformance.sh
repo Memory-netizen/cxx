@@ -2294,16 +2294,16 @@ fi
 # one. cpython's pyatomic_gcc.h writes both for every width it has no _n form
 # for, which was the single blocker behind 322 of its 371 failing units.
 cat > "$tmp/genericatomic.c" <<'EOF'
-struct S { int a; double d; };
+struct S { int a, b; };
 int main(void) {
     int x = 7, y = 0;
     double p = 1.5, q = 0;
-    struct S s = { 3, 2.5 }, t = { 0, 0 };
+    struct S s = { 3, 4 }, t = { 0, 0 };
     __atomic_load(&x, &y, __ATOMIC_RELAXED);
     __atomic_load(&p, &q, __ATOMIC_SEQ_CST);
     __atomic_load(&s, &t, __ATOMIC_RELAXED);
     __atomic_store(&y, &x, __ATOMIC_RELAXED);
-    if (y != 7 || q != 1.5 || t.a != 3 || t.d != 2.5) return 1;
+    if (y != 7 || q != 1.5 || t.a != 3 || t.b != 4) return 1;
     return __atomic_load_n(&x, __ATOMIC_RELAXED) == 7 ? 0 : 2;
 }
 EOF
@@ -2315,6 +2315,21 @@ else
     "$compiler" -w -o "$tmp/genericatomic" "$tmp/genericatomic.c" 2>&1 | head -3 | sed 's/^/    /'
     n_fail=$((n_fail + 1))
 fi
+
+# A whole access wider than eight bytes has no atomic instruction behind it,
+# and cxx does not call libatomic. Both spellings are refused rather than
+# quietly made non-atomic: before this check, the GCC spelling compiled to a
+# plain copy -- a data race the program never asked for. gcc emits
+# `__atomic_load_16` here and clang accepts it, so this is a recorded gap
+# (see §0), not a divergence in cxx's favour.
+bad "a wide __atomic_load is refused rather than made non-atomic" <<'EOF'
+struct S { long long a, b; };
+int main(void) {
+    struct S s = { 1, 2 }, t;
+    __atomic_load(&s, &t, __ATOMIC_SEQ_CST);
+    return (int)t.a;
+}
+EOF
 
 # GCC spells the overflow builtins once per operation and once per type, and
 # cpython's bundled mimalloc calls __builtin_umull_overflow: those calls were
@@ -6951,6 +6966,52 @@ if "$compiler" -w -o "$tmp/commavla" "$tmp/commavla.c" > "$tmp/log" 2>&1 && "$tm
 else
     echo "testing a comma length is allowed in a block-scope array ... FAILED"
     sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- -fsyntax-only ---------------------------------------------------
+# Check the translation unit, write nothing: no .ll, no .s, no .o and no
+# link, with -o ignored -- the behaviour gcc and clang give a build script
+# that passes its usual -o along. A file with no main is the sharpest check
+# that no link happens, and the error case is what says it still reports.
+cat > "$tmp/fsonly.c" <<'EOF'
+int f(void) { return 0; }
+EOF
+cat > "$tmp/fsonly_bad.c" <<'EOF'
+int main(void) { return 1 + ; }
+EOF
+if [ -e "$tmp/fsonly.o" ]; then rm -f "$tmp/fsonly.o"; fi
+# A file with no main can only pass if nothing was linked; the driver writes
+# no file of its own either, and the -S/-c names would sit beside the source.
+if "$compiler" -w -fsyntax-only "$tmp/fsonly.c" > "$tmp/log" 2>&1 && [ ! -e "$tmp/fsonly.o" ] &&
+    [ ! -e "$tmp/fsonly.s" ] && [ ! -e "$tmp/fsonly.ll" ]; then
+    echo "testing -fsyntax-only accepts a file with no main ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -fsyntax-only accepts a file with no main ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+if "$compiler" -w -fsyntax-only -o "$tmp/fsonly.o" "$tmp/fsonly.c" > "$tmp/log" 2>&1 && [ ! -e "$tmp/fsonly.o" ]; then
+    echo "testing -fsyntax-only ignores -o and writes nothing ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -fsyntax-only ignores -o and writes nothing ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+if "$compiler" -w -fsyntax-only "$tmp/fsonly_bad.c" > "$tmp/log" 2>&1; then
+    echo "testing -fsyntax-only still reports an error ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+else
+    echo "testing -fsyntax-only still reports an error ... passed"
+    n_pass=$((n_pass + 1))
+fi
+if "$compiler" -fsyntax-only -E "$tmp/fsonly.c" 2>/dev/null | grep -q 'int f(void)'; then
+    echo "testing -fsyntax-only lets -E win ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -fsyntax-only lets -E win ... FAILED"
     n_fail=$((n_fail + 1))
 fi
 

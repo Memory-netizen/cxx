@@ -542,8 +542,179 @@ cxx 两种情形都重复转换后的字母，于是 `"+g"(h)` 的输入被标�
 
 **缺口表更新**：§0 的“asm 匹配约束对间接输出”一行**移除**（已实现）。
 
-### R115 用户提问引出的两个真缺陷：数组长度的类型检查、逗号不算常量表达式 —— ✅ 编译侧再收两类
+### R117 真缺陷：GCC 拼法的原子 load/store 被降级成普通访问 —— ✅ 已修，>8 字节改为拒绝（缺口记录）
 
+从 §R116 的“三条 irgen 检查能不能前移”探出来的：`atomic_object()` 对 GCC 拼法（`__atomic_load`、
+`__atomic_load_n`、`__atomic_store`、`__atomic_store_n`）放行**普通对象**的地址，但降级原子性的判断
+`is_atomic_ptr(addr)` 只看**pointee 有没有 `Q_ATOMIC`** —— 于是这些内建编出来的就是普通读写：
+
+| 源码 | 修前 cxx 的 IR | gcc | clang |
+|---|---|---|---|
+| `__atomic_load_n(p, __ATOMIC_SEQ_CST)`（`long *p`） | `load i64, ptr %p` ✗ | `movq` + `lock`/栅栏 | `load atomic` |
+| `__atomic_store_n(p, v, __ATOMIC_RELAXED)` | `store i64` ✗ | `xchgq` | `store atomic` |
+| `__atomic_load(p, r, order)` / `__atomic_store(p, r, order)` | 同上，普通 copy ✗ | 同 | 同 |
+| 同一对象经 C11 拼法（`_Atomic long *`） | `load atomic i64 … seq_cst` ✓ | — | — |
+
+也就是说：**程序要求的原子性被静默丢掉了**（数据竞争），而 C11 拼法那条路是对的 —— 这正是最坏的一类
+缺陷（错代码而不是报错）。根因是 parse 把 `mem_order` 标在节点上，而 `irgen.c` 的 `load()`/`store()`
+只用 `is_atomic_ptr(addr)` 决定要不要发原子指令（`irgen.c:389`、`488`）。
+
+**修法（`src/parser.c` 的 `atomic_object()`，一处）**：GCC 拼法取的是普通对象的地址，它要求的访问同样是原子的，
+于是把这个 pointee 读成 C11 拼法本会要求的 `_Atomic` 类型 —— 套一层 `ND_EXCAST`（cast 自己的类型
+`add_type()` 不会覆盖），指向 `type_qual(base, Q_ATOMIC)` 的指针。这样下面所有东西一次对齐：
+原子降级、整块访问的宽度上限、对齐。
+
+#### 连带的两件事
+
+1. **>8 字节的整块原子访问现在被拒绝**（两个拼法一致）：`atomic aggregate larger than 8 bytes … is not supported`。
+   gcc 走 `__atomic_load_16`（libatomic），clang 也接受；cxx 不调 libatomic，**拒绝而不是静默非原子** ——
+   按 §0 记为缺口（新增断言把它钉住）。
+2. **原来那条 conformance 断言其实固化了错误行为**：它用 16 字节的 `struct { int a; double d; }` 走
+   `__atomic_load(&s, &t, …)`，修前靠“普通 copy”通过。已改成 8 字节的记录（值语义照测），
+   另加一条“宽记录必须被拒”的断言。
+
+#### 实测
+
+| 项目 | 之前 | 现在 |
+|---|---|---|
+| `test/ir.sh` | — | **+4 条**：GCC 四种拼法的 IR 里必须出现 `load atomic`/`store atomic`（含 8 字节记录的整块访问） |
+| `test/conformance.sh` | 305 / 0 gap | **306 / 0 gap**（改 1 条、加 1 条） |
+| `make test` | exit 0 | exit 0（driver / error / ir / conformance / c2y 全绿） |
+
+### R116 新功能：`-fsyntax-only` —— ✅ 与两家退出码/产物一致，多报 irgen 类诊断（已记录）
+
+用户要求补上这个驱动选项。它此前是 §R115 里记下的一处驱动缺口（gcc/clang 都有，cxx 回
+`unknown argument`），也是 `doc/crash-smoke.sh` 原本想用却用不了的选项。
+
+#### 语义怎么定
+
+cxx 只有一趟前端（`parse → fold_ast → irgen → dump_module`），没有独立代码生成阶段可跳。
+所以这里的“syntax only”取**“跑完整趟前端、什么都不写”**：不写 `.ll`/`.s`/`.o`、不链接、`-o` 忽略。
+这样它报的诊断是**普通编译的父集**，而退出码与产物与两家完全一致 —— 先用脚本把两家的行为量出来再对齐：
+
+| 用例 | cxx | gcc | clang |
+|---|---|---|---|
+| `-fsyntax-only` 好文件 | rc 0，无产物 | rc 0，无产物 | rc 0，无产物 |
+| `-fsyntax-only` 语法错 | rc 1，无产物 | rc 1，无产物 | rc 1，无产物 |
+| `-fsyntax-only` 语义错（不完整元素类型） | rc 1 | rc 1 | rc 1 |
+| `-fsyntax-only -o out.o` | rc 0，**不产生 out.o** | 同 | 同 |
+| `-fsyntax-only -c` / `-S` | rc 0（静默忽略） | rc 0（静默） | rc 0 + “argument unused” 警告 |
+| `-fsyntax-only -E` | **`-E` 生效**（预处理到 stdout） | 同 | 同（另给警告） |
+| 多个输入 / 无输入 | rc 0 / rc 1 | 同 | 同 |
+
+实现（三处，`src/main.c`）：解析 `-fsyntax-only` 存标志；驱动的 `.c` 分支在 `-E`/`-M` 之后、
+`-S` 之前插一段“只跑 cc1、不给输出路径”；非 C 输入（`.s`/`.S`/`.o`/`.a`/`.so`）直接跳过（不进链接参数表，
+所以不会链接）。`cc1()` 在 `irgen()` 之后、`open_outfile()` 之前 `return`。
+
+#### 前端时间分布（临时插桩实测，插桩已移除；`grep -c TEMP-TIME src/main.c` = 0）
+
+| 输入 | 预处理 | parse | fold_ast | irgen | cc1 合计 | 驱动（`-fsyntax-only`） | 驱动（`-S`） |
+|---|---|---|---|---|---|---|---|
+| `sqlite3.c`（9.5 MB） | 1038 ms | **7764 ms** | 38 ms | 135 ms | 8976 ms | 8.91 s | 11.64 s |
+| `src/parser.c`（9.4 k 行） | 181 ms | **209 ms** | 7 ms | 27 ms | 424 ms | 0.85 s | 0.87 s |
+| `src/irgen.c` | 117 ms | **155 ms** | 1 ms | 12 ms | 286 ms | 0.33 s | — |
+| 小程序 | 12 ms | 1 ms | 0 ms | 0 ms | 13 ms | — | — |
+
+读法：**parse 占前端 50–88%**，`fold_ast` 与 `irgen` 合起来只有 1.5–8%；`-fsyntax-only` 相对 `-S`
+省下的 2.7 s（sqlite3.c，约 23%）全部来自跳过后端。
+
+#### 「三条 irgen 错误能不能前移到 parse，好让语法检查更快」—— 能移，但不划算
+
+- `not a lvalue`（`irgen.c:301`）：用 14 个形状探过（`&(x+1)`、`asm` 输出操作数写成右值、`(x=1)=2`、
+  非左值的成员/数组元素、`va_start` 取右值…），**全部被 parse 自己拦下**（`lvalue required as unary ‘&’
+  operand` / `lvalue required in ‘asm’ statement` / `lvalue required as ‘=’ operand`），没找到能到达
+  irgen 那一条的输入 —— 它是**安全网**，性质上更接近内部断言，不是“用户可见错误”。
+- `atomic aggregate larger than 8 bytes`：**能前移**，但要覆盖 6 个形状（`atomic_load`、`atomic_store`、
+  `atomic_exchange`、`atomic_compare_exchange` 四个内建，加上直接读写 `_Atomic` 对象的两种普通访问 ——
+  后两种“这是原子访问”的判断在 irgen），前移等于把这条判断抄一份。
+- `‘asm’ operand of aggregate type is not supported`：**能干净地前移**（parse 已经有操作数类型与
+  `is_indirect`），而且这条是 cxx 有意比两家严格的拒绝（见 §R117 末段）。
+
+但即使三条都前移，收益就是上表里 `fold`+`irgen` 的 1.5–8%；而**停在 parse 之后还会丢掉 `fold_ast` 的警告**
+（`-Wconstant-conversion`/`-Wfloat-conversion`/`-Wliteral-conversion`/移位计数 —— 实测其调用栈是
+`check_shift_count ← fold_node ← fold_ast`），也就是 `-fsyntax-only -Wall -Werror` 会安静下来，
+对做代码检查的人是倒退。**结论：保持现状**（跑完前端、不写文件）；要提速应该提在正确的地方 ——
+跳过后端与不落盘，那才是大头。
+
+因为 `parse()` 之后还有一趟**会报错**的前端。实测（`-fsyntax-only` 与 `-c` 各跑一遍）：
+
+| 用例 | `-fsyntax-only` | `-c` | 检查在哪 |
+|---|---|---|---|
+| `_Atomic struct S v;`（`struct S` 是 16 字节）`atomic_load(&v)` | **报** `atomic aggregate larger than 8 bytes or of non-power-of-two size is not supported` | 同 | `irgen.c:312` —— 只有 `irgen()` 会报 |
+| `struct S; struct S a[3];`（元素类型不完整） | 报 `array has incomplete element type` | 同 | `parse()` |
+| `(void)0 = x` | 报 `lvalue required as ‘=’ operand` | 同 | `parse()` |
+
+放在 `parse()` 之后就会漏掉第一类：构建脚本的探测**通过**、真正的编译随后失败 —— 对“只做语法检查”的
+用途来说这是最坏的失败模式。代价是 `-fsyntax-only` 不比普通编译省前端时间，它省的是后端
+（跳过 `clang -S`、汇编器与链接器）和文件写入。
+
+#### 一处方向相反的差异（初稿写反了，实测更正）
+
+| 用例 | cxx `-fsyntax-only` | cxx 普通编译 | gcc | clang |
+|---|---|---|---|---|
+| `void f(void){ int x=1; asm("" : "=i"(x)); }` | **不报** | 报 `could not allocate output register for constraint 'i'`（**LLVM 后端**发的） | 静默接受 | 报 `invalid output constraint '=i' in asm`（sema） |
+
+这条 asm 约束检查 cxx 交给 LLVM 后端，`-fsyntax-only` 不走后端，所以报不出来；clang 在自己的 sema 里查，
+所以它的 `-fsyntax-only` 也能报。本节初稿把两个方向写反了，实测后更正 —— 这属于结构差异（cxx 没有独立
+sema 检查器去重做后端的约束校验），不改代码，记录在案。
+
+#### 实测
+
+| 项目 | 之前 | 现在 |
+|---|---|---|
+| `test/conformance.sh` | 301 / 0 gap | **305 / 0 gap**（+4 条：无 `main` 也能过、`-o` 被忽略且不产生文件、报错仍然报、`-E` 优先） |
+| `doc/crash-smoke.sh` | 用 `-S -o /dev/null` 代替 | 改回 **`-fsyntax-only`**（就是它文档里写的那个选项），并修好 `stride 1` 选不出样本的 bug（`NR % 1 == 1` 恒为假） |
+| `make test` | exit 0 | exit 0（c2y 101/0） |
+| c2ycov / 2 / 3 / 5 | 109 / 34 / 19 / 16 | 109 / 34 / 19 / 16 |
+
+#### 边界情形（都实测过）
+
+| 用例 | 结果 |
+|---|---|
+| `-fsyntax-only a.s` / `a.S` / `a.o` | rc 0，**什么都不做**（不汇编、不预处理、不进链接参数表）—— 与 gcc 一致 |
+| `-fsyntax-only -dump-tokens` / `-ast-dump` | 转储照常打印（这两个开关本来就在驱动里提前返回） |
+| `-fsyntax-only -MD -MF x.d` | 写依赖文件、不编译 —— 与 gcc 一致 |
+| `-Werror` 下的警告 | 仍按非零退出（警告机制未改） |
+| 全语料崩溃全扫（37,190 个测试，`-fsyntax-only`，`-j8`） | **0 崩溃** —— 这是修好工具之后第一次真正跑满全语料（此前几次读数因为 `-fsyntax-only` 不存在而什么都没测） |
+
+#### 全量那次的读数说明
+
+用最终二进制重跑全量得 **17,637 / 191**（上一次 17,638 / 189）。差的两个经复核都是**负载下的偶发**，
+不是编译器行为变化：
+
+- `C/0134/0134_0136.c` 那次被记成 `compile`：单独重编 **5/5 通过**，把 `C/0134`、`C/0185`、`C/0140`
+  三个目录整目录重跑探针得 **311/312、0 失败**（当时机器 load ≈ 10，探针与我的 c2ycov/conformance 并行跑）。
+- `C/0185/0185_0123.c` 那次被记成 `output`：这个文件本轮早些时候也来回跳过，重跑三次其输出与 clang **逐字节相同**。
+
+所以真实成绩仍是 **17,638 / 189**；这两例的偶发性来自探针在高负载下的编译/运行失败，值得以后把
+探针的并发调低一点再复跑（`FJ_JOBS`）。
+
+`-fsyntax-only` 现在可用于构建脚本的探测；`make`/autoconf/cmake 那类“只做语法检查”的试探不会再因为
+`unknown argument` 而误判 cxx 不可用。
+
+#### 附：8,783 个「参考实现编不过」到底是什么（用户提问引出的一次排查）
+
+`doc/fujitsu.sh` 的 `try()` 是**编译并链接**（`clang -w -o bin f.c -lm`），失败即记 `reffail`。实测：
+
+| 分类 | 数量 | 依据 |
+|---|---|---|
+| 多文件测试的单个文件 | **8,708（99.1%）** | 分布在 **1,714 个**目录里，每个目录有 `CMakeLists.txt` + `llvm_multisource(...)`，一组约 5 个 `.c` 共享一个 `.reference_output`；探针一次只编一个文件，没有 `main` 的那个链接失败（抽样 219 个中 **196 个确实没有 `main`**） |
+| 单文件、clang 自己也编不过 | **75** | 抽样 439 个里 436 个败在**链接**、只有 3 个是编译错误。这 75 个中：约 49 个是 `-Wincompatible-pointer-types`（clang 23 把这类指针不匹配从警告升为错误，它们是写给宽松编译器的老测试）、13 个缺头文件、2 个未声明或缺失的库函数（`memcpy`、`gets`）、`rsize_t`/`RSIZE_MAX`/`errno_t`（C11 Annex K）与 `TMP_MAX_S` 各 1 |
+
+**结论：这一类不是负向测试。** 整个套件没有“必须被拒绝”的约定：每个测试都是“跑起来、与
+`*.reference_output` 比输出”（共 29,479 个 `reference_output`）。所以这 37,190 个测试**不能**回答
+“cxx 是否正确拒绝了错误的程序”这个问题。
+
+**但它顺手提供了一份负向素材**：把那 75 个单文件测试交给 cxx（探针从不问它们），结果 **69 拒 / 6 收** ——
+38 条 `incompatible types when passing argument`、11 条 `incompatible types when assigning`、9 条缺头文件、
+2 条 `implicit declaration of function ‘memcpy’`、`TMP_MAX_S`/`rsize_t`/`RSIZE_MAX`/`errno_t` 各 1；
+cxx 收下的 6 个全是 clang 因 **OpenMP 头缺失**（4 个）或**链接失败**（2 个）才失败的，不是语义错误。
+也就是说那 49 个指针不匹配的约束违规，**两家都不放过**。
+
+负向覆盖目前靠我们自己的断言：`test/conformance.sh` 里 `bad`/`pedantic`/`-pedantic-errors` 那 20 余条，
+以及 `doc/c2ycov*.sh` 的 `rej`。要再扩，最省事的素材就是上面这 75 个文件。
+
+### R115 用户提问引出的两个真缺陷：数组长度的类型检查、逗号不算常量表达式 —— ✅ 编译侧再收两类
 用户问：“`array_dimensions` 解析完 `len` 的表达式之后似乎没有判断他是整数类型？”——**确认属实**，
 而且顺着这条线还查出相邻的第二个缺陷（逗号表达式被当作常量表达式）。两个都修好，各留断言。
 
@@ -623,8 +794,8 @@ guarded 之后 `static int x = (1, 3);` 与 gcc 一致地拒绝，7 个逗号用
 `doc/crash-smoke.sh` 一直用 `-fsyntax-only` 编译每个样本，而 **cxx 没有这个选项**：它对每个文件都回
 `unknown argument` 并 exit 1，脚本把这当成“没崩溃”，于是此前几次“0 崩溃”的读数**什么都没测**。
 改用 `-S -o /dev/null`（同样走完整前端）后重测：**3,100 个样本，0 崩溃**。
-`-fsyntax-only` 本身是驱动接口上的一个缺口（gcc/clang 都有），按 §0 只记录、不顺手实现；
-需要时可以用 `-S -o /dev/null` 代替。
+`-fsyntax-only` 当时是驱动接口上的一个缺口（gcc/clang 都有），**已在 §R116 实现**；在那之前
+`-S -o /dev/null` 是替代品，`doc/crash-smoke.sh` 现在用回了这个选项本身。
 
 #### 同一函数里另外两条约束（本轮只记录，未改）
 

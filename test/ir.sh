@@ -29,6 +29,30 @@ check 'digraph %:%:'
 
 # Atomics: accesses to _Atomic objects become LLVM atomic ops; plain
 # accesses default to seq_cst (C11 7.17.3 order -> LLVM order mapping).
+# GCC's spellings address an ordinary object, and the access they ask for is
+# atomic all the same: the pointee is read as the _Atomic type the C11
+# spelling would have required. Before that, `__atomic_load_n` on a plain
+# `long` was emitted as a plain load -- the atomicity was silently dropped.
+echo 'void f(long *p) { (void)__atomic_load_n(p, __ATOMIC_SEQ_CST); }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'load atomic i64, ptr'
+check 'GCC __atomic_load_n on a plain object is an atomic load'
+
+echo 'void f(long *p, long v) { __atomic_store_n(p, v, __ATOMIC_RELAXED); }' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'store atomic i64'
+check 'GCC __atomic_store_n on a plain object is an atomic store'
+
+printf 'void f(long *p, long *r) { __atomic_load(p, r, __ATOMIC_SEQ_CST); }\n' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'load atomic i64, ptr'
+check 'GCC __atomic_load on a plain object is an atomic load'
+
+printf 'void f(long *p, long *r) { __atomic_store(p, r, __ATOMIC_SEQ_CST); }\n' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'store atomic i64'
+check 'GCC __atomic_store on a plain object is an atomic store'
+
+printf 'struct S { int a, b; };\nvoid f(struct S *p, struct S *r) { __atomic_load(p, r, __ATOMIC_SEQ_CST); }\n' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'load atomic i64, ptr'
+check 'GCC __atomic_load of an eight-byte record is atomic'
+
 echo '_Atomic int x; void f(void) { x = 1; }' \
   | $compiler -S -emit-llvm -o - -xc - | grep -q 'store atomic i32 1, ptr @x seq_cst, align 4'
 check 'atomic store default seq_cst'

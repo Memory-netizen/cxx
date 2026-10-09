@@ -2558,6 +2558,20 @@ static Node *atomic_object(Token **tok, Token *start) {
     bool atomic = is_pointer(object->ty) && (object->ty->base->qual & Q_ATOMIC);
     if (!atomic && !(gcc_atomic_args && is_pointer(object->ty)))
         error(start, "address argument to atomic operation must be a pointer to _Atomic type");
+    // A GCC spelling addresses an ordinary object, and the access it asks for
+    // is atomic all the same. Reading the pointee as the _Atomic type the C11
+    // spelling would have required -- through a cast, whose own type add_type()
+    // leaves alone -- is what makes the two spellings alike everywhere below:
+    // the atomic lowering, the width limit a whole access has to respect, and
+    // the alignment. Without it the load and the store came out as *plain*
+    // accesses, so `__atomic_load_n(p, __ATOMIC_SEQ_CST)` on a plain `long`
+    // was an ordinary read and the atomicity the program asked for was
+    // silently dropped (gcc emits `xchg`/`lock` for the same source).
+    if (!atomic) {
+        Node *cast = new_unary(ND_EXCAST, object, start);
+        cast->ty = pointer_to(type_qual(object->ty->base, Q_ATOMIC), object->ty->qual);
+        object = cast;
+    }
     return object;
 }
 

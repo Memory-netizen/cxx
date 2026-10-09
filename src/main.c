@@ -34,6 +34,7 @@ static bool opt_MP;
 static bool opt_S;
 static bool opt_ll;
 static bool opt_c;
+static bool opt_fsyntax_only;
 static bool opt_P;
 static bool opt_cc1;
 static bool opt_hash_hash_hash;
@@ -87,7 +88,7 @@ bool opt_pedantic_errors;
 
 static void usage(int status) {
     fprintf(stderr,
-            "cxx [ -o <path> ] [ -S | -c | -E ] [ -ast-dump ] [ -dump-tokens ]"
+            "cxx [ -o <path> ] [ -S | -c | -E | -fsyntax-only ] [ -ast-dump ] [ -dump-tokens ]"
             " [ -raw-dump-tokens | -dump-raw-tokens ] <file>\n");
     exit(status);
 }
@@ -362,6 +363,16 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-S")) {
             opt_S = true;
+            continue;
+        }
+
+        // Check the translation unit and write nothing: no .ll, no .s, no
+        // .o, no link, and -o is ignored, which is what gcc and clang do with
+        // this flag (a build system passes its usual -o along). -E and -M
+        // are handled before it in the driver, so preprocessing still wins,
+        // as it does in both of them.
+        if (!strcmp(argv[i], "-fsyntax-only")) {
+            opt_fsyntax_only = true;
             continue;
         }
 
@@ -1033,6 +1044,13 @@ static void cc1(void) {
 
     Module *module = irgen(prog);
 
+    // -fsyntax-only: the translation unit has been read, checked and lowered,
+    // and that is all -- the module is not written anywhere. cxx has one
+    // front-end pass rather than a separate code generator, so "syntax only"
+    // here means "no output", and it keeps the diagnostics irgen produces;
+    // gcc and clang have a code generation stage to skip instead.
+    if (opt_fsyntax_only) return;
+
     FILE *out = open_outfile(output_file);
     dump_module(module, out);
 
@@ -1336,6 +1354,11 @@ int main(int argc, char **argv) {
 
         FileType type = get_file_type(input);
 
+        // -fsyntax-only has nothing to do with an object file, an archive
+        // or an assembly source, and it must not put them in the linker's
+        // argument list either: the link does not happen.
+        if (opt_fsyntax_only && type != FILE_C) continue;
+
         // Handle .o, .a or .so — pass straight to linker.
         if (type == FILE_OBJ || type == FILE_AR || type == FILE_DSO) {
             ld_args[num_ldarg++] = input;
@@ -1384,6 +1407,14 @@ int main(int argc, char **argv) {
 
         // -E: .c → stdout
         if (opt_E || opt_M) {
+            run_cc1(argc, argv, input, NULL);
+            continue;
+        }
+
+        // -fsyntax-only: .c → nothing at all. The front end runs in full
+        // (see cc1()), and no output path is handed to it, so no file of any
+        // kind is written.
+        if (opt_fsyntax_only) {
             run_cc1(argc, argv, input, NULL);
             continue;
         }
