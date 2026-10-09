@@ -1179,10 +1179,13 @@ typedef struct BuiltinDef {
     // row's kind is its index + 1. Storing it too would be a second
     // source of truth. parser.c asserts the table covers every kind.
     BuiltinClass cls;
-    char *intrinsic;  // e.g. "llvm.bswap.i%d", or NULL
-    int ret;          // BuiltinTargetType selector for the result
-    int args;         // BuiltinTargetType selector for the parameters
-    bool uniform;     // every parameter has the type above
+    // The lowering: an LLVM intrinsic name ("llvm.bswap.i%d"), the name of
+    // the library function the builtin stands for ("memcpy"), or NULL when
+    // irgen lowers the call itself.
+    char *intrinsic;
+    int ret;       // BuiltinTargetType selector for the result
+    int args;      // BuiltinTargetType selector for the parameters
+    bool uniform;  // every parameter has the type above
     // A literal i1 argument appended after the operands, or -1 for none.
     // llvm.ctlz/cttz are the reason: their second argument (is_zero_undef,
     // an immarg) is true for clz/ctz and false for clrsb, so it is a
@@ -1213,7 +1216,17 @@ typedef enum {
     BT_LLONG,
     BT_ULLONG,
     BT_VOIDPTR,
-    BT_NONE,  // BCLASS_SPECIAL: the shape comes from parser code
+    // Parameter lists whose parameters do not all share one type. A row whose
+    // `args` is one of these declares that list instead of repeating a single
+    // type `nargs` times: memcpy and memmove take `void *, const void *,
+    // size_t`, memset a value to fill with, memcmp answers with an int.
+    // Naming the whole list here rather than in three more fields of
+    // BuiltinDef is what keeps one row per builtin -- the property the table
+    // exists for -- and leaves every other row untouched.
+    BT_MEMCPY_ARGS,  // void *, const void *, unsigned long
+    BT_MEMSET_ARGS,  // void *, int, unsigned long
+    BT_MEMCMP_ARGS,  // void *, const void *, unsigned long (result: int)
+    BT_NONE,         // BCLASS_SPECIAL: the shape comes from parser code
 } BuiltinTargetType;
 
 extern BuiltinDef builtin_defs[];

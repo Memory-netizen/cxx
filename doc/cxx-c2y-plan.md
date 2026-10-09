@@ -542,7 +542,34 @@ cxx 两种情形都重复转换后的字母，于是 `"+g"(h)` 的输入被标�
 
 **缺口表更新**：§0 的“asm 匹配约束对间接输出”一行**移除**（已实现）。
 
+### R119 A 类内建声明化收尾：6 行转声明式、两处既有缺陷、表可表达任意固定原型 —— ✅
+
+按 `doc/builtin-redesign.md` 把 A 类做完：把**能由固定 C 函数原型表达却仍留在 B 类**的 6 行搬走 ——
+`__builtin_unreachable`、`__sync_synchronize`、`__builtin_memcpy`、`__builtin_memmove`、
+`__builtin_memset`、`__builtin_memcmp`。表 census：**86 行 = 30 DECL + 56 SPECIAL**。
+
+| 项 | 内容 |
+|---|---|
+| 表 | 新增「具名形参表」选择子 `BT_MEMCPY_ARGS`/`BT_MEMSET_ARGS`/`BT_MEMCMP_ARGS`（memcpy 一族形参类型不同：`void *`、`const void *`、`size_t`）。用选择子而不是给 `BuiltinDef` 加字段，保住「一行 = 一个内建」，其余各行位置初始化不动 |
+| `void (void)` 两行 | irgen 按 id 降级：`__builtin_unreachable` 仍是 void 空操作；`__sync_synchronize` 发 `fence seq_cst` |
+| memcpy 一族 | irgen 的 `gen_libcall()` 发库调用（`intrinsic` 里不是 `llvm.*` 的名字即它代表的库函数）；`declare_builtin()` 顺带把库函数声明进模块 —— 少了声明 LLVM 会拒绝该引用。`parse_mem_builtin()`（44 行）与其 4 个 case 删除 |
+| B 类理由 | `builtin-redesign.md` §2.2 由 5 行扩成**逐族 11 行**（覆盖全部 56 行），判据补一条：结果须可为运行期值、实参在求值前不被折叠 |
+
+**顺带抓到的两个既有缺陷**（不是本次引入，但都被本次暴露）：
+
+| 缺陷 | 现象 | 修法 |
+|---|---|---|
+| 取内建地址产出 LLVM 拒绝的模块 | `&__builtin_bswap32` 一直「能编译」，模块里却引用了没有任何声明引入的符号：`use of undefined value '@__builtin_bswap32'` | 前端拒绝（`builtin functions must be directly called`，与 clang 同句）；§3.2 的「获得取址能力」一句据此更正 |
+| 任何 `void *` 转换都误报 `discards qualifiers` | `type.c` 的 `is_assignable()` 里 `!agree` 一项对 void 对恒真：`char *`→`void *` 也报、`memcpy(dst, src, n)` 全报 | 只有**目标真的丢掉限定符**时才报；七个用例与 clang 逐点一致 |
+
+**验证**：`make test` exit 0（conformance **315 / 0 gap**，c2y 101 / 0）；**bootstrap 逐字节相同**
+（cxx2 = cxx3 = cxx4、21/21 目标文件）；`tcctests` 106 ok / 0 failed；跨目标 arm64 / rv64 / rv32
+各 51 / 0。新增断言 11 条：`test/ir.sh` 4（库声明、库调用、memcmp 的 int、fence）、
+`test/conformance.sh` 7（arity、const 源可编译可运行、四个限定符用例、取址被拒）。
+两份拆分评估存档在 `doc/parser-split-eval.md`。
+
 ### R118 阶段解耦：用户可见检查全部前移到前端，`-fsyntax-only` 在折叠之后、irgen 之前返回 —— ✅
+，`-fsyntax-only` 在折叠之后、irgen 之前返回 —— ✅
 
 用户给定性：**irgen 设计上不该再对程序提要求，它只负责 IR 生成**；`-fsyntax-only` 应在折叠完成后、
 irgen 之前返回 —— 这既是时间优化，也是阶段解耦。按此实施。

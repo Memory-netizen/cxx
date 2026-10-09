@@ -849,18 +849,23 @@ else
     n_fail=$((n_fail + 1))
 fi
 
-# The declaration mode gives a builtin an address, which the old dedicated
-# node could not.
+# A builtin the compiler defines has no address to take. It used to compile
+# -- the declaration mode gave it a symbol -- but the module then referred to
+# a symbol no declaration introduced, and LLVM refused it; gcc and clang
+# answer with this same sentence.
 cat > "$tmp/bsp.c" <<'EOF'
 int (*p)(unsigned) = __builtin_bswap32;
 int f(unsigned x) { return p(x); }
 EOF
-if "$compiler" -w -S -emit-llvm -o "$tmp/bsp.ll" "$tmp/bsp.c" 2>"$tmp/bsp.err"; then
-    echo "testing a builtin has an address ... passed"
+if "$compiler" -w -S -emit-llvm -o /dev/null "$tmp/bsp.c" 2>"$tmp/bsp.err"; then
+    echo "testing a builtin has no address ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+elif grep -q 'builtin functions must be directly called' "$tmp/bsp.err"; then
+    echo "testing a builtin has no address ... passed"
     n_pass=$((n_pass + 1))
 else
-    echo "testing a builtin has an address ... FAILED"
-    head -3 "$tmp/bsp.err" | sed 's/^/    /'
+    echo "testing a builtin has no address ... FAILED (wrong diagnostic)"
+    sed 's/^/    /' "$tmp/bsp.err" | head -3
     n_fail=$((n_fail + 1))
 fi
 
@@ -7060,6 +7065,68 @@ else
     echo "testing -fsyntax-only still runs the folding warnings ... FAILED"
     n_fail=$((n_fail + 1))
 fi
+
+# The memory builtins are ordinary declarations now, so the prototype is what
+# reports the arity, and the parameters convert the way any function's do.
+cat > "$tmp/memarity.c" <<'EOF'
+void *f(void *d, const void *s) { return __builtin_memcpy(d, s); }
+EOF
+if "$compiler" -w -fsyntax-only "$tmp/memarity.c" > "$tmp/log" 2>&1; then
+    echo "testing a memory builtin reports its arity ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+elif grep -q 'too few arguments to function' "$tmp/log"; then
+    echo "testing a memory builtin reports its arity ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a memory builtin reports its arity ... FAILED (wrong diagnostic)"
+    sed 's/^/    /' "$tmp/log" | head -3
+    n_fail=$((n_fail + 1))
+fi
+
+# The second parameter is `const void *`: a const source has to be accepted
+# without a discarded-qualifier diagnostic, which is what a `void *` there
+# would produce.
+cat > "$tmp/memconst.c" <<'EOF'
+int main(void) {
+    const char *s = "abc";
+    char d[4];
+    __builtin_memcpy(d, s, 4);
+    if (__builtin_memcmp(d, s, 4) != 0) return 1;
+    __builtin_memmove(d, s, 4);
+    __builtin_memset(d, 0, 4);
+    return d[0] != 0;
+}
+EOF
+if "$compiler" -Wall -Werror -o "$tmp/memconst" "$tmp/memconst.c" > "$tmp/log" 2>&1 && "$tmp/memconst"; then
+    echo "testing a const source for the memory builtins ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a const source for the memory builtins ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -3
+    n_fail=$((n_fail + 1))
+fi
+
+# A conversion to or from `void *` drops nothing by construction, so it must
+# not warn; only a qualifier the destination does not carry does. The whole
+# suite of `memcpy(dst, src, n)`-shaped calls depends on the first case.
+qual_case() {
+    local label=$1 warns=$2 body=$3
+    printf '%s\n' "$body" > "$tmp/qual.c"
+    local out
+    out=$("$compiler" -Wall -fsyntax-only "$tmp/qual.c" 2>&1 | grep -c 'discards qualifiers')
+    if [ "$out" = "$warns" ]; then
+        echo "testing $label ... passed"
+        n_pass=$((n_pass + 1))
+    else
+        echo "testing $label ... FAILED (expected $warns, got $out)"
+        n_fail=$((n_fail + 1))
+    fi
+}
+qual_case "char * to void * does not warn" 0 'void f(void *); int g(char *p) { f(p); return 0; }'
+qual_case "const char * to const void * does not warn" 0 \
+    'void f(const void *); int g(const char *p) { f(p); return 0; }'
+qual_case "const char * to void * still warns" 1 'void f(void *); int g(const char *p) { f(p); return 0; }'
+qual_case "volatile char * to void * still warns" 1 'void f(void *); int g(volatile char *p) { f(p); return 0; }'
 
 # --- summary ---------------------------------------------------------
 echo

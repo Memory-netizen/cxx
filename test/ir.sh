@@ -29,6 +29,24 @@ check 'digraph %:%:'
 
 # Atomics: accesses to _Atomic objects become LLVM atomic ops; plain
 # accesses default to seq_cst (C11 7.17.3 order -> LLVM order mapping).
+# A builtin that stands for a library function calls it, and the module has
+# to declare the symbol: LLVM refuses a reference no declaration introduces.
+printf 'void f(char *d, const char *s) { __builtin_memcpy(d, s, 4); }\n' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'declare ptr @"memcpy"'
+check 'a memory builtin declares the library function'
+
+printf 'void f(char *d) { __builtin_memset(d, 0, 4); }\n' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'call ptr @"memset"'
+check 'a memory builtin calls the library function'
+
+printf 'int f(const char *a, const char *b) { return __builtin_memcmp(a, b, 4); }\n' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'call i32 @"memcmp"'
+check 'memcmp answers with an int'
+
+printf 'void f(void) { __sync_synchronize(); }\n' \
+  | $compiler -S -emit-llvm -o - -xc - | grep -q 'fence seq_cst'
+check '__sync_synchronize is a sequentially consistent fence'
+
 # GCC's spellings address an ordinary object, and the access they ask for is
 # atomic all the same: the pointee is read as the _Atomic type the C11
 # spelling would have required. Before that, `__atomic_load_n` on a plain

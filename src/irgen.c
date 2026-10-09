@@ -1451,19 +1451,58 @@ static Ref gen_classify_call(Node *node, int kind) {
     }
 }
 
+// A builtin that stands for a library function: the call goes to that
+// symbol with the prototype the row declared. Every parameter is a pointer or
+// an integer, so no aggregate travels here and the call needs none of the ABI
+// work the ordinary path does. LLVM declares the symbol on first use, exactly
+// as it does for a header's own declaration of the same function.
+static Ref gen_libcall(Node *node, int kind) {
+    BuiltinDef *d = builtin_def(kind);
+    uint32_t id = intern(d->intrinsic, strlen(d->intrinsic));
+    register_asm_name(id, d->intrinsic);
+
+    Ref *ops = emalloc((node->narg + 2) * sizeof(Ref));
+    ops[0] = GLB(id, builtin_type(kind));
+    int n = 1;
+    for (Node *arg = node->args; arg; arg = arg->next) ops[n++] = gen_expr(arg);
+
+    if (node->ty->kind == TY_VOID) {
+        new_ins(IR_CALL, R, ops, n);
+        return R;
+    }
+    Ref dst = TMP(tmp_id++, node->ty);
+    new_ins(IR_CALL, dst, ops, n);
+    return dst;
+}
+
 static Ref gen_builtin_call(Node *node, int kind) {
     BuiltinDef *d = builtin_def(kind);
     if (!d) fatal("unknown builtin kind %d in irgen", kind);
 
-    // A builtin described by an intrinsic name needs no per-builtin code. A
-    // BCLASS_SPECIAL row may carry a name instead of an intrinsic: the
-    // library function a memory builtin is, which parse_mem_builtin()
-    // already turned into an ordinary call.
+    // A name that is not an llvm.* one is the library function the builtin
+    // stands for, and the call goes there.
+    if (d->cls == BCLASS_DECL && d->intrinsic && strncmp(d->intrinsic, "llvm.", 5)) return gen_libcall(node, kind);
+    // A builtin described by an intrinsic name needs no per-builtin code.
     if (d->cls == BCLASS_DECL && d->intrinsic) return gen_intrinsic_call(node, d, kind);
 
     // The bit-scanning family is a fixed prototype plus a short instruction
     // sequence, which is what a row with no intrinsic means here.
     switch (kind) {
+        // The two void (void) builtins irgen lowers itself. __builtin_unreachable
+        // is the no-op a void expression already is: cxx has no unreachable
+        // terminator to emit, and a path that reaches it has no results to keep,
+        // so the program behaves the same either way -- what is lost is the
+        // optimiser's knowledge that the path cannot be taken.
+        // __sync_synchronize() is the sequentially consistent fence that
+        // __builtin_unreachable is not.
+        case BUILTIN_UNREACHABLE:
+            return R;
+        case BUILTIN_SYNC_SYNCHRONIZE: {
+            Ir *ins = new_ins(IR_FENCE, R, NULL, 0);
+            ins->mem_order = MEM_ORDER_SEQ_CST;
+            return R;
+        }
+
         case BUILTIN_FFS:
         case BUILTIN_FFSL:
         case BUILTIN_FFSLL:

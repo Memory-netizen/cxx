@@ -1,7 +1,8 @@
 # 内建函数模块重构设计（声明式内建 + 统一折叠 + 统一 IR）
 
-状态：**部分落地**。§3 的声明式内建表与统一折叠路径已按计划的 P1（math 内建族）
-用于常量产出族与比较/分类族；其余（B 类之外的统一 IR 捕获等）仍为设计稿。
+状态：**已落地**。声明式内建表（一行一个内建，见 §5.2）、统一折叠（§3.3）、按 id 的 IR 捕获
+（§3.4）都在用；**A 类声明化已做完**：表里 **86 行**，其中 **30 行声明式（BCLASS_DECL）**、
+**56 行不可声明化（BCLASS_SPECIAL）**，后者的逐族理由见 §2.2，本轮收尾记录见 §5.5。
 
 相关文档：`doc/cxx-c2y-plan.md`（总体计划与工作项）、`doc/c2ycov.sh`（一致性覆盖）。
 
@@ -137,16 +138,28 @@ f7dd815e99e61583b5e28cc28991f31ccdfc613eea68e7c5abc12d40e23ea84f  src/cxx.h
 
 ### 2.2 B 类：保持现状（只能由编译器实现）
 
-| 内建 | 为什么不能声明化 |
-|---|---|
-| `__builtin_alloca` / `_with_align` | 不是普通调用：栈分配语义、结果生存期到函数返回、对齐参数是**位数** |
-| `__builtin_constant_p` | 语义要求**看到未折叠的实参**；一旦走 `ND_FUNCALL`，实参会先被折叠，判定必然失真 |
-| `__builtin_types_compatible_p` | 实参是**类型名**不是表达式 |
-| `__builtin_offsetof`（尚未实现） | 同上，且需要成员偏移 |
-| `__c11_atomic_*`（13 个） | 携带内存序、需要左值对象、CAS 需要两个内存序；语义上不是纯函数 |
+判据是「不能用一条固定的 C 函数原型表达」——**或者**结果不必在运行期产生、实参在求值前不能
+被折叠。逐族如下（行数即 `builtin_defs[]` 里的行数，共 56 行）：
 
-B 类保留 `parse_builtin_fn`（建议改名为 `parse_special_builtin`），`primary()` 里按
-「先查 A 类表 → 否则查 B 类表」的顺序分派。
+| 族 | 行数 | 为什么不能声明化 |
+|---|---|---|
+| `__c11_atomic_*`（13）＋ `__atomic_*` 泛型拼法（4） | 17 | 携带内存序、需要左值对象、CAS 需要两个内存序；实参类型随对象而变 |
+| `__builtin_{add,sub,mul}_overflow` | 3 | 操作数必须按**自身宽度**到达 IR（内建名由宽度决定）；固定原型会把 `short` 提升成 `int`，算出的宽度就错了。已按 §4 每次调用**即时合成重载** |
+| `__builtin_alloca` / `_with_align` | 2 | 不是普通调用：栈分配语义、结果生存期到函数返回、对齐参数是**位数** |
+| `__builtin_constant_p` | 1 | 语义要求**看到未折叠的实参**；一旦走 `ND_FUNCALL`，实参会先被折叠，判定恒为真 —— 静默错误 |
+| `__builtin_types_compatible_p` / `__builtin_offsetof` | 2 | 实参是**类型名**／成员指示符，不是表达式 |
+| `__builtin_assume_aligned` | 1 | 原型是可变参数（`(ptr, align, ...)`）；返回值还随实参类型（gcc 返回同一类型，`void *` 会把后续表达式的指针运算变成逐字节） |
+| `__builtin_va_arg` / `_va_start` / `_va_end` / `_va_copy` | 4 | `va_arg` 的第二个实参是**类型名**；`va_start` 需要「最后一个具名参数」与可变参数函数检查；四者的操作数都是 va_list **对象的地址**（数组 va_list 要退化、结构体要取址），声明式调用会把结构体按值传 |
+| `__sync_lock_release` | 1 | 实参类型随对象（要按对象宽度存零） |
+| 常量产出族：`huge_val{,f,l}`、`inf{,f,l}`、`nan{f,,l}`、`nans{f,,l}` | 12 | 值必须在**编译期**得到（`INFINITY`/`NAN`/`HUGE_VAL` 都是常量表达式），`nan`/`nans` 的实参还必须是**字符串字面量** —— 固定原型既表达不了「必须折成常量」，也表达不了「必须是字面量」 |
+| 比较族：`isgreater`、`isgreaterequal`、`isless`、`islessequal`、`islessgreater`、`isunordered` | 6 | 操作数保持**调用点写出的类型**：固定原型会把 `float` 提升为 `double`（多一条 `fpext`），把 `long double` 降为 `double`（**丢精度，比较结果可能变**） |
+| 分类族：`isnan`、`isinf`、`isinf_sign`、`isfinite`、`isnormal`、`signbit`、`fpclassify` | 7 | 同上（类型泛化）；`fpclassify` 另有六个实参 |
+
+因此判据补一条：**除「能用固定原型表达」之外，还要求结果可以是运行期的值、实参在求值前不被
+折叠**。B 类保留 `parse_builtin_fn`，`primary()` 里按「先查 A 类表 → 否则查 B 类表」的顺序分派。
+
+本轮把**能声明化却还留在 B 类的 6 行**搬走了：`__builtin_unreachable`、`__sync_synchronize`、
+`__builtin_memcpy`、`__builtin_memmove`、`__builtin_memset`、`__builtin_memcmp`（见 §5.5）。
 
 ---
 
@@ -196,8 +209,10 @@ extern <ret> __builtin_xxx(<params>);
 **用户可覆盖**：因为只是「若未声明则注入」，用户自己写 `extern ... __builtin_bswap32(...)`
 （或任何同名声明）就用自己的。这比现状（内建名字永远优先）更符合 C 的直觉。
 
-**注意**：A 类内建一旦变成普通符号，就**获得了取址能力**（`&__builtin_bswap32` 可以编译）。
-这是行为扩展，可接受，但要在文档里写明。
+**注意**：A 类内建虽然变成了普通符号，但**不能取址**：`&__builtin_bswap32`、把内建名存进
+函数指针都会被拒绝（`builtin functions must be directly called`，与 clang 同句）。最初的实现
+允许它，代价是模块里出现了一个没有任何声明引入的符号，LLVM 直接拒绝整个模块
+（`use of undefined value '@__builtin_bswap32'`）—— 见 §5.5。
 
 ### 3.3 折叠期：`opt_ast.c` 的 `ND_FUNCALL` 统一折叠
 
@@ -590,6 +605,46 @@ typedef struct BuiltinDef {
 `__builtin_bswap16/32/64` 用例当场抓住。教训：**宽度取自操作数类型，`ret` 与 `args`
 必须一致**；且 `BuiltinTargetType` 需要 `BT_USHORT` 这类选择子——最初只列了
 `BT_INT/BT_UINT/BT_LONG/BT_ULONG/BT_LLONG/BT_ULLONG`，漏了短整型。
+
+### 5.5 A 类声明化收尾实施记录（已完成）
+
+表里最后 6 行能声明化却还在 B 类的内建搬完了：`__builtin_unreachable`、`__sync_synchronize`、
+`__builtin_memcpy`、`__builtin_memmove`、`__builtin_memset`、`__builtin_memcmp`。census：
+**86 行 = 30 DECL + 56 SPECIAL**。
+
+改动：
+
+1. **表新增「具名形参表」选择子**（`BT_MEMCPY_ARGS`/`BT_MEMSET_ARGS`/`BT_MEMCMP_ARGS`）：memcpy
+   一族的形参类型不同（`void *`、`const void *`、`size_t`），而原来一行只有 `args`＋`uniform`
+   两列。选择子而不是给 `BuiltinDef` 加三个字段，是为了保住「一行表项 = 一个内建」，也让其余
+   83 行的位置初始化原样不动。
+2. **`__builtin_unreachable`、`__sync_synchronize` 是 `void (void)`**，irgen 按 id 降级
+   （前者仍是 void 表达式的空操作；后者发 `fence seq_cst`）。
+3. **memcpy 一族由 irgen 发库调用**（`gen_libcall()`）：`intrinsic` 字段里不是 `llvm.*` 的名字
+   就是它代表的库函数；`declare_builtin()` 顺带把该库函数声明进模块 —— 没有声明，LLVM 会拒绝
+   那个引用。`parse_mem_builtin()`（44 行）连同它的 4 个 case 一起删除。
+
+实施中抓到两个**既有缺陷**（都不是这次改动引入的，但都被它暴露）：
+
+- **取内建地址会产出 LLVM 拒绝的模块**。A 类内建变成符号后 `&__builtin_bswap32` 一直"能编译"，
+  但模块里引用了一个没有任何声明引入的符号，LLVM 报 `use of undefined value`。clang 的答复是
+  `builtin functions must be directly called`，cxx 现在同句拒绝（§3.2 的"获得取址能力"一句
+  据此更正）。
+- **任何 `void *` 转换都误报 `discards qualifiers`**（`type.c` 的 `is_assignable()`：`void` 对
+  与对象指针"按构造不兼容"，`!agree` 一项因而恒真）。`char *` → `void *` 也报，`memcpy(dst,
+  src, n)` 全都报 —— 与两家都不符。现在只有**目标真的丢掉限定符**时才报，与 clang 逐点一致：
+
+  | 转换 | 修前 cxx | 修后 cxx | clang |
+  |---|---|---|---|
+  | `char *` → `void *` | 报 | 不报 | 不报 |
+  | `const char *` → `const void *` | 报 | 不报 | 不报 |
+  | `const char *` → `void *` | 报 | 报 | 报 |
+  | `volatile char *` → `void *` | 报 | 报 | 报 |
+
+验证：`make test` exit 0（conformance **315 / 0 gap**、c2y 101 / 0）、**bootstrap 逐字节相同**
+（cxx2 = cxx3 = cxx4，21/21 目标文件）、`tcctests` 106 ok / 0 failed、跨目标 arm64 / rv64 / rv32
+各 51 / 0。新增断言：`test/ir.sh` 4 条（库调用与声明、memcmp 的 int、fence）、`conformance.sh`
+7 条（arity、const 源可编译可运行、四个限定符用例、取址被拒）。
 
 ### 5.3 表结构对后续步骤的适配度（待第 2 步验证）
 

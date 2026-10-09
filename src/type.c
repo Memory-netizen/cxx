@@ -946,7 +946,14 @@ bool is_assignable(Type *dst, Node *src, int ctx) {
         bool agrees = agree || agrees_ignoring_qualifiers(pointee_unqual(dst->base), pointee_unqual(src_ty->base));
         bool void_pair = (is_objptr(dst) && is_voidptr(src_ty)) || (is_objptr(src_ty) && is_voidptr(dst));
         if (agrees || void_pair) {
-            if (!agree || !BIT_SUPERSET(pointee_qual(dst->base), pointee_qual(src_ty->base)))
+            // A `void *` pair agrees by construction: the pointed-to types are
+            // unrelated on purpose, so nothing but a qualifier can be dropped,
+            // and only one the destination does not carry is a diagnostic.
+            // Without that first term every conversion to or from `void *`
+            // warned -- `char *` to `void *`, and with them every
+            // `memcpy(dst, src, n)` -- which neither reference does.
+            bool quals_carried = BIT_SUPERSET(pointee_qual(dst->base), pointee_qual(src_ty->base));
+            if (void_pair ? !quals_carried : (!agree || !quals_carried))
                 warning(WG_DISCARDED_QUALIFIERS, src->tok, "%s discards qualifiers", asop_msg[ctx]);
             return true;
         }

@@ -34,7 +34,6 @@ static uint32_t new_unique_varname(uint32_t id);
 static Node *declaration(Token **rest, Token *tok, Type *ty, SClass sclass, int align, int funcspec, Attr *attrs);
 
 static void attr_decl_apply(Attr *attrs, int *funcspec, int *align, bool gnu_only);
-static Node *parse_mem_builtin(Token **rest, Token *tok, int kind);
 static Attr *find_noreturn_attr(Attr *attrs);
 static void sym_attr_flags(Sym *var, Attr *attrs, bool gnu_only);
 static bool is_attr_start(Token *tok);
@@ -2204,8 +2203,7 @@ BuiltinDef builtin_defs[NUM_BUILTINFN] = {
     [BUILTIN_OFFSETOF] = {"__builtin_offsetof", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_SYNC_LOCK_RELEASE] = {"__sync_lock_release", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
                                    0},
-    [BUILTIN_SYNC_SYNCHRONIZE] = {"__sync_synchronize", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
-                                  0},
+    [BUILTIN_SYNC_SYNCHRONIZE] = {"__sync_synchronize", BCLASS_DECL, NULL, BT_VOID, BT_NONE, true, -1, 0, 0, NULL, 0},
     [BUILTIN_VA_END] = {"__builtin_va_end", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_VA_ARG] = {"__builtin_va_arg", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
     [BUILTIN_VA_COPY] = {"__builtin_va_copy", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
@@ -2233,14 +2231,21 @@ BuiltinDef builtin_defs[NUM_BUILTINFN] = {
     // the only builtins whose call yields an aggregate.
     [BUILTIN_ASSUME_ALIGNED] = {"__builtin_assume_aligned", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0,
                                 NULL, 0},
-    [BUILTIN_UNREACHABLE] = {"__builtin_unreachable", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
-    // A BCLASS_SPECIAL row may carry a name that is no intrinsic: for these
-    // it is the library function the builtin is, which parse_mem_builtin()
-    // declares and calls.
-    [BUILTIN_MEMCPY] = {"__builtin_memcpy", BCLASS_SPECIAL, "memcpy", BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
-    [BUILTIN_MEMMOVE] = {"__builtin_memmove", BCLASS_SPECIAL, "memmove", BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
-    [BUILTIN_MEMSET] = {"__builtin_memset", BCLASS_SPECIAL, "memset", BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
-    [BUILTIN_MEMCMP] = {"__builtin_memcmp", BCLASS_SPECIAL, "memcmp", BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    // `void (void)`: an ordinary prototype, so the row is declarative and
+    // irgen lowers the call itself -- there is nothing the arguments could
+    // carry that a prototype would lose.
+    [BUILTIN_UNREACHABLE] = {"__builtin_unreachable", BCLASS_DECL, NULL, BT_VOID, BT_NONE, true, -1, 0, 0, NULL, 0},
+    // The memory builtins stand for a library function, and their prototypes
+    // are the library's: the name in `intrinsic` is that function, and irgen
+    // emits the call to it. The parameter lists are named because their
+    // parameters differ in type (see BuiltinTargetType).
+    [BUILTIN_MEMCPY] = {"__builtin_memcpy", BCLASS_DECL, "memcpy", BT_VOIDPTR, BT_MEMCPY_ARGS, false, -1, 0, 3, NULL,
+                        0},
+    [BUILTIN_MEMMOVE] = {"__builtin_memmove", BCLASS_DECL, "memmove", BT_VOIDPTR, BT_MEMCPY_ARGS, false, -1, 0, 3, NULL,
+                         0},
+    [BUILTIN_MEMSET] = {"__builtin_memset", BCLASS_DECL, "memset", BT_VOIDPTR, BT_MEMSET_ARGS, false, -1, 0, 3, NULL,
+                        0},
+    [BUILTIN_MEMCMP] = {"__builtin_memcmp", BCLASS_DECL, "memcmp", BT_INT, BT_MEMCMP_ARGS, false, -1, 0, 3, NULL, 0},
     [BUILTIN_ADD_OVERFLOW] = {"__builtin_add_overflow", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
                               0},
     [BUILTIN_SUB_OVERFLOW] = {"__builtin_sub_overflow", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
@@ -2636,6 +2641,33 @@ static Type *builtin_target_type(int sel) {
     }
 }
 
+// The parameters of a prototype that mixes types, written out by the
+// selector its row carries. Returns how many were written; 0 means the row
+// uses the uniform `args` selector instead.
+static int builtin_param_list(int sel, Type **out) {
+    Type *voidptr = pointer_to(T.ty_void, 0);
+    Type *constvoidptr = pointer_to(type_qual(T.ty_void, Q_CONST), 0);
+    switch (sel) {
+        case BT_MEMCPY_ARGS:
+            out[0] = voidptr;
+            out[1] = constvoidptr;
+            out[2] = T.ty_ulong;
+            return 3;
+        case BT_MEMSET_ARGS:
+            out[0] = voidptr;
+            out[1] = T.ty_int;
+            out[2] = T.ty_ulong;
+            return 3;
+        case BT_MEMCMP_ARGS:
+            out[0] = constvoidptr;
+            out[1] = constvoidptr;
+            out[2] = T.ty_ulong;
+            return 3;
+        default:
+            return 0;
+    }
+}
+
 // The declared type of an A-class builtin, built from its row: the return
 // type, then `nargs` parameters. func_type() alone sets only the return
 // type, and fncall() walks params and reports arity with nparam, so both
@@ -2646,15 +2678,20 @@ Type *builtin_type(int kind) {
 
     Type *fty = func_type(builtin_target_type(d->ret));
 
+    // A prototype whose parameters are not all the same type carries a named
+    // list; otherwise the one `args` selector is repeated.
+    Type *list[3];
+    int nlist = builtin_param_list(d->args, list);
+    uint32_t nparams = nlist ? (uint32_t)nlist : d->nargs;
     Type *tail = NULL;
-    for (uint32_t i = 0; i < d->nargs; i++) {
-        Type *pt = copy_type(builtin_target_type(d->args));
+    for (uint32_t i = 0; i < nparams; i++) {
+        Type *pt = copy_type(nlist ? list[i] : builtin_target_type(d->args));
         if (tail)
             tail = tail->next = pt;
         else
             fty->params = tail = pt;
     }
-    fty->nparam = d->nargs;
+    fty->nparam = nparams;
     return fty;
 }
 
@@ -2670,6 +2707,23 @@ Type *builtin_type(int kind) {
 // `declare` built from cxx's Type, whose signature need not match the
 // real LLVM intrinsic. Letting LLVM auto-declare on first use yields the
 // overload the call site actually needs.
+// Declare the library function a builtin stands for, unless a declaration
+// is already in scope. The identifier is only borrowed for the lookup: what
+// the source says stays the builtin's own spelling.
+static void declare_libcall(char *name, Type *fty, Token *tok) {
+    uint32_t id = intern(name, strlen(name));
+    uint32_t saved = tok->id;
+    tok->id = id;
+    NameSpace *ns = find_ident(tok, true, false);
+    tok->id = saved;
+    if (ns) return;
+
+    Sym *sym = new_gvar(id, fty);
+    sym->is_function = true;
+    push_namespace(file_scope, id, SYM_FUNC, fty, tok)->var = sym;
+    sym->sclass = SC_EXTERN;
+}
+
 static void declare_builtin(Token *tok, int kind) {
     Type *fty = builtin_type(kind);
     if (!fty) return;
@@ -2699,6 +2753,13 @@ static void declare_builtin(Token *tok, int kind) {
     sym->is_defined = true;
     push_namespace(file_scope, tok->id, SYM_FUNC, fty, tok)->var = sym;
     sym->sclass = SC_EXTERN;
+
+    // A row that names a library function -- `memcpy` -- needs that symbol in
+    // the module as well: the call irgen emits goes to the library, and LLVM
+    // refuses a reference no declaration introduces. A declaration a header
+    // already made is used as it is, which is what types the call.
+    BuiltinDef *d = builtin_def(kind);
+    if (d->intrinsic && strncmp(d->intrinsic, "llvm.", 5)) declare_libcall(d->intrinsic, fty, tok);
 }
 
 // Builtins lower to dedicated node kinds (ND_ATOMICRMW, ND_CAS,
@@ -2974,18 +3035,6 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             Type *type2 = typename(&tok, tok);
             *rest = skip(tok, TK_RPAREN);
             return new_num(is_compatible(type_unqual(type1), type_unqual(type2)), start);
-        }
-        case BUILTIN_SYNC_SYNCHRONIZE: {
-            // A full barrier, and the only argument is the empty list. The
-            // node is the one the C11 fence builtins build; a
-            // sequentially consistent fence is exactly what
-            // __sync_synchronize() means.
-            Node *fence = new_node(ND_FENCE, tok);
-            tok = skip(tok->next, TK_LPAREN);
-            *rest = skip(tok, TK_RPAREN);
-            fence->mem_order = MEM_ORDER_SEQ_CST + 1;
-            fence->ty = T.ty_void;
-            return fence;
         }
         case BUILTIN_OFFSETOF: {
             // __builtin_offsetof(type, member-designator), where the
@@ -3391,24 +3440,6 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             int64_t size = const_expr(&tok, tok);
             *rest = skip(tok, TK_RPAREN);
             return new_num(size <= T.ty_nullptr->size, start);
-        }
-        case BUILTIN_MEMCPY:
-        case BUILTIN_MEMMOVE:
-        case BUILTIN_MEMSET:
-        case BUILTIN_MEMCMP:
-            return parse_mem_builtin(rest, tok, kind);
-        case BUILTIN_UNREACHABLE: {
-            // GNU __builtin_unreachable(): the statement after which control
-            // never arrives, and reaching it is undefined. cxx has no
-            // unreachable terminator to emit -- the IR opcode for one is
-            // declared and unused -- so what it builds is the no-op that a
-            // void expression already is. The program's results are the same
-            // either way, because a path that reaches this point has none;
-            // what is lost is the optimiser's knowledge that it cannot.
-            // cpython's Py_UNREACHABLE() expands to it.
-            tok = skip(tok->next, TK_LPAREN);
-            *rest = skip(tok, TK_RPAREN);
-            return new_excast(new_num(0, start), T.ty_void, start);
         }
         case BUILTIN_ASSUME_ALIGNED: {
             // GNU __builtin_assume_aligned(ptr, align[, offset]) is the
@@ -3886,6 +3917,12 @@ static Node *primary(Token **rest, Token *tok) {
                     node->ty = et->is_unsigned ? T.ty_ullong : T.ty_llong;
             }
         } else {
+            // A builtin the compiler defines has no address to take: the name
+            // is only usable where it is called, and a module that referred to
+            // the symbol itself would name something that does not exist. gcc
+            // and clang answer with this same sentence.
+            if (sc->var->is_builtin && tok->next->kind != TK_LPAREN)
+                error(tok, "builtin functions must be directly called");
             // [GNU] "__FUNCTION__" and "__PRETTY_FUNCTION__" are further
             // names of the standard "__func__"; the name space entry is the
             // one that says which spelling this use came from. gcc's wording
@@ -4060,62 +4097,6 @@ static Member *get_struct_member(Member *mem, Token *tok) {
         if (mem->name->id == tok->id) return mem;
     }
     return NULL;
-}
-
-// PostExp  ::= (PrimExp | CompLit) PostFix*
-// CompLit  ::= "(" SCSpec* TypeName ")" BracedInit
-// PostFix  ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident | "++" | "--"
-// ArgList  ::= AsExp ("," AsExp)*
-// The memory builtins. Each is the library function named in its table row,
-// and the call it builds is an ordinary one to it: the declaration the
-// program has in scope gives the call its prototype -- glibc's <string.h>
-// always declares these -- and one is declared here when it has not, since a
-// builtin is callable without including the header that declares it. The
-// symbol is not marked as a builtin, so irgen emits the call rather than
-// looking for an intrinsic.
-static Node *parse_mem_builtin(Token **rest, Token *tok, int kind) {
-    BuiltinDef *d = builtin_def(kind);
-    char *lib = d->intrinsic;
-    uint32_t id = intern(lib, strlen(lib));
-
-    // The library function's own prototype, used only when nothing in scope
-    // declares it: void *f(void *, const void *|int, size_t), or int for
-    // memcmp. The size parameter is the target's unsigned long, which is the
-    // width size_t has everywhere cxx targets.
-    Type *fty = func_type(kind == BUILTIN_MEMCMP ? T.ty_int : pointer_to(T.ty_void, 0));
-    Type *p = copy_type(pointer_to(T.ty_void, 0));
-    fty->params = p;
-    p = p->next = copy_type(kind == BUILTIN_MEMSET ? T.ty_int : pointer_to(T.ty_void, 0));
-    p->next = copy_type(T.ty_ulong);
-    fty->nparam = 3;
-    fty->name = tok;
-
-    // Look the name up as it is written, so a declaration from a header is
-    // the one that types the call. The identifier is only borrowed for the
-    // lookup: what the source says is still the builtin's spelling.
-    uint32_t saved = tok->id;
-    tok->id = id;
-    NameSpace *ns = find_ident(tok, true, false);
-    tok->id = saved;
-
-    Sym *sym;
-    if (ns) {
-        while (ns->prev) ns = ns->prev;
-        sym = ns->var;
-    } else {
-        sym = new_gvar(id, fty);
-        sym->is_function = true;
-        push_namespace(file_scope, id, SYM_FUNC, fty, tok)->var = sym;
-    }
-
-    Node *fn = new_var_node(sym, tok);
-    add_type(fn);
-    // The function designator decays to a pointer, which is the shape
-    // fncall() expects from postfix() and the one irgen reads the address
-    // out of: without it the conversion inside fncall() would load the
-    // function itself.
-    new_imcast(&fn, pointer_to(fn->ty, 0));
-    return fncall(rest, tok->next, fn);
 }
 
 static Node *postfix(Token **rest, Token *tok) {
