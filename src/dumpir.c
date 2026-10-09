@@ -1152,7 +1152,11 @@ static void dump_init(Initializer *init, Type *ty) {
             fprintf(out_file, "zeroinitializer");
             return;
         }
-        if (ty->base->size == 1) {
+        // `c"..."` is an [N x i8] constant, so it needs an integer element:
+        // a one-byte struct is not one. libswscale's `FormatEntry` is a struct
+        // of one byte, and writing its array as a string gave LLVM
+        // "'[227 x i8]' but expected '[227 x %struct.FormatEntry]'".
+        if (is_integer(ty->base) && ty->base->size == 1) {
             fprintf(out_file, "c\"");
             for (int i = 0; i < ty->len; i++) {
                 if (!init->child[i]->val)

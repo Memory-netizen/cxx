@@ -7,6 +7,7 @@
 #   FF_JOBS=8            make -j
 #   FF_STEP=5400         timeout for each of configure and make
 #   FF_CONFIGURE=1       force a fresh configure even if one has been done
+#   FF_MAKE_ARGS="V=1"   extra make variables (V=1 shows the commands)
 #
 # FFmpeg's configure probes the compiler hard -- it compiles and runs a test
 # program per optional feature -- so running it with cxx as CC is what decides
@@ -22,6 +23,7 @@ set -u
 C=${1:-./cxx}
 SRC=${2:-${FF_SRC:-$HOME/rw/ffmpeg}}
 JOBS=${FF_JOBS:-8}
+MAKE_ARGS=${FF_MAKE_ARGS:-}
 STEP=${FF_STEP:-5400}
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" || exit 1
@@ -52,8 +54,8 @@ if [ ! -f ffbuild/config.mak ] || [ -n "${FF_CONFIGURE:-}" ]; then
     fi
 fi
 
-printf '   make -k -j%s: ' "$JOBS"
-timeout "$STEP" make -k "-j$JOBS" > "$logs/make.log" 2>&1
+printf '   make -k -j%s%s: ' "$JOBS" "${MAKE_ARGS:+ $MAKE_ARGS}"
+timeout "$STEP" make -k "-j$JOBS" $MAKE_ARGS > "$logs/make.log" 2>&1
 printf 'exit %s (log: %s)\n' "$?" "$logs/make.log"
 
 objects=$(find . -name '*.o' | wc -l)

@@ -1712,6 +1712,9 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
     }
 }
 
+// The sequence behind the names of anonymous records (see below).
+static int anon_seq;
+
 void insert_ty(Type *ty, char *kind) {
     int i = -1;
     Type *t = types;
@@ -1720,14 +1723,19 @@ void insert_ty(Type *ty, char *kind) {
         t = t->next;
     }
     char *name;
-    if (!ty->id) {
-        // A record the compiler built itself -- the target's va_list, an
-        // argument aggregate -- was never given a name token. str(0) is
-        // whatever string the preprocessor interned first, which can be a
-        // file path, and a path is not an identifier the IR can carry:
-        // number those instead. i counts the unnamed records already in the
-        // list, so the first one becomes `struct.anon.1`.
-        name = format("%s.anon.%d", kind, i + 2);
+    if (!ty->id || ty->is_anon) {
+        // A record with no name of its own: a tagless `struct { ... }` (given
+        // intern("anon") for an id, parser.c:7493) or one the compiler built
+        // itself -- the target's va_list, an argument aggregate -- which was
+        // never given a name token at all. str(0) is whatever string the
+        // preprocessor interned first, which can be a file path, and a path is
+        // not an identifier the IR can carry.
+        //
+        // One sequence for both, not a count of what the list happens to hold:
+        // the two cases used to be counted apart and each started at anon.1,
+        // so two unrelated structs came out as %struct.anon.1 and LLVM refused
+        // the module as a redefinition (libavcodec/jpegxl_parser.c).
+        name = format("%s.anon.%d", kind, ++anon_seq);
     } else if (i >= 0) {
         name = format("%s.%s.%d", kind, str(ty->id), i);
     } else {
@@ -5132,11 +5140,32 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
     Node dummy, *cur = &dummy;
     do {
         Token *start = tok;
+        // GNU puts attributes at the beginning of a declarator as well as
+        // after it, and real code uses both: `int i, ret, av_unused(version);`
+        // expands to `int i, ret, __attribute__((unused)) version;`. The list
+        // belongs to the declarator that follows, so it is parsed here and
+        // attached to that declarator's type, which is where
+        // apply_postdecl_attrs() and attr_decl_apply() read it from.
+        Attr *leading = NULL;
+        while (is_attr_start(tok)) {
+            Attr *list = tok->kind == TK_ATTR ? attr_list_gnu(&tok, tok) : attr_list_c23(&tok, tok);
+            if (!list) break;
+            Attr *tail = list;
+            while (tail->next) tail = tail->next;
+            tail->next = leading;
+            leading = list;
+        }
         // The bounds registered here are the ones the declarator adds plus
         // whatever a `typeof(int[n])` in the specifier part registered
         // before it; the statement below evaluates each of them once, and
         // the object's size then reads the counters they wrote.
         Type *ty = declarator(&tok, tok, basety);
+        if (leading) {
+            Attr *tail = leading;
+            while (tail->next) tail = tail->next;
+            tail->next = ty->attrs;
+            ty->attrs = leading;
+        }
         Token *var_name = ty->name;
         apply_postdecl_attrs(ty);
 
@@ -8616,7 +8645,28 @@ static Token *external_declaration(Token *tok) {
     int cnt = -1;
     while (1) {
         cnt++;
+        // GNU puts attributes at the beginning of a declarator as well as
+        // after it, and real code uses both: `int i, ret, av_unused(version);`
+        // expands to `int i, ret, __attribute__((unused)) version;`. The list
+        // belongs to the declarator that follows, so it is parsed here and
+        // attached to that declarator's type, which is where
+        // apply_postdecl_attrs() and sym_attr_flags() read it from.
+        Attr *leading = NULL;
+        while (is_attr_start(tok)) {
+            Attr *list = tok->kind == TK_ATTR ? attr_list_gnu(&tok, tok) : attr_list_c23(&tok, tok);
+            if (!list) break;
+            Attr *tail = list;
+            while (tail->next) tail = tail->next;
+            tail->next = leading;
+            leading = list;
+        }
         Type *ty = declarator(&tok, tok, basety);
+        if (leading) {
+            Attr *tail = leading;
+            while (tail->next) tail = tail->next;
+            tail->next = ty->attrs;
+            ty->attrs = leading;
+        }
         apply_postdecl_attrs(ty);
         Token *var_name = ty->name;
         // 6.7.6.2p2: a variably modified type needs a block scope, the bound

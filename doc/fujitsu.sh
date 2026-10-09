@@ -139,6 +139,15 @@ gap_feature() { # gap_feature <src>
         echo "decimal floating point"
         return 0
     fi
+    # The C17 meaning of `()` -- parameters unspecified -- which cxx does not
+    # implement (section 0, R56/R57). clang's -Wdeprecated-non-prototype covers
+    # a call to a function declared that way; a call through a *pointer*
+    # declared that way is the same unsupported form and is named here. The
+    # shape `(*name)()` is a declarator, not a call.
+    if grep -qE '\([[:space:]]*\*[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\)[[:space:]]*\([[:space:]]*\)' "$src" 2>/dev/null; then
+        echo "() with parameters unspecified (C17)"
+        return 0
+    fi
     return 0
 }
 

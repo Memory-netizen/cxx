@@ -870,12 +870,16 @@ static bool sign_only_difference(Type *a, Type *b) {
 // which is what ffmpeg's `luty = v->curr_luty` assigns across and what
 // `const double (*const ctables)[256] = lsbf ? a : b` initializes with.
 //
-// Exactly one level: the `const int` of a `const int *` is part of the
-// pointed-to type, and C keeps `int **` and `const int **` incompatible.
+// Every array level, and no pointer level: an array of arrays is an array at
+// each step, so the qualifier written on the outermost declarator reaches the
+// innermost element -- `const int16_t a[3][3][8]` qualifies the `int16_t`. The
+// `const int` of a `const int *`, on the other hand, is part of the
+// pointed-to type, and C keeps `int **` and `const int **` incompatible; the
+// recursion stops there.
 static Type *pointee_unqual(Type *ty) {
     ty = type_unqual(ty);
     if (!is_array(ty)) return ty;
-    Type *elem = type_unqual(ty->base);
+    Type *elem = pointee_unqual(ty->base);
     if (elem == ty->base) return ty;
     // The array stays -- its length is still compared -- and only the
     // element's qualifier goes.
@@ -934,6 +938,19 @@ bool is_assignable(Type *dst, Node *src, int ctx) {
 
 void check_asop(Type *dst, Node *src, int ctx) {
     if (is_assignable(dst, src, ctx)) return;
+    // 6.3.2.3p3: a null pointer constant is an integer constant expression with
+    // the value zero, and the parser meets such an expression before anything
+    // folds it -- `fp0(1 - 1)` and `int *p = 0 + 0;` both name one.
+    // is_null_constant() sees only an ND_NUM, so the value is taken here. gcc
+    // accepts these silently and clang warns about the style; cxx takes gcc's
+    // answer, having no -Wint-conversion of its own.
+    //
+    // fold_node() returns a node of its own: reading src->ival here would read
+    // the unfolded expression's, which holds something else entirely.
+    if (is_pointer(dst)) {
+        Node *folded = fold_node(src);
+        if (folded->kind == ND_NUM && is_integer(folded->ty) && int128_is_zero(folded->ival)) return;
+    }
     error(src->tok, "incompatible types when %s", asop_msg[ctx]);
 }
 
@@ -1597,13 +1614,15 @@ void add_type(Node *node) {
                 // whole access unit rather than the field.
                 if (op->is_indirect && op->expr->kind == ND_MEMBER && op->expr->member->is_bitfield)
                     error(op->expr->tok, "cannot take address of bit-field ‘%s’", str(op->expr->member->name->id));
+                // A memory operand names an object, so an array among them is
+                // the array itself and not the pointer it decayed to: the
+                // address handed over is the array's, and the type LLVM is
+                // given for it is the array type. This holds for an output as
+                // well -- `"+m"(state)` is both -- and the decayed node is not
+                // an lvalue, which is how it was refused before.
+                if (op->is_indirect && op->expr->kind == ND_IMCAST && op->expr->lhs->ty->kind == TY_ARRAY)
+                    op->expr = op->expr->lhs;
                 if (!op->is_output) {
-                    // A memory operand names an object, so an array among them
-                    // is the array itself and not the pointer it decayed to:
-                    // the address handed over is the array's, and the type
-                    // LLVM is given for it is the array type.
-                    if (op->is_indirect && op->expr->kind == ND_IMCAST && op->expr->lhs->ty->kind == TY_ARRAY)
-                        op->expr = op->expr->lhs;
                     // A register input is a value, which is what the lvalue
                     // conversion produces; an indirect one keeps the object,
                     // whose address is what travels.

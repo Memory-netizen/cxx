@@ -3175,6 +3175,238 @@ static report_fn usage_routine __attribute__((noreturn));
 int main(void) { return usage_routine == 0 ? 0 : 1; }
 EOF
 
+# --- anonymous records get distinct names -----------------------------
+# insert_ty() numbered a type by counting the entries already in `types` with
+# a matching id. Anonymous records arrive two ways -- a tagless `struct { ... }`
+# is given intern("anon") for an id, while one the compiler builds itself has
+# no id at all -- and the two were counted apart, each starting at anon.1. Two
+# unrelated structs then came out as %struct.anon.1 and LLVM refused the module
+# as a redefinition (libavcodec/jpegxl_parser.c). One sequence for both.
+cat > "$tmp/anon.c" <<'EOF'
+#include <stdio.h>
+struct A { struct { int x, y; } p; };
+struct B { struct { double d; } q; };
+union  U { struct { char c; } s; int i; };
+struct C { struct { struct { int deep; } in; } out; };
+int main(void) {
+    struct A a = {{1, 2}};
+    struct B b = {{3.5}};
+    union U u = {{7}};
+    struct C c = {{{9}}};
+    printf("%d %d %.1f %d %d\n", a.p.x, a.p.y, b.q.d, u.s.c, c.out.in.deep);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/anon" "$tmp/anon.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/anon")" = "1 2 3.5 7 9" ]; then
+    echo "testing anonymous records get distinct names ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing anonymous records get distinct names ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a one-byte struct array is not a byte string ---------------------
+# `c"..."` is an [N x i8] constant, so the short form is only right when the
+# element is an integer type. libswscale's FormatEntry is a struct one byte
+# wide, and cxx wrote its 227-element table as a string -- LLVM refused the
+# module twice ("'[227 x i8]' but expected '[227 x %struct.FormatEntry]'" and
+# "redefinition of type"). A byte array keeps the short form.
+cat > "$tmp/bytestr.c" <<'EOF'
+#include <stdio.h>
+struct One { char c; };
+struct One tab[4] = {{1}, {2}, {3}, {4}};
+char bytes[4] = {5, 6, 7, 8};
+union U { char c; };
+union U uni[2] = {{9}, {10}};
+int main(void) {
+    printf("%d %d %d %d | %d %d %d %d | %d %d\n", tab[0].c, tab[1].c, tab[2].c, tab[3].c,
+           bytes[0], bytes[1], bytes[2], bytes[3], uni[0].c, uni[1].c);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/bytestr" "$tmp/bytestr.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/bytestr")" = "1 2 3 4 | 5 6 7 8 | 9 10" ]; then
+    echo "testing a one-byte struct array is not a byte string ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a one-byte struct array is not a byte string ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- passing an aggregate by value ------------------------------------
+# The value has to be given a home before it can travel, and that copy was
+# written with IR_STORE -- which put the address where the bytes belong, since
+# in this IR an aggregate value *is* its address. LLVM refused the module:
+# "'%tmp104' defined with type 'ptr' but expected '%struct.SchedulerNode'",
+# which is ffmpeg's fftools/ffmpeg_sched.c. The copies elsewhere (the va_arg
+# paths) are IR_MEMCPY, and this one is now too.
+cat > "$tmp/aggarg.c" <<'EOF'
+#include <stdio.h>
+struct S { int a, b, c; };
+static int sum(struct S s) { return s.a + s.b + s.c; }
+struct Holder { struct S node; };
+struct Holder h = {{1, 2, 3}};
+static struct S get(void) { struct S s = {4, 5, 6}; return s; }
+static int pass(struct S a, struct S b) { return sum(a) * 10 + sum(b); }
+int main(void) {
+    struct S v = {10, 20, 30};
+    printf("%d %d %d %d\n", sum(h.node), sum(get()), sum((struct S){7, 8, 9}), pass(v, h.node));
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/aggarg" "$tmp/aggarg.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/aggarg")" = "6 15 24 606" ]; then
+    echo "testing a by-value aggregate argument ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a by-value aggregate argument ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- an array as an asm memory operand, and the local's slot -----------
+# Two bugs that met in one program. `"+m"(state)` is an output *and* an
+# indirect operand: the input half of the ND_ASM loop already kept the array
+# itself rather than the pointer it decayed to, the output half did not, so the
+# lvalue check saw the decayed node and refused it -- ffmpeg's
+# libavutil/utils.c:105 (`uint16_t state[14]` with `"fstenv %0"`).
+#
+# And a local object's storage was allocated with the *declared* alignment:
+# 8 for a `double[2]`, where an array of 16 bytes or more has to sit 16-aligned
+# on x86-64 (object_align, R63) or a `movaps` on it faults. Globals and
+# __builtin_alloca were fixed then; the fn->locals alloca was missed.
+cat > "$tmp/asmarr.c" <<'EOF'
+#include <stdio.h>
+#include <stdint.h>
+int main(void) {
+    uint16_t state[14] = {0};
+    double a[2] = { 1.0, 2.0 }, r[2];
+    __asm__ volatile("fstenv %0 \n\t" : "+m"(state) : : "memory");
+    __asm__("movaps %1, %%xmm0\n\tmovaps %%xmm0, %0" : "=m"(r) : "m"(a));
+    printf("%zu %d %g %g\n", sizeof(state), (int)state[0], r[0], r[1]);
+    (void)state[0];
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/asmarr" "$tmp/asmarr.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/asmarr" 2>/dev/null | sed 's/^[0-9]* /s /')" = "s 28 895 1 2" ]; then
+    echo "testing an array as an asm memory operand ... passed"
+    n_pass=$((n_pass + 1))
+elif [ -x "$tmp/asmarr" ]; then
+    # fstenv's state[0] is machine-specific; the point is that it runs.
+    got=$("$tmp/asmarr" 2>/dev/null)
+    case "$got" in
+        "28 "*" 1 2") echo "testing an array as an asm memory operand ... passed"; n_pass=$((n_pass + 1)) ;;
+        *) echo "testing an array as an asm memory operand ... FAILED"; echo "    got: $got"; n_fail=$((n_fail + 1)) ;;
+    esac
+else
+    echo "testing an array as an asm memory operand ... FAILED (compile)"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- an attribute between declarators ---------------------------------
+# GCC allows an attribute at the *beginning* of a declarator as well as after
+# it, and FFmpeg leans on that: `int i, ret, av_unused(version), nb_curves;`
+# with av_unused expanding to __attribute__((unused)) is vf_curves.c:591, and
+# ripemd.c:111 has the same shape. cxx read attributes before and after a
+# declarator but not at the start of one, so it stopped at "expected identifier
+# or '('". Both declaration paths -- the block one and the file-scope one --
+# take the list now and attach it to the declarator that follows.
+cat > "$tmp/attrdecl.c" <<'EOF'
+#include <stdio.h>
+#define av_unused __attribute__((unused))
+int g1, g2, av_unused(g3), g4;
+int main(void) {
+    int i, ret, av_unused(version), nb_curves;
+    unsigned a, b, av_unused t;
+    i = 2; ret = 3; version = 1; nb_curves = 4;
+    a = 5; b = 6; t = 7;
+    g1 = 8; g2 = 9; g3 = 10; g4 = 11;
+    printf("%d %d %d %d %u %u %u %d %d %d %d\n", i, ret, version, nb_curves, a, b, t, g1, g2, g3, g4);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/attrdecl" "$tmp/attrdecl.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/attrdecl")" = "2 3 1 4 5 6 7 8 9 10 11" ]; then
+    echo "testing an attribute at the start of a declarator ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing an attribute at the start of a declarator ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- an argument-count diagnostic on an anonymous callee --------------
+# `int (*mpfp)(); mpfp(0);` calls through a pointer, and the function type it
+# points to has no name: all three argument-count diagnostics read
+# ty->name->len, so the compiler died with signal 11 -- the Fujitsu suite's
+# C/0048_0001, whose parser got there through `int mpfff(), (*mpfp)(), ii;`.
+# clang words this case without a name and cxx follows it. Both directions are
+# checked: the too-many one was reachable, the too-few one was not.
+cat > "$tmp/anonymous.c" <<'EOF'
+int (*mpfp)();
+int (*mpfp2)(int, int);
+int main(void) { if (0) return (*mpfp)(0); return (*mpfp2)(); }
+EOF
+if "$compiler" -w -c -o "$tmp/anonymous.o" "$tmp/anonymous.c" > "$tmp/log" 2>&1; then
+    echo "testing a bad call through a pointer ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+elif grep -q 'internal compiler error' "$tmp/log"; then
+    echo "testing a bad call through a pointer ... FAILED (compiler died)"
+    n_fail=$((n_fail + 1))
+else
+    n_ok=$(grep -c 'too many arguments\|too few arguments' "$tmp/log" || true)
+    if [ "$n_ok" -ge 1 ]; then
+        echo "testing a bad call through a pointer ... passed"
+        n_pass=$((n_pass + 1))
+    else
+        echo "testing a bad call through a pointer ... FAILED (no argument-count diagnostic)"
+        sed 's/^/    /' "$tmp/log" | head -3
+        n_fail=$((n_fail + 1))
+    fi
+fi
+
+# --- a null pointer constant written as an expression -----------------
+# 6.3.2.3p3: an integer constant expression with the value 0 is one, and
+# is_null_constant() only knows a literal. gcc accepts these silently, clang
+# with a warning; cxx refused them until the Fujitsu suite's C/0150_0002
+# (`fp0(1-1)` with `int fp0(int *)`) turned up. A real mismatch stays an error.
+cat > "$tmp/nullconst.c" <<'EOF'
+#include <stdio.h>
+int fp0(int *p) { return p == 0; }
+int main(void) {
+    int *a = 1 - 1;
+    int *b = 0 + 0;
+    int *c = 2 - 2;
+    printf("%d %d %d %d\n", fp0(1 - 1), a == 0, b == 0, c == 0);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/nullconst" "$tmp/nullconst.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/nullconst")" = "1 1 1 1" ]; then
+    echo "testing a null pointer constant written as an expression ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a null pointer constant written as an expression ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+cat > "$tmp/nullconst2.c" <<'EOF'
+int main(void) { int a = 1; int *p = a; return *p; }
+EOF
+if "$compiler" -w -c -o "$tmp/nullconst2.o" "$tmp/nullconst2.c" > "$tmp/log" 2>&1; then
+    echo "testing a non-constant integer to pointer stays an error ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+else
+    echo "testing a non-constant integer to pointer stays an error ... passed"
+    n_pass=$((n_pass + 1))
+fi
+
 # --- __label__, GNU's block-local labels ------------------------------
 # `__label__ a, b;` declares names whose scope is the block, so that two
 # blocks -- or two expansions of a macro carrying one inside a statement

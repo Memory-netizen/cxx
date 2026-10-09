@@ -39,6 +39,7 @@ debug 阶段结束后再统一计划是否扩充。探针把它们算进 `gap` �
 |---|---|---|
 | **SSE/MMX 内联函数族**（`__builtin_ia32_*`）及 `__SSE2__` | Fujitsu `C/0159`；`§R63` | 试过定义 `__SSE2__`，结果 cpython 从 381/385 掉到 **149/385**（头文件的 SIMD 分支全部散架），已撤回 |
 | **`__sync_*` 未实现的形式**：`*_and_fetch`、`__sync_{bool,val}_compare_and_swap`、`nand` | Fujitsu `C/0044_0001`；`§R68` | 已有 `fetch_and_*`、`lock_test_and_set`、`lock_release`、`synchronize`；`_and_fetch` 要把操作数加回去（指针还要按元素缩放），CAS 两形式按值接旧值，nand 没有 `A_*` 撠码 |
+| **asm 匹配约束（`"0"`–`"9"`）对间接输出** | ffmpeg `libavcodec/x86/hpeldsp_init.c`；§R73 | 展成被匹配者的约束并按地址传值，于是 `elementtype` 落在非间接约束上（IR 非法）；clang 传值、约束保留为数字 |
 | **十进制浮点** `_Decimal32/64/128` | §0 长期不做 | 已在上面“明确不做”之列 |
 | 复数（`_Complex`/`_Imaginary`/虚数后缀） | §0 长期不做 | 探针已按 `noproto` 桶过滤 |
 
@@ -515,6 +516,274 @@ VLA 的 `len` 就是 `vla_len` 指针的低 32 位（见缺陷 1），所以把*
 | **验收** | `test/conformance.sh` **160 → 171 passed / 0 gap**（十一条新断言）：变长边界只求值一次（三种形状 + 运行时取值）、变长 typedef 在声明处捕获、`sizeof`/`_Countof` 变长对象、部分初始化的超大记录（4097 字节数组，运行时校验零填充）、变长调用前的记录形参、`[[noreturn]]` 在对象上是 error／GNU 拼写是警告／函数指针接受、`-std=c11` 是严格模式而 `-std=gnu11` 不是、文件作用域的变长修改类型被拒、`__inline` 是关键字。全套复跑：c2y 101/0、arm64 51、rv64 51、rv32 51(+1 skipped)、`doc/probes.sh` 全部基线（c2ycov 109/2、selfhost 21/0/0、asm 68/0 …）、`doc/bootstrap.sh` 仍是 **cxx2 = cxx3 = cxx4 逐字节相同**（说明调用类型表、初始化器链与关键字表的改动没有动摇不动点）。`clang-format-21 --dry-run --Werror` 干净。另外 **`make test` 由红转绿**：本轮开始时 `[[noreturn]] int v;` 是**失败**的——R11 把这条诊断从 error 降成了警告，但 `test/error.sh` 仍然要求它报错；本轮把**标准拼写**恢复成 error（GNU 拼写保持警告，函数指针仍接受），与 clang 一致 |
 | **记分（`doc/realworld.sh` 全量探针）** | **git 567/567 保持全过**；**cpython 368/385 → 377/385**（本轮修好的 9 个单元：`Modules/socketmodule.c`、`Python/crossinterp.c`（这两个是崩溃）、`Python/codegen.c`、`Python/compile.c`、`Python/pythonrun.c`、`Python/getcompiler.c`、`Objects/typeobject.c`、`Modules/expat/xmltok.c`、`Modules/expat/xmlrole.c`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21 不变 |
 | **剩余阻塞项** | **cpython 8**（按性质分两类）。环境类 4 个：`Python/pystrhex.c`（`implicit declaration of function ‘__builtin_shufflevector’`）、`Modules/Hacl_Hash_Blake2s_Simd128.c`、`Modules/Hacl_Hash_Blake2b_Simd256.c`、`Modules/_testcapimodule.c`（`static assertion failed: __extension__ __alignof__(buf) >= 64`）——这四个都要 `vector_size` 向量类型，而它们之所以被启用，是因为这棵树的 `pyconfig.h` 是安装时用宿主 clang 配置出来的（它声明「本编译器有 `__builtin_shufflevector`、有 64 字节对齐的 SIMD」），cxx 本身不支持向量类型。真正的缺陷 4 个：`Modules/posixmodule.c`（`implicit declaration of function ‘__builtin_memset’`）、`Python/jit_unwind.c`（`premature end of input`）、`Modules/_testsinglephase.c`（`array initializer must be an initializer list`），以及（R14 复查后更正）`Modules/_ctypes/_ctypes_test.c` —— 它在 `__GNUC__` 下包含 `<complex.h>`，而 glibc 的 `bits/cmathcalls.h` 用 `_Mdouble_complex_`（`double _Complex`）声明函数，属于本计划 **有意不做** 的 `_Complex` 缺口，不是新缺陷 |
+
+### R78 修好：匿名记录的命名 —— ✅ FFmpeg 的 bug 类别归零，debug 阶段结束
+
+最后一个非法 IR：`libavcodec/jpegxl_parser.c` 里两个**不同的匿名结构体**都叫 `%struct.anon.1`，
+LLVM 报 `redefinition of type`。
+
+**定位手段**：同样用 `FF_MAKE_ARGS=V=1` 的日志（注意不要用“最近的 CC 行”推断文件，
+`-j` 下输出交错；要用“最近一条 `cxx … -c …` 命令”），拿到命令行后用 `-cc1 -cc1-output` 导出 IR：
+
+```llvm
+13: %struct.anon.1 = type { i32, i32 }
+99: %struct.anon.1 = type { %struct.FFJXLMetadata, %struct.JXLFrame }
+```
+
+**根因**（用一次临时 trace 确认，已撤）：匿名记录有**两条进入 `insert_ty()` 的路**，各自计数、
+**各自从 `anon.1` 开始**：
+
+- 无标签的 `struct { … }` 在 `parser.c:7493` 被赋 `ty->id = intern("anon")`，走 `struct.anon.<同 id 计数>`；
+- 编译器自己造的记录（目标的 va_list、参数聚合体）或尚未取得 id 的副本，`ty->id == 0`，走 `struct.anon.<同 id 计数 + 2>`。
+
+于是一个走第二条路、一个走第一条路的两个结构体都叫 `anon.1`。trace 里同一个名字确实被算出了**两次**。
+
+**修法**：两条路合并到**一个全局单调序列**（`static int anon_seq`），名字与表内容无关、
+按构造唯一。修后 `jpegxl_parser.c` 用它自己的构建命令编译通过，IR 里的匿名类型名不再重复。
+
+#### debug 阶段结束：探针里只剩缺口
+
+| 探针 | 结果 |
+|---|---|
+| **FFmpeg** | 目标文件 **2262**，崩溃 **0**，错误类别 **1**——且那一类是**已记录的缺口**（asm 匹配约束，§0），**不再有 bug** |
+| **深样本（`FJ_PER_DIR=3`）** | **376 / 376，0 failed**；超出范围 61 OpenMP + 100 无原型/K&R；缺口 14（`()` 无原型 7 + SSE/MMX 7） |
+| **验收** | `test/conformance.sh` **263 passed / 0 gap**（本轮新增：三层嵌套的匿名结构体、匿名联合体与其成员）；`doc/c2ycov.sh` 109/0；c2y 101/0；`make test` exit 0 |
+| **全量** | **全部与基线相同**：realworld cpython **381/385**（四例均为已记录的缺口：SIMD 内联函数与 `<complex.h>`）、git 567/567、libpng 18/18、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；tests2 **106 / 0**；跨目标 arm64 51/0、rv64 51/0、rv32 51/0（+1 skipped）；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。 |
+
+R71–R78 八轮共修好：指针调用的参数个数崩溃、`1 - 1` 当空指针常量被拒、
+多维数组元素限定符、声明符开头的属性、asm 内存操作数是数组（含输出侧）、局部对象槽位对齐、
+按值传递的聚合体被当值存、`c"…"` 误用于一字节结构体数组、匿名记录命名撞车。
+期间以下项按政策归入**缺口**（§0 缺口表），留待 debug 阶段结束后统一计划：
+`()` 无原型（C17 语义）、SSE/MMX intrinsics、`_Complex`/`_Decimal*`、asm 匹配约束对间接输出。
+
+### R77 修好：`c"…"` 只能表示 `[N x i8]` —— ✅ FFmpeg 的三类非法 IR 全消
+
+按 §R76 的计划，先把探针改成能看命令行（`FF_MAKE_ARGS`，`V=1`）。
+第二次 `make -k` **只重建失败的目标**，所以很快；日志里三个错误全部指向**同一个文件**
+`libswscale/utils.c`，而且两个错误在**同一行 IR**（99:1 与 99:63）——果然同源。
+
+拿到确切命令行（带全部 `-D`）后复现，再用 `-cc1 -cc1-output` 保下 IR：
+
+```llvm
+%struct.FormatEntry = type { i8 }
+@format_entries = internal global [227 x %struct.FormatEntry] c"\00\00\00\00..."   ; 字符串形式
+```
+
+**根因**：`dump_init()` 的数组分支只要“元素大小为 1”就用 `c"…"` 简写（`dumpir.c:1155`）。
+但 `c"…"` **就是 `[N x i8]`**：元素是一字节的**结构体**时，类型是 `[227 x %struct.FormatEntry]`，两者不匹配——
+LLVM 于是报两次（`constant expression type mismatch` 与 `redefinition of type`）。
+
+**修法**：条件加上“元素是整型类型”：`is_integer(ty->base) && ty->base->size == 1`。
+字节数组依然用简写（实测 IR：`@bytes = … c"\05\06\07\08"`），一字节结构体/联合体数组改为逐元素（`[%struct.One { i8 1 }, …]`）。
+
+| | |
+|---|---|
+| **FFmpeg** | 目标文件 **2259 → 2261**，崩溃 **0**，错误类别 **4 → 2**（两个 `constant expression type mismatch` 全消，均出自 `libswscale/utils.c`）。剩下：1 个 `redefinition of type`（**非法 IR**）与 1 个 `Elementtype`（缺口） |
+| **验收** | `test/conformance.sh` 261 → **262 passed / 0 gap**（新增：一字节结构体数组、一字节联合体数组、字节数组三者并存，含运行值）；最小用例与 gcc/clang 一致；`libswscale/utils.c` 用它自己的构建命令编译通过；`doc/c2ycov.sh` 109/0；c2y 101/0；`make test` exit 0 |
+| **全量** | **与基线相同**：realworld cpython **381/385**、libpng 18/18、git 567/567、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；深样本（`FJ_PER_DIR=3`）**376 / 376，0 failed**（缺口 14）；tests2 **106 / 0**；跨目标 arm64 51/0、rv64 51/0、rv32 51/0（+1 skipped）；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。 |
+
+**下一轮目标**：最后一个非法 IR。同样用 `V=1` 的日志定位到了：
+
+```
+CC      libavcodec/vp9recon.o
+/tmp/cxx-JzMAZ9:99:1: error: redefinition of type
+   99 | %struct.anon.1 = type { %struct.FFJXLMetadata, %struct.JXLFrame }
+```
+
+两个**不同的匿名结构体**被编成了同一个 LLVM 名字 `%struct.anon.1`，LLVM 视为重定义。
+修法方向：匿名类型的编号必须对**每个不同类型**唯一（而不是每个作用域/每次遇到重新计数）。
+
+### R76 修好：按值传递的聚合体被“存”而不是“拷贝” —— ✅ `ffmpeg_sched.c` 的 5 类非法 IR 全消
+
+上一轮定位到单个文件的非法 IR，本轮拿下了。IR 现场：
+
+```llvm
+%tmp104 = getelementptr %struct.SchedulerNode, ptr %tmp101, i64 %tmp103   ; 节点的地址
+%tmp105 = alloca %struct.SchedulerNode, align 4
+store %struct.SchedulerNode %tmp104, ptr %tmp105, align 4                 ; 把地址当记录值存
+```
+
+LLVM 拒绝：`'%tmp104' defined with type 'ptr' but expected '%struct.SchedulerNode'`。
+
+**根因**：cxx 的 IR 里**聚合体的值就是它的地址**，所以记录从不走 `IR_STORE`——
+它的拷贝都是 `IR_MEMCPY`（va_arg 那两处就是）。唯一漏掉的是“给值一个家”的那个分支：
+**按值传递聚合体参数**时（`irgen.c:1876`），它调用 `store(a, hv, …)`，而 `a` 是地址。
+
+**修法**：改成 `IR_MEMCPY`（与旁边的写法一致，两侧都转成 `char *`），并顺手把那个 home 的 alloca 也换成
+`object_align()`（R75 的同一条规则：16 字节及以上的聚合体在 x86-64 上 16 对齐）。
+
+| | |
+|---|---|
+| **FFmpeg** | 目标文件 **2257 → 2259**，崩溃 **0**，错误类别 **6 → 4**（两个 `'%tmp…' defined with type 'ptr' but expected …` 全消，均出自这一处）。剩下：1 个 `redefinition of type`、2 个 `constant expression type mismatch`（均为**非法 IR**），以及 1 个 `Elementtype`（缺口） |
+| **验收** | `fftools/ffmpeg_sched.c` **单独编译通过**；`test/conformance.sh` 260 → **261 passed / 0 gap**（新增：成员左值、返回值、复合字面量三种聚合体实参，加两个实参同时传）；最小用例与 gcc/clang 输出一致；`doc/c2ycov.sh` 109/0；c2y 101/0；`make test` exit 0 |
+| **全量** | **与基线相同**：realworld cpython **381/385**、libpng 18/18、git 567/567、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；深样本（`FJ_PER_DIR=3`）**376 / 376，0 failed**（缺口 14）；tests2 **106 / 0**；跨目标 arm64 51/0、rv64 51/0、rv32 51/0（+1 skipped）；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。 |
+
+**下一轮目标**：剩下三类非法 IR（1 个 `redefinition of type`、2 个 `constant expression type mismatch`）。
+它们**无法单独编译复现**：涉及的文件（`libswscale/utils.c`、带 `FormatEntry` 表的那几个）
+脱离 FFmpeg 的构建参数就先报缺少配置宏或头文件，而 `make -k` 的日志只有 `CC xxx.o`、
+没有实际命令行。所以下一步是**用 `V=1` 重跑 FFmpeg 探针**（或从探针里取出它自己的编译命令），
+先把那两个文件的确切命令行拿到，再定位。
+
+### R75 修好：数组作 asm 内存操作数 + 局部对象的槽位对齐 —— ✅ 两个 bug，同一个程序里相遇
+
+两者是在验证第一个时撞出第二个的。
+
+#### （一）`"+m"(state)`：输出侧没有数组修正
+
+ffmpeg `libavutil/utils.c:105`：
+
+```c
+uint16_t state[14];
+__asm__ volatile ("fstenv %0 \n\t" : "+m" (state) : : "memory");
+```
+
+`"+m"` 既是**输出**又是**间接（内存）**操作数。`ND_ASM` 的循环里，**输入侧**已经知道“内存操作数命名的是对象，
+数组就是数组本身而不是它退化成的指针”（保留数组节点，传的是数组地址），**输出侧没有**，
+于是左值检查拿到的是退化后的 `ND_IMCAST`（不是左值）而报 `lvalue required in ‘asm’ statement`。
+
+**修法**：把那个修正移到循环开头，两半共用。修后 `libavutil/utils.c` 编译通过。
+
+#### （二）局部对象的槽位用了声明对齐（R63 漏掉的第三条路径）
+
+验证第一个时合成的用例（`uint16_t state[14]` 加 `movaps` 读写 `double a[2]`）在 cxx 下崩溃，而分开写都正常。IR 里看到原因：
+
+```llvm
+%tmp4 = alloca [2 x double], align 8      ; 应为 16
+```
+
+R63 给“对象对齐”建了 `object_align()`（16 字节及以上的数组在 x86-64 上是 16 对齐），
+应用在**全局对象发射**与 **`__builtin_alloca`**；局部变量的存储是**第三处**：
+
+```c
+for (Sym *var = fn->locals; var; var = var->next)
+    new_ins(IR_ALLOCA, …, (Ref[]){INT(var->align)}, 1);   /* 声明对齐 */
+```
+
+`var->align` 是声明对齐，也是 `_Alignof` 该报的值（`double[2]` 为 8），必须保持；而**槽位**需要 16。
+改成 `object_align(var->ty, var->align)` 后，`alloca … align 16`，那个 R63 时期**连编都编不过**的用例
+现在编译并运行正常（三家输出一致）。
+
+| | |
+|---|---|
+| **FFmpeg** | 目标文件 **2256 → 2257**，崩溃 **0**；`libavutil/utils.c` 编译通过。剩下的全是**非法 IR**：2 个 `defined with type ‘ptr’ but expected …`、1 个 `redefinition of type`、2 个 `constant expression type mismatch`；另有 1 个 `Elementtype`（`libavcodec/x86/hpeldsp_init.c`，已核实仍在，归缺口） |
+| **验收** | `test/conformance.sh` 259 → **260 passed / 0 gap**（新增：数组作 `"+m"` 操作数与局部数组上的 `movaps`，一个用例同时盖住两个 bug）；`libavutil/utils.c` 编译通过；`doc/c2ycov.sh` 109/0；c2y 101/0；`make test` exit 0 |
+| **全量** | **与基线相同**：realworld cpython **381/385**、libpng 18/18、git 567/567、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；深样本（`FJ_PER_DIR=3`）**376 / 376，0 failed**（缺口 14）；tests2 **106 / 0**；跨目标 arm64 51/0、rv64 51/0、rv32 51/0（+1 skipped）；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。 |
+
+**下一轮目标**：剩下的**非法 IR**。已定位到单个文件：`fftools/ffmpeg_sched.c` 单独编译即可复现
+`'%tmp104' defined with type 'ptr' but expected '%struct.SchedulerNode'`，而日志里那 5 类（两个 `defined with type`、
+`redefinition of type`、两个 `constant expression type mismatch`）很可能同源。
+（另：`libswscale/utils.c` 单独编译时先报 `FF_ALLOC_TYPED_ARRAY` 未声明，那是缺少 FFmpeg 配置宏的假象，与 cxx 无关。）
+
+### R74 修好：属性可以写在声明符列表中间 —— ✅ FFmpeg 的两个解析错误消失
+
+```c
+int i, ret, av_unused(version), nb_curves;   /* av_unused = __attribute__((unused)) */
+```
+
+GCC 允许属性出现在**声明符的开头**，不只是它之后；FFmpeg 就靠这一点（`vf_curves.c:591`），
+`ripemd.c:111` 是同一形状（`uint32_t a, b, …, av_unused t;`）。cxx 在声明符**之后**（`apply_postdecl_attrs`）
+和声明**之前**（`declspecs`/`decl_attrs`）都能读属性，就是不能在**声明符开头**，于是报
+`expected identifier or ‘(’`。
+
+**修法**：两条声明路径各自的声明符循环，在**每轮开头**接受属性并接到该声明符的 `ty->attrs`
+上——下游的 `apply_postdecl_attrs()`、`attr_decl_apply()`、`sym_attr_flags()` 都从那里读，所以不需要别的改动。
+
+> 一次白跑：第一版只改了文件作用域那条路径（`declaration()`），而 FFmpeg 的两行都在**函数体内**，
+> 走的是 `init_decl_list()`（`parser.c:5126`）——修完第二条才生效。两条都留着，两种位置都合法。
+
+| | |
+|---|---|
+| **FFmpeg** | 目标文件 **2254 → 2256**，崩溃 **0**，错误类别 **9 → 7**（`expected identifier or ‘(’` 两例消失）。剩下的是：2 个 `defined with type ‘ptr’ but expected …`、1 个 `redefinition of type`、2 个 `constant expression type mismatch`（以上四类是 **非法 IR**）、1 个 `lvalue required in ‘asm’ statement`（`libavutil/utils.c:105`，asm 的内存操作数是数组 `uint16_t state[14]`，两家都接受）、1 个 `Elementtype`（已归缺口） |
+| **验收** | 两个复现与 gcc/clang 输出一致；**`ripemd.c` 编译通过**；`vf_curves.c` 越过该错（再往后是 `NULL_IF_CONFIG_SMALL`，**三家都报**——单独编译缺少 FFmpeg 配置宏的假象）；`test/conformance.sh` 258/0；`doc/c2ycov.sh` 109/0；c2y 101/0；`make test` exit 0；`doc/probes.sh` 全部基线 |
+| **全量** | **与基线相同**：realworld cpython **381/385**、libpng 18/18、git 567/567、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；**深样本（`FJ_PER_DIR=3`）仍 376 / 376，0 failed**（缺口 14）；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。 |
+
+### R73 修好：多维数组的元素限定符；并把 FFmpeg 剩余错误分类定案 —— ⚠️ debug 阶段尚未结束
+
+为了收尾 debug 阶段，重跑了 FFmpeg 探针（自 §R60 后没再跑）：**0 崩溃**，以下是它报出的每一类
+
+#### （一）修好的：`pointee_unqual()` 只剥一层数组
+
+6.7.3p9 说“写在数组类型上的限定符属于它的元素”。**数组的数组在每一层都是数组类型**，
+所以 `const int16_t a[3][3][8]` 的限定符落在最内层的 `int16_t` 上；只剥一层只能去掉 `int16_t[3][8]`
+的限定符（而它本来就没有）。这就是 ffmpeg `vf_colorspace.c:327`：被调者取
+`const int16_t yuv2yuv_coeffs[3][3][8]`，而调用方传的是 `int16_t[3][3][8]` 成员。
+
+先前的写法故意只剥一层，因为“`int **` 与 `const int **` 不相容”——那条规则依然成立：
+**递归只沿数组元素走，不穿过指针层**。修后实测：多维数组的 const 被接受（三家一致），
+`int **` → `const int **` 依然被拒绝（gcc/cxx；clang 只警告，已有记录的严重度差异）。
+
+#### （二）FFmpeg 剩余错误的分类（本轮定案，尚未修）
+
+| 类别 | 数量 | 真相 | 定性 |
+|---|---|---|---|
+| `expected identifier or ‘(’` | 2 | **GCC 属性写在声明符列表中间**：`int i, ret, av_unused(version), nb_curves;`（`vf_curves.c:591`）、`uint32_t …, av_unused t;`（`ripemd.c:111`），`av_unused` 展开为 `__attribute__((unused))` | **bug**（解析） |
+| `‘%tmp7’ defined with type ‘ptr’ but expected ‘%union.SyncQueueFrame’` | 2 | 发射出的 IR 类型不一致（`ffmpeg_sched.c` 与另一处） | **bug**（非法 IR） |
+| `redefinition of type` | 1 | 同一个名字发了两个不同的 LLVM 类型 | **bug**（非法 IR） |
+| `constant expression type mismatch: [227 x i8] vs [227 x %struct.FormatEntry]` | 2 | 初始化器的类型与声明的不一致（同 R64 那一族的另一面） | **bug**（非法 IR） |
+| `lvalue required in ‘asm’ statement` | 1 | `libavutil/utils.c:105`，`asm` 操作数是数组 | **bug**（诊断不对） |
+| `Elementtype attribute can only be applied for indirect constraints` | 1（同一文件共 8 行） | `libavcodec/x86/hpeldsp_init.c`：匹配约束 `"0"` 对一个**间接输出**时，cxx 把它展成被匹配者的约束并按**地址**传值（clang 传的是值 `i32 %9`，约束保留为 `0`） | **缺口**（asm 匹配约束不完整） |
+
+所以 **debug 阶段尚未结束**：上表前五行都是待修的 bug（其中三行是**非法 IR**）。
+第六行按政策归入缺口，已记入 §0 的缺口表。
+
+| | |
+|---|---|
+| **FFmpeg** | 目标文件 **2252 → 2254**，崩溃 **0**，错误类别 10 → **9**（`incompatible types when passing argument` 两例全消） |
+| **深样本** | 仍 **376 / 376，0 failed**（缺口 14） |
+| **验收** | `test/conformance.sh` **258 passed / 0 gap**；`doc/c2ycov.sh` 109/0；c2y 101/0；`make test` exit 0；`doc/probes.sh` 全部基线（自举逐字节相同） |
+| **全量** | **与基线相同**：realworld cpython **381/385**、libpng 18/18、git 567/567、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；tests2 **106 通过 / 0 失败**；跨目标 arm64 51/0、rv64 51/0、rv32 51/0（+1 skipped）。 |
+
+### R72 debug 第一轮：一个崩溃 + 一个误报错 —— ✅ 两个都修好
+
+按 §R71 的政策，本轮只修已有功能的 bug。上一轮扫描给出的两个目标都落定了：
+
+#### （一）通过函数指针调用时的参数个数诊断：空指针解引用 → SIGSEGV
+
+最小复现（三行）：
+
+```c
+int (*mpfp)();
+int main(void) { return (*mpfp)(0); }
+```
+
+`fncall()` 的三处参数个数诊断都读 `ty->name->len`，而通过指针调用时所指的函数类型**没有名字**
+（`ty->name == NULL`）——于是解引用空指针。其中两处（`too few`）在现有测试里碰不到，
+一处（`too many`）就是 Fujitsu `C/0048_0001`：
+
+```c
+int mpfff(), (*mpfp)(), ii;
+ii = (*mpfp)(i);
+```
+
+**修法**：新增 `error_call_args()`，只在类型有名字时命名，否则用 clang 的措辞
+（`too many arguments to function call; expected 0`）。修后四个复现都变成正常诊断。
+
+> **顺带发现**：`C/0048_0001` 在崩溃修好后仍报错，但那是**已记录的政策类**（`()` 的 C17 语义，§R56/R57）。
+> 探针原来的 clang 过滤只命中“声明为 `f()` 的函数被调用”，**不命中函数指针这一形态**；
+> 现已把 `(*name)()` 这个声明符形态归入同一缺口类（命中 7 个）。
+
+#### （二）`1 - 1` 就是空指针常量，却被当成类型不匹配
+
+Fujitsu `C/0150_0002`：`int fp0(int *);` 对应 `fp0(1-1)`。按 6.3.2.3p3，“值为 0 的整型常量表达式”
+**就是空指针常量**——gcc 静默接受，clang 警告接受（“expression which evaluates to zero treated as a null
+pointer constant”），cxx 报错。根因：`is_null_constant()`（`type.c:271`）只认**字面量零**
+（一个 `ND_NUM`），而语法分析阶段碰到的是**尚未折叠**的表达式。
+
+影响面不止调用：`int *p = 1 - 1;`、`= 0 + 0;`、`= 2 - 2;` 同样被拒。
+
+**修法**：在 `check_asop()`（那个汇总“incompatible types when …”的函数）里，当目标是指针时先
+`fold_node(src)` 一次，折叠结果是一个值为 0 的整型 `ND_NUM` 就放行。
+
+> **一个坑**：`fold_node()` 返回的是**它自己的节点**，读 `src->ival` 会读到未折叠表达式的值。
+> 另外 cxx 没有 `-Wint-conversion` 组，按本阶段“只修 bug”的原则取 **gcc 的静默接受**，而不新增警告。
+
+**两个真实不匹配依然报错**（三家一致）：`int *p = a;`（非常量）、`long n = p;`（指针转整）。
+
+| | |
+|---|---|
+| **深样本（`FJ_PER_DIR=3`）** | **376 / 376**，**0 failed**（修前 377/378 并有 1 个真失败）；超出范围 61 OpenMP + 100 无原型/K&R，缺口 14（`()` 无原型 7 + SSE/MMX 7），参考实现编不出 5 |
+| **验收** | `test/conformance.sh` 255 → **258 passed / 0 gap**（新增：指针调用的参数个数必须是诊断而非崩溃、常量表达式形式的空指针常量必须接受、非常量整数转指针必须仍拒绝）；`doc/c2ycov.sh` 109/0；c2y 101/0；`make test` exit 0；`C/0150_0002` 跑到 `END`，与参考一致 |
+| **全量** | **与基线相同**：realworld cpython **381/385**、libpng 18/18、git 567/567、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；tests2 **106 通过 / 0 失败**；跨目标 arm64 51/0、rv64 51/0、rv32 51/0（+1 skipped）；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。 |
 
 ### R71 阶段转向：debug——只修 bug，未支持功能先屏蔽记缺口 —— ✅ 政策与分类已落地
 

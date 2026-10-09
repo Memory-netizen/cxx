@@ -1870,10 +1870,20 @@ static Ref gen_expr(Node *node) {
                         // A record value is an address, but one that came
                         // back from a load is not, so give it a home.
                         Ref home = TMP(tmp_id++, pointer_to(arg->ty, 0));
-                        new_ins(IR_ALLOCA, home, (Ref[]){INT(arg->ty->align)}, 1);
+                        new_ins(IR_ALLOCA, home, (Ref[]){INT(object_align(arg->ty, arg->ty->align))}, 1);
                         Ref hv = home;
                         hv.ty = pointer_to(arg->ty, 0);
-                        store(a, hv, arg->ty->align, NULL);
+                        // A record is copied, not stored: in this IR an
+                        // aggregate value *is* its address, so IR_STORE would
+                        // write the pointer where the bytes belong -- which is
+                        // what LLVM refused in fftools/ffmpeg_sched.c
+                        // ("'%tmp104' defined with type 'ptr' but expected
+                        // '%struct.SchedulerNode'").
+                        Ref dst8 = hv;
+                        dst8.ty = pointer_to(T.ty_char, 0);
+                        Ref src8 = a;
+                        src8.ty = pointer_to(T.ty_char, 0);
+                        new_ins(IR_MEMCPY, R, (Ref[]){dst8, src8, INT(arg->ty->size)}, 3);
                         addr = hv;
                     }
                     if (c.npiece == 0 && T.agg_byval_param && !variadic_call) {
@@ -3260,7 +3270,13 @@ Module *irgen(Module *md) {
 
         for (Sym *var = fn->locals; var; var = var->next) {
             if (var->ty->kind == TY_VLA) continue;
-            new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty, 0)), (Ref[]){INT(var->align)}, 1);
+            // The *object's* alignment, not the declared one: an array of 16
+            // bytes or more is 16-aligned on x86-64 (see object_align), while
+            // var->align -- 8 for a `double[2]` -- is what _Alignof reports
+            // and has to stay that. Without this the slot is 8-aligned and a
+            // `movaps` on the object faults.
+            new_ins(IR_ALLOCA, TMP(var->vreg = tmp_id++, pointer_to(var->ty, 0)),
+                    (Ref[]){INT(object_align(var->ty, var->align))}, 1);
         }
 
         // The C spec defines a special rule for the main function.
