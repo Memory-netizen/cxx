@@ -3175,6 +3175,59 @@ static report_fn usage_routine __attribute__((noreturn));
 int main(void) { return usage_routine == 0 ? 0 : 1; }
 EOF
 
+# --- the input half of a '+' asm operand ------------------------------
+# GCC's `+` operand is one operand; LLVM's constraint string needs two. Where
+# the constraint names nothing but memory the input half names the same memory
+# and travels as the same address ("*m") -- clang emits "=*m,*m" for
+# `"+m"(x)`. For a constraint that may live in a register, clang emits a
+# matching number and passes the object's *value*: `"+g"(h)` comes out as
+# "=*imr,0" with an i32 operand. cxx repeated the converted letters either way,
+# so the input was marked indirect and handed the address; LLVM then refused
+# the elementtype attribute, which belongs to an indirect constraint only.
+# That is ffmpeg's libavcodec/x86/rnd_template.c.
+cat > "$tmp/pluscons.c" <<'EOF'
+#include <stdio.h>
+#include <stdint.h>
+static int run(int h, const unsigned char *pixels, unsigned char *block, long line_size) {
+    int i = h;
+    __asm__ volatile("movq   (%1), %%mm0 \n\t"
+                     "add    %3, %1      \n\t"
+                     "subl   $2, %0      \n\t"
+                     "jnz    1f          \n\t"
+                     "1:                 \n\t"
+                     : "+g"(i), "+S"(pixels)
+                     : "D"(block), "r"(line_size)
+                     : "rax", "memory");
+    return i;
+}
+static int mem(int *p) {
+    int v = 7;
+    __asm__ volatile("addl $1, %0" : "+m"(v));   /* the same-address form */
+    __asm__ volatile("addl $2, %0" : "+r"(v));   /* the matching-number form */
+    return v + *p;
+}
+static int explicit_match(int v) {
+    int r = 0;
+    __asm__ volatile("movl %1, %0" : "=r"(r) : "0"(v));
+    return r;
+}
+int main(void) {
+    unsigned char b[8] = {0}, p[8] = {0};
+    int k = 5;
+    printf("%d %d %d\n", run(3, p, b, 8), mem(&k), explicit_match(41));
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/pluscons" "$tmp/pluscons.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/pluscons")" = "1 15 41" ]; then
+    echo "testing the input half of a '+' asm operand ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the input half of a '+' asm operand ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
 # --- anonymous records get distinct names -----------------------------
 # insert_ty() numbered a type by counting the entries already in `types` with
 # a matching id. Anonymous records arrive two ways -- a tagless `struct { ... }`

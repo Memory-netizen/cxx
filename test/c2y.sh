@@ -2,7 +2,9 @@
 # C2y (ISO/IEC 9899:202y, N3685) regression net.
 #
 # Why this file exists: the C2y-driven round that produced
-# doc/n3685-conformance.md found three real defects -- a && / || fold that
+# The N3685 conformance review (its checklist lived in doc/n3685-conformance.md
+# until that snapshot was folded into doc/cxx-c2y-plan.md) found three real
+# defects -- a && / || fold that
 # answered the opposite of the standard, a short-circuit right operand that
 # emitted a module LLVM refused, and a -lm that reached the linker ahead of
 # the object files -- and every one of them passed `make test` untouched.

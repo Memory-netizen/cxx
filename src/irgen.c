@@ -3032,10 +3032,16 @@ static Ref gen_asm(Node *node) {
             args[op->arg_pos] = addr;
             ind[op->arg_pos] = 1;
             // A '+' memory operand names the same address twice: once as the
-            // output the template writes and once as the input it reads.
+            // output the template writes and once as the input it reads. An
+            // input that is a matching number instead carries the value the
+            // object holds, and is not an indirect operand at all.
             if (op->is_plus) {
-                args[op->plus_arg_pos] = addr;
-                ind[op->plus_arg_pos] = 1;
+                if (op->plus_in_indirect) {
+                    args[op->plus_arg_pos] = addr;
+                    ind[op->plus_arg_pos] = 1;
+                } else {
+                    args[op->plus_arg_pos] = asm_read(op->expr, ir_ty);
+                }
             }
             continue;
         }

@@ -1,8 +1,12 @@
 # cxx 修订计划（C2y 收口）
 
-> 依据：`doc/n3685-conformance.md`（当前版，基于 commit `0924007` + 本轮改动）。
+> 依据：**N3685 草案本身**（`doc/n3685.txt`），外加两样自动化对照：`doc/c2ycov.sh`
+> （一致性覆盖，取代早期手工清单）与 §1 的 P-工作项（提案清单）。早期的
+> `doc/n3685-conformance.md` 是基于 commit `0924007` 的**手工快照**，其“未修复”项
+> 经复测**全部已修**（`_Atomic` 聚合体、N3652 数组补全、`<math.h>` 宏、`-pthread`、
+> `__STDC_IEC_60559_TYPES__`），内容已并入本文与 `c2ycov.sh`，故删除（历史见 git）。
 > 本文取代旧的 A/B/C/D/E/F 批次计划 —— 那六批**已全部完成**，存档见 §5。
-> 内建框架的设计见 `doc/builtin-redesign.md`。
+> 内建框架的设计见 `doc/builtin-redesign.md`（框架已按 P1 落地，其余仍为设计稿）。
 
 ---
 
@@ -33,13 +37,19 @@
 debug 阶段结束后再统一计划是否扩充。探针把它们算进 `gap` 桶（与“超出范围”分开），
 于是“失败”只剩下**本该能用的东西真出了问题**。
 
+**仍未闭合的两项（原手工清单的遗留，2025 复测）**：
+
+| 项 | 状态 |
+|---|---|
+| N3366 `7.26 <stdmchar.h>` | cxx 未提供该头，系统也无此头 —— **本机无法对照**，故不列入缺口表（既非已支持也非已证缺口） |
+| N3348 泛型关联里的 `[*]` | 未实现；`doc/c2ycov.sh` 覆盖此项，列入 §1 待办 |
+
 **缺口表（已知未支持，已屏蔽）**：
 
 | 缺口 | 见证 | 备注 |
 |---|---|---|
 | **SSE/MMX 内联函数族**（`__builtin_ia32_*`）及 `__SSE2__` | Fujitsu `C/0159`；`§R63` | 试过定义 `__SSE2__`，结果 cpython 从 381/385 掉到 **149/385**（头文件的 SIMD 分支全部散架），已撤回 |
 | **`__sync_*` 未实现的形式**：`*_and_fetch`、`__sync_{bool,val}_compare_and_swap`、`nand` | Fujitsu `C/0044_0001`；`§R68` | 已有 `fetch_and_*`、`lock_test_and_set`、`lock_release`、`synchronize`；`_and_fetch` 要把操作数加回去（指针还要按元素缩放），CAS 两形式按值接旧值，nand 没有 `A_*` 撠码 |
-| **asm 匹配约束（`"0"`–`"9"`）对间接输出** | ffmpeg `libavcodec/x86/hpeldsp_init.c`；§R73 | 展成被匹配者的约束并按地址传值，于是 `elementtype` 落在非间接约束上（IR 非法）；clang 传值、约束保留为数字 |
 | **十进制浮点** `_Decimal32/64/128` | §0 长期不做 | 已在上面“明确不做”之列 |
 | 复数（`_Complex`/`_Imaginary`/虚数后缀） | §0 长期不做 | 探针已按 `noproto` 桶过滤 |
 
@@ -130,7 +140,7 @@ debug 阶段结束后再统一计划是否扩充。探针把它们算进 `gap` �
 | | |
 |---|---|
 | **现状** | `atomic_load` / `atomic_store` / `atomic_exchange` 作用于 `_Atomic struct S` 时，cxx 报 `error: '%tmpN' defined with type '%struct.S' but expected 'ptr'`。`_Atomic int` 正常；普通结构体的返回值成员访问也正常 |
-| **最小复现** | `bash doc/minbug.sh` 的 B 组；见 `doc/n3685-conformance.md` §2.1 |
+| **最小复现** | `bash doc/minbug.sh` 的 B 组（原手工清单 §2.1，已并入本节） |
 | **根因** | 原子读被降级成标量 `load atomic i32`，随后成员访问把这个**结构体值**当成指针做 `getelementptr` |
 | **验收** | 上述三种函数对 `_Atomic struct`（含含数组/浮点成员的形状）编译通过且运行值与 clang 一致；`test/atomic.c` 增聚合体用例 |
 
@@ -516,6 +526,130 @@ VLA 的 `len` 就是 `vla_len` 指针的低 32 位（见缺陷 1），所以把*
 | **验收** | `test/conformance.sh` **160 → 171 passed / 0 gap**（十一条新断言）：变长边界只求值一次（三种形状 + 运行时取值）、变长 typedef 在声明处捕获、`sizeof`/`_Countof` 变长对象、部分初始化的超大记录（4097 字节数组，运行时校验零填充）、变长调用前的记录形参、`[[noreturn]]` 在对象上是 error／GNU 拼写是警告／函数指针接受、`-std=c11` 是严格模式而 `-std=gnu11` 不是、文件作用域的变长修改类型被拒、`__inline` 是关键字。全套复跑：c2y 101/0、arm64 51、rv64 51、rv32 51(+1 skipped)、`doc/probes.sh` 全部基线（c2ycov 109/2、selfhost 21/0/0、asm 68/0 …）、`doc/bootstrap.sh` 仍是 **cxx2 = cxx3 = cxx4 逐字节相同**（说明调用类型表、初始化器链与关键字表的改动没有动摇不动点）。`clang-format-21 --dry-run --Werror` 干净。另外 **`make test` 由红转绿**：本轮开始时 `[[noreturn]] int v;` 是**失败**的——R11 把这条诊断从 error 降成了警告，但 `test/error.sh` 仍然要求它报错；本轮把**标准拼写**恢复成 error（GNU 拼写保持警告，函数指针仍接受），与 clang 一致 |
 | **记分（`doc/realworld.sh` 全量探针）** | **git 567/567 保持全过**；**cpython 368/385 → 377/385**（本轮修好的 9 个单元：`Modules/socketmodule.c`、`Python/crossinterp.c`（这两个是崩溃）、`Python/codegen.c`、`Python/compile.c`、`Python/pythonrun.c`、`Python/getcompiler.c`、`Objects/typeobject.c`、`Modules/expat/xmltok.c`、`Modules/expat/xmlrole.c`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21 不变 |
 | **剩余阻塞项** | **cpython 8**（按性质分两类）。环境类 4 个：`Python/pystrhex.c`（`implicit declaration of function ‘__builtin_shufflevector’`）、`Modules/Hacl_Hash_Blake2s_Simd128.c`、`Modules/Hacl_Hash_Blake2b_Simd256.c`、`Modules/_testcapimodule.c`（`static assertion failed: __extension__ __alignof__(buf) >= 64`）——这四个都要 `vector_size` 向量类型，而它们之所以被启用，是因为这棵树的 `pyconfig.h` 是安装时用宿主 clang 配置出来的（它声明「本编译器有 `__builtin_shufflevector`、有 64 字节对齐的 SIMD」），cxx 本身不支持向量类型。真正的缺陷 4 个：`Modules/posixmodule.c`（`implicit declaration of function ‘__builtin_memset’`）、`Python/jit_unwind.c`（`premature end of input`）、`Modules/_testsinglephase.c`（`array initializer must be an initializer list`），以及（R14 复查后更正）`Modules/_ctypes/_ctypes_test.c` —— 它在 `__GNUC__` 下包含 `<complex.h>`，而 glibc 的 `bits/cmathcalls.h` 用 `_Mdouble_complex_`（`double _Complex`）声明函数，属于本计划 **有意不做** 的 `_Complex` 缺口，不是新缺陷 |
+
+### R79 asm 匹配约束对间接输出 —— ✅ 缺口表最后一项落地，FFmpeg 诊断类别归零
+
+`libavcodec/x86/rnd_template.c` 里的 `"+g"(h)`：GCC 的 `+` 操作数是**一个**，LLVM 的约束串需要**两个**。
+
+- 约束**只名内存**时，输入半边命名同一块内存、传**同一地址**，clang 写作 `"=*m,*m"`；
+- 约束**可能落在寄存器**时，clang 写**匹配数字**、传对象的**值**：`"+g"(h)` → `"=*imr,0"`（操作数 `i32`），`"+r"(x)` → `"=r,0"`。
+
+cxx 两种情形都重复转换后的字母，于是 `"+g"(h)` 的输入被标成 indirect 并传了地址 —— LLVM 拒绝
+落在非 indirect 约束上的 `elementtype`。**修法**：新增 `asm_cons_mem_only()`（字母全落在 `moV<>` 内）
+判定走哪一条；数字那条在 IR 里改传 `asm_read()` 的**值**。修后约束串与 clang **逐字一致**，
+`hpeldsp_init.c` 编译通过，FFmpeg 探针的**诊断类别归零**（只剩链接期的 `ld returned 1`）。
+验收：`test/conformance.sh` 264/0（新增 `+g`/`+m`/`+r`/显式 `"0"` 四种形式，与两家输出一致）。
+
+**缺口表更新**：§0 的“asm 匹配约束对间接输出”一行**移除**（已实现）。
+
+### R81 “完全不支持 `f()` 无原型声明”的覆盖面 —— 实测：现代项目上**近乎零**
+
+该策略（§0、§R56/R57）拒绝的是**两种写法**：
+① 对一个**无原型声明**（`int f();`）的函数**带实参调用**；② **K&R 式定义**。
+C23 把 `()` 归于 `(void)`、删除了 K&R 定义，两家参考实现在 C23 下同样报错；cxx 的差异在于它**在所有 C 版本下都这么判**。
+
+#### 方法：让参考编译器当裁判（`doc/noproto.sh`）
+
+`f()` 的**空调用**是完全合法的代码，正则无法区分；clang 有一个开关同时命中这两种写法。
+新增的探针 `doc/noproto.sh` 把每个翻译单元按**项目自己的命令**（取自 `make -n`，含它自己的 `-I/-D/-include/-std=`）交给
+`clang -Werror=deprecated-non-prototype`，拒绝的单元就是策略在该项目里的覆益。
+
+**两道校验**（都是必要的，第一版就是靠它们拯回来的）：
+
+1. **自造样本**：`int f(); f(1);` → `noproto`、K&R 定义 → `kr`、正确原型 → `clean`。
+   （提醒：`-Wno-everything` 会**连这个诊断一并关掉**，`-Werror=` 只改严重度、不重新启用；第一版就是这么错的。）
+2. **与探针交叉验证**：同一目录下，探针的过滤器与普查结果一致（`C/0006`：独立过滤器测得 0 个真无原型，普查也是 0）；
+   另用**真有这两种写法的目录**做阳性对照：`C/0023` 107 单元 → 拒绝 6（全 K&R），`C/0048` 314 单元 → 拒绝 **70**（K&R 36 + 调用形式 34）。
+
+#### 结果：三类代码，三个数量级
+
+| 项目 | 单元 | 被策略拒绝 | 备注 |
+|---|---|---|---|
+| git 2.47 | 567 | **0** | 全清 |
+| FFmpeg | 2 119 | **0** | 1 个单元因其他原因失败 |
+| cpython | 207 | **0** | 全清 |
+| curl 8.10 | 170 | **0** | 全清 |
+| libpng | 78 | **0** | 32 个单元需配置头 |
+| redis 7.4 | 151 | **0** | 77 个单元需配置头 |
+| lua | 34 | **0** | |
+| tinycc | 21 | **0** | |
+| zlib | 17 | **0** | |
+| **busybox**（整棵树，688 个 `.c`） | 688 | **2** | `shell/ash_test/recho.c`（K&R，**测试目录**）、`shell/random.c`（调用形式） |
+| **Fujitsu 测试集**（抽样 1 432 个文件，覆盖全部 203 个目录） | 1 432 | **95 = 6.6%** | K&R **78** + 调用形式 **17** |
+
+→ 当代维护中的大型 C 项目（上表前九行，**3 181 个能干净编译的单元**）里**一个也没有**；
+这些项目在 cxx 下的实际构建结果独立印证了这一点（：`doc/realworld.sh` 的失败面里没有一例这两种诊断）。
+它们集中在：（a）**编译器测试集**（刻意测试这些旧形式），（b）老项目里的**测试/示例目录**。
+
+#### 一个副产品：探针的 `noproto` 桶里有三种东西
+
+上述抽样顺便量出：探针标为 `noproto` 的用例里，真正的无原型/K&R 只占一部分，
+另一大类是 **`_Complex` 虚数后缀**（§0 的“有意不支持”，如 `C/0006` 的 12 个文件）。
+两者都不计入失败，但它们的**性质不同**：前者是政策选择，后者是明确不做。本轮把它们分开计数了。
+
+#### 本轮没测到的
+
+| 项 | 原因 |
+|---|---|
+| busybox 的**构建范围**（默认配置 170 个对象） | 命令提取在本轮未收敛；上表的 2 是**整棵树**扫描，且 688 个单元里 655 个因缺 `libbb.h` 等原因停在更早的阶段，所以 **2 是下界** |
+| nginx | `./configure` 需要 PCRE，本机未安装 |
+| 内核 | 未下载（其阻塞点是驱动层选项与自我标识，与本策略无关） |
+| redis/busybox/libpng 的部分单元 | 需配置头或子目录 flag，本轮算作“其他失败”，不计入两边 |
+
+**结论**：完全不支持这两种写法，对**当代维护中的真实项目几乎零代价**（实测 3 181 个单元 0 命中）；
+代价集中在**旧代码与测试集**（测试集样本 6.6%），且那里的主体是 **K&R 定义**（78 对 17）——
+而 K&R 定义在 C23 里已被**删除**，两家参考实现也不再接受。cxx 与他们的差别只在于
+**不管 `-std=` 是什么都按 C23 判**；若要支持 C17 语义，需要的不是语法能力，而是**对 `-std=` 的应用**。
+
+### R80 文档整理 + 全量跑测试集的时间估算 —— ✅
+
+#### （一）doc 下的 md：三份变两份
+
+| 文件 | 处置 | 依据 |
+|---|---|---|
+| `doc/n3685-conformance.md` | **删除**（已并入本文与 `c2ycov.sh`） | 基于 commit `0924007` 的手工快照，其“未修复”项**逐条复测均已修**：`_Atomic` 聚合体、N3652 数组补全、`<math.h>` 宏（它称之为“最大缺口”）、`-pthread`、`__STDC_IEC_60559_TYPES__`；活的清单就是 §1 的 P-工作项，自动化对照是 `c2ycov.sh`。文件在 git 里，删除不丢历史 |
+| `doc/builtin-redesign.md` | **保留**，更新状态行 | 它仍是内建框架的设计依据（P1 引用）；但“未实现”已过时 —— §3 的声明式内建表与统一折叠已按 P1 落地 |
+| `doc/cxx-c2y-plan.md` | **保留**，更新首部依据与 4 处引用 | 它是唯一的计划与轮次记录（§0 范围 + §1 P-工作项 + 79 个轮次节） |
+
+遗留两项已写入 §0：`<stdmchar.h>`（N3366，本机无此头，**无法对照**）、
+N3348（泛型关联里的 `[*]`，由 `c2ycov.sh` 覆盖）。
+
+#### （二）全量跑 compiler-test-suite 的时间估算
+
+测得底座：8 逻辑核（i5-10300H，7 GB）。探针每例的工作 = 参考实现编译+链接+运行、
+cxx 编译+链接+运行、加一次 clang 预过滤，最后比对 stdout 与退出码。**三个样本实测**：
+
+| 样本 | 用例数 | 构成 | 挂钟 | CPU | 挂钟/例 | CPU/例 |
+|---|---|---|---|---|---|---|
+| 5 个目录，**串行** | 173 | 153 无原型类 + 3 缺口 | 51.6 s | 38.6 s | 0.298 s | 0.223 s |
+| 标准深样本 `FJ_PER_DIR=3` `-j8` | 556 | 61 OMP + 100 无原型 + 14 缺口 + 5 参考编不出 | 29.6 s | 167.0 s | **0.053 s** | **0.300 s** |
+| 两个最大目录 `0104 0055` `-j8` | 1888 | 2 OMP + 314 无原型 + 72 缺口 | 102.5 s | 575.3 s | **0.054 s** | **0.305 s** |
+
+两个 `-j8` 样本（构成差异很大）在每例成本上**相差 2%**，并行效率两次都是 **5.6×**。
+
+**测得数据直接外推**：全集 **37 190** 个 `.c`（203 个目录，中位数 58，最大 991）。
+
+| 口径 | 估算 |
+|---|---|
+| 挂钟 @ `-j8` | 37 190 × 0.0535 s ≈ 1 990 s ≈ **33 分钟** |
+| CPU 总量 | 37 190 × 0.30 s ≈ 11 157 s ≈ **3.1 CPU·小时** |
+| @ `-j1`（串行） | ≈ 3.1 小时 |
+
+注意：上述计时**是在另一个 8 并发构建（realworld）同时跑的情况下取的**，空闲机器上只会更快；
+且两个很不同的样本给出同一个每例成本，所以 **30–40 分钟是稳健区间**。风险在尾部：若全集里超时用例（`FJ_TIMEOUT=20`）比样本多，
+或出现大量“两家都慢”的用例，尾部会拉长；三个样本里未见超时。
+
+实跑建议：
+
+```bash
+cd ~/cxx
+FJ_LIMIT=0 FJ_JOBS=8 bash doc/fujitsu.sh ./cxx > ~/cxxwork/logs/fj-full.log 2>&1 &
+# 分批（可中断续跑，DIRS 优先于 LIMIT）：
+FJ_LIMIT=0 FJ_DIRS="0104 0055 0053" FJ_JOBS=8 bash doc/fujitsu.sh ./cxx
+```
+
+全量跑的价值在**失败面**：两个最大目录里 1 500 个可判定用例有 **139 个失败**（已知缺口 72），
+那是现有样本（每目录 3 个，失败 0）看不到的。
 
 ### R78 修好：匿名记录的命名 —— ✅ FFmpeg 的 bug 类别归零，debug 阶段结束
 
@@ -2651,7 +2785,7 @@ R15 加的 `doc/tcctests.sh` 把 tinycc 自带的 `tests/tests2` 当成**行为*
 6. `-lm` 端到端（已在 `test/conformance.sh`）
 7. `<stdmchar.h>` 可包含
 
-依据见 `doc/n3685-conformance.md` §10 的 6 条覆盖空洞。
+依据见 §1 的 P-工作项与 `doc/c2ycov.sh`（原手工清单 §10 的 6 条覆盖空洞已并入）。
 
 ### D1 警告分组用位 flags —— ✅ 已完成
 
@@ -3375,7 +3509,6 @@ IR 从 4 条降到 2 条（`icmp/fcmp ne` + `zext`），与 `clang -O0` 逐字�
 
 | 文档 | 内容 |
 |---|---|
-| `doc/n3685-conformance.md` | N3685 实现对照清单：四个维度的实测覆盖、缺口、探针自证 |
 | `doc/builtin-redesign.md` | 声明式内建框架的设计与实施记录（P1 的基础） |
 | `doc/cfg.txt` | C2y 文法（不含扩展） |
 | `doc/token.txt` | C2y 记号与关键字文法 |

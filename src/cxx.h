@@ -755,6 +755,10 @@ struct AsmOperand {
     // output above, and an input that shares its register ("0") or its
     // address ("*m"). The second is spelled here.
     char *conv_in;
+    // Which of the two that input is: the same address as the output, for a
+    // constraint that names nothing but memory, or a value tied to it by
+    // number. Only the first is an indirect operand.
+    bool plus_in_indirect;
     uint32_t index;  // position in GCC's numbering: outputs first, then inputs
     // Where the IR call numbers this operand in its constraint string. The
     // two agree for everything the program may name; they differ only for the

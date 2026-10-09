@@ -6207,6 +6207,20 @@ static int asm_cons_off(char *cons) {
     return i;
 }
 
+// True when a constraint's letters name nothing but memory: "m", "o", "V",
+// "<", ">". A `+` operand repeats such a constraint for its input half,
+// because there the input *is* the same memory; for anything that may live in
+// a register GCC names a matching number instead and the input is a value.
+// clang draws the line in the same place: `"+m"(x)` comes out as "=*m,*m" and
+// `"+g"(h)` as "=*imr,0".
+static bool asm_cons_mem_only(const char *cons) {
+    int off = asm_cons_off((char *)cons);
+    if (!cons[off]) return false;
+    for (const char *p = cons + off; *p; p++)
+        if (!strchr("moV<>", *p)) return false;
+    return true;
+}
+
 // A constraint's letters, in LLVM's spelling. They are looked up in the
 // target's table: a few name one fixed register ('a' is {ax} on x86), and the
 // memory letters have to be marked indirect ('m' is *m), which is also what
@@ -6595,9 +6609,15 @@ static Node *asm_stmt(Token **rest, Token *tok) {
         op->plus_arg_pos = arg++;
         // A `+` operand shares the output's register ("0"), or its address
         // ("*m"): the first is the matching constraint, the second is the
-        // same memory operand named a second time.
+        // same memory operand named a second time. Which one it is depends on
+        // the constraint itself and not on how the output was spelled: `g`
+        // may become memory for the output and still takes a value as its
+        // input, which is why clang writes "=*imr,0" for `"+g"(h)`. Repeating
+        // the letters there put the elementtype attribute on a constraint
+        // that is not indirect, and LLVM refused the module.
+        op->plus_in_indirect = op->is_indirect && asm_cons_mem_only(op->cons + asm_cons_off(op->cons));
         op->conv_in =
-            op->is_indirect ? asm_cons_conv(op->cons + asm_cons_off(op->cons), false) : format("%u", op->index);
+            op->plus_in_indirect ? asm_cons_conv(op->cons + asm_cons_off(op->cons), false) : format("%u", op->index);
         plus_ord++;
     }
 
