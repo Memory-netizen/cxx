@@ -391,6 +391,22 @@ static Ref load(Ref addr, Type *type, int align, Member *mem) {
     }
 }
 
+// The value a bit-field holds after `val` was stored in it: the low
+// `bit_width` bits, extended by the field's signedness. load() applies the same
+// two shifts to a value it has read from memory.
+static Ref bitfield_stored_value(Ref val, Member *mem, Type *type) {
+    Type *ty = mem->unit_ty;
+    int unit_bits = is_bitint128(ty) ? bitint_width(ty) : ty->size * 8;
+    int shift = unit_bits - mem->bit_width;
+    Ref src = cast(val, val.ty, ty);
+    if (shift == 0) return cast(src, ty, type);
+    Ref shl = TMP(tmp_id++, ty);
+    new_ins(IR_SHL, shl, (Ref[]){src, INT(shift)}, 2);
+    Ref shr = TMP(tmp_id++, ty);
+    new_ins(IR_SHR, shr, (Ref[]){shl, INT(shift)}, 2);
+    return cast(shr, ty, type);
+}
+
 static void store(Ref val, Ref addr, int align, Member *mem) {
     if (mem && mem->is_bitfield) {
         Type *ty = mem->unit_ty;
@@ -878,15 +894,39 @@ static Ref gen_va_arg(Node *node) {
         if (orec->kind != TY_STRUCT) fatal("va_arg: va_list is not a struct");
         Ref oaddr = va_field_addr(ap, orec, ops->mem_field);
         Ref over = load(oaddr, T.ty_voidptr, 8, NULL);
+        Ref base = over;
+        if (ops->mem_align > 8) {
+            // A member of this class can be aligned wider than a slot, and
+            // then the caller leaves padding in front of it: raise the cursor
+            // the way the register classes do, and for the same reason.
+            Ref bits = TMP(tmp_id++, T.ty_ulong);
+            new_ins(IR_PTRTOINT, bits, (Ref[]){over}, 1);
+            Ref bias = TMP(tmp_id++, T.ty_ulong);
+            new_ins(IR_ADD, bias, (Ref[]){bits, LONG(ops->mem_align - 1)}, 2);
+            Ref mask = TMP(tmp_id++, T.ty_ulong);
+            new_ins(IR_AND, mask, (Ref[]){bias, LONG(-ops->mem_align)}, 2);
+            Ref up = TMP(tmp_id++, T.ty_voidptr);
+            new_ins(IR_INTTOPTR, up, (Ref[]){mask}, 1);
+            base = up;
+        }
         int step = (want->size + 7) / 8 * 8;
-        Ref o8 = over;
+        Ref o8 = base;
         o8.ty = pointer_to(T.ty_char, 0);
         Ref onext = TMP(tmp_id++, o8.ty);
         new_ins(IR_GEP, onext, (Ref[]){o8, INT(step)}, 2);
         Ref oslot = onext;
         oslot.ty = T.ty_voidptr;
         store(oslot, oaddr, 8, NULL);
-        return over;
+        // An aggregate value is represented by its address, so for a record
+        // the candidate already *is* the result; anything else has to be
+        // read out of it, exactly as the register paths do at the join.
+        if (want->kind == TY_STRUCT || want->kind == TY_UNION) {
+            base.ty = pointer_to(want, 0);
+            return base;
+        }
+        int la = want->align;
+        if (la > 8) la = 8;
+        return load(base, want, la, NULL);
     }
     if (ops->kind != VA_MEM_REGS) fatal("unknown va_arg kind %d", ops->kind);
 
@@ -1655,6 +1695,10 @@ static Ref gen_expr(Node *node) {
                 atomic_order = node_mem_order(node);
                 store(dst, addr, align, node->lhs->member);
             }
+            // 6.5.16p3: the value of the assignment is the value the left
+            // operand has afterwards, which for a bit-field is the stored one.
+            Member *mem = node->lhs->kind == ND_MEMBER ? node->lhs->member : NULL;
+            if (mem && mem->is_bitfield && is_integer(node->ty)) return bitfield_stored_value(dst, mem, node->ty);
             return dst;
         }
         case ND_PREINC:

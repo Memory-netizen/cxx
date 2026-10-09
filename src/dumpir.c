@@ -970,19 +970,28 @@ void dump_type(Type *ty) {
             if (pos > off) {
                 // The tail of a straddling unit, one byte at a time.
                 for (int i = pos; i < end; i++) fprintf(out_file, "%si8", i > pos ? ", " : "");
+                pos = end;
             } else {
                 print_type(memty);
+                // The element is the access unit, which reaches past the bits
+                // for a field whose width is not a whole number of bytes. The
+                // value walk advances by the unit, so this one has to as well.
+                pos = off + memty->size;
             }
-            pos = end;
         }
         if (pos < ty->size) {
             if (!first) fprintf(out_file, ", ");
             fprintf(out_file, "[%d x i8]", ty->size - pos);
         }
     } else if (ty->kind == TY_UNION) {
+        // A union with no members (`union blank_uni1 { };`, which C/0186/0076
+        // writes) has no canonical member; its image is empty, the same `{ }`
+        // the struct branch above prints for an empty record.
         mem = union_canon_member(ty);
-        print_type(mem->ty);
-        if (mem->ty->size < ty->size) fprintf(out_file, ", [%d x i8]", ty->size - mem->ty->size);
+        if (mem) {
+            print_type(mem->ty);
+            if (mem->ty->size < ty->size) fprintf(out_file, ", [%d x i8]", ty->size - mem->ty->size);
+        }
     }
     record_close(ty);
     fprintf(out_file, "\n");
@@ -1064,6 +1073,8 @@ static bool init_is_punned(Initializer *init, Type *ty) {
     if (!init) return false;
     if (ty->kind == TY_UNION) {
         Member *mem = init->mem ? init->mem : union_default_member(ty);
+        // A union with no members has nothing to punned-write.
+        if (!mem) return false;
         if (mem != union_canon_member(ty)) return true;
         return init_is_punned(init->child[mem->idx], mem->ty);
     }
@@ -1096,6 +1107,7 @@ static bool init_needs_inline(Initializer *init, Type *ty) {
     if (ty->kind == TY_UNION) {
         Member *mem = init->mem ? init->mem : union_default_member(ty);
         Member *canon = union_canon_member(ty);
+        if (!mem) return false;
         if (mem != canon) return true;
         // The member may itself be an aggregate whose value takes the inline
         // form -- a union of a union, the inner one initialized through a
@@ -1133,6 +1145,10 @@ static void print_init_ty(Initializer *init, Type *ty) {
 
     if (ty->kind == TY_UNION) {
         Member *canon = union_canon_member(ty);
+        if (!canon) {
+            print_type(ty);
+            return;
+        }
         Member *mem = (init->is_inited && init->mem) ? init->mem : canon;
         // The same test dump_init() makes for the value: a canonical member
         // whose own initializer is written punned (a union inside it) makes
@@ -1165,12 +1181,14 @@ static void print_init_ty(Initializer *init, Type *ty) {
             }
             if (pos > off) {
                 for (int i = pos; i < end; i++) fprintf(out_file, "%si8", i > pos ? ", " : "");
+                pos = end;
             } else if (m->is_bitfield) {
                 print_type(m->unit_ty);
+                pos = off + m->unit_ty->size;
             } else {
                 print_init_ty(init->child[m->idx], m->ty);
+                pos = off + m->ty->size;
             }
-            pos = end;
             m = m->next;
         }
         if (pos < ty->size) {
@@ -1230,6 +1248,12 @@ static void dump_init(Initializer *init, Type *ty) {
             return;
         }
         Member *mem = init->mem ? init->mem : union_default_member(ty);
+        if (!mem) {
+            // An empty union: nothing to initialize, and the image is empty.
+            print_type(ty);
+            fprintf(out_file, " zeroinitializer");
+            return;
+        }
         Member *canon = union_canon_member(ty);
         Initializer *child = init->child[mem->idx];
         if (mem != canon || init_is_punned(child, mem->ty)) {

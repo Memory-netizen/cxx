@@ -1896,6 +1896,7 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
 
     if (ty->kind == TY_UNION && !init->expr) {
         Member *mem = init->mem ? init->mem : union_default_member(ty);
+        if (!mem) return new_node(ND_NOP, tok);
         InitDesg desg2 = {desg, 0, mem, NULL};
         return create_lvar_init(init->child[mem->idx], mem->ty, &desg2, tok);
     }
@@ -1927,6 +1928,7 @@ static bool is_fully_initialized(Initializer *init, Type *ty) {
             return true;
         case TY_UNION: {
             Member *mem = init->mem ? init->mem : union_default_member(ty);
+            if (!mem) return true;
             if (!is_fully_initialized(init->child[mem->idx], mem->ty)) return false;
             return mem->ty->size == ty->size;
         }
@@ -2000,6 +2002,7 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
 
     if (ty->kind == TY_UNION) {
         Member *mem = init->mem ? init->mem : union_default_member(ty);
+        if (!mem) return;
         eval_gvar_data(init->child[mem->idx], mem->ty);
         init->is_inited |= init->child[mem->idx]->is_inited;
     }
@@ -2468,8 +2471,27 @@ int builtin_kind_of(Node *func) {
 }
 
 static bool is_const_expr(Node *node) {
+    // A comma operator makes an expression not constant (6.6p3), and folding
+    // it away would say otherwise: `(1, 3)` folds to 3. Asked before the
+    // fold, `int a[(1, 3)]` at file scope is a variably modified object --
+    // which 6.7.7.3p2 forbids there -- rather than an array of three, and
+    // __builtin_constant_p((1, 3)) is 0 as gcc has it.
+    if (node->kind == ND_COMMA) return false;
     node = fold_node(node);
+    // Folding can leave a conversion in place, and a conversion of a
+    // constant is a constant. The two that reach here are the ones the
+    // standard writes for `NULL` and for a string literal: `(void *)0` is an
+    // explicit cast (6.3.2.3p3) and `""` decays to `char *` through an
+    // implicit one. Both references answer 1 for each (C/0178/0035 cases 3
+    // and 4), where the folded node used to be the cast rather than the
+    // constant inside it.
+    while (node->kind == ND_IMCAST || node->kind == ND_EXCAST || node->kind == ND_LVTOR) node = node->lhs;
     if (node->kind == ND_NUM) return true;
+    // A string literal is an array object the translator knows, and its
+    // address is an address constant (case 4).
+    if (node->kind == ND_VAR && node->var->is_str) return true;
+    // `nullptr` and a null pointer constant are constants (case 3).
+    if (node->kind == ND_NULLPTR || (node->ty && is_nullptr(node->ty))) return true;
     // A constexpr variable or an element of a constexpr aggregate is
     // usable in constant expressions (C23 6.6).
     Node *root = node;
@@ -4559,8 +4581,11 @@ Fp128 eval_fp128(Node *node) {
                 return fp128_is_zero(eval_fp128(node->cond)) ? eval_fp128(node->els) : eval_fp128(node->then);
             return eval(node->cond) ? eval_fp128(node->then) : eval_fp128(node->els);
         case ND_COMMA:
-            eval(node->lhs);
-            return eval_fp128(node->rhs);
+            // As in eval2: 6.6p3 forbids the comma in a constant expression.
+            // The wording drops "integer" because this is the floating
+            // evaluator: `static double d = (1.0, 2.0);` is not a constant
+            // expression either, and gcc refuses it too.
+            error(node->tok, "expression is not a constant expression");
         case ND_IMCAST:
         case ND_EXCAST: {
             // Source may be an integer (or a float of another format);
@@ -4578,9 +4603,12 @@ Fp128 eval_fp128(Node *node) {
     return (Fp128){{0, 0, 0, 0}};
 }
 
+static Int128 eval_int128(Node *node);
+
 // Compile-time evaluation in the Int128 domain for _BitInt constants
-// (all widths; node->ival holds the value).
-static Int128 eval_int128(Node *node) {
+// (all widths; node->ival holds the value). The result is narrowed to its
+// type by eval_int128 below, which is the entry every caller uses.
+static Int128 eval_int128_wide(Node *node) {
     add_type(node);
     switch (node->kind) {
         case ND_NUM:
@@ -4653,8 +4681,8 @@ static Int128 eval_int128(Node *node) {
         case ND_COND:
             return int128_is_zero(eval_int128(node->cond)) ? eval_int128(node->els) : eval_int128(node->then);
         case ND_COMMA:
-            eval_int128(node->lhs);
-            return eval_int128(node->rhs);
+            // As in eval2: 6.6p3 forbids the comma in a constant expression.
+            error(node->tok, "expression is not an integer constant expression");
         case ND_IMCAST:
         case ND_EXCAST: {
             if (is_flonum(node->lhs->ty)) {
@@ -4672,6 +4700,20 @@ static Int128 eval_int128(Node *node) {
     }
     error(node->tok, "not a compile-time constant");
     return (Int128){{0, 0, 0, 0}};
+}
+
+// A value is as wide as its own type, exactly as it is in the target's
+// arithmetic: the operators above compute in 128 bits, so an intermediate
+// that went negative in a 64-bit unsigned type would otherwise carry 128
+// bits of ones into the next operation. `(-1u)/2` in #if is (2^64-1)/2, and
+// it came out as 2^64-1 -- the halving of the 128-bit value, truncated back
+// to 64 bits at the end. gcc and clang answer 2^63-1, as
+// C/0125/0125_0026.c and its neighbours expect.
+static Int128 eval_int128(Node *node) {
+    Int128 v = eval_int128_wide(node);
+    if (!is_integer(node->ty)) return v;
+    int bits = (node->ty->kind & TY_BITINT) ? bitint_width(node->ty) : node->ty->size * 8;
+    return int128_normalize(v, bits, node->ty->is_unsigned ? UNSIGNED : SIGNED);
 }
 
 static int64_t eval_ty(int64_t val, Type *ty) {
@@ -4892,8 +4934,16 @@ static int64_t eval2(Node *node, uint32_t *sym) {
             return int128_to_i64(folded->ival);
         }
         case ND_COMMA:
-            eval(node->lhs);
-            return eval2(node->rhs, sym);
+            // 6.6p3: a constant expression shall not contain a comma
+            // operator. Folding turns `(1, 3)` into 3 and hides that, so the
+            // operand is not evaluated here at all: an array length, an
+            // enumerator, a case label or a bit-field width written that way
+            // is not an integer constant expression, and gcc says so (clang
+            // accepts it, which is a divergence this follows the standard
+            // on). What is *not* constant is still usable where the language
+            // allows a variable one -- a block-scope array length, whose
+            // operand keeps being evaluated at run time.
+            error(node->tok, "expression is not an integer constant expression");
         case ND_EQ:
         case ND_NE:
         case ND_LT:
@@ -5085,6 +5135,13 @@ static int64_t eval2(Node *node, uint32_t *sym) {
 }
 
 static int64_t eval_rval(Node *node, uint32_t *sym) {
+    // Not every caller wants the object a symbolic address names: eval() is
+    // `eval2(node, NULL)` and asks only for the number. Writing through a null
+    // sym killed the compiler on `static int len = ((char *)&(msg.end)) -
+    // ((char *)&msg);` (C/0202/0140); the offsets it returns are what the
+    // difference needs, so a local dummy answers correctly as well as safely.
+    uint32_t dummy;
+    if (!sym) sym = &dummy;
     switch (node->kind) {
         case ND_VAR:
             if (node->var->is_local) error(node->tok, "not a compile-time constant");
@@ -8145,18 +8202,22 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 ty = typeof_specifier(&tok, tok, tok->kind == TK_TYPEOF_U);
                 typespec_cnt += OTHER;
                 goto check_type;
-            case TK_ALIGNAS:
+            case TK_ALIGNAS: {
                 if (!align) error(tok, "alignas is not allowed in this context");
                 tok = skip(tok->next, TK_LPAREN);
 
-                if (is_typename(tok, true))
-                    *align = typename(&tok, tok)->align;
-                else
-                    *align = const_expr(&tok, tok);
-                if (*align & (*align - 1))
-                    error(ty_tok, "requested alignment ‘%d’ is not a positive power of 2", *align);
+                int a = is_typename(tok, true) ? typename(&tok, tok)->align : const_expr(&tok, tok);
+                // 6.7.5p5: an alignment specification of zero has no effect;
+                // p6: of several, the strictest wins. Assigning instead let a
+                // later zero wipe an earlier sixteen -- `long _Alignas(16)
+                // _Alignas(0) g_b;` came out align 8 (C/0057/0005).
+                if (a) {
+                    if (a & (a - 1)) error(ty_tok, "requested alignment ‘%d’ is not a positive power of 2", a);
+                    *align = MAX(*align, a);
+                }
                 tok = skip(tok, TK_RPAREN);
                 continue;
+            }
             case TK_VOID:
                 typespec_cnt += VOID;
                 break;
@@ -8612,6 +8673,21 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
     tok = skip(tok, TK_RBRACKET);
     ty = decl_suffix(rest, tok, ty, is_param);
 
+    // 6.7.7.3p1: the array length expression, when there is one, shall have
+    // integer type -- constant or not, and whether it names a declaration, a
+    // parameter or a type name. The constant case used to be caught by
+    // accident (a `double` is not an integer constant expression, so the
+    // diagnostic came from there), and a variably modified one was not caught
+    // at all: `int a[n * 1.0]` compiled and sized the array from a floating
+    // value. gcc and clang both refuse it.
+    if (len) {
+        add_type(len);
+        if (!is_integer(len->ty)) {
+            if (is_arith(len->ty)) error(len->tok, "size of array has non-integer type ‘%s’", diag_ty_name(len->ty));
+            error(len->tok, "size of array has non-integer type");
+        }
+    }
+
     if (!len) {
         ty = array_of(ty, -1);
     } else if (ty->kind == TY_VLA || !is_const_expr(len)) {
@@ -8623,7 +8699,17 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
         scope->vla_expr = vgrow(scope->vla_expr, scope->vla_num + 1);
         scope->vla_expr[scope->vla_num++] = expr;
     } else {
-        ty = array_of(ty, eval_ice(len));
+        // 6.7.7.3p1: a constant length shall have a value greater than zero.
+        // A negative one must not reach array_of(): -1 is the sentinel for an
+        // array of unspecified length, so `int a[-1]` silently became
+        // `int a[]`, and sizeof(a) answered "incomplete type" afterwards.
+        // Zero is the flexible-array idiom of a GNU extension rather than a
+        // defect, so it is a pedantic diagnostic like the other extensions
+        // cxx accepts; gcc and clang keep it for -pedantic-errors as well.
+        int64_t n = eval_ice(len);
+        if (n < 0) error(len->tok, "size of array is negative");
+        if (n == 0) pedantic(len->tok, "ISO C forbids zero-size array");
+        ty = array_of(ty, n);
     }
 
     array_bracket_note(ty, l_bracket);

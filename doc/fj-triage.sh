@@ -51,13 +51,106 @@ msg=$(echo "$out" | grep -m1 'error:' | sed 's/.*error: //' | sed "s/‘[^’]*�
 if [ -z "$msg" ]; then
     # cxx's own diagnostics do not always carry the word "error".
     msg=$(echo "$out" | grep -m1 -v '^ *[0-9]* |' | head -1 | cut -c1-72)
-    [ -z "$msg" ] && msg="(no output at all -- cxx crashed?)"
+    # No message at all means cxx compiled the file this time: the verdict in
+    # the results file predates a fix, and the entry is stale rather than a
+    # crash. (A crash prints "internal compiler error" through the driver.)
+    if [ -z "$msg" ]; then
+        if "$CXX" -w -c -o /dev/null "$f" > /dev/null 2>&1; then
+            msg="（已修复：本次编译通过，结果文件是旧的）"
+        else
+            msg="(no output at all -- cxx crashed?)"
+        fi
+    fi
 fi
 printf '%s\t%s\n' "$msg" "$f"
 SH
     chmod +x "$WORK/diag.sh"
     CXX="$CXX" xargs -a "$WORK/compile.list" -d '\n' -P "$JOBS" -n 1 "$WORK/diag.sh" > "$WORK/compile.diag" 2>"$WORK/compile.err" || true
 fi
+
+# --- 1a2. tests recorded as divergences: the standard is on cxx's side ---
+#
+# doc/fj-divergences.md lists the tests where cxx refuses or differs and the
+# standard says cxx is right (the references are the lenient ones). They are
+# not defects and are filed apart.
+DIVERGENCES=${DIVERGENCES:-doc/fj-divergences.md}
+: > "$WORK/compile.divergence"
+if [ -f "$DIVERGENCES" ]; then
+    grep -oE 'C/[0-9]+/[0-9_/]+\.c' "$DIVERGENCES" | sort -u > "$WORK/divergent.list"
+fi
+
+# --- 1b. name the feature a refused file needs ---
+#
+# A file cxx refuses because it uses something cxx does not have is a gap, not
+# a defect (section 0 of the plan: recorded and filtered, not implemented on
+# the spot). The feature is read off the source, which is what says it.
+feature_of() {
+    f=$1
+    if grep -q 'redefine_extname' "$f" 2>/dev/null; then echo '#pragma redefine_extname'; return; fi
+    if grep -qE '^[[:space:]]*#ident' "$f" 2>/dev/null; then echo '#ident'; return; fi
+    if grep -qE 'atomic_(thread|signal)_fence' "$f" 2>/dev/null; then echo 'atomic_*_fence'; return; fi
+    if grep -q 'FLT_HAS_SUBNORM\|DBL_HAS_SUBNORM\|LDBL_HAS_SUBNORM' "$f" 2>/dev/null; then echo '*_HAS_SUBNORM（标准已标为过时）'; return; fi
+    if grep -q 'FLT_DECIMAL_DIG\|DBL_DECIMAL_DIG' "$f" 2>/dev/null; then echo 'float.h 的 *_DECIMAL_DIG'; return; fi
+    if grep -q '_Complex\|__STDC_IEC_559_COMPLEX__\|__STDC_NO_COMPLEX__' "$f" 2>/dev/null; then echo '_Complex'; return; fi
+    # Function-level attributes and anything that only matters to an
+    # optimiser: the user's ruling is that these are recorded as gaps and done
+    # in an optimisation phase, not now.
+    if grep -q 'always_inline\|__builtin_return_address\|__builtin_frame_address' "$f" 2>/dev/null; then
+        echo '函数级属性 / 内联（优化阶段）'; return
+    fi
+    if grep -q 'weakref\|noinline' "$f" 2>/dev/null; then
+        echo '函数级/对象属性 noinline、weakref（优化阶段）'; return
+    fi
+    # __builtin_constant_p is implemented -- the user's reading -- so a file
+    # that uses it is a defect's file, not a gap's.
+    if grep -qE '__SSE[0-9_]*__|__AVX[0-9_]*__|__MMX__|__AVX2__' "$f" 2>/dev/null; then
+        echo '目标特性宏（优化/代码生成阶段）'; return
+    fi
+    if grep -q '__attribute__[[:space:]]*((weak))\|__attribute__((weak))' "$f" 2>/dev/null; then echo '__attribute__((weak))'; return; fi
+    if grep -qE '\\[[:space:]]+$' "$f" 2>/dev/null; then echo '字符串里反斜杠接空白再接换行（GNU 扩展）'; return; fi
+    # Not a defect either: the reference refuses the file as well. Two of
+    # the files left (C/0048/0049, C/0186/0131) are like that -- gcc,
+    # clang and cxx all reject them, so there is nothing to fix.
+    if ! clang -w -std=c23 -c -o /dev/null "$f" > /dev/null 2>&1; then
+        echo '参考实现（clang -std=c23）同样拒绝'
+        return
+    fi
+    echo ''
+    return
+}
+: > "$WORK/compile.gap"
+: > "$WORK/compile.defect"
+while IFS=$'\t' read -r msg file; do
+    [ -z "${file:-}" ] && continue
+    if [ -s "$WORK/divergent.list" ] && grep -qF "${file#$HOME/compiler-test-suite/}" "$WORK/divergent.list"; then
+        printf '%s\t%s\n' "$msg" "$file" >> "$WORK/compile.divergence"
+        continue
+    fi
+    feat=$(feature_of "$file" "$msg")
+    if [ -n "$feat" ]; then
+        printf '%s\t%s\t%s\n' "$feat" "$msg" "$file" >> "$WORK/compile.gap"
+    else
+        printf '%s\t%s\n' "$msg" "$file" >> "$WORK/compile.defect"
+    fi
+done < "$WORK/compile.diag"
+
+# --- 1c. the same question for the runtime failures ---
+#
+# A test that compiles and then differs may still be a feature cxx does not
+# have -- an attribute it does not forward, say -- and the user's ruling puts
+# those with the gaps. The source decides, exactly as it does for a refusal.
+: > "$WORK/runtime.gap"
+: > "$WORK/runtime.defect"
+for kind in exit output timeout; do
+    files "$kind" | while read -r f; do
+        feat=$(feature_of "$f" "")
+        if [ -n "$feat" ]; then
+            printf '%s\t%s\t%s\n' "$feat" "$kind" "$f" >> "$WORK/runtime.gap"
+        else
+            printf '%s\t%s\n' "$kind" "$f" >> "$WORK/runtime.defect"
+        fi
+    done
+done
 
 # --- 2. runtime failures, by directory ---
 for kind in exit output timeout; do
@@ -73,7 +166,10 @@ done
 # not, that is a defect. Tests that print plain values are their own class.
 if [ "$(count output)" -gt 0 ]; then
     : > "$WORK/output.class"
-    files output | xargs -P "$JOBS" -I{} bash -c '
+    # The tests section 1c already filed as gaps are not classified here: an
+    # attribute cxx does not forward is a gap, not a runtime defect.
+    files output | grep -vxFf <(cut -f3 "$WORK/runtime.gap" 2>/dev/null | sort -u) 2>/dev/null |
+    xargs -P "$JOBS" -I{} bash -c '
         cxx="$1"
         f="$2"
         d=$(mktemp -d)
@@ -88,9 +184,14 @@ if [ "$(count output)" -gt 0 ]; then
         if [ "${rng:-0}" -gt 0 ] && [ "${cng:-0}" -eq 0 ]; then class=ref-ng
         elif [ "${cng:-0}" -gt 0 ] && [ "${rng:-0}" -eq 0 ]; then class=cxx-ng
         fi
+        # A test doc/fj-divergences.md already records stays recorded here as
+        # well: whether it is "cxx prints NG" or "nobody prints OK/NG" is
+        # beside the point once the difference has been judged and written
+        # down with its citation.
+        if [ -s "$3" ] && grep -qF "${f#$4/}" "$3"; then class=divergence; fi
         printf "%s\t%s\n" "$class" "$f"
         rm -rf "$d"
-    ' _ "$CXX" {} >> "$WORK/output.class"
+    ' _ "$CXX" {} "$WORK/divergent.list" "$HOME/compiler-test-suite" >> "$WORK/output.class"
 fi
 
 # --- 3. the report ---
@@ -111,7 +212,32 @@ fi
     done
     printf '| `gap` | %s |\n' "$(count gap)"
     echo
-    echo "## 1. 真缺陷：编译被拒（按诊断聚类）"
+    echo "## 1a. 缺口：用到了 cxx 还没有的特性（只记录）"
+    echo
+    if [ -s "$WORK/compile.gap" ]; then
+        echo "按“文件需要的特性”归类，逐个读文件得出："
+        echo
+        echo "| 数量 | 特性 | 代表文件 |"
+        echo "|---|---|---|"
+        awk -F'\t' '{n[$1]++; if (!($1 in first)) first[$1]=$3} END {for (k in n) printf "%d\t%s\t%s\n", n[k], k, first[k]}' \
+            "$WORK/compile.gap" | sort -rn |
+            while IFS=$'\t' read -r c feat f; do
+                printf '| %s | `%s` | `%s` |\n' "$c" "$feat" "${f#$HOME/compiler-test-suite/}"
+            done
+    else
+        echo "无。"
+    fi
+    echo
+    if [ -s "$WORK/compile.divergence" ]; then
+        echo "## 1a2. 记录的分歧：按标准判定 cxx 正确（\`doc/fj-divergences.md\`）"
+        echo
+        echo "| 诊断 | 测试 |"
+        echo "|---|---|"
+        awk -F'\t' '{printf "| `%s` | `%s` |\n", $1, $2}' "$WORK/compile.divergence" |
+            sed "s|$HOME/compiler-test-suite/||"
+        echo
+    fi
+    echo "## 1b. 真缺陷：编译被拒（按诊断聚类）"
     echo
     if [ "$n_compile" -eq 0 ]; then
         echo "无。"
@@ -121,7 +247,7 @@ fi
         echo "| 数量 | 诊断 | 代表文件 |"
         echo "|---|---|---|"
         awk -F'\t' '{n[$1]++; if (!($1 in first)) first[$1]=$2} END {for (k in n) printf "%d\t%s\t%s\n", n[k], k, first[k]}' \
-            "$WORK/compile.diag" | sort -rn | head -40 |
+            "$WORK/compile.defect" | sort -rn | head -40 |
             while IFS=$'\t' read -r c msg f; do
                 case $msg in
                     *"implicit declaration"*)
@@ -133,6 +259,18 @@ fi
             done
     fi
     echo
+    if [ -s "$WORK/runtime.gap" ]; then
+        echo "## 1c. 缺口：运行期失败里同样是用到了没有的特性"
+        echo
+        echo "| 数量 | 特性 | 代表文件 |"
+        echo "|---|---|---|"
+        awk -F'\t' '{n[$1]++; if (!($1 in first)) first[$1]=$3} END {for (k in n) printf "%d\t%s\t%s\n", n[k], k, first[k]}' \
+            "$WORK/runtime.gap" | sort -rn |
+            while IFS=$'\t' read -r c feat f; do
+                printf '| %s | `%s` | `%s` |\n' "$c" "$feat" "${f#$HOME/compiler-test-suite/}"
+            done
+        echo
+    fi
     echo "## 2. 真缺陷：运行期不一致"
     echo
     if [ -s "$WORK/output.class" ]; then
@@ -143,13 +281,15 @@ fi
         echo "| 类别 | 数量 | 读法 |"
         echo "|---|---|---|"
         printf '| `ref-ng` | %s | 参考实现自己报 NG、cxx 全 OK —— **cxx 正确，属参考分歧，只记录** |\n' \
-            "$(grep -c '^ref-ng' "$WORK/output.class" 2>/dev/null || echo 0)"
+            "$(awk '/^ref-ng/{n++} END{print n+0}' "$WORK/output.class" 2>/dev/null)"
         printf '| `cxx-ng` | %s | cxx 报 NG、参考全 OK —— **真缺陷** |\n' \
-            "$(grep -c '^cxx-ng' "$WORK/output.class" 2>/dev/null || echo 0)"
+            "$(awk '/^cxx-ng/{n++} END{print n+0}' "$WORK/output.class" 2>/dev/null)"
         printf '| `plain` | %s | 两家都不打 OK/NG，打印普通数值，逐个案看 |\n' \
-            "$(grep -c '^plain' "$WORK/output.class" 2>/dev/null || echo 0)"
+            "$(awk '/^plain/{n++} END{print n+0}' "$WORK/output.class" 2>/dev/null)"
+        printf '| `divergence` | %s | 已在 `doc/fj-divergences.md` 记录，判定为 cxx 正确 |\n' \
+            "$(awk '/^divergence/{n++} END{print n+0}' "$WORK/output.class" 2>/dev/null)"
         echo
-        for cls in cxx-ng ref-ng; do
+        for cls in cxx-ng divergence ref-ng; do
             grep "^$cls" "$WORK/output.class" | cut -f2 | sed "s|$HOME/compiler-test-suite/||" | sed "s|^|  - \`|; s|\$|\`|" |
                 head -12
         done

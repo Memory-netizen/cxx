@@ -56,6 +56,12 @@ static VaArgOps va_arg_gp = {
     .mem_step = 8,
 };
 
+// A register step of 16 walks the SSE save area, whose slots are sixteen
+// bytes apart; a *stack* slot is eight. The two are not the same number, and
+// an argument that runs out of SSE registers is read from the stack: with 16
+// here, the second double of a variadic function whose eight SSE registers
+// are all named was read one slot too far (C/0081/0081_0011.c, and the same
+// shift in C/0080/0080_0013.c).
 static VaArgOps va_arg_fp = {
     .kind = VA_MEM_REGS,
     .offset_ty = &ty_uint_,
@@ -64,7 +70,7 @@ static VaArgOps va_arg_fp = {
     .reg_field = 3,
     .mem_field = 2,
     .reg_step = 16,
-    .mem_step = 16,
+    .mem_step = 8,
 };
 
 // A long double is 16-byte aligned while the overflow area advances 8 bytes
@@ -90,20 +96,20 @@ static VaArgOps va_arg_gp16 = {
     .mem_step = 16,
 };
 
+// long double and _Float128 are MEMORY class: they are never in the register
+// save area. That cannot be said with the offset test the register classes
+// use -- it is an unsigned `offset <= bound`, and gp_offset is 0 when the
+// function has no named integer argument, so a bound of 0 still sent the
+// first va_arg to the register save area and read whatever was in %rdi
+// (C/0080/0080_0013.c read the second named float, C/0081/0081_0006.c read a
+// NaN). With VA_MEM_OVERFLOW there is no register branch at all; the cursor
+// moves one whole 16-byte argument and is raised to its alignment first.
 static VaArgOps va_arg_mem16 = {
-    .kind = VA_MEM_REGS,
+    .kind = VA_MEM_OVERFLOW,
     .offset_ty = &ty_uint_,
     .offset_field = 0,
-    // Always the overflow area: gp_offset is at least 8 after va_start,
-    // so "still has room in a register" is never true for this class.
-    .offset_bound = 0,
     .reg_field = 3,
     .mem_field = 2,
-    .reg_step = 8,
-    // long double and _Float128 are 16 bytes wide on the stack, and
-    // belong to the MEMORY class, so the cursor always moves a whole
-    // one of them -- never the 8 that va_arg_gp uses.
-    .mem_step = 16,
     .mem_align = 16,
 };
 

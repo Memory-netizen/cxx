@@ -6595,6 +6595,365 @@ int n;
 int a[n];
 EOF
 
+# --- 6.10.4.1 rescanning and further replacement ----------------------
+# 6.10.4.1p2: a name that is not replaced because it is the name of a macro
+# whose replacement list is being scanned is "no longer available for
+# further replacement", and that outlives the scan itself. `f1(2)(9)` is the
+# case that shows it: the `f1` that `g1` expands to must stay a plain
+# identifier, so the parenthesis from the file cannot call it. The second
+# check is the mirror image, and the reason the rule is not "the body's
+# names are frozen": the `f2` that `g2(9)` expands to *is* called, because
+# the argument list comes from the file and is not painted by the
+# invocation that happens to precede it. gcc and clang agree on both.
+cat > "$tmp/paint.c" <<'EOF'
+#include <string.h>
+#define f1(a) a*g1
+#define g1 f1
+#define f2(a) a*g2
+#define g2(a) f2(a)
+#define x(a) # a
+#define y(a) x(a)
+int main(void) {
+    if (strcmp(y(f1(2)(9)), "2*f1(9" ")")) return 1;
+    if (strcmp(y(f2(2)(9)), "2*9*g2")) return 2;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/paint" "$tmp/paint.c" > "$tmp/log" 2>&1 && "$tmp/paint"; then
+    echo "testing a nonreplaced macro name stays unexpandable ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a nonreplaced macro name stays unexpandable ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- 6.10.3.2p2 white space in a stringized argument ------------------
+# White space before a parameter in the body is white space between the
+# argument's tokens, so `P(9)` stringizes as "x 9"; the argument's own
+# leading white space is not part of the argument, so `P3( 9 )` is "x*9".
+# When the call is reached from another macro's replacement list, the first
+# token of the expansion takes the white space of the name it replaces:
+# `g2` is written against the `*`, so the `9` of its argument is not
+# preceded by a blank even though f2's body has one.
+cat > "$tmp/wsstr.c" <<'EOF'
+#include <string.h>
+#define X(x) #x
+#define Y(x) X(x)
+#define P(p) x p
+#define P3(p) x*p
+#define f2(a) a*g2
+#define g2(a) f2(a)
+int main(void) {
+    if (strcmp(Y(P(9)), "x 9")) return 1;
+    if (strcmp(Y(P3( 9 )), "x*9")) return 2;
+    if (strcmp(Y(-f2(2)(9)), "-2*9*g2")) return 3;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/wsstr" "$tmp/wsstr.c" > "$tmp/log" 2>&1 && "$tmp/wsstr"; then
+    echo "testing white space in a stringized macro argument ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing white space in a stringized macro argument ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- 6.10.1p4 the types an #if expression is evaluated in -------------
+# Every signed integer type acts as intmax_t and every unsigned one as
+# uintmax_t, so a literal's own rank never reaches the arithmetic: `1l` and
+# `-1u` are both 64 bits wide, and the second is unsigned, which makes the
+# comparison unsigned. Read as `long` against `unsigned int` it would be
+# signed instead -- long represents every unsigned int -- and cxx answered 1
+# where gcc, clang and the draft answer 0.
+cat > "$tmp/pptype.c" <<'EOF'
+#if 1l > (-1u)
+#error mixed signedness compared as signed
+#endif
+#if -1l < 1u
+#error the unsigned operand did not make the comparison unsigned
+#endif
+#if !(1u < -1)
+#error the unsigned operand did not win
+#endif
+#if !(2147483647u < -2147483648)
+#error the signed operand was not converted to unsigned
+#endif
+#if (-1u) / 2 != 9223372036854775807u
+#error unsigned division
+#endif
+#if 0x100000000 > 0
+#else
+#error a literal wider than int was read back as an int
+#endif
+int main(void) { return 0; }
+EOF
+if "$compiler" -w -o "$tmp/pptype" "$tmp/pptype.c" > "$tmp/log" 2>&1 && "$tmp/pptype"; then
+    echo "testing #if evaluates in intmax_t/uintmax_t ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing #if evaluates in intmax_t/uintmax_t ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- 7.16.1 va_arg: the arguments the registers did not take -----------
+# Two SysV AMD64 rules the probe used to get wrong. A variadic double that has
+# run out of SSE registers comes off the stack, where a slot is eight bytes
+# and not the sixteen of a save-area slot; and a long double is always on the
+# stack, where the offset test the register classes use cannot say "never" --
+# the offset is zero when the function has no named integer argument, so a
+# bound of zero still read from the register save area.
+cat > "$tmp/vaargs.c" <<'EOF'
+#include <stdarg.h>
+static int mix(float a, float b, double c, double d, float e, float f, double g, double h, ...) {
+    va_list ap;
+    va_start(ap, h);
+    int i = va_arg(ap, int);
+    long long l = va_arg(ap, long long);
+    double x = va_arg(ap, double);
+    double y = va_arg(ap, double);
+    long double z = va_arg(ap, long double);
+    va_end(ap);
+    if (a != -6.0f || b != -5.0f || c != -4.0 || d != -3.0) return 1;
+    if (e != -2.0f || f != -1.0f || g != 0.0 || h != 1.0) return 2;
+    if (i != 2 || l != 3 || x != 4.0 || y != 5.0 || z != 6.0L) return 3;
+    return 0;
+}
+static int only_ld(long double a, ...) {
+    va_list ap;
+    va_start(ap, a);
+    long double b = va_arg(ap, long double);
+    long double c = va_arg(ap, long double);
+    va_end(ap);
+    return a == 1.0L && b == 2.0L && c == 3.0L ? 0 : 1;
+}
+static int many_d(int n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++)
+        if (va_arg(ap, double) != i + 1.0) return 1;
+    va_end(ap);
+    return 0;
+}
+int main(void) {
+    if (mix(-6, -5, -4, -3, -2, -1, 0, 1, 2, 3LL, 4.0f, 5.0, 6.0L)) return 4;
+    if (only_ld(1.0L, 2.0L, 3.0L)) return 5;
+    if (many_d(11, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0)) return 6;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/vaargs" "$tmp/vaargs.c" > "$tmp/log" 2>&1 && "$tmp/vaargs"; then
+    echo "testing va_arg of doubles and long doubles ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing va_arg of doubles and long doubles ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- 6.10.3.2p2 white space, and a stray backslash, in a stringized argument
+# A newline between the argument's tokens is white space like any other, so
+# `F( 123\n456 )` stringizes as "123 456"; white space before the argument's
+# first token is deleted, so the same argument written on the line after the
+# call is "q*9" in a body of `q*p`. And `#define a(x) \n` -- a backslash that
+# is not a preprocessing token -- is passed through rather than escaped, so
+# the literal holds the escape it begins.
+cat > "$tmp/strws.c" <<'EOF'
+#include <string.h>
+#define X(x) #x
+#define Y(x) X(x)
+#define F(p) p
+#define G(p) q*p
+#define A(x) \n
+int main(void) {
+    if (strcmp(Y(F( 123
+456 )), "123 456")) return 1;
+    if (strcmp(Y(G(
+9)), "q*9")) return 2;
+    if (strcmp(Y(A(x)), "\n")) return 3;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/strws" "$tmp/strws.c" > "$tmp/log" 2>&1 && "$tmp/strws"; then
+    echo "testing white space and a stray backslash in a stringized argument ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing white space and a stray backslash in a stringized argument ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- 6.10.8.1 __LINE__ inside an object-like macro --------------------
+# The predefined macros are answered from the token's origin, which has to be
+# the invocation: the body of an object-like macro is expanded as it is
+# stored, so stamping the origins after the expansion answered with the line
+# of the definition instead of the line of use.
+cat > "$tmp/linemac.c" <<'EOF'
+#include <string.h>
+#define L __LINE__
+#define M L
+#define FL() __LINE__
+int main(void) {
+    int line = __LINE__;
+    if (L != line + 1) return 1;
+    if (M != line + 2) return 2;
+    if (FL() != line + 3) return 3;
+    if (strcmp(__FILE__, "linemac.c") && strstr(__FILE__, "linemac.c") == NULL) return 4;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/linemac" "$tmp/linemac.c" > "$tmp/log" 2>&1 && "$tmp/linemac"; then
+    echo "testing __LINE__ is the line of the invocation ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __LINE__ is the line of the invocation ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- 6.10.1.1 __builtin_constant_p of a null pointer and of a literal --
+cat > "$tmp/bcp.c" <<'EOF'
+#include <stddef.h>
+int main(void) {
+    int a;
+    if (__builtin_constant_p(NULL) != 1) return 1;
+    if (__builtin_constant_p((void *)0) != 1) return 2;
+    if (__builtin_constant_p("") != 1) return 3;
+    if (__builtin_constant_p(1) != 1) return 4;
+    if (__builtin_constant_p(a) != 0) return 5;
+    if (__builtin_constant_p(&a) != 0) return 6;
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/bcp" "$tmp/bcp.c" > "$tmp/log" 2>&1 && "$tmp/bcp"; then
+    echo "testing __builtin_constant_p sees through a conversion ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __builtin_constant_p sees through a conversion ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- 6.7.7.3p1 the array length expression ---------------------------
+# "the expression shall have an integer type. If the expression is a constant
+# expression, it shall have a value greater than zero." The constant case used
+# to be refused by accident -- a double is not an integer *constant*
+# expression, so the diagnostic came from there -- and a variably modified
+# length was not refused at all: `int a[n * 1.0]` sized the array from a
+# floating value. A negative constant was worse than accepted: -1 is the
+# sentinel for an array of unspecified length, so `int a[-1]` became `int a[]`
+# and sizeof answered "incomplete type" much later. gcc and clang refuse all
+# four of these.
+bad "a non-integer array length" <<'EOF'
+int a[1.5];
+EOF
+bad "a non-integer variably modified array length" <<'EOF'
+int f(int n) {
+    int a[n * 1.0];
+    return (int)sizeof a;
+}
+EOF
+bad "a non-integer array parameter length" <<'EOF'
+void f(int n, int a[n * 1.0]);
+EOF
+bad "a pointer array length" <<'EOF'
+int *p;
+int a[p];
+EOF
+bad "a negative array length" <<'EOF'
+int a[-1];
+EOF
+bad "a non-integer length in a type name" <<'EOF'
+int main(void) { return (int)sizeof(int[1.5]); }
+EOF
+
+# Zero is the flexible-array idiom: an extension in all three compilers, so it
+# is accepted, warned about under -pedantic and fatal under -pedantic-errors
+# (which is what the pedantic() helper is for).
+cat > "$tmp/zeroarr.c" <<'EOF'
+struct s { int n; char d[0]; };
+int a[0];
+int main(void) { return 0; }
+EOF
+if "$compiler" -w -o "$tmp/zeroarr" "$tmp/zeroarr.c" > "$tmp/log" 2>&1 && "$tmp/zeroarr"; then
+    echo "testing a zero-size array is a (pedantic) extension ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a zero-size array is a (pedantic) extension ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+# -pedantic warns and still exits 0 (the mode is not -pedantic-errors), so the
+# check is the message, not the status.
+if "$compiler" -pedantic -S -o /dev/null "$tmp/zeroarr.c" > "$tmp/log" 2>&1 &&
+    grep -q 'zero-size array' "$tmp/log"; then
+    echo "testing -pedantic accepts a zero-size array with a warning ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -pedantic accepts a zero-size array with a warning ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+if "$compiler" -pedantic-errors -S -o /dev/null "$tmp/zeroarr.c" > "$tmp/log" 2>&1; then
+    echo "testing -pedantic-errors rejects a zero-size array ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+else
+    echo "testing -pedantic-errors rejects a zero-size array ... passed"
+    n_pass=$((n_pass + 1))
+fi
+
+# --- 6.6p3 the operators a constant expression may not contain ---------
+# "Constant expressions shall not contain assignment, increment, decrement,
+# function-call, or comma operators, except when they are contained within a
+# subexpression that is not evaluated." Folding is what hid the comma: it
+# reduces `(1, 3)` to 3, which then looks like a constant everywhere. gcc
+# refuses all of these; clang folds the comma and accepts them, so this is
+# another place the standard, not the majority, decides.
+bad "a comma operator in an _Static_assert" <<'EOF'
+_Static_assert((1, 3), "x");
+EOF
+bad "a comma operator in an enumerator" <<'EOF'
+enum { A = (1, 3) };
+EOF
+bad "a comma operator in a case label" <<'EOF'
+int f(int x) {
+    switch (x) {
+        case (1, 3):
+            return 1;
+    }
+    return 0;
+}
+EOF
+bad "a comma operator in a bit-field width" <<'EOF'
+struct s { int a : (1, 3); };
+EOF
+bad "a comma operator in a static initializer" <<'EOF'
+static int x = (1, 3);
+int main(void) { return x; }
+EOF
+bad "a comma operator in a file-scope array length" <<'EOF'
+int a[(1, 3)];
+EOF
+# Where the language allows a non-constant length the comma is fine: this is
+# a variable length array, and the operand is evaluated at run time.
+cat > "$tmp/commavla.c" <<'EOF'
+int f(void) {
+    int a[(1, 3)];
+    return (int)sizeof a;
+}
+int main(void) { return f() - 3 * (int)sizeof(int); }
+EOF
+if "$compiler" -w -o "$tmp/commavla" "$tmp/commavla.c" > "$tmp/log" 2>&1 && "$tmp/commavla"; then
+    echo "testing a comma length is allowed in a block-scope array ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a comma length is allowed in a block-scope array ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then

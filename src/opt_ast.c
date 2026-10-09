@@ -715,6 +715,14 @@ Node *fold_node(Node *node) {
         case ND_COMMA:
             node->lhs = fold_node(node->lhs);
             node->rhs = fold_node(node->rhs);
+            // In a static initializer the comma has to survive the folding:
+            // 6.7.9p4 asks for a constant expression, 6.6p3 says a constant
+            // expression does not contain a comma operator, and folding it
+            // to the right operand is exactly what hides that.
+            // `static int x = (1, 3);` is refused, as gcc refuses it.
+            // Everywhere else the fold is what turns cpython's
+            // `((void)sizeof(int), 4)` into the constant it means.
+            if (in_static_init) return node;
             if (is_int_const(node->lhs) || is_fp_const(node->lhs)) return node->rhs;
             // A cast to void throws the value away, and a constant under it
             // has nothing else to lose. `((void)sizeof(int), 4)` is the shape

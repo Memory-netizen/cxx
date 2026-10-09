@@ -21,6 +21,16 @@ ok() {
         echo "FAIL  $1"; sed 's/^/          /' "$t/log" | head -2; n_fail=$((n_fail+1))
     fi
 }
+# Missing until now, so the two "rej" probes below silently did nothing:
+# bash answered "rej: command not found" and the summary still read clean.
+rej() {
+    cat > "$t/t.c"
+    if $C -w -S -o /dev/null "$t/t.c" > "$t/log" 2>&1; then
+        echo "FAIL  $1  (accepted; expected a diagnostic)"; n_fail=$((n_fail+1))
+    else
+        echo "PASS  $1"; n_pass=$((n_pass+1))
+    fi
+}
 
 echo "### Q. N3239 constants are literals"
 run "typeof of each constant form" <<'EOF'

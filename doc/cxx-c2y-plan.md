@@ -542,6 +542,597 @@ cxx 两种情形都重复转换后的字母，于是 `"+g"(h)` 的输入被标�
 
 **缺口表更新**：§0 的“asm 匹配约束对间接输出”一行**移除**（已实现）。
 
+### R115 用户提问引出的两个真缺陷：数组长度的类型检查、逗号不算常量表达式 —— ✅ 编译侧再收两类
+
+用户问：“`array_dimensions` 解析完 `len` 的表达式之后似乎没有判断他是整数类型？”——**确认属实**，
+而且顺着这条线还查出相邻的第二个缺陷（逗号表达式被当作常量表达式）。两个都修好，各留断言。
+
+#### 1）数组长度没有类型检查（6.7.7.3p1）
+
+N3685 **6.7.7.3p1**（C2y 里 `6.7.6.2p1` 的新编号）：
+
+> If they delimit an expression, called the **array length expression**, the expression **shall have an
+> integer type**. If the expression is a constant expression, it shall have **a value greater than zero**.
+
+`array_dimensions()` 里 `len = assign(&tok, tok)` 之后确实什么都没查。实测（`-S -o /dev/null`）：
+
+| 用例 | 修前 cxx | gcc | clang | 说明 |
+|---|---|---|---|---|
+| `int a[1.5];` | reject | reject | reject | **碰巧**被拒：`double` 不是整型常量表达式，诊断来自 `eval_ice()`，消息也是“expression is not an integer constant expression” |
+| `int f(int n){ int a[n*1.0]; }` | **accept** ✗ | reject | reject | 变长数组这条路上**完全没有检查** |
+| `void f(int n, int a[n*1.0]);` | **accept** ✗ | reject | reject | 形参同样 |
+| `int a[-1];` | **accept** ✗ | reject | reject | 更糟：`-1` 正好是 `array_of()` 里“长度未指定”的哨兵，`int a[-1]` 静默变成 `int a[]`，`sizeof(a)` 事后报“incomplete type” |
+| `int a[0];` | accept | accept | accept | 三家都当 GNU 扩展接受；`-pedantic-errors` 三家都拒 |
+
+修法（`src/parser.c` 的 `array_dimensions()`，一处覆盖声明、形参、类型名三条路）：
+
+- 解析完 `len` 后 `add_type(len)` 并检查 `is_integer(len->ty)`，不是就报
+  `size of array has non-integer type ‘double’`（非算术类型则不带类型名）。
+- 常量分支改成先取 `n = eval_ice(len)`：`n < 0` 报 `size of array is negative`（不再让 `-1` 变成“长度未指定”），
+  `n == 0` 走 `pedantic()`（GNU 扩展，`-pedantic` 警告、`-pedantic-errors` 致命——与 gcc/clang 逐项一致）。
+
+修后 18 个“必须拒/必须收”的探针与 gcc、clang **完全一致**；另有 13 个合法形状
+（`(int)1.5`、枚举、`sizeof`、函数调用 VLA、`short`/`unsigned` VLA、`[const 3]`、`[static n]`、`[*]`、
+多维 VLA、`_BitInt` 长度、`6/2`）全部照常接受。
+
+#### 2）逗号表达式被当成常量表达式（6.6p3，探针时顺带发现）
+
+N3685 **6.6p3**：“Constant expressions shall not contain assignment, increment, decrement, function-call,
+or comma operators, except when they are contained within a subexpression that is not evaluated.”
+
+cxx 的 `fold_node()` 会把 `(1, 3)` 折成 `3`（`src/opt_ast.c` 的 `ND_COMMA` 分支），折叠之后它到处都“像常量”：
+
+| 用例 | 修前 cxx | gcc | clang |
+|---|---|---|---|
+| `_Static_assert((1, 3), "x");` | accept | **reject** | accept |
+| `enum { A = (1, 3) };` | accept | **reject** | accept |
+| `case (1, 3):` | accept | **reject** | accept |
+| `struct s { int a : (1, 3); };` | accept | **reject** | accept |
+| `static int x = (1, 3);` | accept | **reject** | accept |
+| 文件作用域 `int a[(1, 3)];` | accept | **reject**（“variably modified at file scope”） | accept |
+| `__builtin_constant_p((1, 3))` | 1 | **0** | 1 |
+| 块作用域 `int a[(1, 3)];`（允许非常量长度） | accept | accept | accept |
+
+修法三处，都只针对**用户写出来的**逗号（解析器内部为原子内建/`sizeof` VLA 造的 `ND_COMMA` 不走这些路）：
+
+1. `eval2()` / `eval_int128()` / `eval_fp128()` 的 `ND_COMMA` 分支不再求值，直接报
+   `expression is not an integer constant expression`（三种求值器都要，因为常量表达式按类型走不同的求值器）。
+2. `is_const_expr()` 在 `fold_node()` **之前**先看根节点是不是 `ND_COMMA` —— 折叠正是抹掉它的那一步。
+   这样文件作用域的 `int a[(1, 3)]` 按“非常量长度 ⇒ 可变长类型”处理，随即撞上 6.7.7.3p2
+   （文件作用域不得有可变长类型）而报错；块作用域仍照常接受（VLA）。
+3. `opt_ast.c` 的 `ND_COMMA` 折叠在 `in_static_init` 时提前返回，不再折掉逗号：
+   静态初始化器要的是常量表达式（6.7.9p4），折掉了就查不出来。其它位置照旧折叠——
+   `((void)sizeof(int), 4)` 仍要折成常量 `4`（cpython 的 `Py_ARRAY_LENGTH` 形状，早前一轮的断言）。
+
+guarded 之后 `static int x = (1, 3);` 与 gcc 一致地拒绝，7 个逗号用例全部与 gcc 同侧。这是
+**gcc/clang 分歧**（clang 一律接受并折叠），按标准字面（6.6p3）站 gcc，已记入 `doc/fj-divergences.md`。
+
+#### 实测汇总
+
+| 项目 | 之前 | 现在 |
+|---|---|---|
+| `test/conformance.sh` | 285 / 0 gap | **301 / 0 gap**（+16 条断言：数组长度 9 条、逗号 7 条） |
+| `make test` | exit 0 | exit 0（c2y 101/0） |
+| c2ycov / 2 / 3 / 5 | 109 / 34 / 19 / 16 | 109 / 34 / 19 / 16 |
+| bootstrap | cxx2=cxx3=cxx4 | cxx2=cxx3=cxx4 **逐字节相同**，21 个目标文件亦相同 |
+| `doc/tcctests.sh` | 106 ok / 0 | 106 ok / 0 |
+| 全量复跑（37,190，`-j7`） | 17,638 / 189 | **17,638 / 189** —— 逐测试比对与上一轮**完全一致**（没有一个测试改类），即这两处收紧**没有**让任何原本能编的测试变得不能编 |
+
+#### 顺带修好一个“自己不生效”的工具
+
+`doc/crash-smoke.sh` 一直用 `-fsyntax-only` 编译每个样本，而 **cxx 没有这个选项**：它对每个文件都回
+`unknown argument` 并 exit 1，脚本把这当成“没崩溃”，于是此前几次“0 崩溃”的读数**什么都没测**。
+改用 `-S -o /dev/null`（同样走完整前端）后重测：**3,100 个样本，0 崩溃**。
+`-fsyntax-only` 本身是驱动接口上的一个缺口（gcc/clang 都有），按 §0 只记录、不顺手实现；
+需要时可以用 `-S -o /dev/null` 代替。
+
+#### 同一函数里另外两条约束（本轮只记录，未改）
+
+为了确认这条约束的边界，把 6.7.7.3p1 的其余约束也做成探针，又发现两条**同一函数**里缺的检查。
+这两条 **gcc 与 clang 都拒**（不是分歧），但影响面小（都只涉及不常见的声明形式，野生代码不用它们），
+按“最小可复核的改动”原则留作下一轮的清单：
+
+| 用例 | cxx | gcc | clang | 约束与缺在哪里 |
+|---|---|---|---|---|
+| `struct S; void f(struct S a[3]);`（形参的元素类型不完整） | **accept** ✗ | reject | reject | 6.7.7.3p1：“The element type shall not be an incomplete or function type.” cxx 只在**声明**层查（`parser.c` 两处报 `array has incomplete element type`），形参声明走 `func_param()`，把那两处绕过去了 |
+| `void f(int a[3][static 5]);` | **accept** ✗ | reject | reject | 同条：“The optional type qualifiers and the keyword `static` shall appear only in a declaration of a function parameter with an array type, and then only in the **outermost** array type derivation.” cxx 的检查只分 `is_param`，没有区分“最外层” |
+| `void f(int a[3][const 5]);` | **accept** ✗ | reject | reject | 同上，限定符那一半 |
+
+修法方向已经明确：前者把元素完整性检查放进 `array_dimensions()`（或 `func_param()` 的类型调整之前），
+后者给 `decl_suffix()` 增加“是否最外层”的实参传给 `array_dimensions()`。两个都是诊断补全，不动代码生成。
+
+另外确认**没有**问题的相邻形状（三家一致）：`void f(struct S *a)`、`extern` 声明的不完整类型、
+`int a[static 3][5]`、`int a[const 3]`、`int a[static 3]`（非形参）、`int a[*]`（原型外）、
+`sizeof(int[const 3])` —— 该拒的拒、该收的收。
+
+### R114 七个真缺陷（§1c 运行期 + §1b 编译期）—— ✅ `plain` 21 → 2（那 2 个是 clang 侧分歧）
+
+上一轮留下的“下一步”是 `__builtin_constant_p`；按它做下去时顺手把 `plain` 那 21 个逐个跑通了，
+一共修好 7 处**真缺陷**（6 处在预处理/常量求值，1 处是 SysV AMD64 的 `va_arg`）。全部先写出最小复现、
+与 `gcc`+`clang` 两家对齐后再动代码，并在 `test/conformance.sh` 里各留一条断言（278 → **285**）。
+
+#### 1）`__builtin_constant_p`：折叠后剩下的是“转换节点”（§R113 的待办）
+
+上一轮按“字符串字面量 / 空指针常量”补的两个判定没命中，原因查清了：**折叠后的形状是转换节点本身**。
+把 `NodeKind` 的枚举按序号算出来（`python3` 解析 `src/cxx.h`）之后对照运行时看到的数字：
+`""` → **43** = `ND_IMCAST`（数组到指针的隐式转换），`NULL` → **44** = `ND_EXCAST`（`(void *)0` 的显式转换），
+`sizeof(a)` → 78 = `ND_NUM`（本来就对）。修法是**先剥掉 `ND_IMCAST`/`ND_EXCAST`/`ND_LVTOR` 再判定**
+（“常量的转换还是常量”）。实测 23 项探针（`NULL`、`(void*)0`、`(int*)0`、`""`、`"abc"`、`(int)3.0`、
+`(long)a`、`(int)(a+1)`、`cp`、`&ci`、`ci`、`g`、`E`、`(int)E`、`sizeof(a)`、`(size_t)sizeof(a)`、`'x'`、
+`1?2:3`、`(int)(1?2:3)` …）中，cxx 与 **gcc 完全一致**；与 clang 只差 `ci` 一项（即已记录的第 13 例）。
+
+#### 2）宏重扫描：未被替换的名字要**永久**不可再展开（`C/0048/0048_0087.c`）
+
+`cxx-ng` 里最后一个。最小复现（`gcc` 与 `clang` 输出逐字相同）：
+
+```c
+#define f1(a) a*g1
+#define g1    f1
+#define f2(a) a*g2
+#define g2(a) f2(a)
+#define x(a) # a
+#define y(a) x(a)
+y(f1(2)(9))   /* 参考： "2*f1(9)"   cxx 原来： "2* 9*f1" */
+y(f2(2)(9))   /* 参考： "2*9*g2"    cxx 原来： "2* 9*g2" */
+```
+
+两处缺陷叠在一起：
+
+- **涂色要跨出窗口**。6.10.4.1p2：“These nonreplaced macro name preprocessing tokens are **no longer
+  available for further replacement** even if they are later (re)examined …”。cxx 原来只有一层全局
+  “正在替换”栈，出栈就忘了；`f1` 正是出栈后被 `rescan_call` 重新当作调用展开的。修法：`expand_macro`
+  里因 `is_disabled` 而**原样拷出**的名字，给副本打上 `noexpand`（永久）。
+- **展开的首 token 继承名字的空白**。`rescan_call` 里少了两处调用点都有的
+  `prev->next->is_leadingws = macro_name->is_leadingws;`：`f2` 的 `9` 因此带上了 f2 体内参数前的空格。
+  这是 `2*9*g2` 与 `2* 9*g2` 的差别，与涂色无关。
+
+`f1` 与 `f2` 的差别本身是标准里那条“嵌套替换”子句的边界：`g2(9)` 的实参表来自**文件**，
+没有被 f2 这次替换涂色（Prosser 算法里是与右括号的 hide set 取交），所以内层 `f2` **要**展开；
+而 `g1` 是对象宏，`f1` 直接来自被替换的替换表，**不**展开。
+
+#### 3）SysV AMD64 `va_arg`：两处 ABI 缺陷（`C/0080`、`C/0081` 共 6 个文件）
+
+| 缺陷 | 现象 | 原因 | 修法 |
+|---|---|---|---|
+| `va_arg_fp.mem_step` 写成 16 | 固定形参占满 8 个 SSE 寄存器后，第 2 个 variadic `double` 起全部错位（`C/0081/0081_0011.c` 的 `…,9,11,12,10`） | 16 是**寄存器保存区**里 XMM 槽的间距；**栈**上一个 double 只占 8 字节 | `mem_step = 8` |
+| `va_arg_mem16.offset_bound = 0` 想表达“永远在溢出区” | 函数**没有具名整型形参**时 `gp_offset == 0`，无符号的 `offset <= 0` 成立 → `long double` 从寄存器保存区读（`C/0080/0080_0013.c` 读出第 5 个具名实参、`C/0081/0081_0006.c` 读出 NaN） | 这个测试表达不了“永不”，注释里“gp_offset 至少是 8”也不成立 | 改成 `VA_MEM_OVERFLOW`（根本没有寄存器分支），并给这条路径补上 `mem_align` 的**向上**对齐（long double 是 16 字节对齐） |
+| `VA_MEM_OVERFLOW` 直接返回地址 | 改完上面一条，`long double` 读出来是 1e-4937 之类的垃圾 | 该分支原来只服务**空记录**（值即地址）；标量必须就地取载 | 记录仍返回地址，标量按 `min(align,8)` 取载，与 `VA_MEM_REGS` 的汇合点一致 |
+
+修完后 5 个自写探针（`double` 形参、`long double` 形参、`float` 形参、`int` 形参、混合 8 具名 + 5 变参）
+与 clang **逐字一致**；受影响的 8 个测试文件全部转为 SAME。
+
+#### 4）`#if` 要在 `intmax_t`/`uintmax_t` 里求值（`C/0125/0125_0026.c`、`0125_0028.c`）
+
+6.10.1p4：`#if` 里“all signed integer types and all unsigned integer types act as if they have the same
+representation as, respectively, `intmax_t` and `uintmax_t`”。cxx 把 `#if` 交给**普通常量表达式解析器**求值，
+于是按字面量**写出来的类型**做常规算术转换：`1l > -1u` 成了 `long` 对 `unsigned int`——而 `long` 能表示所有
+`unsigned int`，两边都变有符号 → 答 1，gcc/clang/标准都答 0。修法：`eval_const_tokens` 里把每个整型字面量
+**重新定型**为 64 位（各目标的 `intmax_t`/`uintmax_t` 都是 64 位）并按自身有无符号决定 signed/unsigned。
+8 项混合符号探针现在与 clang **全同**。
+
+#### 5）`(-1u)/2` 在 `#if` 里算出 `2^64-1`（同一个文件）
+
+第 4 条修好后仍有一处：`#if (-1u)/2 == 0x7FFFFFFFFFFFFFFF` 两边不一致。原因是 `eval_int128()` 的
+**中间值**没有按自己的类型收窄：`-1u` 是 128 位全 1，除以 2 得 128 位的 `2^127-1`，最后才截到 64 位 → `2^64-1`。
+修法：`eval_int128_wide()` 保留原实现，外面包一层 `eval_int128()`，按 `bitint_width()` 或 `size*8`
+把每个子表达式的值 `int128_normalize` 回它自己的宽度（`_BitInt` 与非 `_BitInt` 两种宽度来源都照顾到）。
+这同时修好了“`int` 溢出后再参与 64 位运算”的一类隐式错误。
+
+#### 6）字符串化：换行也算空白；杂散反斜杠不转义（`C/0125/0125_0020.c`、`0125_0008.c`）
+
+- 词法器把行首 token 记成 `is_sol`，**不设** `is_leadingws`，而 `join_tokens()` 只看后者，
+  于是 `x(f( 123\n456 ))` 字符化成 `"123456"`；参考是 `"123 456"`。改为两个标志都看。
+- 换行同时还要区分“实参自己的换行”与“形参在体内的位置”：替换进参数位置的**首** token 现在连同
+  `is_sol` 一起继承形参（`y(G(\n9))` 是 `"q 9"`，`y(F(\n9))` 配 `q*p` 是 `"q*9"`）。
+- `#define a(x) \n`（`\` 不是合法的预处理记号）参考实现在字符化时**不转义**这个反斜杠，
+  拼出来的字面量 `"\n"` 因此含一个**换行符**（长度 1）；cxx 原来把它转义成 `\\n`（长度 2）。
+  改为按 token 拼**拼写**（只对字符串/字符字面量内部的 `\` 与 `"` 转义），再交给第 6 阶段
+  （`convert_str_literal`）解码——`test/conformance.sh` 里 5 种字符串化场景现在与两家全同。
+
+#### 7）`__LINE__` 在对象宏里答的是定义行（`C/0054/0054_0102.c`）
+
+`__LINE__`/`__FILE__` 通过 token 的 `origin` 回溯到**最外层调用**。对象宏那条路把 `origin` 盖在
+**展开之后**，而 `__LINE__` 是在展开**进行中**读它的——于是答了 `#define` 所在的行（该测试因此 72 行全错）。
+修法：对象宏的体先 `copy_body()` 成带 `origin` 的副本再展开（顺带也不再往共享的宏体上写字）。实测
+`L=7 / M=8 / FL()=9`（`__LINE__` 直接、经一层对象宏、经函数宏）与 gcc/clang 全同。
+
+#### 实测汇总
+
+| 项目 | 之前 | 现在 |
+|---|---|---|
+| `plain`（两家都不打 OK/NG、逐个案看） | 21 | **2**（`0055_0670`/`0676`，见下） |
+| `test/conformance.sh` | 278 / 0 gap | **285 / 0 gap** |
+| `make test` | exit 0 | exit 0（c2y 101/0） |
+| c2ycov / 2 / 3 / 5 | 109 / 34 / 19 / 14 | 109 / 34 / 19 / **16** |
+| `-E` 往返（`C/0048`+`0125`+`0054`+`0081` 里能跑起来的 530 个） | — | **529/530**：预处理后再编译的输出与直接编译**逐字相同**（唯一差异是测试自己用 `%p` 打地址） |
+| `doc/tcctests.sh`（tinycc 自检程序） | 106 ok / 0 | 106 ok / 0 |
+| `doc/bootstrap.sh`（自举链） | cxx2=cxx3=cxx4 | cxx2=cxx3=cxx4 **逐字节相同**，21 个目标文件也逐字节相同 |
+| `doc/selfhost.sh` | 21 ok / 0 | 21 ok / 0 无效 IR / 0 崩溃 |
+
+`-E` 往返这一项是这轮新加的检查：`is_sol`/`origin` 的改动影响的是**打印器**（`print_tokens`、`needs_space`），
+普通编译看不见它；拿真实文件走“`-E` → 再编译 → 运行”与“直接编译 → 运行”对比，530 个里 529 个逐字相同。
+脚本落在 RT-DIFF 0048_0158 (rc 0 vs 0)
+        33c33
+        < ***-33**** N   G ****:9e1babf
+        ---
+        > ***-33**** N   G ****:d4486eaf（用法：RT-DIFF 0048_0158 (rc 0 vs 0)
+        33c33
+        < ***-33**** N   G ****:858902cf
+        ---
+        > ***-33**** N   G ****:adb3ca3f， 换语料），与 crash-smoke: 930 of the corpus's tests compiled with -fsyntax-only, 0 crashed 一样是新增工具。
+脚本落在 `doc/eround.sh`（用法：`bash doc/eround.sh`，`SRC=<目录>` 换语料），与 `doc/crash-smoke.sh` 一样是新增工具。
+
+#### 全量复跑（37,190 个测试，`-j7`；§R105 之后第一次）
+
+| | §R105（之前） | 本次（§R114） |
+|---|---|---|
+| 通过 | 17,612 / 17,833 | **17,638 / 17,833** |
+| 失败 | 215 | **189** |
+| `compile` | 176 | **171** |
+| `output` | 38 | **18** |
+| `exit` | 1 | **0** |
+| `timeout` | 0 | 0 |
+
+`doc/fj-worklist.md` 已用这次结果重新生成（`bash doc/fj-triage.sh`）：
+
+- **§1b 真缺陷：只剩 145 条政策类**（`implicit declaration of function`，§0/§R81 已记录的政策），
+  原来的 5 条“已修复（结果文件是旧的）”消失 —— 编译侧真缺陷 **0**。
+- **§2 真缺陷：`cxx-ng` 0、`plain` 0** —— 运行期真缺陷 **0**。剩下的 18 个 `output` = 6 个“参考自己报 NG”
+  （`C/0054` 那 6 个，cxx 全对）+ 3 个已记录分歧 + 9 个 §1c 缺口（属性/`HAS_SUBNORM`/`DECIMAL_STR`/目标宏）。
+- §1a 缺口 22 条、§1c 缺口 9 条、§3 缺口三类（274 个 `()`、73 个 `__sync_*`、51 个 SSE/MMX 内建），
+  按 §0 只记录。
+
+`doc/fj-triage.sh` 这轮补了两处，都是“分类本身出错”的修正：
+
+1. `output` 分类现在会查 `doc/fj-divergences.md`：已记录的测试归新的 `divergence` 类，不再计成 `cxx-ng`
+   （`C/0178/0178_0035.c` 因此从“真缺陷 1”变成“已记录分歧”）；同时把该文件里那一行的 `C/0178/0178_0035`
+   补上 `.c` —— 提取分歧清单的正则是 `C/<目录>/<文件>.c`，少了后缀就一直没被认出来。
+2. 计数列的 `grep -c … || echo 0` 在计数为 0 时会打印两行（`0` 与 `0`），改用 `awk` 计数；
+   这一轮 `plain` 归零，正好把它暴露出来。
+
+`doc/c2ycov5.sh` 里 `rej()` 从来没定义过（`bash: rej: command not found`），两条“应当报错”的探针
+**静默什么都没做**，汇总仍显示干净——已补上，两条都通过。这类“探针自己不生效”的坑记在这里备查。
+
+#### 剩下 2 个：clang 侧分歧，已记入 `doc/fj-divergences.md`
+
+`C/0055/0055_0670.c` / `0055_0676.c` 用非法内存序调 `__atomic_store`（7.17.7.1p2 约束，两家都只警告）。
+**clang 把整条语句丢掉**（`foo1` 编成空函数），gcc 照常存储；测试自带的非 GNU 分支期望输出是
+`C/0055/0055_0670.c` / `0055_0676.c` 用非法内存序调 `__atomic_store`（7.17.7.1p2 约束，两家都只警告）。
+**clang 把整条语句丢掉**（`foo1` 编成空函数），gcc 照常存储；测试自带的非 GNU 分支期望输出是
+`0x7f 0x7e 0x7e`（即**存储发生**）。cxx 与 gcc、与测试自身的期望一致 → 记为参考分歧，不改。
+
+#### 方法学备注（本轮踩到的一个测量陷阱）
+
+在 DSH 的 pwsh 命令行里，`$?`、`$x`、`$cc` 这类 `$` 变量会在 bash 看到之前就被展开掉
+（`/bin/false >/dev/null 2>&1; echo "rc=$?"` 打出来的却是 `rc=0`）。这一轮里有几次“退出码”读数因此是假的
+——一度以为“cxx 报了错却仍返回 0”，写成脚本文件重新测量后确认：**cxx 对所有错误路径都返回非零**
+（`--bogus-flag`、缺文件、`-c`/`-S`/`-fsyntax-only`/整链、`#error`、语法错误、直接跑 `-cc1` 全都非零，
+好文件返回 0）。结论：**退出码只能在脚本文件里测**（`if cmd; then … else … fi`），命令行上只采信输出对比。
+本轮所有实质结论都来自输出对比，未受影响。
+
+### R113 `__builtin_constant_p`：用户定性为真缺陷 —— ⚠️ 两处判定已补，尚未命中折叠后的形状
+
+用户指出：`__builtin_constant_p` **已实现**，所以 `C/0178/0178_0035` 是**真缺陷**（编译期常量判定），
+不是缺口；并且判定规则是**不能明确判断为常量就视为非常量**（例：未初始化的 `const int ci;`）。
+已把 `__builtin_constant_p` 从 triage 的缺口判定里移出。
+
+#### 13 个检查里的实测对照
+
+| # | 表达式 | gcc | clang | cxx（现在） | 判定 |
+|---|---|---|---|---|---|
+| 1–2 | 常量、常量除法 | 1 | 1 | 1 | ✓ |
+| **3** | `NULL` | 1 | 1 | **0** | **真缺陷**（待修） |
+| **4** | `""` | 1 | 1 | **0** | **真缺陷**（待修） |
+| 5–12 | `cp`、`&ci`、`cc`、`a=2`、`func()`、`func`、`&func`、`sizeof(a)` | 0…0…1 | 0…0…1 | 0…0…1 | ✓ |
+| 13 | `sizeof(a)==sizeof(cc) ? ci : 0` | **0** | 1 | 0 | **分歧，标准/规则在 cxx 这边**（已入 `doc/fj-divergences.md`） |
+
+#### 已补的两处（方向对，尚未命中）
+
+`is_const_expr()` 新增：字符串字面量（`ND_VAR` 且 `var->is_str`）与空指针常量（`ND_NULLPTR`
+或 `is_nullptr(ty)`）。**但实测未生效**：加临时 trace 看到，`fold_node()` 之后 `""` 是**节点种类 43**、
+`NULL` 是**44**（`sizeof(a)` 是 78 = `ND_NUM`，这一个本来就对）。下一步很具体：
+把 `ND_ADDR`/`ND_NULLPTR` 等候选的**数值在运行时打出来**（上一次尝试因脚本环境没打出来），
+再在 `is_const_expr()` 里接受对应形状（字符串字面量的地址、常量 0 转成指针）。
+
+（现状：零个回归。`test/conformance.sh` 278/0；c2ycov 109/0；c2y 101/0；`make test` exit 0；
+trace 已移除，`grep -c CXX_TRACE src/*.c` 全 0。）
+
+**已在 §R114 补完**：折叠后剩下的是**转换节点**（`""` → `ND_IMCAST`、`NULL` → `ND_EXCAST`），
+判定前先剥掉转换即可，第 3、4 两例现在与两家一致；第 13 例按用户规则维持 0 并记为分歧。
+
+### R112 用户定性：函数级属性与优化相关一律列为缺口 —— ✅ 并修好 `_Alignas` 的一个真缺陷
+
+#### 定性（按用户的口径）
+
+| 测试 | 用到的东西 | 类别 |
+|---|---|---|
+| `C/0077/0077_0031`、`0077_0034` | `__attribute__((always_inline))` + `__builtin_return_address` | **缺口（函数级属性 / 内联）** |
+| `C/0059/0059_0087` | `__attribute__((weakref("__target")))` | **缺口（属性）** |
+| `C/0178/0178_0035` | `__builtin_constant_p` | **缺口（编译期常量判定）** |
+| `C/0044/0044_0003` | `__SSE__` / `__SSE2__` / `__AVX__` 等目标特性宏 | **缺口（代码生成阶段）** |
+
+已写进 `doc/fj-triage.sh` 的 `feature_of()`，日后自动归入工作清单 §1a，类名里标明“优化阶段”。
+
+（背景：`__builtin_return_address(0)` 的实现本身是对的 —— cxx 发的就是 `llvm.returnaddress.p0`；
+差的是 `always_inline` 没有转发成 LLVM 的 `alwaysinline` 属性，于是 AlwaysInliner 不动手，
+内层函数取到的是它自己的调用点。按用户决定，这一块留给优化阶段。）
+
+#### 同期修好的真缺陷：`_Alignas(0)` 不应抹掉先前的对齐（`C/0057/0057_0005`，`exit` 判定）
+
+```c
+long _Alignas(16) _Alignas(0) g_b;      /* 原本只得到 align 8，应为 16 */
+assert((long)&l_b % 16 == 0);           /* 断言失败，程序 abort */
+```
+
+**6.7.5p5**：“An alignment specification of zero has no effect.”；**p6**：多个规定取**最严**。
+cxx 用的是**赋值**，后面的 0 把前面的 16 覆盖了。修法：取最大、0 不参与；
+非 2 的幂仍报错（与两家一致）。
+
+| 验收 | 结果 |
+|---|---|
+| 对齐形状（全局/局部、两种 `_Alignas` 顺序） | 三家逐值一致（均 16 对齐） |
+| `_Alignas(类型名)` 与非 2 的幂 | 前者接受；后者三家均报错 |
+| `C/0057/0057_0005.c` | 不再 abort，rc=0（与参考一致） |
+| `C/0057 + C/0013` | 750 of 755 passed |
+| `test/conformance.sh` | **278 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+### R110/R111 修好：两个真缺陷（位域镜像推进、赋值表达式的值）—— ✅ 编译侧真缺陷归零，`0095`/`0129` 整目录全通过
+
+#### R110：三处遍历的推进规则不一致（`C/0202/0202_0087`）
+
+`INT64T mem64:64; … INT64T mem53:53; …` 的结构体，每个位域的**访问单位是 8 字节**，但 53 位只占 7 字节。
+**值**的遍历按单位推进，而 R91 修过的两个**类型**遍历按“位所占字节”推进 —— 类型里因此多出一个 `[1 x i8]` 空隙，
+元素数与初始化器对不上，LLVM 报 `initializer with struct type has wrong # elements`。
+
+**修法**：统一到“**非跨元素按单位、跨元素按尾巴**”（与值的遍历一致）。
+
+#### R111：赋值表达式的值必须是“赋值后左操作数的值”（`C/0095/0095_0005`、`C/0129/0129_0160`）
+
+```c
+struct t { signed int b05:2; signed long long b00:8; … } x, *y = &x;
+y->b00 = y->b05 = … = 2;      /* b05 = 2 存进 2 位有符号位域后就是 -2 */
+if (y->b00 == -2) OK          /* 两家参考都是 OK */
+```
+
+**6.5.16p3**：“An assignment expression has the value of the left operand **after the assignment**.”
+对位域而言就是**存进去的那个值**（按位宽截断、按符号性扩展）。cxx 把右操作数原样返回，
+于是链式赋值一路传下去的是 2，而不是 -2。
+
+**修法**：`ND_AS` 在左操作数是位域时，用与 `load()` 相同的两次移位对**手中的值**截断/扩展
+（不额外读内存，避免给 volatile 位域多一次访问）。
+
+| 验收 | 结果 |
+|---|---|
+| `C/0202/0202_0087.c` | 编译并与参考输出一致 |
+| `C/0095/0095_0005.c`、`C/0129/0129_0160.c` | 均**与参考逐字一致** |
+| 链式赋值最小用例（含 `int v = (y->b05 = 3);`） | 三家逐值一致（`b00=-2 …`、`value of the assignment=-1`） |
+| 位域家族 R83–R91 与 `C/0013` | 全部保持正确 |
+| `C/0013 0095 0129` 目录 | **832 of 832 passed, 0 failed** |
+| `test/conformance.sh` | **278 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+#### 剩余运行期真缺陷（下一批）
+
+`cxx-ng` 原 8 个，本轮消掉 2 个（`0095_0005`、`0129_0160`），剩：
+`C/0044/0044_0003`、`C/0048/0048_0087`、`C/0077/0077_0031`、`C/0077/0077_0034`、`C/0059/0059_0087`、`C/0178/0178_0035`，
+以及 `exit` 的 `C/0057/0057_0005`。
+
+### R109 现存缺陷的逐类定性（跑测试 + 查标准）与一个真缺陷的修好 —— ✅ `##` placemarker
+
+用户要求：对现有缺陷跑测试、分类、遇到分歧记录，并给出**严格符合标准的做法**供参考。
+下表逐类列出：现象、标准依据、两家参考行为、判定与建议。
+
+| 类（数量） | 现象 / 最小复现 | 标准（N3685） | gcc / clang | 判定与严格做法 |
+|---|---|---|---|---|
+| `(cond ? a : b)` 作左值（1，`C/0044/0044_0007`） | `(a == 5 ? obj1 : obj2).array[3] = a;` | **6.5.16 脚注 111**：“A conditional expression does not yield an lvalue.”；**6.5.16p3**：“An assignment expression … is not an lvalue.” | 两家**接受**（含 `-pedantic-errors`） | **分歧，标准在 cxx 这边**：保持拒绝（已记入 `doc/fj-divergences.md`） |
+| 条件表达式的指针操作数嵌套限定符（4，`C/0202/0097/0100/0103/0106`） | `p = i ? pa : cia;`（`int **` 与 `const int **`） | **6.5.16p3 约束**：“both operands are pointers to qualified or unqualified versions of compatible types”；**6.2.7p11**：“Two qualified types are compatible if and only if they are identically qualified versions of compatible types” —— `int *` 与 `const int *` 不是同限定符的兼容类型，**约束不满足** | **gcc 报错**；clang 接受 + `warning: pointer type mismatch` | **分歧，标准在 cxx 这边**（与 gcc 同侧）：保持拒绝，已记入分歧表 |
+| `##` 与空实参（3，`C/0202/0202_0287`） | `#define t(x,y,z) x ## y ## z`；`t(,2,3)` 应为 `23`，`t(,,)` 应为空 | **6.10.5.4**：空实参“replaced by a **placemarker** preprocessing token”；**6.10.5.5**：“Placemarker preprocessing tokens are handled specially” | 两家均按 placemarker 处理 | **真缺陷，已修**：`subst()` 用列表头区分“真的以 `##` 开头”与“空实参造成的假象”；八种粘贴形态与两家逐值一致 |
+| 巨型位域的初始化器 IR（1，`C/0202/0202_0087`） | `INT64T mem64:64; …` 的结构体全局初始化 | 标准无争议（初始化器必须合法） | 两家正常 | **真缺陷**：LLVM 报 `initializer with struct type has wrong # elements`，属 cxx 的位域镜像拼写（待修） |
+| 146 个 `implicit declaration` | 调用未声明的函数 | C2y 不再容许旧形式（§0/§R81 已记录） | 探针参考（`clang -std=c17`）接受并警告 | **政策类**，只记录；已写进分歧表 |
+
+#### 已修的那一个（`##`）
+
+```c
+#define t(x,y,z) x ## y ## z
+t(,2,3)   /* 23 */      t(,,)   /* 空 */
+```
+
+cxx 没有 placemarker 概念，只要 `##` 前面的参数展开为空就报
+`'##' cannot appear at start of macro expansion`。修法：`subst()` 记下**替换列表的头**，
+只有列表真的以 `##` 开头时才报错；否则视为“左侧是 placemarker”——右侧自成一体，
+两个 placemarker 相粘则什么也不产生。
+
+| 验收 | 结果 |
+|---|---|
+| `t(1,2,3) t(,2,3) t(1,,3) t(1,2,) t(,,3) t(,2,) t(1,,) t(,,)0` | 三家逐值一致（`123 23 13 12 3 2 1 0`） |
+| 真正以 `##` 开头的替换列表 | cxx 仍拒绝（与两家同侧） |
+| `C/0202/0202_0287.c` | **编译并运行** |
+| `test/conformance.sh` | **278 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+### R108 按标准判定：`(a == 5 ? obj1 : obj2).array[3] = a;` 的左值性 —— ✅ **cxx 正确**，记为分歧
+
+用户要求“根据标准本身判断”。cxx 的目标草案（`doc/n3685.txt`）写得很明确：
+
+| 依据 | 原文 |
+|---|---|
+| **6.5.16 脚注 111** | “A conditional expression does not yield an lvalue.” |
+| **6.5.16p3** | “An assignment expression has the value of the left operand after the assignment, but is **not an lvalue**.” |
+| 6.5.2.3p7 例 1 | “`f().x` is a valid postfix expression but is **not an lvalue**.” |
+
+因此 `(a == 5 ? obj1 : obj2)` **不是左值**，`.array[3]` 也就不是可修改左值，`= a` 属**约束违反**：
+cxx 报 `lvalue required as ‘=’ operand` 是对的。同一条规则也判第 95 行 `(obj1 = obj2).array[3] = a;` 无效。
+
+实测到的参考行为（这是它们宽容，不是 cxx 错）：
+
+| | `-std=c11` / `c17` / `c23` / `c2y` | 加 `-pedantic-errors` |
+|---|---|---|
+| gcc | 接受 | **接受** |
+| clang | 接受 | **接受** |
+| cxx | 拒绝 | — |
+
+两家在**所有标准模式、连 `-pedantic-errors` 都不报**地接受它（实现的是 C++ 的“两个同类型左值 → 结果为左值”）；
+这个测试靠的就是这份宽容。
+
+#### 机制：分歧列表
+
+新增 `doc/fj-divergences.md`：每条写明**标准依据**与**实测到的参考行为**。
+`doc/fj-triage.sh` 读它，把列入的测试从“真缺陷”移到新的 **§1a2 记录的分歧**一节。
+`C/0044/0044_0007.c` 已归入该节，工作清单里真缺陷的编译拒绝从 6 类降到 5 类。
+
+（若以后决定跟随参考实现支持这个扩展，改动在 `modifiable_lvalue()`：当条件表达式的两个分支都是同类型左值时将其视为左值（并在内部用条件选择实现存储）；
+目前保持严格按标准。）
+
+### R107 修好：三个崩溃（空联合体、符号地址求值）—— ✅ 全量里已无 SIGSEGV
+
+用户给出的原则：**无论输入如何，编译器本身不应该崩溃；最少要报告错误之后退出**。
+已写进 §0，与“缺口只记录”并列。
+
+#### 崩溃一：空联合体（`C/0186/0186_0076`、`0077`）
+
+```c
+union blank_uni1 {
+};
+```
+
+`dump_type()` 的联合体分支取“对齐最大的成员”作为镜像，而空联合体没有成员 —— `union_canon_member()`
+返回 NULL，随后 `print_type(mem->ty)` 解引用空指针（空**结构体**走另一条路，不会崩）。
+
+修法：类型打印器与初始化器路径共 **7 处**加守卫（`init_is_punned`、`init_needs_inline`、`print_init_ty`、
+`dump_init`、`create_lvar_init`、`is_fully_initialized`、`eval_gvar_data`），对“没有成员”给出“无需写入”的答案；
+类型仍打成 `{ }`（与空结构体一致）。我自己的对照用例（嵌套、数组、局部、包在结构体里并带初始化器）
+在第一版修法后仍崩，才把剩下的点找齐。
+
+#### 崩溃二：符号地址求值时写空指针（`C/0202/0202_0140`）
+
+```c
+static test_t msg;
+static int len = ((char *) &(msg.end)) - ((char *) &msg);
+```
+
+`eval()` 的契约是 `eval2(node, NULL)`——“只要数值，不关心哪个对象”——而 `eval_rval()` 在 ND_VAR
+分支写 `*sym`：遇到 `&msg.end` 就向空指针写入。修法：`sym` 为空时用一个局部哑元。
+偏移量正是这个差值所需（`msg.end` 在 `msg` 之后 4 字节），所以这个守卫不仅安全，结果也对。
+
+| 验收 | 结果 |
+|---|---|
+| `C/0186/0186_0076`、`0077`、`C/0202/0202_0140` | 均**编译通过**，且输出与参考**逐字一致** |
+| 空联合体在各种位置（嵌套、数组、局部、文件作用域、带初始化器） | 三家逐值一致（`1 0 4 2 5 0`） |
+| `C/0186`、`C/0202` 目录重跑 | 见下方输出 |
+| `test/conformance.sh` | **278 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+#### 不崩溃这件事，现在有了常驻检查
+
+用户的要求是绝对的（“无论输入如何”），而探针只能告诉我们它正在数的那些文件。新增
+`doc/crash-smoke.sh`：按步长抽取结果文件里的测试（**不分判定类别**），逐个用
+`-fsyntax-only` 跑一遍，把信号退出（≥ 128）或输出里的 `internal compiler error` 计为崩溃，
+**并以崩溃数作为自己的退出码**，可以直接当门禁。
+
+| 范围 | 结果 |
+|---|---|
+| 176 个 `compile` 失败（triage 逐个重跑） | **0 崩溃** |
+| 全语料抽样（步长 25，1,488 个文件，含 `reffail`/`skip`/`noproto` 各类） | **0 崩溃** |
+| 全语料抽样（步长 40，930 个文件） | **0 崩溃** |
+
+抽样不是全量：若要彻底，可以用 `bash doc/crash-smoke.sh <results> 1`（全部 37,190 个，`-fsyntax-only`
+下约 30–40 分钟）。
+
+### R106 缺口与真缺陷的更细分类（用户指出的三处）—— ✅ 已自动化进 `doc/fj-triage.sh`
+
+用户指出：`C/0059/0059_0052.c` 与 `C/0125/0125_0014.c` 用的是**尚未支持的预处理特性**（归缺口）；
+`C/0057/0057_0025.c` 涉及**未实现的 `atomic_signal_fence`**（归缺口）；`C/0057/0057_0075.c`
+的 `FLT_HAS_SUBNORM` 在标准里**明确标为过时**。逐个核对后确认，并把判定写进了 triage。
+
+#### 现在的分类（自动生成在 `doc/fj-worklist.md` §1a/§1b）
+
+**§1a 缺口（只记录）—— 9 类 20 个文件**
+
+| 数量 | 特性 | 代表文件 | 依据 |
+|---|---|---|---|
+| 5 | `#pragma redefine_extname` | `C/0059/0059_0054.c` | 指令未实现（编译过但链接时符号名未重命名） |
+| 4 | 参考实现（`clang -std=c23`）同样拒绝 | `C/0048/0048_0049.c` | 三家都拒绝，无需修 |
+| 3 | `#ident` | `C/0125/0125_0014.c` | 遗留指令，clang 接受并忽略 |
+| 2 | 字符串里反斜杠接空白再接换行（GNU 扩展） | `C/0059/0059_0081.c` | 标准下不是接续，clang 作扩展接受 |
+| 2 | `atomic_thread_fence` / `atomic_signal_fence` | `C/0057/0057_0024.c` | 内置未实现 |
+| 1 | `*_HAS_SUBNORM`（**标准已标为过时**） | `C/0057/0057_0075.c` | C23 将这组宏列为 obsolescent |
+| 1 | `float.h` 的 `*_DECIMAL_DIG` | `C/0057/0057_0076.c` | 宏未提供 |
+| 1 | `_Complex` | `C/0057/0057_0079.c` | 未支持（§0 已声明） |
+| 1 | `__attribute__((weak))` | `C/0181/0181_0235/0181_0235_0000.c` | 属性未生效 |
+
+**§1b 真缺陷 —— 156 个**
+
+| 数量 | 诊断 | 性质 |
+|---|---|---|
+| 146 | `implicit declaration of function ‘X’` | 政策类（C23 已删除的旧形式，§0/§R81） |
+| 4 | `incompatible types when assigning` | 真缺陷（C/0202） |
+| 3 | **SIGSEGV** | 真缺陷（C/0186×2、C/0202×1） |
+| 1 | `lvalue required as ‘=’ operand` | 真缺陷 |
+| 1 | `initializer with struct type has wrong # elements` | 真缺陷（位域初始化的 IR 拼写） |
+| 1 | `'##' cannot appear at start of macro expansion` | 真缵陷（宏展开） |
+
+#### 实现方式
+
+`doc/fj-triage.sh` 新增 `feature_of()`：**读源文件**看它需要什么特性（`redefine_extname`、`#ident`、
+`atomic_*_fence`、`*_HAS_SUBNORM`、`*_DECIMAL_DIG`、`_Complex`、`__attribute__((weak))`、反斜杠接空白的行接续），
+都不命中时再用 `clang -w -std=c23 -c` 试一次：它也拒绝则归入“参考实现同样拒绝”，否则才算真缺陷。
+分类结果写进工作清单的 §1a/§1b，下一次全量后自动更新。
+
+### R105 第三次全量 + 工作清单分类升级 —— ✅ **17,612 通过，真失败 330 → 215**
+
+#### 三次全量对比
+
+| 判定 | R82 | R95 | **R105** |
+|---|---|---|---|
+| `ok` | 17,127 | 17,498 | **17,612** |
+| `compile` | 347 | 285 | **176** |
+| `output` | 350 | 43 | **38** |
+| `exit` | 1 | 1 | 1 |
+| `timeout` | 0 | 1 | **0** |
+| 真失败合计 | **698** | **330** | **215** |
+
+其中 `compile` 176 个里 **146 个是政策类**（`implicit declaration`，C23 已删除的旧形式，只记录）
+—— **真正需要修的编译缺陷只剩 30 个**。日志 `~/cxxwork/logs/fj-full.log`，逐例结果 `fj-full3.results`。
+
+#### 工作清单现在自带分类
+
+`doc/fj-triage.sh` 新增一步：对每个 `output` 差异**用两家各编译运行一遍**，数它们自己打的 `OK`/`NG`，
+然后写进工作清单：
+
+| 类别 | 数量 | 读法 |
+|---|---|---|
+| `ref-ng` | 6 | 参考实现自己报 NG、cxx 全 OK —— **cxx 正确，只记录** |
+| `cxx-ng` | **8** | cxx 报 NG、参考全 OK —— **真缺陷** |
+| `plain` | 24 | 两家都不打 OK/NG，打印普通数值 |
+
+（这一步在小集合上先验证过，结果与手工分析逐个对得上；期间踩了两个坑：`xargs -I{}` 的参数位置、
+以及反引号在**双引号内需转、单引号内不需**——后者一度把报告打成 2 行，已修复并复测。）
+
+#### 这一阶段累计修好的真缺陷（R83–R105）
+
+| 缺陷 | 规模 |
+|---|---|
+| 位域/联合体初始化与布局（含未命名成员、跨元素单位、类型双关内联形式） | C/0013 **341 → 676/676** |
+| `x86_fp80` 常量拼写 | 61 |
+| 块作用域 `extern` 声明顶掉同名定义 | 32+ |
+| 指针下层限定符（clang 口径：警告并接受） | 5 |
+| 类型之后的存储类 + 块内 typedef 多声明符 | 4 |
+| `#line` 参数先宏展开 | 4 |
+| 纯标签声明在块内新建标签（6.7.2.3p7） | 5 |
+| 指针数组被当成字符数组 | 3 |
+| 省略花括号穿过“数组的数组” | （自查发现） |
+| `is_compatible` 对未命名成员的空指针解引用（崩溃） | 8 |
+
+断言数：`test/conformance.sh` 267 → **278**，全部通过；c2ycov 109/0；c2y 101/0；`make test` exit 0。
+
+#### 下一阶段的工作清单（`doc/fj-worklist.md`，自动生成）
+
+- **真缺陷**：30 个编译拒绝（已按诊断聚类：3 个崩溃、3 个 `#ident`、3 个链接、4 个 `incompatible types when assigning`、…），
+  8 个 `cxx-ng` 运行期缺陷，24 个 `plain` 值差异，1 个 `exit`；
+- **只记录**：146 个 `implicit declaration`（政策类，§R81）、6 个 `ref-ng`（参考实现自己不符合测试预期）、
+  398 个已声明缺口、7,459 个 no-prototype/K&R、2,717 个 OpenMP、8,783 个参考实现也编不过。
+
 ### R104 修好：省略花括号穿过“数组的数组” —— ✅ 回应 §R103 末尾发现的旧缺陷
 
 ```c

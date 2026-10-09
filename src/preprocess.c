@@ -562,11 +562,24 @@ static int64_t eval_const_tokens(Token *expr) {
     expr = dummy2.next;
 
     convert_ppnumber(expr);
-    // 6.10.1: in #if, all integer types act as intmax_t/uintmax_t
-    // (64 bits here); truncate _BitInt values as-if converted to
-    // uintmax_t before the parser's checked const_expr sees them.
-    for (Token *t = expr; t->kind != TK_EOF; t = t->next)
-        if (t->kind == TK_NUM && (t->lit_suffix & SUF_BITINT)) t->ival = int128_normalize(t->ival, 64, UNSIGNED);
+    // 6.10.1p4: for the purposes of #if, every signed integer type acts as
+    // intmax_t and every unsigned one as uintmax_t, so the *rank* of a
+    // literal's written type never reaches the arithmetic. The arithmetic
+    // itself is the ordinary constant expression parser, which types a
+    // literal from its suffix, so each one is re-typed here: intmax_t and
+    // uintmax_t are 64 bits on every target cxx has, so a long long with the
+    // literal's own signedness is the same type. Without this, `1l > -1u`
+    // was long against unsigned int - and long represents every unsigned
+    // int, so the comparison went signed and cxx answered 1 where the draft,
+    // gcc and clang all answer 0 (C/0125/0125_0028.c test 03-04 and
+    // C/0125/0125_0026.c test 01-11, both `#if` on a mixed-signedness pair).
+    for (Token *t = expr; t->kind != TK_EOF; t = t->next) {
+        if (t->kind != TK_NUM) continue;
+        bool uns = (t->lit_suffix & SUF_BITINT) ? (t->lit_suffix & SUF_UNSIGNED) != 0 : infer_numtype(t)->is_unsigned;
+        // A _BitInt value is truncated as if converted to (u)intmax_t.
+        if (t->lit_suffix & SUF_BITINT) t->ival = int128_normalize(t->ival, 64, uns ? UNSIGNED : SIGNED);
+        t->lit_suffix = SUF_LLONG | (uns ? SUF_UNSIGNED : 0) | (t->lit_suffix & SUF_NONDEC);
+    }
     // No floating constant of any kind is allowed in #if (gcc/clang
     // reject them all: float/double/long double and the interchange
     // _Float16/32/64/128).
@@ -862,12 +875,31 @@ static MacroArg *find_arg(MacroArg *args, Token *tok) {
     return NULL;
 }
 
+// A copy of a macro body, every token pointing back at the invocation that
+// produced it. `__LINE__` and `__FILE__` are answered from that pointer, and
+// so is the line -E prints a token on, so the copy has to be made before the
+// expansion rather than after it.
+static Token *copy_body(Token *body, Token *invocation) {
+    Token dummy = {}, *cur = &dummy;
+    for (Token *t = body; t && t->kind != TK_EOF; t = t->next) {
+        cur = cur->next = copy_token(t);
+        cur->origin = invocation;
+    }
+    cur->next = NULL;
+    return dummy.next;
+}
+
 // Concatenates all tokens in `tok` and returns a new string.
 static char *join_tokens(Token *tok) {
-    // Compute the length of the resulting token.
+    // Compute the length of the resulting token. White space between the
+    // argument's tokens is a single space in the result (6.10.3.2p2), and a
+    // newline is white space as much as a blank is: the lexer marks the
+    // first token of a line is_sol instead of is_leadingws, which is why
+    // both flags are read here. `x(f( 123\n456 ))` stringizes as "123 456"
+    // in gcc, clang and the Fujitsu suite (C/0125/0125_0020.c test 45-03).
     int len = 1;
     for (Token *t = tok; t && t->kind != TK_EOF; t = t->next) {
-        if (t != tok && t->is_leadingws) len++;
+        if (t != tok && (t->is_leadingws || t->is_sol)) len++;
         len += t->len;
     }
 
@@ -876,12 +908,63 @@ static char *join_tokens(Token *tok) {
     // Copy token texts.
     int pos = 0;
     for (Token *t = tok; t && t->kind != TK_EOF; t = t->next) {
-        if (t != tok && t->is_leadingws) buf[pos++] = ' ';
+        if (t != tok && (t->is_leadingws || t->is_sol)) buf[pos++] = ' ';
         strncpy(buf + pos, tok_text(t), t->len);
         pos += t->len;
     }
     buf[pos] = '\0';
     return buf;
+}
+
+// Concatenates all tokens in `tok` into the spelling of the string literal
+// that # produces -- the text between its quotes. Two characters cannot be
+// copied as they stand when they occur *inside* a string or character
+// literal token: the backslash, which would start an escape in the outer
+// literal, and the double quote, which would end it. Everything else is
+// copied as written, a stray backslash included: it is not a preprocessing
+// token at all, and gcc and clang leave it in place, so the literal ends up
+// holding whatever escape it begins -- `#define a(x) \n` stringizes to a
+// newline, not to a backslash and an `n` (C/0125/0125_0008.c test 27-07).
+static char *join_spelling(Token *tok) {
+    int len = 1;
+    for (Token *t = tok; t && t->kind != TK_EOF; t = t->next) {
+        if (t != tok && (t->is_leadingws || t->is_sol)) len++;
+        len += t->len;
+        if (t->kind == TK_STRLIT || t->kind == TK_CHARLIT) {
+            char *text = tok_text(t);
+            for (uint32_t i = 0; i < t->len; i++)
+                if (text[i] == '\\' || text[i] == '"') len++;
+        }
+    }
+
+    char *buf = emalloc(len);
+    int pos = 0;
+    for (Token *t = tok; t && t->kind != TK_EOF; t = t->next) {
+        if (t != tok && (t->is_leadingws || t->is_sol)) buf[pos++] = ' ';
+        char *text = tok_text(t);
+        for (uint32_t i = 0; i < t->len; i++) {
+            if ((t->kind == TK_STRLIT || t->kind == TK_CHARLIT) && (text[i] == '\\' || text[i] == '"'))
+                buf[pos++] = '\\';
+            buf[pos++] = text[i];
+        }
+    }
+    buf[pos] = '\0';
+    return buf;
+}
+
+// A string literal token made from its own spelling, quotes included.
+// new_str_token() escapes the string it is handed, which is what the
+// predefined macros want; # cannot have that, because the escapes it leaves
+// in place are the escapes the literal has to be read with. Nothing is lost
+// by trusting the caller here: phase 6 decodes every string literal from its
+// spelling, this one included.
+static Token *new_str_token_spelled(char *spelling, Token *tmpl) {
+    Token *new = emalloc(sizeof(Token));
+    new->kind = TK_STRLIT;
+    new->id = intern(spelling, strlen(spelling));
+    write_scratch_space(new, spelling);
+    new->origin = tmpl;
+    return new;
 }
 
 // Concatenates all tokens in `arg` and returns a new string token.
@@ -890,8 +973,8 @@ static Token *stringize(Token *arg) {
     // Create a new string token. We need to set some value to its
     // source location for error reporting function, so we use a macro
     // name token as a template.
-    char *s = join_tokens(arg);
-    return new_str_token(s, arg);
+    char *s = join_spelling(arg);
+    return new_str_token_spelled(format("\"%s\"", s), arg);
 }
 
 // Concatenate two tokens to create a new token.
@@ -920,6 +1003,11 @@ static bool has_varargs(MacroArg *args) {
 static Token *subst(Token *tok, MacroArg *args) {
     Token dummy = {};
     Token *cur = &dummy;
+    // The list's first token. A `##` that only looks like it begins the
+    // expansion -- because the parameter before it was an empty argument, and
+    // an empty argument is a placemarker (6.10.5.4) -- is a paste with nothing
+    // on the left, not the constraint violation 6.10.3.3 describes.
+    Token *head = tok;
 
     while (tok->kind != TK_EOF) {
         // "#" followed by a parameter is replaced with stringized actuals.
@@ -948,7 +1036,14 @@ static Token *subst(Token *tok, MacroArg *args) {
         }
 
         if (tok->kind == TK_HASHHASH) {
-            if (cur == &dummy) error(tok, "'##' cannot appear at start of macro expansion");
+            if (cur == &dummy) {
+                // A placemarker on the left: the right side stands alone, and
+                // two placemarkers together contribute nothing. Only a list
+                // that really begins with `##` is the constraint violation.
+                if (tok == head) error(tok, "'##' cannot appear at start of macro expansion");
+                tok = tok->next;
+                continue;
+            }
 
             if (tok->next->kind == TK_EOF) error(tok, "'##' cannot appear at end of macro expansion");
 
@@ -1020,7 +1115,14 @@ static Token *subst(Token *tok, MacroArg *args) {
                 cur = cur->next = copy_token(t);
                 if (t->kind == TK_IDENT && is_painted(snap, t->id)) cur->noexpand = true;
                 if (first) {
+                    // The token stands where the parameter stood, both for
+                    // the blank before it and for the line it starts: an
+                    // argument written on the line after the call is still
+                    // preceded by the body's own white space and not by a
+                    // newline of its own (`y(G(\n9))` is "q 9", while
+                    // `y(F(\n9))` with a body of `q*p` is "q*9").
                     cur->is_leadingws = tok->is_leadingws;
+                    cur->is_sol = tok->is_sol;
                     first = false;
                 }
             }
@@ -1088,6 +1190,14 @@ static Token *rescan_call(Token *dst, Token *prev, Token **input) {
         push_disabled(m->id);
         dst = expand_macro(before, sub);
         pop_disabled();
+        // The expansion stands where the name token was, so its first token
+        // carries the name's leading white space -- the rule the two callers
+        // apply to their own expansions. It matters one level down: in
+        // `#define f2(a) a*g2` / `#define g2(a) f2(a)`, the `9` of `f2(2)(9)`
+        // is placed in f2's body (after a blank, so it would take a space)
+        // but the call it comes from is g2's, and g2's name is written
+        // against the `*`: gcc and clang both stringize `2*9*g2`.
+        if (before->next) before->next->is_leadingws = name->is_leadingws;
     }
 }
 
@@ -1104,6 +1214,15 @@ static Token *expand_macro(Token *dst, Token *list) {
         }
         if (is_disabled(cur->id) || cur->noexpand) {
             dst = dst->next = copy_token(cur);
+            // 6.10.4.1p2: a name that is not replaced because it is the name
+            // of a macro whose replacement list is being scanned is "no
+            // longer available for further replacement", and that lasts
+            // beyond the scan. Without this, `rescan_call` picks the name up
+            // again as soon as the window closes and calls it with the
+            // parenthesis that follows the invocation: `#define f1(a) a*g1`
+            // / `#define g1 f1` / `f1(2)(9)` would expand the inner `f1`
+            // instead of leaving `2*f1(9)` (C/0048/0048_0087.c test 01).
+            if (is_disabled(cur->id)) dst->noexpand = true;
             cur = cur->next;
             continue;
         }
@@ -1166,15 +1285,22 @@ static Token *expand_macro(Token *dst, Token *list) {
             }
             while (aliases-- > 0) pop_disabled();
 
+            // The body is expanded as a copy carrying the invocation, and
+            // carrying it *before* the expansion runs: `__LINE__` inside an
+            // object-like macro reads the line through origin while that
+            // expansion is still going on, so stamping the origins
+            // afterwards answered with the line of the definition
+            // (C/0054/0054_0102.c). The copy also keeps the expansion from
+            // writing on the body, which every later use of the macro shares.
+            Token *body = copy_body(m->body, macro_name);
             Token *prev = dst;
             push_disabled(cur->id);
-            dst = expand_macro(dst, m->body);
+            dst = expand_macro(dst, body);
             pop_disabled();
             if (prev->next) {
                 prev->next->is_leadingws = macro_name->is_leadingws;
                 prev->next->is_sol = macro_name->is_sol;
             }
-            for (Token *t = prev->next; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
             dst = rescan_call(dst, prev, &cur->next);
             cur = cur->next;
             continue;
