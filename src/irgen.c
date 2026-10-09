@@ -6,9 +6,7 @@ static Blk *curb;
 static Blk dummy;
 static Blk *tail;
 static Blk *unreach = &(Blk){};
-static bool abi_lowering(void);
 static Type *abi_ret_scalar(Type *ty);
-static bool abi_lowered(Type *ty);
 static bool abi_sret_result(Type *ty);
 static int tmp_id;
 // Block labels live in their own numbering space: the output prefixes them
@@ -298,7 +296,9 @@ static Ref gen_addr(Node *node) {
         default:
             break;
     }
-    error(node->tok, "not a lvalue");
+    // Unreachable: every construct that needs an address is checked where it
+    // is parsed, so a node arriving here is this compiler's own bug.
+    fatal("gen_addr: no address for node kind %d", node->kind);
     return R;
 }
 
@@ -306,10 +306,11 @@ static Ref gen_addr(Node *node) {
 // size: LLVM has no atomic instruction for a record, and its cmpxchg takes
 // integer or pointer operands only. clang's IR type-puns the same way, so the
 // bytes move unchanged (the object is not read as an integer by the program).
-static Type *atomic_agg_bits(Node *node, Type *ty) {
+static Type *atomic_agg_bits(Type *ty) {
     int sz = ty->size;
-    if (sz != 1 && sz != 2 && sz != 4 && sz != 8)
-        error(node->tok, "atomic aggregate larger than 8 bytes or of non-power-of-two size is not supported");
+    // The front end refuses a wider whole access where it is written
+    // (check_atomic_aggregate): this is a compiler bug, not a program's.
+    if (sz != 1 && sz != 2 && sz != 4 && sz != 8) fatal("an unsupported atomic aggregate reached irgen");
     return bitint[sz * 8][1];
 }
 
@@ -1612,7 +1613,7 @@ static Ref gen_expr(Node *node) {
                 // Whole access to an _Atomic aggregate reads the bit
                 // pattern through an integer of the same size (clang
                 // does the same; consumers store it type-punned).
-                return load(addr, atomic_agg_bits(node, node->ty), align, NULL);
+                return load(addr, atomic_agg_bits(node->ty), align, NULL);
             }
             // A record has no rvalue of its own here: the rest of the
             // compiler represents a record value by its address, so the
@@ -1676,7 +1677,7 @@ static Ref gen_expr(Node *node) {
                     // Whole access to an _Atomic aggregate: move the bit
                     // pattern through a same-size integer. The load/store
                     // are atomic iff their respective object is atomic.
-                    Type *bits = atomic_agg_bits(node, node->ty);
+                    Type *bits = atomic_agg_bits(node->ty);
                     atomic_order = node_mem_order(node);
                     Ref src = load(src_addr, bits, align, NULL);
                     atomic_order = node_mem_order(node);
@@ -2078,7 +2079,7 @@ static Ref gen_expr(Node *node) {
             Type *cmp_ty = t;
             Ref old_val, new_val;
             if (is_record(t)) {
-                cmp_ty = atomic_agg_bits(node, t);
+                cmp_ty = atomic_agg_bits(t);
                 old_val = load(addr2, cmp_ty, t->align, NULL);
                 new_val = load(gen_expr(node->desired), cmp_ty, t->align, NULL);
             } else {
@@ -2135,7 +2136,7 @@ static Ref gen_expr(Node *node) {
             // exchange the POINTER's value, which is why atomic_exchange()
             // on a struct answered with the wrong bytes and then faulted.
             if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) {
-                Type *ity = atomic_agg_bits(node, node->ty);
+                Type *ity = atomic_agg_bits(node->ty);
                 Ref src = gen_expr(node->desired);
                 Ref old = load(src, ity, node->ty->align, NULL);
                 Ref res = TMP(tmp_id++, ity);
@@ -2777,18 +2778,6 @@ static void gen_continue(Node *n) {
     curb = unreach;
 }
 
-// Whether `ty` is returned through a hidden pointer (the ABI memory class).
-static bool abi_lowering(void) { return T.classify_aggregate != NULL; }
-
-// Whether the ABI lowering applies to this type at all: a record, whose
-// classifier decides between registers and memory, or a scalar the target
-// passes by reference, which the same classifier answers memory for.
-static bool abi_lowered(Type *ty) {
-    if (!abi_lowering()) return false;
-    if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) return true;
-    return T.scalar_by_ref && T.scalar_by_ref(ty);
-}
-
 // The single value an aggregate comes back as, or NULL when the classifier's
 // answer already says how it is returned.
 static Type *abi_ret_scalar(Type *ty) {
@@ -2954,24 +2943,6 @@ static void gen_ret(Node *n) {
     ret_jump(n);
 }
 
-// The IR type an asm operand travels as.
-//
-// A record has no first-class value here, so a register constraint on one
-// means whatever the ABI makes of it: a single piece is one value, and several
-// would need the constraint string to grow an operand per piece, which GCC's
-// numbering has no room for. A record the ABI would pass in memory has no
-// register to name at all. Both are refused rather than silently miscompiled;
-// neither reference refuses them, which is a divergence this compiler lives
-// with until the piece-wise form is implemented.
-static Type *asm_ir_ty(Type *ty, bool is_indirect) {
-    if (is_indirect) return ty;
-    if (ty->kind != TY_STRUCT && ty->kind != TY_UNION) return ty;
-    if (!abi_lowered(ty)) return NULL;
-    AggClass c;
-    T.classify_aggregate(ty, &c);
-    return c.npiece == 1 ? c.piece[0].ty : NULL;
-}
-
 // The address an operand travels as, for a constraint that names memory. An
 // lvalue is its own address; anything else is given a home of its own for the
 // length of the statement, which is what gcc does with a memory operand that
@@ -3069,8 +3040,10 @@ static Ref gen_asm(Node *node) {
     int reti = 0;
 
     for (AsmOperand *op = node->asm_ops; op; op = op->next) {
-        Type *ir_ty = asm_ir_ty(op->expr->ty, op->is_indirect);
-        if (!ir_ty) error(op->expr->tok, "‘asm’ operand of aggregate type is not supported");
+        // The front end refused a register operand the ABI cannot put in one
+        // (asm_operand_ir_type, called where the operand is written).
+        Type *ir_ty = asm_operand_ir_type(op->expr->ty, op->is_indirect);
+        if (!ir_ty) fatal("asm operand of an unsupported aggregate type reached irgen");
         if (op->is_indirect) {
             Ref addr = asm_addr(op->expr);
             args[op->arg_pos] = addr;

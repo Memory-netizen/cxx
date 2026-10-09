@@ -1468,6 +1468,10 @@ void complete_copies(Type *ty);
 // Give a type its IR name and add it to the module's type list.
 void insert_ty(Type *ty, char *kind);
 Type *type_qual(Type *ty, uint32_t qual);
+bool abi_lowering(void);
+bool abi_lowered(Type *ty);
+Type *asm_operand_ir_type(Type *ty, bool is_indirect);
+void check_atomic_aggregate(Type *ty, Token *tok);
 // Qualify an array's element type instead of the array (rebuilding the chain).
 Type *array_elem_qual(Type *ty, uint32_t qual);
 Type *type_unqual(Type *ty);

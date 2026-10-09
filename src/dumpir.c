@@ -214,11 +214,6 @@ static bool is_agg(Type *ty);
 static int abi_param_count(Type *ty);
 static void print_param_type(Type *ty, int i, bool bare);
 
-// The ABI lowering is per target: it is enabled only where the target
-// supplies a classifier, so a target that has none keeps the plain
-// signature it had.
-static bool abi_lowering(void) { return T.classify_aggregate != NULL; }
-
 static void print_type(Type *ty) {
     if (!ty) {
         fprintf(out_file, "void");

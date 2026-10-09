@@ -7015,6 +7015,52 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# -fsyntax-only stops after the folding pass and before irgen, so it has to
+# report every demand the front end makes -- including the two that used to be
+# irgen's -- and the folding warnings that pass produces.
+cat > "$tmp/fsoatomic.c" <<'EOF'
+struct S { long long a, b; };
+int main(void) {
+    struct S s = { 1, 2 }, t;
+    __atomic_load(&s, &t, __ATOMIC_SEQ_CST);
+    return (int)t.a;
+}
+EOF
+if "$compiler" -w -fsyntax-only "$tmp/fsoatomic.c" > "$tmp/log" 2>&1; then
+    echo "testing -fsyntax-only reports a wide atomic access ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+elif grep -q 'atomic aggregate larger than 8 bytes' "$tmp/log"; then
+    echo "testing -fsyntax-only reports a wide atomic access ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -fsyntax-only reports a wide atomic access ... FAILED (wrong diagnostic)"
+    sed 's/^/    /' "$tmp/log" | head -3
+    n_fail=$((n_fail + 1))
+fi
+cat > "$tmp/fsoasm.c" <<'EOF'
+struct S { long long a, b; };
+void f(struct S s) { asm("" : : "r"(s)); }
+EOF
+if "$compiler" -w -fsyntax-only "$tmp/fsoasm.c" > "$tmp/log" 2>&1; then
+    echo "testing -fsyntax-only reports an asm register operand it cannot lower ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+elif grep -q 'asm.*operand of aggregate type' "$tmp/log"; then
+    echo "testing -fsyntax-only reports an asm register operand it cannot lower ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -fsyntax-only reports an asm register operand it cannot lower ... FAILED (wrong diagnostic)"
+    sed 's/^/    /' "$tmp/log" | head -3
+    n_fail=$((n_fail + 1))
+fi
+printf 'int f(void) { return 1 << -1; }\n' > "$tmp/fsoshift.c"
+if "$compiler" -fsyntax-only -Wshift-count-negative "$tmp/fsoshift.c" 2>&1 | grep -q 'shift count is negative'; then
+    echo "testing -fsyntax-only still runs the folding warnings ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing -fsyntax-only still runs the folding warnings ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then

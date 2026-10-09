@@ -2572,6 +2572,7 @@ static Node *atomic_object(Token **tok, Token *start) {
         cast->ty = pointer_to(type_qual(object->ty->base, Q_ATOMIC), object->ty->qual);
         object = cast;
     }
+    check_atomic_aggregate(object->ty->base, start);
     return object;
 }
 
@@ -5227,8 +5228,11 @@ static Node *assign(Token **rest, Token *tok) {
         NodeKind op = as_op[as->kind];
         if (op != ND_AS && (node->ty->qual & Q_ATOMIC))
             node = atomic_compound_assign(node, op, rhs, false, as);
-        else
+        else {
+            // A store to an _Atomic aggregate is a whole atomic access too.
+            if (op == ND_AS) check_atomic_aggregate(node->ty, as);
             node = new_binary(op, node, rhs, as);
+        }
     }
     *rest = tok;
     add_type(node);
@@ -6711,6 +6715,13 @@ static Node *asm_stmt(Token **rest, Token *tok) {
     for (AsmOperand *op = ops; op; op = op->next)
         if (op->is_plus) nplus++;
     for (AsmOperand *op = ops; op; op = op->next) {
+        // A register operand of record type has to be one the ABI turns into
+        // a single register: a wider record has no register to name, and the
+        // piece-wise form GCC's constraint numbering cannot express is not
+        // implemented. Refused here, where the operand is written; gcc and
+        // clang leave it to their backends and accept it.
+        if (!op->is_indirect && !asm_operand_ir_type(op->expr->ty, false))
+            error(op->expr->tok, "‘asm’ operand of aggregate type is not supported");
         op->index = op->is_output ? out_ord++ : nouts + in_ord++;
         op->pos = op->index;
         // A register output is one of the call's return values; an indirect

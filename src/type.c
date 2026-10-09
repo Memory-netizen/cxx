@@ -1008,8 +1008,53 @@ void modifiable_lvalue(Node *node) {
         error(lhs->tok, "assignment to expression with array type");
 }
 
+// Whether the target has an ABI classifier at all (every target cxx has).
+bool abi_lowering(void) { return T.classify_aggregate != NULL; }
+
+// Whether the ABI lowering applies to this type: a record, whose classifier
+// decides between registers and memory, or a scalar the target passes by
+// reference, which the same classifier answers memory for.
+bool abi_lowered(Type *ty) {
+    if (!abi_lowering()) return false;
+    if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) return true;
+    return T.scalar_by_ref && T.scalar_by_ref(ty);
+}
+
+// The IR type an asm operand travels as, or NULL when it has none: a record
+// has no first-class value, so a *register* constraint on one means whatever
+// the ABI makes of it -- a single piece is one value, and several would need
+// the constraint string to grow an operand per piece, which GCC's numbering
+// has no room for. A record the ABI would pass in memory has no register to
+// name at all. The front end refuses both where the operand is written; irgen
+// asks this same question for the piece type, so the two cannot drift apart.
+Type *asm_operand_ir_type(Type *ty, bool is_indirect) {
+    if (is_indirect) return ty;
+    if (ty->kind != TY_STRUCT && ty->kind != TY_UNION) return ty;
+    if (!abi_lowered(ty)) return NULL;
+    AggClass c;
+    T.classify_aggregate(ty, &c);
+    return c.npiece == 1 ? c.piece[0].ty : NULL;
+}
+
+// A whole access to an _Atomic aggregate moves its bit pattern through an
+// integer of the same size, and only 1/2/4/8-byte ones have an atomic
+// instruction behind them. irgen lowers what the front end has already
+// accepted -- it is not the stage that gets to refuse a program -- so the
+// demand is checked where the access is written: a builtin's object, an
+// assignment to an _Atomic aggregate, or a read of one.
+void check_atomic_aggregate(Type *ty, Token *tok) {
+    if (!(ty->qual & Q_ATOMIC)) return;
+    if (ty->kind != TY_STRUCT && ty->kind != TY_UNION) return;
+    int sz = ty->size;
+    if (sz != 1 && sz != 2 && sz != 4 && sz != 8)
+        error(tok, "atomic aggregate larger than 8 bytes or of non-power-of-two size is not supported");
+}
+
 void lvalue_convert(Node **expr) {
     if (!(*expr) || !(*expr)->is_lvalue) return;
+    // Reading an _Atomic aggregate is a whole atomic access, and the lvalue
+    // conversion is where the read happens.
+    check_atomic_aggregate((*expr)->ty, (*expr)->tok);
     // A scalar constexpr variable read folds to the initializer's
     // constant value (C23 6.6): every scalar value load passes through
     // the lvalue conversion. Address-of and writes bypass it and keep

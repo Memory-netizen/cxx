@@ -542,6 +542,65 @@ cxx 两种情形都重复转换后的字母，于是 `"+g"(h)` 的输入被标�
 
 **缺口表更新**：§0 的“asm 匹配约束对间接输出”一行**移除**（已实现）。
 
+### R118 阶段解耦：用户可见检查全部前移到前端，`-fsyntax-only` 在折叠之后、irgen 之前返回 —— ✅
+
+用户给定性：**irgen 设计上不该再对程序提要求，它只负责 IR 生成**；`-fsyntax-only` 应在折叠完成后、
+irgen 之前返回 —— 这既是时间优化，也是阶段解耦。按此实施。
+
+#### 三条检查的去向
+
+| 原位置 | 去向 | 做法 |
+|---|---|---|
+| `irgen.c` `atomic_agg_bits`：`atomic aggregate larger than 8 bytes …` | **type.c `check_atomic_aggregate()`**，在“访问被写出来”的三处调用 | 内建的对象（`atomic_object()`）、对 `_Atomic` 聚合的赋值（`assign()` 的 `ND_AS`）、对它的读（`lvalue_convert()`）—— 正好覆盖此前探到的 6 个形状 |
+| `irgen.c` `asm_ir_ty`：`‘asm’ operand of aggregate type is not supported` | 整函数搬到 **type.c `asm_operand_ir_type()`**；parser 在 asm 操作数循环里拒绝，irgen 仍用它取 piece 类型 | 一份实现两处用，前后端不会各写一份判断而漂移 |
+| `irgen.c` `gen_addr` 的 `not a lvalue` | **改成 `fatal()`**（内部断言） | 14 个形状探针里没有一个能到达它；它本就不是“用户要求”，而是编译器自检 |
+| `abi_lowering()` / `abi_lowered()` | irgen.c → **type.c**（`dumpir.c` 里那份重复的 `abi_lowering` 同时删掉） | 前端要用同一个答案，三处合成一份 |
+
+结果：**`src/irgen.c` 与 `src/dumpir.c` 里已无任何 `error(`/`warning(`**，只剩 `fatal()`（编译器自检）——
+“irgen 只专注 IR 生成”这条边界现在是可以被 `grep` 验证的事实。
+
+#### `-fsyntax-only` 的位置
+
+`cc1()` 里改为在 `fold_ast(prog)` 之后、`irgen(prog)` 之前返回（原来在 irgen 之后）。
+之所以放在**折叠之后**而不是 parse 之后：那批警告（`-Wconstant-conversion`、`-Wfloat-conversion`、
+`-Wliteral-conversion`、移位计数）出自折叠那趟，`-fsyntax-only -Wall -Werror` 不该因此安静下来。
+
+#### 实测：两个模式现在报同一批前端诊断
+
+| 用例 | `-fsyntax-only` | 普通编译 |
+|---|---|---|
+| C11 拼法、16 字节 `_Atomic` 聚合 | 报（前端） | 报（前端） |
+| GCC 拼法 `__atomic_load`、16 字节 | 报（前端） | 报（前端） |
+| asm 寄存器操作数是 16 字节记录 | 报（前端） | 报（前端） |
+| asm 寄存器操作数是 8 字节记录 | 接受 | 接受（无假阳性） |
+| 元素类型不完整 | 报（前端） | 报（前端） |
+| `-Wshift-count-negative` 的警告 | **照报**（证明折叠那趟仍在跑） | 报 |
+| `asm("" : "=i"(x))` —— LLVM 后端的约束检查 | 不报 | 报（`could not allocate output register for constraint 'i'`） |
+
+最后一行是现在**唯一**落在前端之后的诊断：它由 LLVM 后端发出，`-fsyntax-only` 不走后端。
+这条差异记在 §R116，属于结构性的（cxx 不重做后端的约束校验）。
+
+#### 时间（sqlite3.c，9.5 MB，空载，三次取最好）
+
+| 模式 | 时间 |
+|---|---|
+| `-E`（只预处理） | 0.70 s |
+| **`-fsyntax-only`（预处理 + parse + 折叠）** | **2.41 s** |
+| `-S -o /dev/null`（全链） | 4.57 s |
+
+顺带更正 §R116 里那张阶段耗时表：它是在机器满载时测的，绝对数值偏大三倍左右；空载口径下结论不变
+（parse 占前端大头，`fold_ast` + `irgen` 合起来约 1.5–2%，跳过后端才是大头）。
+
+#### 验收
+
+| 项目 | 结果 |
+|---|---|
+| `test/conformance.sh` | 306 → **309 / 0 gap**（+3：`-fsyntax-only` 报宽原子访问、报 asm 寄存器操作数、仍出折叠警告） |
+| `make test` | **exit 0**（driver / error / ir / conformance / c2y） |
+| bootstrap | cxx2 = cxx3 = cxx4 **逐字节相同**，21 个目标文件亦相同 |
+| `grep -c 'error(\|warning(' src/irgen.c src/dumpir.c` | **0 / 0** |
+| 原子 IR（`test/ir.sh` 的 4 条） | 不变：四种 GCC 拼法仍发 `load atomic`/`store atomic` |
+
 ### R117 真缺陷：GCC 拼法的原子 load/store 被降级成普通访问 —— ✅ 已修，>8 字节改为拒绝（缺口记录）
 
 从 §R116 的“三条 irgen 检查能不能前移”探出来的：`atomic_object()` 对 GCC 拼法（`__atomic_load`、
@@ -607,6 +666,9 @@ cxx 只有一趟前端（`parse → fold_ast → irgen → dump_module`），没
 所以不会链接）。`cc1()` 在 `irgen()` 之后、`open_outfile()` 之前 `return`。
 
 #### 前端时间分布（临时插桩实测，插桩已移除；`grep -c TEMP-TIME src/main.c` = 0）
+
+**注**：下表是机器满载时（全量套件 + 崩溃全扫并行，load ≈ 10）测的，绝对值偏大 3 倍左右；
+空载口径与更正后的结论见 **§R118**。
 
 | 输入 | 预处理 | parse | fold_ast | irgen | cc1 合计 | 驱动（`-fsyntax-only`） | 驱动（`-S`） |
 |---|---|---|---|---|---|---|---|

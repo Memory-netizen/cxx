@@ -1042,14 +1042,14 @@ static void cc1(void) {
 
     fold_ast(prog);
 
-    Module *module = irgen(prog);
-
-    // -fsyntax-only: the translation unit has been read, checked and lowered,
-    // and that is all -- the module is not written anywhere. cxx has one
-    // front-end pass rather than a separate code generator, so "syntax only"
-    // here means "no output", and it keeps the diagnostics irgen produces;
-    // gcc and clang have a code generation stage to skip instead.
+    // -fsyntax-only: the translation unit has been read and checked, and
+    // that is all. The return sits after the folding pass -- where the
+    // conversions and shift counts a program is warned about are seen -- and
+    // before irgen, which only lowers: every demand a program has to meet is
+    // the front end's to make, so nothing user-facing is skipped.
     if (opt_fsyntax_only) return;
+
+    Module *module = irgen(prog);
 
     FILE *out = open_outfile(output_file);
     dump_module(module, out);
