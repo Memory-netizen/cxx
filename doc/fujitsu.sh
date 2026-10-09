@@ -12,6 +12,8 @@
 #   FJ_REF=clang                   the reference compiler (empty to skip it)
 #   FJ_FILTER_CC=clang             who decides what is out of scope (empty: no filter)
 #   FJ_GAPS=1                      filter tests that need a missing feature (0 to keep them)
+#   FJ_RESULTS=file                copy the per-test verdicts here (the temp
+#                                  directory that holds them is removed on exit)
 #   FJ_VERBOSE=1                   print every failing test
 #
 # Two forms are out of scope for cxx and are filtered out rather than counted
@@ -107,7 +109,10 @@ try() { # try <compiler> <src> <dir> <tag>
         echo compile
         return
     fi
-    timeout "$TMO" "$dir/$tag.bin" > "$dir/$tag.out" 2> "$dir/$tag.err"
+    # Run in the work directory: a test that opens a file for writing would
+    # otherwise litter the source tree the probe runs from (the full run left
+    # test1.txt .. test5.txt in the cxx checkout).
+    (cd "$dir" && timeout "$TMO" "$dir/$tag.bin") > "$dir/$tag.out" 2> "$dir/$tag.err"
     local rc=$?
     if [ $rc -eq 124 ]; then
         echo timeout
@@ -263,6 +268,11 @@ export C REF LIBS TMO FILTER_CC GAPS
 
 xargs -a "$work/list" -d '\n' -P "$JOBS" -I{} bash -c 'one "$@"' _ {} "$work" > "$work/results" 2>"$work/xargs.err"
 [ -s "$work/xargs.err" ] && cat "$work/xargs.err"
+# The per-test verdicts are the raw material of a work list, and $work is
+# removed on exit: a caller that wants them says where to put them.
+if [ -n "${FJ_RESULTS:-}" ]; then
+    cp "$work/results" "$FJ_RESULTS" && printf '   results: %s\n' "$FJ_RESULTS"
+fi
 
 count() { grep -c "^$1 " "$work/results" || true; }
 n_ok=$(count ok)

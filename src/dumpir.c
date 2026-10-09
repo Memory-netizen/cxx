@@ -300,7 +300,32 @@ static void print_label(Con *c, char *sym, char *dot) {
 static void printcon(Con *c, Type *ty) {
     if (c->type == CBits) {
         if (is_flonum(ty)) {
-            fprintf(out_file, "0x%016" PRIx64, c->bits.i);
+            // The 64-bit hex form is the legacy single-bit-pattern literal and
+            // LLVM only accepts it for a type of that width: printed for an
+            // x86_fp80 it is "floating point constant does not have type
+            // 'x86_fp80'". A value that reached here as 64 bits came from an
+            // integer or from a narrower type, so for a wider one the value is
+            // spelled as a decimal literal, which LLVM reads in the type it is
+            // used with. Zero and the non-finite values stay exact.
+            if (ty->kind == TY_LDOUBLE || ty->kind == TY_F128) {
+                double d;
+                memcpy(&d, &c->bits.i, sizeof(d));
+                if (c->bits.i == 0) {
+                    fprintf(out_file, "%s",
+                            T.ldouble_is_fp80 && ty->kind == TY_LDOUBLE ? "0xK00000000000000000000"
+                                                                        : "0xL0000000000000000000000000000000");
+                } else if (d != d || d == (double)INFINITY || d == -(double)INFINITY) {
+                    // NaN and the infinities, in the 80-bit pattern: sign and
+                    // exponent first, then the significand.
+                    uint16_t se = (uint16_t)(d != d ? 0x7fff : (d > 0 ? 0x7fff : 0xffff));
+                    uint64_t m = d != d ? (uint64_t)0xc000000000000000 : 0;
+                    fprintf(out_file, "0xK%04x%08x%08x", se, (unsigned)(m >> 32), (unsigned)m);
+                } else {
+                    fprintf(out_file, "%.17e", d);
+                }
+            } else {
+                fprintf(out_file, "0x%016" PRIx64, c->bits.i);
+            }
         } else {
             // Constants reach here already normalised to their declared
             // type and width, so the stored value is printed as-is. The
@@ -369,17 +394,35 @@ static void printcon(Con *c, Type *ty) {
     }
 }
 
+static void print_operand(Ref r);
+
+static void print_operand(Ref r);
+
+// An immediate is read in the type the instruction is spelled with, not in
+// whatever type the constant happens to carry: a zero held as a double, used
+// in an x86_fp80 compare, printed `0x0000000000000000` and LLVM refused the
+// module ("floating point constant does not have type 'x86_fp80'").
+static void print_operand_as(Ref r, Type *ty) {
+    if (r.type == RCon && is_flonum(ty))
+        printcon(&curm->con[r.val], ty);
+    else
+        print_operand(r);
+}
+
 static void print_operand(Ref r) {
     if (r.type == RCon) {
         printcon(&curm->con[r.val], r.ty);
     } else if (r.type == RInt) {
         if (is_flonum(r.ty)) {
-            // an integer immediate used as a floating constant: print
-            // the double bit pattern (e.g. fcmp with 0)
-            uint64_t b;
+            // An integer immediate used as a floating constant (a compare
+            // against 0, say). printcon() spells the literal for the type: the
+            // double pattern is not a valid x86_fp80 literal, and printing one
+            // is what made `fcmp oeq x86_fp80 %x, 0x0000000000000000` fail.
             double d = (double)r.val;
+            uint64_t b;
             memcpy(&b, &d, 8);
-            fprintf(out_file, "0x%016" PRIx64, b);
+            Con c = {.type = CBits, .bits.i = (int64_t)b};
+            printcon(&c, r.ty);
         } else if (is_pointer(r.ty) || r.ty->kind == TY_NULLPTR) {
             // A null pointer is the immediate zero typed as a pointer, the
             // same as (void *)0. LLVM wants the literal null for a pointer
@@ -796,7 +839,7 @@ void dump_blk(Blk *b) {
                 fprintf(out_file, " ");
                 print_operand(ir->args[0]);
                 fprintf(out_file, ", ");
-                print_operand(ir->args[1]);
+                print_operand_as(ir->args[1], ir->args[0].ty);
                 fprintf(out_file, "\n");
                 break;
             }
@@ -877,6 +920,7 @@ void dump_blk(Blk *b) {
 }
 
 static void dump_init(Initializer *init, Type *ty);
+static void print_init_ty(Initializer *init, Type *ty);
 static Member *union_canon_member(Type *ty);
 
 // A record's braces. A packed record is written `<{ ... }>`: its body carries
@@ -885,6 +929,14 @@ static Member *union_canon_member(Type *ty);
 // `double` of `struct { char c; double i; } __attribute__((packed))` moves from
 // offset 1 to 8, and an initializer written against the type fills the wrong
 // bytes. Types and constants are spelled the same way, as clang does.
+// True when a member owns an element of the record's image. A bit-field is
+// addressed through the access unit it lives in, which is that unit's element;
+// a zero-width one has no bits at all and no unit of its own -- the layout
+// gives it the offset of the member that follows, and that member is the one
+// the element belongs to (6.7.2.1p12: a zero-width field forces the next field
+// to a unit boundary, it does not occupy one).
+static bool member_has_element(Member *m) { return !m->is_bitfield || m->bit_width > 0; }
+
 static void record_open(Type *ty) { fprintf(out_file, ty->layout_packed ? "<{ " : "{ "); }
 
 static void record_close(Type *ty) { fprintf(out_file, ty->layout_packed ? " }>" : " }"); }
@@ -900,18 +952,28 @@ void dump_type(Type *ty) {
         bool first = true;
         for (; mem; mem = mem->next) {
             int off = mem->offset;
-            // A bit-field inside an earlier member's access unit has no
-            // element of its own; it is addressed through that member.
-            if (off < pos) continue;
             Type *memty = mem->is_bitfield ? mem->unit_ty : mem->ty;
+            // The bytes the member's bits occupy -- for a bit-field that is
+            // not its access unit (5 + 29 bits is five bytes, not eight), and
+            // a field straddling the cursor is still owed the bytes beyond it.
+            int end =
+                member_has_element(mem)
+                    ? (off * 8 + (mem->is_bitfield ? mem->bit_offset + mem->bit_width : mem->ty->size * 8) + 7) / 8
+                    : pos;
+            if (end <= pos) continue;
             if (!first) fprintf(out_file, ", ");
             first = false;
             if (pos < off) {
                 fprintf(out_file, "[%d x i8], ", off - pos);
                 pos = off;
             }
-            print_type(memty);
-            pos += memty->size;
+            if (pos > off) {
+                // The tail of a straddling unit, one byte at a time.
+                for (int i = pos; i < end; i++) fprintf(out_file, "%si8", i > pos ? ", " : "");
+            } else {
+                print_type(memty);
+            }
+            pos = end;
         }
         if (pos < ty->size) {
             if (!first) fprintf(out_file, ", ");
@@ -932,16 +994,23 @@ void dump_type(Type *ty) {
 // element types so that any member's value is a valid constant
 // (type-punning).
 static Member *union_canon_member(Type *ty) {
-    Member *m = ty->members;
-    for (Member *x = ty->members->next; x; x = x->next)
-        if (x->align > m->align) m = x;
-    return m;
+    // Only a named member can be it: an unnamed bit-field takes no initializer
+    // and holds no value of its own, and picking one made the initializer look
+    // like it wrote a non-canonical member (see init_needs_inline).
+    Member *m = NULL;
+    for (Member *x = ty->members; x; x = x->next)
+        if (x->name && (!m || x->align > m->align)) m = x;
+    // A union of nothing but unnamed bit-fields has no named member at all;
+    // the first one is then the only thing to spell.
+    return m ? m : ty->members;
 }
 
 // The anonymous member-typed element type: "{ <mem-ty> [, pad] }".
-static void print_union_elem_ty(Type *ty, Member *mem) {
+static void print_union_elem_ty(Type *ty, Member *mem, Initializer *child) {
     record_open(ty);
-    print_type(mem->ty);
+    // The member's type as its own value is spelled: a member that is itself a
+    // union punned one level down is written `{ i8, [7 x i8] }`, not by name.
+    print_init_ty(child, mem->ty);
     if (mem->ty->size < ty->size) fprintf(out_file, ", [%d x i8]", ty->size - mem->ty->size);
     record_close(ty);
 }
@@ -966,15 +1035,49 @@ static void print_union_con(Con *c, Type *mem_ty) {
 // The union element value: the member-typed value plus padding.
 static void dump_union_elem(Type *ty, Member *mem, Initializer *child) {
     record_open(ty);
-    if (mem->ty->kind == TY_STRUCT || mem->ty->kind == TY_ARRAY) {
+    if (mem->ty->kind == TY_STRUCT || mem->ty->kind == TY_UNION || mem->ty->kind == TY_ARRAY) {
+        // A member that is itself an aggregate carries an aggregate value; the
+        // scalar printer below would spell it `%union.X 0`, which LLVM refuses
+        // ("integer/byte constant must have ...").
         dump_init(child, mem->ty);
     } else {
         print_type(mem->ty);
         fprintf(out_file, " ");
-        print_union_con(child->val, mem->ty);
+        // An unnamed bit-field member takes no initializer, so there may be no
+        // value here at all; the bytes it covers are zero. Handing the null
+        // Con to print_union_con() is what killed the compiler.
+        if (child && child->val)
+            print_union_con(child->val, mem->ty);
+        else
+            printcon(&(Con){0, CBits, 0, {0}}, mem->ty);
     }
     if (mem->ty->size < ty->size) fprintf(out_file, ", [%d x i8] zeroinitializer", ty->size - mem->ty->size);
     record_close(ty);
+}
+
+// True when what is written for this initializer is the member-typed
+// (type-punning) form rather than the type's own image. It decides how the
+// *containing* type has to be spelled, so dump_init(), print_init_ty() and
+// print_union_elem_ty() all have to agree on it -- a union inside a union
+// punned one level down makes the level above it inline as well.
+static bool init_is_punned(Initializer *init, Type *ty) {
+    if (!init) return false;
+    if (ty->kind == TY_UNION) {
+        Member *mem = init->mem ? init->mem : union_default_member(ty);
+        if (mem != union_canon_member(ty)) return true;
+        return init_is_punned(init->child[mem->idx], mem->ty);
+    }
+    if (ty->kind == TY_STRUCT) {
+        for (Member *m = ty->members; m; m = m->next)
+            if (!m->is_bitfield && init_is_punned(init->child[m->idx], m->ty)) return true;
+        return false;
+    }
+    if (ty->kind == TY_ARRAY) {
+        for (int i = 0; i < ty->len; i++)
+            if (init_is_punned(init->child[i], ty->base)) return true;
+        return false;
+    }
+    return false;
 }
 
 // Whether an initializer needs its type spelled out. A union initialized
@@ -991,8 +1094,14 @@ static bool init_needs_inline(Initializer *init, Type *ty) {
     if (!init || !init->is_inited) return false;
 
     if (ty->kind == TY_UNION) {
-        Member *mem = init->mem ? init->mem : ty->members;
-        return mem != union_canon_member(ty);
+        Member *mem = init->mem ? init->mem : union_default_member(ty);
+        Member *canon = union_canon_member(ty);
+        if (mem != canon) return true;
+        // The member may itself be an aggregate whose value takes the inline
+        // form -- a union of a union, the inner one initialized through a
+        // member that is not *its* canonical one. The containing type has to
+        // be spelled the same way the value is.
+        return init_needs_inline(init->child[mem->idx], mem->ty);
     }
     if (ty->kind == TY_STRUCT) {
         for (Member *m = ty->members; m; m = m->next) {
@@ -1025,10 +1134,13 @@ static void print_init_ty(Initializer *init, Type *ty) {
     if (ty->kind == TY_UNION) {
         Member *canon = union_canon_member(ty);
         Member *mem = (init->is_inited && init->mem) ? init->mem : canon;
-        if (mem == canon)
+        // The same test dump_init() makes for the value: a canonical member
+        // whose own initializer is written punned (a union inside it) makes
+        // this union inline as well, or the type and the value disagree.
+        if (mem == canon && !init_is_punned(init->child[mem->idx], mem->ty))
             print_type(ty);
         else
-            print_union_elem_ty(ty, mem);
+            print_union_elem_ty(ty, mem, init->child[mem->idx]);
         return;
     }
 
@@ -1038,7 +1150,10 @@ static void print_init_ty(Initializer *init, Type *ty) {
         bool first = true;
         for (Member *m = ty->members; m;) {
             int off = m->offset;
-            if (off < pos) {
+            int end = member_has_element(m)
+                          ? (off * 8 + (m->is_bitfield ? m->bit_offset + m->bit_width : m->ty->size * 8) + 7) / 8
+                          : pos;
+            if (end <= pos) {
                 m = m->next;
                 continue;
             }
@@ -1048,13 +1163,14 @@ static void print_init_ty(Initializer *init, Type *ty) {
                 fprintf(out_file, "[%d x i8], ", off - pos);
                 pos = off;
             }
-            if (m->is_bitfield) {
+            if (pos > off) {
+                for (int i = pos; i < end; i++) fprintf(out_file, "%si8", i > pos ? ", " : "");
+            } else if (m->is_bitfield) {
                 print_type(m->unit_ty);
-                pos += m->unit_ty->size;
             } else {
                 print_init_ty(init->child[m->idx], m->ty);
-                pos += m->ty->size;
             }
+            pos = end;
             m = m->next;
         }
         if (pos < ty->size) {
@@ -1113,12 +1229,14 @@ static void dump_init(Initializer *init, Type *ty) {
             fprintf(out_file, " zeroinitializer");
             return;
         }
-        Member *mem = init->mem ? init->mem : ty->members;
+        Member *mem = init->mem ? init->mem : union_default_member(ty);
         Member *canon = union_canon_member(ty);
         Initializer *child = init->child[mem->idx];
-        if (mem != canon) {
-            // Anonymous member-typed form (type-punning, as in clang).
-            print_union_elem_ty(ty, mem);
+        if (mem != canon || init_is_punned(child, mem->ty)) {
+            // Anonymous member-typed form (type-punning, as in clang) -- and
+            // also when the member is the canonical one but its own value is
+            // written punned, because then the types have to match too.
+            print_union_elem_ty(ty, mem, child);
         } else {
             print_type(ty);
         }
@@ -1196,7 +1314,11 @@ static void dump_init(Initializer *init, Type *ty) {
         bool first = true;
         while (mem) {
             int off = mem->offset;
-            if (off < pos) {
+            int end =
+                member_has_element(mem)
+                    ? (off * 8 + (mem->is_bitfield ? mem->bit_offset + mem->bit_width : mem->ty->size * 8) + 7) / 8
+                    : pos;
+            if (end <= pos) {
                 mem = mem->next;
                 continue;
             }
@@ -1205,6 +1327,19 @@ static void dump_init(Initializer *init, Type *ty) {
             if (pos < off) {
                 fprintf(out_file, "[%d x i8] zeroinitializer, ", off - pos);
                 pos = off;
+            }
+            if (pos > off) {
+                // The tail of a straddling unit: one byte element per byte,
+                // each carrying the bits that fall in it.
+                for (int i = pos; i < end; i++) {
+                    if (i > pos) fprintf(out_file, ", ");
+                    int64_t b = bitfield_image(ty, init, i, 1);
+                    fprintf(out_file, "i8 ");
+                    printcon(&(Con){0, CBits, 0, {b}}, T.ty_char);
+                }
+                pos = end;
+                mem = mem->next;
+                continue;
             }
             if (mem->is_bitfield) {
                 int64_t val = bitfield_image(ty, init, pos, mem->unit_ty->size);
@@ -1531,8 +1666,41 @@ static struct {
 } *emitted;
 static int num_emitted;
 
+// Whether this symbol is what the module defines under that name, as opposed
+// to a bare declaration. Functions answer with their body, the same way the
+// rest of the compiler does.
+static bool is_definition(Sym *sym) { return sym->is_function ? sym->body != NULL : !(sym->sclass & SC_EXTERN); }
+
+// The names this module defines, collected before anything is emitted. One
+// name can carry two symbols -- a block-scope `extern int a;` declaration and
+// the file-scope `int a;` definition -- and the declaration may come first in
+// the list. A global may be declared or defined in a module, not both, so a
+// declaration of a name this module defines is not printed at all: letting it
+// stand in for the definition left the unit defining nothing and the link
+// failed with `undefined reference to 'a'` (32 tests).
+static struct {
+    char *name;
+} *defined_names;
+static int num_defined_names;
+
+static bool name_is_defined(char *name) {
+    for (int i = 0; i < num_defined_names; i++)
+        if (!strcmp(defined_names[i].name, name)) return true;
+    return false;
+}
+
+static void record_defined_name(char *name) {
+    if (name_is_defined(name)) return;
+    if (!defined_names)
+        defined_names = vnew(8, sizeof(defined_names[0]));
+    else
+        defined_names = vgrow(defined_names, num_defined_names + 1);
+    defined_names[num_defined_names++].name = name;
+}
+
 static bool already_emitted(Sym *sym) {
     char *name = emitted_name(sym);
+    if (!is_definition(sym) && name_is_defined(name)) return true;
     for (int i = 0; i < num_emitted; i++)
         if (!strcmp(emitted[i].name, name)) return true;
     if (!emitted)
@@ -1582,6 +1750,12 @@ void dump_module(Module *md, FILE *out) {
 
     for (Type *ty = md->tys; ty; ty = ty->next) dump_type(ty);
     if (md->tys) fprintf(out_file, "\n");
+
+    num_defined_names = 0;
+    for (Sym *var = md->data; var; var = var->next)
+        if (is_definition(var)) record_defined_name(emitted_name(var));
+    for (Sym *fn = md->fns; fn; fn = fn->next)
+        if (is_definition(fn)) record_defined_name(emitted_name(fn));
 
     for (Sym *var = md->data; var; var = var->next) dump_data(var);
     if (md->data) fprintf(out_file, "\n");

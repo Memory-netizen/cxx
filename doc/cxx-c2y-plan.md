@@ -542,6 +542,765 @@ cxx 两种情形都重复转换后的字母，于是 `"+g"(h)` 的输入被标�
 
 **缺口表更新**：§0 的“asm 匹配约束对间接输出”一行**移除**（已实现）。
 
+### R104 修好：省略花括号穿过“数组的数组” —— ✅ 回应 §R103 末尾发现的旧缺陷
+
+```c
+struct T { char c[2][4]; } t = {"abc", "def"};   /* c[1] 原本是 0 */
+char g[2][4] = {"abc", "def"};                   /* 文件作用域，一直正常 */
+struct U u = {{"abc", "def"}};                   /* 有内层花括号，也正常 */
+```
+
+6.7.9p20 允许省略内层聚合体的花括号，列表因此**继续进入该成员的剩余元素**。
+成员的初始化器带着**自己的花括号**到达字符串分支，而它只读一个字符串就返回；逗号与 `"def"` 随后在
+**结构体**层面被丢掉。文件作用域同形走的是列表路径，所以一直正常。
+
+**修法**：字符串分支在**无花括号且元素类型仍是数组**时，继续消耗逗号后的字符串，
+直到数组元素用完或遇到非字符串。一维成员不动（它的逗号属于**下一个成员**）——
+这一点用对照例验证过（`struct P { char a[4]; char b[4]; } p = {"ab","cd"}` 仍为 `[ab][cd]`）。
+
+| 验收 | 结果 |
+|---|---|
+| 三种形状（成员省略花括号 / 文件作用域 / 有内层花括号） | 三家**逐值一致**（`[abc][def]`×3） |
+| 对照例（一维成员 + 二维成员） | 三家一致（`[ab][cd]`、`[ab][cd][ef]`） |
+| `C/0030 0053 0054` | **1035 of 1044 passed**（7 failed） |
+| `test/conformance.sh` | 277 → **278 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+（这个缺陷是用自己的对照矩阵找出的，而不是套件报出来的 —— 正是目标里“更隐秘的 bug”那一类。）
+
+### R103 修好：指针数组不是字符数组 —— ✅ `C/0030` **91/91 全部通过**
+
+```c
+struct tag { char *s[2]; } s = {"abc", "def"};
+```
+
+`s[0]`、`s[1]` 是 `char *`，各自用字符串字面量初始化 —— 普通的指针初始化。cxx 看到“数组前面是字符串”，
+就当成字符数组初始化：`infer_strtype()` 得 `char[4]`，数组的叶子类型是 `char *`，两者不兼容，于是
+报 `array of inappropriate type initialized from string constant`（clang 正常编译）。
+
+**修法**：把原来报错的那个判定提到**进入分支之前**：字符串与数组元素类型不相容时，
+就不走“字符串初始化数组”这条路，而是交给下面的列表路径逐个元素处理。
+
+| 验收 | 结果 |
+|---|---|
+| `C/0030/0030_0067.c` | 编译并输出与参考一致（`abc|def|`） |
+| **`C/0030` 目录** | **91 of 91 passed, 0 failed** |
+| 各种形状（指针数组、结构内指针数组、二维字符数组、`int a[3]="abc"`） | 与 clang **逐个一致**（该报错的两例两家都报） |
+| `test/conformance.sh` | 276 → **277 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+#### 本轮又发现一个（已最小化，下一轮）
+
+在做上面的对照矩阵时顺手发现：
+
+```c
+struct t2 { char c[2][4]; } t = {"abc", "def"};
+printf("%s\n", t.c[1]);      /* 参考输出 def，cxx 输出空 */
+```
+
+二维字符数组成员用**花括号串列**初始化时，第二个字符串没有落下去。与本节的修改无关
+（新条件对 `char[2][4]` 为真，路径与修前一致），属旧有缺陷。最小复现 `~/cxxwork/repro/preparse/strarr.c` 的 `t2`。
+
+### R102 修好：块内的“纯标签声明”建新标签 —— ✅ `C/0053` 那一簇 5 个文件全部与参考一致
+
+对受影响的 19 个目录做了一次**定向重跑**（比全量快得多），结果显示 R96–R101 已经消掉了
+链接类、`x86_fp80`、`#line`、声明符类以及工作清单里的 3 个崩溃。存留的 69 个失败里最大一簇是 `C/0053` 的 5 个输出差异。
+
+#### 根因（6.7.2.3p7）
+
+```c
+struct stag { int a; };          /* 文件作用域，大小 4 */
+int main(void) {
+    struct stag st;              /* 外层类型 */
+    struct stag;                 /* 只有标签：在**当前作用域**新建一个不完整标签，并隐藏外层 */
+    struct stag *p;              /* 指向**内层**那个 */
+    struct stag { char a; };     /* 把它补全，大小 1 */
+    sizeof(*p) == 1              /* C/0053/0440 的 TEST2 */
+}
+```
+
+**“`struct-or-union identifier ;`”形式的声明在块内为当前作用域建新标签**（类型不完整，直到本块把它补全）。
+cxx 直接沿着外层找到了那个标签，于是 `p` 指向外层类型（大小 4），TEST2 报 NG 而 clang 报 OK。
+
+**修法**：`find_tag(tag, false)`（只查当前作用域）为空、且在块内、且是纯标签声明时，
+新建一个不完整的同名标签并推入当前作用域。
+
+| 验收 | 结果 |
+|---|---|
+| `C/0053/0053_0440/0441/0442/0444/0445.c` | **全部与参考输出一致** |
+| 最小形状（`taghide.c`） | 三家逐值一致（`4 1 1`） |
+| `test/conformance.sh` | 275 → **276 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+#### 工作清单分类上的一个收获
+
+对 34 个 `output` 差异逐个在两家下跑一遍、数它们自己打的 `OK`/`NG`，得到三类：
+
+| 类别 | 数量 | 读法 |
+|---|---|---|
+| **cxx 全 OK、参考有 NG** | 6 | **cxx 正确，参考实现自己不符合测试预期**（如 `0054_0018/0019/0020/0021/0023/0027` 的 `sizeof` 布局）—— 属参考分歧，**只记录** |
+| cxx 有 NG、参考全 OK | 10 | **cxx 真缺陷**（本轮修掉其中的 5 个） |
+| 两家都不打 OK/NG | 17 | 打印普通数值，逐个看 |
+
+这一分类已写进本节，下一次全量后应并入 `doc/fj-triage.sh` 的输出。
+
+### R101 修好：`#line` 的参数先宏展开 —— ✅ 第三次成功（前两次的原因已查清）
+
+`#line int1`（`#define int1 200`）在 6.10.4 下应先对**整行**宏展开再读行号，clang 接受。
+前两次失败的真正原因是 **`expand_macro()` 的契约**：
+
+```c
+static Token *expand_macro(Token *dst, Token *list) { … return dst; }   /* 返回的是**链尾** */
+```
+
+它是一个**累加器**：写穿目标（`dst = dst->next = …`）并返回构造出的链尾，惯用写法是传哑头、
+然后以 `dummy.next` 作链首（预处理器里收集参数那段就是 `for (Token *t = dummy2.next; …)`）。
+
+| 尝试 | 写法 | 结果 |
+|---|---|---|
+| 1 | `expand_macro(NULL, args)` | SIGSEGV（目标不能为 NULL） |
+| 2 | 哑头 + **取返回值当链首** | 单 token 行恰巧对；`#line 300 "renamed.c"` 取到链尾的字符串，报“需要正整数” |
+| 3 | 哑头 + **`dummy.next` 作链首**，数值与文件名均取自展开链 | **成功** |
+
+| 验收 | 结果 |
+|---|---|
+| `C/0048/0048_0085.c` | 判定 **`ok`** |
+| `C/0048` | 228 → **229 of 231 passed** |
+| 行号与文件名都是宏的用例 | 与 clang **逐字一致**（`42 42 from_macro.c 300`） |
+| `test/conformance.sh` | **275 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+### R100 修好：块作用域的 typedef 声明可以有多个声明符 —— ✅ `expected expression` 类清零
+
+R99 已经把 `declspecs()` 修到接受“类型之后的存储类”，但 `C/0053/0053_0416.c` 仍报错：
+**块作用域**走到 `SC_TYPEDEF` 那条支路时，它只取一个声明符就停下（非 typedef 的情形走 `declaration()`，能走逗号列表），
+于是 `struct { int i; char c; } typedef *stptype, sttype;` 里的逗号被当成语句结束。改成循环后，每个声明符都登记为 typedef。
+
+| 验收 | 结果 |
+|---|---|
+| `C/0053/0053_0416.c` | **编译通过**（判定 `ok`） |
+| `C/0053` | 736 → **738 of 743 passed** |
+| 最小形状（struct/union/enum 三种 + 多声明符） | 与 clang 一致（均编译） |
+| `test/conformance.sh` | **274 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+#### 同一轮里 `#line` 的两次失败（**均已回退**，类仍开着）
+
+`#line int1`（`#define int1 200`）应先对整行宏展开再读行号（6.10.4，clang 接受）。两次尝试都失败，记录在此：
+
+| 尝试 | 写法 | 结果 |
+|---|---|---|
+| 1 | `tok = expand_macro(NULL, args)` | **SIGSEGV**：`expand_macro()` 写穿目标（`dst = dst->next = …`），目标不能为 NULL |
+| 2 | 传哑头 `Token dummy2 = {}`，且数值与文件名都取自展开列表 | 不再崩溃，但第二条 `#line 300 "renamed.c"` 仍报“需要正整数”—— 展开列表的尾部/续行与原始行的关系还没搞对 |
+
+回退时我的还原脚本切错了花括号，随后用 `git checkout -- src/preprocess.c` 恢复（该文件在版本库里没有其他未提交改动，
+只有我这两次坏编辑），并复测：构建通过、套件全绿、`C/0053` 738、`C/0048` 228。
+
+### R99 声明说明符可以任意交错（部分落地）；`#line` 宏尝试崩溃，**已回退** —— ⚠️ C/0048 226 → 228
+
+#### （一）落地：`declspecs()` 接受写在类型**之后**的存储类
+
+6.7.1 的语法是右递归的，说明符可以任意交错，所以 `struct { int i; char c; } typedef *p, q;` 是合法的（clang 接受）。
+`declspecs()` 的循环条件只看 `is_typename()`，而存储类关键字不算 typename —— 于是类型后的 `typedef` 被当成了**声明符名**。
+加上 `|| sc_table[tok->kind]` 后，`C/0048` 从 226 → **228 of 231**。
+
+#### （二）还差一步：块作用域的语句判定不认这种写法
+
+`C/0053/0053_0416.c:16` 仍报 `expected expression before ‘,’`—— 该行是在**函数内**，
+语句层的“这是不是一个声明”判定没把 `类型 + 存储类` 算进去，于是整行走了表达式语句。
+最小复现 `~/cxxwork/repro/preparse/scafter2.c`（声明部分 clang 接受；下一行的错误是我测试文件自己写错，已核对）。
+
+#### （三）`#line` 的宏尝试：崩溃，已回退
+
+`#line int1`（`#define int1 200`）在 6.10.4 下应先宏展开再读行号，clang 接受。我改成
+`tok = expand_macro(NULL, args)` 后，该文件从“报错”变成 **SIGSEGV**（`expand_macro()` 的契约不是 dst 可为 NULL），
+于是**回退**，代码回到本轮开始的状态。类仍开着（4 个），下一次要按 `expand_macro()` 的实际接口来写。
+
+| 验收 | 结果 |
+|---|---|
+| `C/0048` | 226 → **228 of 231 passed** |
+| `C/0053` | 736 of 743（不变） |
+| `test/conformance.sh` | **274 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+### R98 修好：指针下层的限定符是诊断，不是拒绝 —— ✅ `C/0137` **348/348 全部通过**
+
+工作清单第三类（5 个 `incompatible types when assigning`）的代表 `C/0137/0137_0517.c`：
+
+```c
+volatile long long int **a;
+long long int *b;
+a = &b;                       /* 限定符在**一层指针之下** */
+```
+
+| | 行为 |
+|---|---|
+| gcc | **报错**（`assignment to ‘volatile long long int **’ …`） |
+| clang | **警告并接受**（`assigning to 'volatile long long **' from 'long long **' discards qualifiers'`） |
+| cxx（修前） | 报错 `incompatible types when assigning` ✗ |
+
+探针以 clang 为基准，且 6.5.16.1p1 只要求“指向**有限定符或无限定符版本**的兼容类型”，
+所以 cxx 取 clang 的答案：**诊断保留，但不拒绝**。
+
+**修法**：新增 `agrees_ignoring_qualifiers()`（递归忽略**每一层**指针下的限定符），
+并让 `is_assignable()` 的指针分支用它；原有的 `discards qualifiers` 警告在两种方向都会发出。
+旧断言“指针下层的限定符陷阱”（断言**拒绝**）已按新行为更新，保留“必须有诊断”这一点。
+
+| 验收 | 结果 |
+|---|---|
+| `C/0137/0137_0517.c` | 编译并运行，输出 `kaimk2050-ok`（与参考一致） |
+| **`C/0137` 目录** | **348 of 348 passed, 0 failed** |
+| 两个限定符形状（`volatile` 加入、`const` 丢弃） | 均**警告并接受**（与 clang 同口径） |
+| `test/conformance.sh` | 274 passed / 0 gap（断言更新后仍全绿） |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+### R97 修好：块作用域 `extern` 声明顶掉了同名定义 —— ✅ 工作清单里 32 个链接失败归零
+
+工作清单第二大类（`undefined reference to ‘a’`，32 个）的代表 `C/0053/0053_0653.c`：
+
+```c
+int f(void) { extern int a; a = 10; return a; }   /* 块作用域的 extern */
+int a;                                            /* 文件作用域的定义 */
+```
+
+**同一个名字下有两个符号**：块作用域的 `extern` 声明（`SC_EXTERN`）与文件作用域的暂定定义。
+模块列表里**声明在前**，而发射器的 `already_emitted()` 按名字去重时记下了它的名字 ——
+于是**定义被丢弃**，单元里什么也没定义，链接报 `undefined reference to ‘a’`。
+
+修法（两步，第二步是必需的）：
+
+1. 发射前先收集本模块**定义**的名字（`is_definition()`：函数看 `body`，对象看 `SC_EXTERN`）；
+2. 凡是已被定义的名字，**其声明一律不打印** —— LLVM 不允许一个全局名字既声明又定义（先打声明再补定义会得到
+   `redefinition of global '@a'`，第一版修法就是这么错的）；定义本身就是声明。
+
+| 验收 | 结果 |
+|---|---|
+| `C/0053/0053_0653.c` | 链接并运行，输出 `TEST OK`（与参考一致） |
+| `C/0053` 目录 | 720 → **736 of 743 passed** |
+| 三个最小形状（文件作用域 extern、无 extern、块作用域 extern） | 均链接并运行 |
+| `test/conformance.sh` | 273 → **274 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+### R95 全量重跑（第二次）与 R96 最大的真缺陷：`x86_fp80` 常量 —— ✅ 17,498 通过（+371），失败 698 → **330**
+
+#### 全量结果（`~/cxxwork/logs/fj-full.log`，逐例结果 `fj-full2.results`）
+
+| 判定 | R82 基线 | 现在 |
+|---|---|---|
+| `ok` | 17,127 | **17,498** |
+| `compile` | 347 | **285** |
+| `output` | 350 | **43** |
+| `exit` | 1 | 1 |
+| 真失败合计 | **698** | **330** |
+| `timeout` | 0 | 1 |
+| （范围外）`skipped` / `noproto` / `reffail` / `gap` | 2,717 / 7,459 / 8,783 / 398 | 同前 |
+
+工作清单已用 `doc/fj-triage.sh` 从新结果重生成为 `doc/fj-worklist.md`（`compile` 285 个按诊断聚类）。
+
+#### R96：61 个 `floating point constant does not have type 'x86_fp80'`
+
+现场（`C/0048/0048_0156.c`，文件里只有 `long double lda;`）：
+
+```llvm
+%tmp162 = load x86_fp80, ptr %tmp21, align 16
+%tmp163 = fcmp oeq x86_fp80 %tmp162, 0x0000000000000000   ; ✗ double 位型
+```
+
+**两个打印点都不看类型**：
+
+1. `printcon()` 的 `CBits` + 浮点分支一律 `0x%016lx`（只有 `CBits128` 那条路才按类型分派）；
+2. `print_operand()` 的 `RInt` + 浮点分支（注释里就写着“e.g. fcmp with 0”）同样一律打 double 位型 —— **这一行就是元凶**。
+
+LLVM 按**指令类型**读立即数，所以字面量必须按该类型拼写。修法：
+
+- `printcon()` 的 `CBits` 浮点分支按类型分派，宽类型（`long double` / `fp128`）改用**十进制字面量**（LLVM 按使用处类型读取），零与非有限值保留精确拼写；
+- `print_operand()` 的那一分支改为**调用 `printcon()`**（一个真源）；
+- 新增 `print_operand_as()`：指令第二操作数是立即数时按**指令类型**打印。
+
+| 验收 | 结果 |
+|---|---|
+| `C/0048/0048_0156.c` | 从 `floating point constant does not have type 'x86_fp80'` 到**编译通过** |
+| `C/0048` 目录 | 221 → **226 of 231 passed** |
+| `long double` 与常量比较的端到端用例 | 与 gcc/clang **逐值一致** |
+| `test/conformance.sh` | 272 → **273 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+#### 接下来的工作清单（`doc/fj-worklist.md`）
+
+| 数量 | 诊断 | 性质 |
+|---|---|---|
+| 146 | `implicit declaration of function ‘X’` | **政策类**（C23 已删除的旧形式），只记录 |
+| 32 | `link: undefined reference to ‘a’` | 待查 |
+| 5 | `incompatible types when assigning` | 待查 |
+| 4 | `#line directive requires a positive integer argument` | 待查 |
+| 4 | `expected expression before ‘X’` | 待查 |
+| … | （其余见清单） | |
+
+以及早前已知但本次未动的：`int m2:20` 之后成员丢值、下一次全量跑会确认 R93/R96 的净效果。
+
+### R93/R94 结构体重复定义的崩溃（修好）与一条被纠正的改动 —— ✅ 崩溃已修，诊断改动**已回退**
+
+#### （一）真缺陷：比较两个定义时解引用了无名成员的名字
+
+```c
+struct L2 { unsigned char :0; unsigned char :0; unsigned char m3; };
+struct L2 { unsigned char :0; unsigned char :0; unsigned char m3; };
+```
+
+`is_compatible()`（`type.c:673`）比较成员时直接读 `m1->name->id`，而**未命名位域没有名字**（匿名的
+struct/union 成员同理）—— 空指针解引用，SIGSEGV（栈：`record_decl` → `is_compatible`）。两家参考实现都能正常给出判断，
+cxx 则崩在比较里。
+
+**修法**：名字缺省时用 0 作为“无名”（标识符的 interned id 不会是 0），两个无名成员相等、无名与有名不等。
+
+#### （二）一条被用户纠正的改动：相同的重复定义在 c2y 是**合法**的
+
+我一度把“同一作用域内重复定义”改成一律报错，依据是我用 **`-std=c17`** 测出的两家行为：
+
+| 形状 | `-std=c17` | `-std=c23` / `c2y` |
+|---|---|---|
+| **完全相同**的重复定义（struct / union / enum） | gcc 报错、clang 报错 | **gcc 接受、clang 接受** |
+| **冲突**的重复定义 | 报错 | 报错 |
+
+C23 起允许同一个结构体/联合体/枚举以**相同的定义**再定义一次，只有冲突的才是错误。
+cxx 的目标是 **N3685（c2y）**，所以原来的宽容是对的，那条改动**已回退**。实测证据：它还把 `make test`
+弄红了，回退后又绿。保留的是崩溃修复与**冲突定义仍报错**；新增断言把 c2y 语义固定下来。
+
+| 验收 | 结果 |
+|---|---|
+| 相同的重复定义（struct/union/enum） | 三家在 `-std=c23` 下**均接受** |
+| 冲突的重复定义 | 三家**均报错** |
+| `test/conformance.sh` | 271 → **272 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0；C/0013 **676/676** |
+
+### R91 修好：跨元素边界的位域 —— ✅ **C/0013 全部 676 个用例通过**
+
+R90 回退的原因很快查清了：实验版用 **访问单位的大小** 算元素末尾，而单位可以比位宽得多：
+
+```c
+struct S { unsigned char m1:5; unsigned long m2:29; unsigned char m3; };
+```
+
+`m2` 的位占字节 0–4，但 5+29=34 位使 `get_unit_ty` 选中 **8 字节**的单位，
+于是“尾巴”把 `m3` 所在的字节 5 也吞掉了 —— 20 个形状因此丢值（`m3` 读出 0）。
+
+**修法**：元素的末尾取**该成员的位实际占到的字节**：
+`ceil((bit_offset + width) / 8)`，而不是单位的大小。三处遍历统一改为该判据。
+
+| 验收 | 结果 |
+|---|---|
+| **C/0013（676 个用例）** | **676 of 676 passed，0 failed** |
+| 最小用例 | `straddle.c`（跨边界位域数组、宽单位位域、匿名宽位域、局部与全局）与两家逐值一致 |
+| `test/conformance.sh` | 270 → **271 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+#### 八轮累计（R82–R91，C/0013 位域/联合体家族）
+
+| | R82 全量时 | 现在 |
+|---|---|---|
+| `ok` | 341 | **676** |
+| `output` 差异 | 303 | **0** |
+| `compile`（崩溃） | 32 | **0** |
+
+#### 一个误报（已更正）：那个“局部初始化器 bug”是我自己测试写错了
+
+```c
+struct S { unsigned char m1:5; unsigned long m2:29; unsigned char m3; };
+struct S loc = { 2, 2000, 9 };      /* 局部 */
+```
+
+| | `loc.m3` |
+|---|---|
+| gcc / clang | **9** |
+| cxx | **140724603453449** |
+
+但那是**测试自己的错**：`printf("%lu …", …, loc.m3)` 里 `loc.m3` 是 `unsigned char`，没有转型，
+按 32 位传入却按 64 位读取——未定义行为（两家参考实现恰好打印出 9）。加上转型后三家一致：
+
+```
+gcc    1 1000 7 | 2 2000 9
+clang  1 1000 7 | 2 2000 9
+cxx    1 1000 7 | 2 2000 9
+```
+
+局部路径（`create_lvar_init`）本来就是对的；断言已把局部情形收回。
+
+（以下是当时的记录，保留作为“先怀疑自己的测试”的例子）
+
+全局镜像已经修好（本节上面的 676/676），但**局部变量的运行时初始化**（`create_lvar_init`）
+有它自己的遍历，同一形状仍错。最小复现 `~/cxxwork/repro/preparse/strloc.c`。
+
+#### 下一步：全量重跑
+
+家族已收尾，应重跑一次全量（`FJ_LIMIT=0`，约 75 分钟，
+`FJ_RESULTS=~/cxxwork/logs/fj-full2.results`），取得新的总数，并用 `doc/fj-triage.sh`
+重新生成工作清单（预计 698 个失败里的 372 个已消）。剩下已知的：
+58 个 `x86_fp80`、`int m2:20` 之后丢值、结构体重定义时崩溃。
+
+### R90 剩下的 5 个差异定性完成；修法试了一版，**实测更差，已回退** —— ⚠️ 结论保留，代码回到 R89
+
+C/0013 剩下的 5 个单行值差异是**同一种形状**：
+
+```c
+struct D { unsigned long m1:3; unsigned long :3; unsigned long m3:3; };
+struct D d1[2] = {{ 1, 2 },{ 3, 4 }};
+```
+
+`m3` 从位 6 开始、跨到位 8，所以它的访问单位是**两字节**；而它的**字节偏移**（第 0 字节，首位所在）已在游标之后（第 1 字节，`m1` 单位的末尾），
+三处遍历都把它当“在前一个成员的单位里”而**跳过**。结果是镜像只有一个字节：
+
+| | `%struct.D` | 第二个元素的值 |
+|---|---|---|
+| clang | `{ i8, i8, [6 x i8] }` | `{ i8 3, i8 1, … }`（`m3` = 4） |
+| cxx | `{ i8, [7 x i8] }` ✗ | `{ i8 3, … }`（`m3` = **0**） ✗ |
+
+最小复现 `~/cxxwork/repro/preparse/arr2.c`（`d1`/`d2` 两例与两家不一致）。
+
+#### 试过的修法：把跨元素的单位按逐字节 `i8` 展开
+
+三处遍历的跳过条件从 `off < pos` 改为“单位末尾在游标之后才算有元素”，
+跨边界的单位只补出尾巴那几个字节（一字节一个 `i8`，与 clang 同形）。
+
+| 指标 | 修前（R89） | 试修后 |
+|---|---|---|
+| `arr2.c` 的 `d1`/`d2` | 与两家不一致 | **一致** ✅ |
+| `%struct.D` | `{ i8, [7 x i8] }` | **`{ i8, i8, [6 x i8] }`** ✅（与 clang 同） |
+| **C/0013 通过数** | **671** | **656** ✗（净亏 15） |
+
+—— 目标形状确实修好了，但另有十五个形状受损，于是**回退**，
+C/0013 回到 671、`test/conformance.sh` 回到 270/0（均已复测确认）。
+
+#### 下一步（窄化后再试）
+
+“单位跨元素”这个事实成立、最小复现也在，需要的是**只在真正跨边界时**才动那条路径：
+当前实现把所有 `off < pos` 且单位延到游标之后的情形都当成“跨边界”，而其中不少是
+**同一字节内的另一个单位**（如前例的 `:3`），它们本该继续被跳过。判据应是“该成员的位**越过了当前元素的末尾**”，
+而不是“单位尾巴在游标之后”。
+
+### R89 修好：类型打印器与值打印器全面一致 —— ✅ C/0013 通过数 667 → **671**，编译失败 **0**
+
+R88 给 `dump_init()` 的联合体分支加了 `init_is_punned()` 判断，但 **`print_init_ty()` 的联合体分支漏了**（它还用旧的
+`mem == canon`），于是（`struct HOLD { int tag; union OUT o; }`）：
+
+| | 类型 | 值 |
+|---|---|---|
+| clang | `{ i32, [4 x i8], { { i8, [7 x i8] } } }` | `… { { i8, [7 x i8] } } { … }` |
+| cxx（修前） | `{ i32, [4 x i8], %union.OUT }` ✗ | `… { { i8, [7 x i8] } } { … }` ✗ |
+
+LLVM：`element 2 of struct initializer doesn't match struct element type`。
+
+**修法**：`print_init_ty()` 的联合体分支用与 `dump_init()` 完全相同的条件
+（`mem == canon && !init_is_punned(child, mem->ty)` 才写规范拼法）。两个打印器自此在所有形状上一致。
+
+| 验收 | 结果 |
+|---|---|
+| **C/0013（676 个用例）** | `ok` 667 → **671**；`compile` **4 → 0**（八个文件全部编译通过）；`output` 5 |
+| 嵌套用例 | `nestun.c` / `holdpunned.c`（联合体套联合体、结构体包类型双关联合体、局部与全局）与 gcc/clang **逐值一致** |
+| `test/conformance.sh` | 269 → **270 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+#### 八轮累计（R82–R89，同一个位域/联合体家族）
+
+| C/0013（676 个用例） | R82 全量时 | 现在 |
+|---|---|---|
+| `ok` | 341 | **671** |
+| `output` 差异 | 303 | **5** |
+| `compile`（崩溃） | 32 | **0** |
+
+#### 剩下的
+
+| 形状 | 现状 |
+|---|---|
+| C/0013 的 5 个单行值差异（0013_0611/0616/0630/0633/0645） | 如 `8` vs `0`、`6` vs `2`、`4` vs `0`—— 又是一种初始值落错成员的形状，待缩小 |
+| `int m2:20` 之后的成员丢值（§R85） | 仍在 |
+| 结构体重定义时崩溃（§R85） | 仍在 |
+| 全量重跑 | 本阶段结束前应重跑一次，以取得新的总数 |
+
+### R88 修好：类型双关的判断统一到一个谓词 —— ✅ C/0013 通过数 663 → 667，编译失败 8 → 4
+
+上一轮的线索是“类型前缀是规范拼法、值是内联拼法”。用 trace 发现：
+**`dump_init()` 的联合体分支根本不调用 `init_needs_inline()`**，它自己用 `mem != canon` 判断；而成员的**值**
+是由 `dump_init(child, mem->ty)` 写的，同样的判断在**下一层**做一次。两层意见不一致时 LLVM 报
+`element 0 of struct initializer doesn't match struct element type`。
+
+**修法**：新增递归谓词 `init_is_punned()`（联合体选中非规范成员、或成员自己又是这样），
+三个打印器（`dump_init`、`print_init_ty`、`print_union_elem_ty`）都用它；并让 `print_union_elem_ty`
+用**初始化器感知的** `print_init_ty(child, mem->ty)` 而不是 `print_type()`。
+
+| 验收 | 结果 |
+|---|---|
+| **C/0013** | `ok` 663 → **667**；`compile` **8 → 4**（`0013_0598/0602/0603/0604` 现已编译）；`output` 5 |
+| 最小用例 | `usub.c`（三行）编译通过；类型与值都是内联拼法 |
+| 回归集 | 全部保持正确 |
+| `test/conformance.sh` | 268 → **269 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+#### 剩下的（下一轮）
+
+| 形状 | 现状 |
+|---|---|
+| `C/0013` 的 4 个文件（0013_0665/0669/0670/0671） | 仍报 `element 0 of struct initializer …`（另一形状，待缩小） |
+| **结构体里含类型双关联合体** | 本轮新发现：`struct HOLD { int tag; union OUT o; }`（OUT 同上）报 **`element 2 of struct initializer …`**—— 类型与值的**元素走法不一致**（填充元素的位置）；最小复现 `~/cxxwork/repro/preparse/nestun.c` |
+
+### R87 联合体的“默认成员”与类型双关内联形式 —— ⚠️ 三处改动合乎规范，最后 8 个文件仍失败
+
+目标是 §R86 剩下的 8 个文件（`element 0 of struct initializer …`）。本轮做了三件事，
+都是规范上应该的（回归集全部保持正确、套件全绿），但**没有移动那 8 个文件**：
+
+1. 新增 `union_default_member()`（`type.c` + `cxx.h`）：初始化器未命名成员时取**第一个具名成员**（6.7.9p9）。
+   原来有**五处**（`dumpir.c` ×2、`parser.c` ×3）回退到 `ty->members`，即那个未命名位域；
+2. `union_initializer2()`（无花括号路径）同样改用该助手；
+3. `init_needs_inline()` 的联合体分支不再提前返回：选中的成员若本身是聚合体，
+   它自己的初始化器也可能需要内联形式（联合体套联合体），那么包含它的类型也要一致。
+
+| 验收 | 结果 |
+|---|---|
+| 回归集（以未命名位域开头、联合体位域、宽单位位域） | 全部编译并与两家逐值一致（无回归） |
+| `test/conformance.sh` | **268 passed / 0 gap**（不变） |
+| C/0013 | `ok` 663 不变；8 个 `compile` 失败依旧（报错**列号变了**，说明输出确实变了） |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+#### 下一步已缩到一个点
+
+IR 现场（`0013_0602.c`）：
+
+```llvm
+%union.FUJW00HU00 = type { %union.SUB_UHB00HW00 }
+@fujw00hu00_0 = global %union.FUJW00HU00 { { i8, [7 x i8] } { i8 1, [7 x i8] zeroinitializer } }, align 8
+```
+
+**类型前缀是规范拼法，而值是内联（类型双关）拼法**，两者必须一致。类型前缀由
+`dump_data → dump_init → print_init_ty → init_needs_inline` 选定，而它在这个**嵌套**情形返回了 false：下一步是看
+`init->is_inited` / `init->mem` 在嵌套子初始化器上的传递（`init_needs_inline` 开头就是
+`if (!init || !init->is_inited) return false;`）。
+
+复现：`~/cxxwork/repro/preparse/usub.c`（简化版反而正确，说明缺的就是嵌套那一层）与 `0013_0602.c`。
+
+### R86 修好：花括号路径只跳一个未命名成员 —— ✅ C/0013 通过数 **501 → 663**
+
+上一轮的线索是“`{ 1 }` 走的不是 `struct_initializer2`”。果然：`initializer2()` 把**花括号**的
+struct 初始化发给 `struct_initializer1()`，而它有同样的“只跳一步”错误（R83b 只修了无花括号那条路）：
+
+```c
+if (mem && !mem->name && !is_record(mem->ty)) mem = mem->next;   /* 只跳一个 */
+```
+
+两个未命名成员在前时，值被写进**第二个**，真正的成员保持 0。改成 `while`，并把联合体“初始化第一个**具名**成员”（6.7.9p9）一并对齐。
+
+随后连带修好三个联合体边角（均由此处变得可达）：
+
+1. `union_initializer1()` 跳完可能走到列表尾（全部成员未命名）—— 保留首成员，不置 NULL；
+2. `dump_union_elem()` 拿到**没有值的成员**（未命名位域）时传了 NULL Con 给 `print_union_con()` —— 改为打印该类型的零；
+3. 同一函数的聚合分支漏了 **`TY_UNION`**，于是把“成员本身是联合体”当标量打成 `%union.X 0`，LLVM 报
+   `integer/byte constant must have …`；
+4. `union_canon_member()`（类型双关的那个成员）会选中**未命名位域**，现只在具名成员里选。
+
+| 验收 | 结果 |
+|---|---|
+| **C/0013（676 个用例）** | `ok` 501 → **663**；`output` 差异 173 → **5**；`compile` 2 → 8（下述） |
+| 回归集 | 以未命名位域开头的全家族（含三连 `:0`、联合体首成员为未命名位域、局部变量）与两家逐值一致 |
+| `test/conformance.sh` | 267 → **268 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+四轮累计（R83–R86）在这一族上：`ok` **341 → 663**，`output` **303 → 5**。
+
+#### 剩下的（下一轮）
+
+| 形状 | 现状 |
+|---|---|
+| `C/0013` 的 8 个文件（0013_0598/0602/0603/0604/0665/0669/0670/0671） | **已从崩溃变成有诊断的失败**：`element 0 of struct initializer …`—— 即类型双关的**内联形式**（`init_needs_inline` 与发射的判断不一致） |
+| 5 个输出差异 | 待样本化 |
+| `int m2:20` 之后的成员丢值 | 仍在（§R85） |
+| 结构体重定义时崩溃 | 仍在（§R85） |
+
+### R85 修好：位域单位落在自身对齐之外 —— ✅ C/0013 通过数 425 → 501
+
+`unsigned long m2:29` 这一族（剩余 249 个输出差异的主体）。IR 一目了然：
+
+```llvm
+%struct.E = type { i8, i32, i8, [2 x i8] }        ; 非 packed
+@e = global %struct.E { i8 1, i32 2, i8 3, ... }
+```
+
+**LLVM 把元素放在它自己对齐要求的偏移上**：那个 `i32` 会落在字节 4；而 cxx 的元素就是访问单位、
+放在**位所在的地方**（字节 1）。初始化器写在一处、读取读另一处，于是 `e.m2` 读出 `2 << 24`。
+
+**修法**：位域单位落在非自身对齐处时置 `lowered`，即设 `layout_packed`——正是 R64
+为“C 布局 ≠ LLVM 自然布局”建的机制：`<{ … }>` 的元素就在写它们的地方。
+
+| | 修前 | 修后 |
+|---|---|---|
+| `%struct.E` | `{ i8, i32, i8, [2 x i8] }` | `<{ i8, i32, i8, [2 x i8] }>` |
+| `e.m2` | `33554432` | **`2`** |
+
+| 验收 | 结果 |
+|---|---|
+| **C/0013（676 个用例）** | `ok` 425 → **501**；`output` 249 → **173**；`compile` 2 不变 |
+| 最小用例 | `unsigned long m2:29` / `unsigned long :29` / `unsigned short m2:9` / `int m2:20`，全局与局部都与两家逐值一致 |
+| 旧用例 | R83/R84 的复现集全部保持正确 |
+| `test/conformance.sh` | 266 → **267 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+三轮累计（R83+R84+R85）在这一族上：`ok` **341 → 501**，`output` **303 → 173**，`compile` **32 → 2**。
+
+#### 剩下的（下一轮，已精确到一步）
+
+| 形状 | 现状与线索 |
+|---|---|
+| **以两个连续未命名位域开头**（`struct { unsigned char :0; unsigned char :0; unsigned char m3; } x = { 1 };`） | 仍得 0；局部与全局**都错**，而指定初始化 `.m3 = 1` 正确 → **顺序遍历未赋值**。临时 trace（已撤）显示成员表为 `[:0, :0, m3]`（非记录），但 `struct_initializer2()` 循环体**根本没进去** —— 下一步是找 `{ 1 }` 走的哪条路 |
+| `C/0013/0013_0598.c`、`0013_0665.c` | 仍崩溃（待缩小） |
+| **重定义结构体时崩溃** | 本轮撞见：同一个 `struct L2` 定义两次时 cxx **SIGSEGV**，而应当报 `redefinition of struct or union` —— 另一个真缺陷 |
+| **20 位的 `int` 位域之后的成员丢值** | 本轮新发现：`struct N { unsigned char m1; int m2:20; unsigned char m3; } n = { 1, 70000, 3 };` 的 `m3`，两家给 3、cxx 给 **0**（`m2` 自己正确） |
+
+### R84 修好：联合体的位域成员缺少访问单位 —— ✅ 崩溃族 32 → 2
+
+R83 留下的头号目标。最小复现：`union U { unsigned long long m:3; } u = { 1 };` → SIGSEGV。
+
+`layout_struct()` 对联合体是这么写的：
+
+```c
+if (is_union) { offset = MAX(offset, mem->ty->size); continue; }
+```
+
+—— 每个成员从位 0 开始，所以不走下面的偏移计算；但**这个 `continue` 跳过了唯一设置
+`mem->unit_ty` 的分支**，于是联合体里的位域成员带着 `unit_ty == NULL` 进入读、写与镜像发射。
+结构体路径不受影响（它会设单位），所以同一声明写在结构体里一直正常。
+
+**修法**：联合体分支里补上位域的处理（`offset = 0`、`bit_offset = 0`、
+`unit_ty = get_unit_ty(min_bytes_for_bits(width), is_unsigned)`），尺寸仍用声明类型的大小。
+
+| 验收 | 结果 |
+|---|---|
+| **C/0013（676 个用例）** | `ok` 401 → **425**；`compile`（崩溃）**32 → 2**；`output` 243 → 249（那 6 个从“编不过”变成“跑得出但输出不同”） |
+| 崩溃集 | `bf5/c1/c2/c3/c5/c7/bfuv` 全部编译通过；运行值与 gcc/clang **逐值一致**（`5 3 171 -15`） |
+| `sizeof` 基线 | 9 种形状三家一致（`U1 8 U2 4 U3 1 U4 8 \| S1 8 S2 4 S3 1 S4 8 \| U5 8 S5 8`） |
+| `test/conformance.sh` | 265 → **266 passed / 0 gap** |
+| 其余 | c2ycov 109/0；`make test` exit 0 |
+
+#### 这一族剩下的（下一轮）
+
+| 形状 | 现状 |
+|---|---|
+| `C/0013/0013_0598.c`、`0013_0665.c` | 仍崩溃（另一形状，待缩小） |
+| **宽单位的具名/匿名位域**（`unsigned long m2:29`、`unsigned long :29`） | 镜像对、**读取错位**（`m2` 读出 `2<<24`）—— 剩下 249 个输出差异的主体 |
+| 连续两个 `:0` 后的成员 | `struct T { uchar m1; uchar :0; uchar :0; uchar m3; } t = {1,2};` 仍得 `1 0` |
+
+### R83 修好：零宽位域不拥有元素 —— ✅ C/0013 的输出差异 303 → 243
+
+从 §R82 的工作清单头号目标入手。定位过程：
+
+1. 最小复现（三行）：`struct { unsigned char m1; unsigned char :0; unsigned char m3; } x = { 1, 2 };`
+   —— 参考输出 `1 2`，cxx 输出 `1 0`。
+2. 局部变量（运行时初始化）**正确**，只有**全局静态数据**错—— 所以 layout 对，问题在“初始化器 → 字节”。
+3. 渐进判别：连指定初始化 `.m3 = 2` 也丢，而 `{ 1 }` 三家一致 →— 值没进到镜像里。
+   临时 trace（已撤）给出关键事实：零宽位域的 `offset` 与**其后成员相同**（都是 1），
+   而 layout 本身是对的（`sizeof`/`offsetof` 三家一致）。
+
+**根因**：发射阶段把零宽位域当成一个**元素**，推进了游标，紧接着真正住在那个字节的成员
+就因 `off < pos` 被**跳过**，值和字节一起丢。同一原因让**类型**多出一个元素：`struct { unsigned char m1; unsigned char :0; };`
+会发成 `{ i8, i8 }`，而对象只有 1 字节。
+
+**修法**：`member_has_element()`（`!m->is_bitfield || m->bit_width > 0`），在三个遍历成员找元素的地方
+都加上：`dump_type()`、`print_init_ty()`、取值镜像那个循环。同时把 `struct_initializer2()` 的“跳过无名成员”
+从一次改成一个 `while`（连续两个 `:0` 时只跳一次会把值写进第二个零宽位域）。
+
+| 验收 | 结果 |
+|---|---|
+| **C/0013（676 个用例）** | `ok` 341 → **401**；`output` 差异 303 → **243**；`compile`（崩溃）32 不变 |
+| 最小用例 | `A`/`A2`（含指定初始化）、尾部零宽、三者类型都与两家一致；`@s` 的 IR 与 clang 同形 |
+| `test/conformance.sh` | 264 → **265 passed / 0 gap** |
+| 其余 | c2ycov 109/0；c2y 101/0；`make test` exit 0 |
+
+#### 这一族剩下的（下一轮的目标）
+
+| 形状 | 现状 |
+|---|---|
+| **联合体 + 位域成员** | 仍崩溃（最小：`union U { unsigned long long m:3; } u = {1};`）—— C/0013 的 32 个 `compile` 失败就是它 |
+| 连续两个 `:0` 后的成员 | `struct T { uchar m1; uchar :0; uchar :0; uchar m3; } t = {1,2};` 仍得 `1 0` |
+| 单位 4 字节的具名位域 | `struct E { uchar m1; unsigned long m2:29; uchar m3; } e = {1,2,3};` 的 `m2` 读出 2<<24（镜像对、读取错位） |
+
+三者都已有最小复现，记在 `~/cxxwork/repro/preparse/bf*.c`。
+
+### R82 回到 debug：compiler-test-suite **全量**（37 190 个用例）—— ✅ 找到抽样完全碰不到的 bug
+
+运行：`FJ_LIMIT=0 FJ_JOBS=8 FJ_RESULTS=~/cxxwork/logs/fj-full.results bash doc/fujitsu.sh ./cxx`，
+日志 `~/cxxwork/logs/fj-full.log`，约 75 分钟（比抽样估算的 33 分钟慢：全集里“完整流程”的用例占比更高）。
+
+#### 结果（各类相加正好 37 190）
+
+| verdict | 数量 | 性质 |
+|---|---|---|
+| `ok` | 17 127 | 通过 |
+| `reffail` / `refcrash` / `reftimeout` | 8 783 / 5 / 3 | 参考实现（clang）也编不出或跑不了 |
+| `noproto` | 7 459 | 无原型/K&R 与虚数后缀（已屏蔽） |
+| `skip` | 2 717 | OpenMP（已屏蔽） |
+| `gap` | 398 | 功能缺口：274 `()` 无原型 + 73 `__sync_*` + 51 SSE/MMX（只记录） |
+| **`output`** | **350** | **真缺陷**：输出与参考不一致 |
+| **`compile`** | **347** | **真缺陷**：cxx 拒绝编译 |
+| **`exit`** | **1** | **真缺陷**：退出码不一致 |
+| `timeout` | 0 | 无 |
+
+工作清单由新探针 **`doc/fj-triage.sh`** 自动生成到 `doc/fj-worklist.md`：
+它把 `compile` 失败逐个重跑 cxx 取诊断并聚类，把 `exit`/`output` 按目录归并，把缺口单列。
+
+#### 编译被拒的前几类
+
+| 数量 | 诊断 | 性质 |
+|---|---|---|
+| **69** | `cxx killed by signal 11` | **崩溃**（本轮已最小化，见下） |
+| **58** | `floating point constant does not have type 'x86_fp80'` | 非法 IR：长双精度常量发错 |
+| 146 | `implicit declaration of function ‘X’` | **政策类**：C23 删除了隐式声明，与 `()`/K&R 同一性质（cxx 不管 `-std=` 都按 C23 判） |
+| 42 | （原本计作“无错误行”） | 实为**链接失败**：探针的 compile 一步同时链接，链接器不输出 `error:` |
+| 5 / 4 / 4 / 3 / 3 / 2 / 2 | 其余小类 | `incompatible types when assigning`、`#line` 非正整数、`expected expression before`、`invalid preprocessor directive`、字符串初始化数组类型不符、非常量等 |
+
+#### 本轮已最小化的崩溃：联合体里的位域
+
+```c
+union U { unsigned long long m:3; } u = {1};
+int main(void) { return (int)u.m - 1; }
+```
+
+触发条件（逐条测过）：
+
+| 写法 | cxx |
+|---|---|
+| **联合体 + 位域成员**（局部、全局、带/不带初始化器、单个或多个位域、`int` 或 `unsigned long long`） | **崩溃** |
+| 结构体 + 位域（`struct S { int m:3; } s = {1};`） | 正常 |
+| 联合体 + 普通成员 | 正常 |
+| 两家参考实现 | 全部接受 |
+
+见证文件 `C/0013/0013_0520.c`（联合体里不同类型的位域 + 未命名位域 + **零宽位域**）。下一轮从这里入手。
+
+#### 一个根因解释了 698 个失败里的 **372 个**
+
+工作清单的运行期一节显示：350 个 `output` 失败里 **303 个在 `C/0013`**，而 69 个崩溃里的证人
+`C/0013/0013_0520.c` 也在同一目录。`C/0013` 全目录 676 个 `.c`，**每一个都含位域**。抽一个输出失败的看：
+
+```c
+struct ASHB00JB00HB00 {
+    unsigned char m1;
+    unsigned char   :0;      /* 零宽位域 */
+    unsigned char m3;
+} x = { 1, 2 };
+```
+
+| | 输出 |
+|---|---|
+| 参考实现 | `1 2` |
+| cxx | **`1 0`** |
+
+—— **未命名位域（含零宽位域）在 cxx 里占了一个初始化器槽位**，第二个初始值被写进了
+没有名字的位域，`m3` 因此保持 0。6.7.9p9 说未命名成员**不参与初始化**。
+
+同一族还包含崩溃的那些形状（联合体 + 位域）。两者合计 **372 / 698**，是下一轮的第一个目标。
+
+#### 新探针与两个改动
+
+- `doc/fj-triage.sh`：从 `FJ_RESULTS` 的逐例结果生成 `doc/fj-worklist.md`。
+- `doc/fujitsu.sh`：新增 `FJ_RESULTS=<file>`（逐例结果原本在 mktemp 目录里，退出时连同目录一起删掉）；
+  另让每个用例在**工作目录**里运行——全量跑完后仓库根多出了 `test1.txt` … `test5.txt`，
+  那是写文件的用例写在了探针所在的源码树里（已清理）。
+
 ### R81 “完全不支持 `f()` 无原型声明”的覆盖面 —— 实测：现代项目上**近乎零**
 
 该策略（§0、§R56/R57）拒绝的是**两种写法**：

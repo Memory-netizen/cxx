@@ -1760,32 +1760,42 @@ static Token *include_file(Token **rest, Token *tok, char *path, Token *filename
 // Read #line arguments
 static Token *read_line_marker(Token **rest, Token *tok) {
     Token *start = tok;
-    tok = read_line(rest, tok->next);
-    if (tok->kind != TK_PPNUM) error(start, "#line directive requires a positive integer argument");
+    // 6.10.4: the whole line is macro-replaced before the number is read, so
+    // `#define int1 200` with `#line int1` names line 200 -- C/0048/0085 says
+    // so and clang accepts it, where cxx asked for a pp-number. The caller's
+    // continuation still comes from the original line, which read_line() has
+    // already stored in *rest.
+    Token *args = read_line(rest, tok->next);
+    Token dummy2 = {};
+    expand_macro(&dummy2, args);
+    Token *num = dummy2.next;
+    if (!num || num->kind != TK_PPNUM) error(start, "#line directive requires a positive integer argument");
 
     int line_no = 0;
-    for (uint32_t i = 0; i < tok->len; i++) {
-        char c = tok_text(tok)[i];
+    for (uint32_t i = 0; i < num->len; i++) {
+        char c = tok_text(num)[i];
         if (isdigit(c))
             line_no = line_no * 10 + c - '0';
         else
             error(start, "line marker directive requires a simple digit sequence");
     }
     if (line_no == 0) error(start, "#line directive requires a positive integer argument");
-    if (*tok_text(tok) == '0') error(start, "line marker directive interprets number as decimal, not octal");
+    if (*tok_text(num) == '0') error(start, "line marker directive interprets number as decimal, not octal");
 
     int line, col;
     get_location(start->file, start->loc, &line, &col);
     line_delta = line_no - line - 1;
 
-    tok = tok->next;
+    // The expanded chain ends at NULL -- it carries no EOF token of its own --
+    // so the file name is the token after the number, if there is one.
+    Token *name = num->next;
 
-    if (tok->kind != TK_EOF && (tok->kind != TK_STRLIT || tok->enc_prefix != PREFIX_NONE))
-        error(tok, "filename expected");
+    if (name && name->kind != TK_EOF && (name->kind != TK_STRLIT || name->enc_prefix != PREFIX_NONE))
+        error(name, "filename expected");
 
-    if (tok->kind == TK_STRLIT) {
-        convert_str_literal(tok);
-        display_name = tok->id;
+    if (name && name->kind == TK_STRLIT) {
+        convert_str_literal(name);
+        display_name = name->id;
     }
 
     return new_linemarker(start, line_no, display_name);

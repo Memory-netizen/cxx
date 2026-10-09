@@ -1538,7 +1538,12 @@ static void struct_initializer1(Token **rest, Token *tok, Initializer *init) {
             continue;
         }
 
-        if (mem && !mem->name && !is_record(mem->ty)) mem = mem->next;
+        // An unnamed member that is not a record takes no initializer, and
+        // there can be several in a row -- `unsigned char :0; unsigned char
+        // :0;` -- so this walks past all of them. Skipping only one sent the
+        // value into the second zero-width field and left the member that
+        // follows it at zero.
+        while (mem && !mem->name && !is_record(mem->ty)) mem = mem->next;
         if (mem) {
             initializer2(&tok, tok, init->child[mem->idx], false);
             mem = mem->next;
@@ -1560,7 +1565,14 @@ static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Mem
             return;
         }
 
-        if (mem && !mem->name && !is_record(mem->ty)) mem = mem->next;
+        // An unnamed member that is not a record takes no initializer: a
+        // bit-field, or the padding an unnamed struct member would be. There
+        // can be several in a row -- `unsigned char :0; unsigned char :0;` --
+        // so this walks past all of them, and if they run to the end of the
+        // list the value below belongs to no member at all (which the loop
+        // condition then reports as an excess element).
+        while (mem && !mem->name && !is_record(mem->ty)) mem = mem->next;
+        if (!mem) break;
         initializer2(&tok, tok, init->child[mem->idx], false);
     }
     *rest = tok;
@@ -1569,7 +1581,15 @@ static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Mem
 static void union_initializer1(Token **rest, Token *tok, Initializer *init) {
     tok = skip(tok, TK_LBRACE);
 
-    Member *mem = init->ty->members;
+    // 6.7.9p9: a union's initializer initializes its first *named* member, so
+    // an unnamed bit-field in front of it takes no value of its own. A union
+    // whose members are all unnamed has none to name, and the first member is
+    // kept so that the value is reported as an excess element rather than
+    // dereferencing a null.
+    Member *head = init->ty->members;
+    Member *mem = head;
+    while (mem && !mem->name && !is_record(mem->ty)) mem = mem->next;
+    if (!mem) mem = head;
     bool first = true;
     while (!consume_end(rest, tok)) {
         if (!first) tok = skip(tok, TK_COMMA);
@@ -1594,7 +1614,7 @@ static void union_initializer1(Token **rest, Token *tok, Initializer *init) {
 }
 
 static void union_initializer2(Token **rest, Token *tok, Initializer *init) {
-    init->mem = init->ty->members;
+    init->mem = union_default_member(init->ty);
     initializer2(rest, tok, init->child[0], false);
 }
 
@@ -1623,7 +1643,20 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
         bool braced_str = lit->kind == TK_LBRACE && lit->next->kind == TK_STRLIT && lit->next->next->kind == TK_RBRACE;
         if (braced_str && !is_compatible(type_unqual(infer_strtype(lit->next)->base), type_unqual(init->ty->base)))
             braced_str = false;
-        if (lit->kind == TK_STRLIT || braced_str) {
+        // A string initializes an array only when it belongs to it. For an
+        // array of pointers the literal initializes the *element* -- `char
+        // *s[2]` with `{"abc", "def"}`, where s[0] takes "abc" as an ordinary
+        // pointer -- and taking it for a character-array initializer refused
+        // C/0030/0067. The test is the one that used to raise the error.
+        Type *lit_ty = NULL;
+        if (lit->kind == TK_STRLIT)
+            lit_ty = infer_strtype(lit);
+        else if (braced_str)
+            lit_ty = infer_strtype(lit->next);
+        if (lit_ty && !(is_char(array_leaf_type(init->ty)) && is_char(lit_ty->base)) &&
+            !is_compatible(type_unqual(lit_ty->base), type_unqual(init->ty->base)))
+            lit = NULL, braced_str = false;
+        if (lit && (lit->kind == TK_STRLIT || braced_str)) {
             tok = lit;
             bool has_brace = match(&tok, tok, TK_LBRACE);
             Type *ty = infer_strtype(tok);
@@ -1637,6 +1670,20 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
                 error(tok, "array of inappropriate type initialized from string constant");
             string_initializer(&tok, tok, init);
             if (has_brace) tok = skip(tok, TK_RBRACE);
+            // Elided braces (6.7.9p20): for an array of arrays the list goes
+            // on into the remaining elements -- a struct member's initializer
+            // arrives here without braces of its own, and
+            // `struct T { char c[2][4]; } t = {"abc", "def"};` has to fill
+            // c[1] as well. A one-dimensional array is left alone: there the
+            // comma belongs to the member after it.
+            else if (is_array(init->ty->base)) {
+                for (int i = 1; i < init->ty->len && tok->kind == TK_COMMA; i++) {
+                    if (tok->next->kind != TK_STRLIT) break;
+                    Token *after = NULL;
+                    string_initializer(&after, tok->next, init->child[i]);
+                    tok = after;
+                }
+            }
             for (int i = 0; i < paren; i++) tok = skip(tok, TK_RPAREN);
             *rest = tok;
             return;
@@ -1848,7 +1895,7 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
     }
 
     if (ty->kind == TY_UNION && !init->expr) {
-        Member *mem = init->mem ? init->mem : ty->members;
+        Member *mem = init->mem ? init->mem : union_default_member(ty);
         InitDesg desg2 = {desg, 0, mem, NULL};
         return create_lvar_init(init->child[mem->idx], mem->ty, &desg2, tok);
     }
@@ -1879,7 +1926,7 @@ static bool is_fully_initialized(Initializer *init, Type *ty) {
                 if (!is_fully_initialized(init->child[mem->idx], mem->ty)) return false;
             return true;
         case TY_UNION: {
-            Member *mem = init->mem ? init->mem : ty->members;
+            Member *mem = init->mem ? init->mem : union_default_member(ty);
             if (!is_fully_initialized(init->child[mem->idx], mem->ty)) return false;
             return mem->ty->size == ty->size;
         }
@@ -1952,7 +1999,7 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
     }
 
     if (ty->kind == TY_UNION) {
-        Member *mem = init->mem ? init->mem : ty->members;
+        Member *mem = init->mem ? init->mem : union_default_member(ty);
         eval_gvar_data(init->child[mem->idx], mem->ty);
         init->is_inited |= init->child[mem->idx]->is_inited;
     }
@@ -6855,26 +6902,35 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
             Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec, &attrs);
 
             if (sclass & SC_TYPEDEF) {
-                Type *ty = declarator(&tok, tok, basety);
-                apply_postdecl_attrs(ty);
-                warn_cleanup_attrs(attrs);
-                strip_cleanup_attr(ty);
-                if (is_vm_type(ty)) note_vm_decl(ty->name, true);
-                if (tok->kind == TK_AS)
-                    error(tok,
-                          "illegal initializer (only variables can be "
-                          "initialized)");
-                push_namespace(scope, get_ident(ty->name), SYM_TYNAME, ty, ty->name);
-                // A variably modified typedef is where its bounds are
-                // evaluated: gcc and clang both capture the size there, and
-                // every later use of the type -- `sizeof(T)`, an object
-                // declaration's size -- reads the counter they wrote rather
-                // than running the bound again.
-                for (int i = 0; i < scope->vla_num; i++) {
-                    cur = cur->next = new_unary(ND_EXPR_STMT, scope->vla_expr[i], scope->vla_expr[i]->tok);
-                    add_type(cur);
+                // One typedef declaration may name several types: the whole
+                // list is walked, as declaration() does for the others. With
+                // the storage class written after the type specifiers --
+                // `struct S typedef *a, b;`, which 6.7.1 allows and
+                // C/0053/0416 uses -- both names are typedefs.
+                for (;;) {
+                    Type *ty = declarator(&tok, tok, basety);
+                    apply_postdecl_attrs(ty);
+                    warn_cleanup_attrs(attrs);
+                    strip_cleanup_attr(ty);
+                    if (is_vm_type(ty)) note_vm_decl(ty->name, true);
+                    if (tok->kind == TK_AS)
+                        error(tok,
+                              "illegal initializer (only variables can be "
+                              "initialized)");
+                    push_namespace(scope, get_ident(ty->name), SYM_TYNAME, ty, ty->name);
+                    // A variably modified typedef is where its bounds are
+                    // evaluated: gcc and clang both capture the size there, and
+                    // every later use of the type -- `sizeof(T)`, an object
+                    // declaration's size -- reads the counter they wrote rather
+                    // than running the bound again.
+                    for (int i = 0; i < scope->vla_num; i++) {
+                        cur = cur->next = new_unary(ND_EXPR_STMT, scope->vla_expr[i], scope->vla_expr[i]->tok);
+                        add_type(cur);
+                    }
+                    scope->vla_num = 0;
+                    if (tok->kind != TK_COMMA) break;
+                    tok = tok->next;
                 }
-                scope->vla_num = 0;
             } else {
                 cur = cur->next = declaration(&tok, tok, basety, sclass, align, funcspec, attrs);
             }
@@ -7114,6 +7170,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
     if (!fixed) enum_set_underlying(ty, dummy.next);
     complete_copies(ty);
     if (redefine) {
+        // The same rule for enumerations (see the struct case above).
         if (!is_compatible(ty, exist_ty)) {
             diag("error", tag, "conflicting redefinition of enum ‘enum %s’", str(tag->id));
             goto note;
@@ -7383,6 +7440,16 @@ static void layout_struct(Type *ty, bool is_union) {
         mem->idx = idx++;
 
         if (is_union) {
+            // Every member of a union starts at bit zero, so the offset the
+            // struct path computes below does not apply -- but a bit-field
+            // still needs the access unit it is read and written through.
+            // Leaving unit_ty null here is what killed the compiler on
+            // `union { int m:3; } u = { 1 };` (C/0013 in full).
+            if (mem->is_bitfield) {
+                mem->offset = 0;
+                mem->bit_offset = 0;
+                mem->unit_ty = get_unit_ty(min_bytes_for_bits(mem->bit_width), mem->ty->is_unsigned);
+            }
             offset = MAX(offset, mem->ty->size);
             continue;
         }
@@ -7410,6 +7477,14 @@ static void layout_struct(Type *ty, bool is_union) {
             // bits, so that the load stays within the record (a packed
             // field may cross the boundary of its declared type).
             mem->unit_ty = get_unit_ty(min_bytes_for_bits(mem->bit_offset + width), mem->ty->is_unsigned);
+            // A unit is one element, and it goes where the field's bits are.
+            // When that is not where the unit's own alignment would put it,
+            // the C layout and LLVM's natural one disagree -- `unsigned long
+            // m:29` after a `char` wants byte 1 where LLVM would use byte 4 --
+            // and the record has to be spelled packed, which is what keeps the
+            // initializer and the load at the same offset.
+            if (width > 0 && mem->unit_ty && mem->unit_ty->align > 1 && mem->offset % mem->unit_ty->align)
+                lowered = true;
             bitpos = s + width;
             offset = bitpos / 8;
         } else {
@@ -7462,6 +7537,21 @@ static Type *record_decl(Token **rest, Token *tok) {
     if (tag && tok->kind != TK_LBRACE) {
         *rest = tok;
         ns = find_tag(tag, true);
+        // 6.7.2.3p7: a tag and nothing else, inside a block, declares a *new*
+        // tag of the current scope and hides any outer one; the type is
+        // incomplete until this block completes it. C/0053/0440 declares
+        // `struct stag *p;` and only then `struct stag { char a; };`, and
+        // sizeof(*p) has to be 1. find_tag(tag, false) asks the current scope
+        // alone, which is exactly the condition.
+        if (ns && tok->kind == TK_SEMI && !is_file_scope() && !find_tag(tag, false) &&
+            ((ns->ty->kind == TY_UNION) == is_union)) {
+            ty = struct_type(is_union);
+            ty->size = -1;
+            ty->id = tag->id;
+            push_tag_namespace(tag->id, ty, tag);
+            ty_prepend_attrs(ty, rec_attrs);
+            return ty;
+        }
         if (ns) {
             ty = ns->ty;
             bool match = false;
@@ -7536,6 +7626,12 @@ static Type *record_decl(Token **rest, Token *tok) {
     complete_copies(ty);
 
     if (redefine) {
+        // C23 onward allows the same struct or union to be defined again with
+        // an identical definition (in C17 both references reject it; cxx
+        // targets N3685 and follows the newer rule in every -std=). Only a
+        // *conflicting* definition is an error, and the comparison that spots
+        // it must not assume a member has a name: an unnamed bit-field is a
+        // member like any other, and reading name->id there was a crash.
         if (!is_compatible(ty, exist_ty)) {
             diag("error", tag, "redefinition of struct or union ‘%s %s’", ty_kind, str(tag->id));
             goto note;
@@ -7927,7 +8023,10 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
     Attr *type_attrs = NULL;
     bool seen_declspec = false;
 
-    while (is_typename(tok, true) || is_attr_start(tok)) {
+    // Declaration specifiers may come in any order (6.7.1's grammar is
+    // right-recursive), so a storage class is accepted after a type
+    // specifier as well: `struct { int i; } typedef *p;` is C/0053/0416.
+    while (is_typename(tok, true) || is_attr_start(tok) || sc_table[tok->kind]) {
         Token *ty_tok = tok;
         if (is_attr_start(tok)) {
             Attr *list = tok->kind == TK_ATTR ? attr_list_gnu(&tok, tok) : attr_list_c23(&tok, tok);

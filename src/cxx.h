@@ -1412,6 +1412,7 @@ char *ext_attr(Type *ty);
 bool is_interchange(Type *ty);
 bool is_fpval(Type *ty);
 bool is_arith(Type *ty);
+Member *union_default_member(Type *ty);
 bool is_pointer(Type *ty);
 bool is_nullptr(Type *ty);
 bool is_null_constant(Node *node);

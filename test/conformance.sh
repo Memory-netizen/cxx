@@ -3175,6 +3175,474 @@ static report_fn usage_routine __attribute__((noreturn));
 int main(void) { return usage_routine == 0 ? 0 : 1; }
 EOF
 
+# --- elided braces through an array of arrays -------------------------
+# 6.7.9p20 lets the braces around an inner aggregate be left out, so a struct
+# member that is an array of arrays takes the rest of the list:
+#
+#     struct T { char c[2][4]; } t = {"abc", "def"};   /* c[1] too */
+#
+# The member's initializer arrives with no brace of its own and takes the
+# string path, which read one string and returned; the comma and "def" were
+# dropped at the struct level and c[1] stayed zero. The file-scope form goes
+# through the list path, which is why it always worked. A one-dimensional
+# member is left alone: there the comma belongs to the member after it.
+cat > "$tmp/elide.c" <<'EOF'
+#include <stdio.h>
+struct T { char c[2][4]; } t = {"abc", "def"};
+struct U { char c[2][4]; };
+struct U u = {{"abc", "def"}};
+struct P { char a[4]; char b[4]; } p = {"ab", "cd"};
+struct Q { char a[2][4]; char b[4]; } q = {"ab", "cd", "ef"};
+int main(void) {
+    printf("[%s][%s] [%s][%s] [%s][%s] [%s][%s][%s]\n", t.c[0], t.c[1], u.c[0], u.c[1], p.a, p.b,
+           q.a[0], q.a[1], q.b);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/elide" "$tmp/elide.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/elide")" = "[abc][def] [abc][def] [ab][cd] [ab][cd][ef]" ]; then
+    echo "testing elided braces through an array of arrays ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing elided braces through an array of arrays ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- an array of pointers is not a character array --------------------
+# `struct tag { char *s[2]; } s = {"abc", "def"};` initializes s[0] and s[1],
+# each a `char *`, from the string literals -- ordinary pointer initializers.
+# cxx saw a string in front of an array, took it for a character-array
+# initializer, found `char *` where it wanted `char`, and refused
+# C/0030/0067 with "array of inappropriate type initialized from string
+# constant". The branch is now entered only when the string belongs to the
+# array; `int a[3] = "abc"` still errors, as both references do.
+cat > "$tmp/ptrarr.c" <<'EOF'
+#include <stdio.h>
+char *g[2] = {"abc", "def"};
+struct tag { char *s[2]; } s = {"abc", "def"};
+struct t2 { char c[2][4]; } t = {"abc", "def"};
+int main(void) { printf("%s %s %s %s %s\n", g[0], g[1], s.s[0], s.s[1], t.c[0]); return 0; }
+EOF
+if "$compiler" -w -o "$tmp/ptrarr" "$tmp/ptrarr.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/ptrarr")" = "abc def abc def abc" ] &&
+   ! "$compiler" -w -c -o "$tmp/ptrarr.o" - <<'EOF' > "$tmp/log2" 2>&1
+int a[3] = "abc";
+EOF
+then
+    echo "testing an array of pointers initialized from strings ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing an array of pointers initialized from strings ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a tag-only declaration inside a block ----------------------------
+# 6.7.2.3p7: `struct S;` -- a tag and nothing else -- inside a block declares
+# a *new* tag of that scope and hides any outer one; the type is incomplete
+# until the block completes it, so a pointer declared in between completes to
+# the inner type. C/0053/0440 declares `struct stag *p;` and only then
+# `struct stag { char a; };`, and requires sizeof(*p) == 1 while sizeof(st),
+# declared before the tag-only line, stays 4.
+cat > "$tmp/taghide.c" <<'EOF'
+#include <stdio.h>
+struct stag { int a; };
+struct stag *q;
+int f(void) { return sizeof(struct stag) == 4 && sizeof(*q) == 4; }
+int main(void) {
+    struct stag st;
+    struct stag;
+    struct stag *p;
+    struct stag { char a; };
+    printf("%d %d %d %d\n", (int)sizeof(st), (int)sizeof(struct stag), (int)sizeof(*p), f());
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/taghide" "$tmp/taghide.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/taghide")" = "4 1 1 1" ]; then
+    echo "testing a tag-only declaration inside a block ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a tag-only declaration inside a block ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- #line with macro arguments ---------------------------------------
+# 6.10.4 macro-replaces the whole directive line before the line number is
+# read, so `#define int1 200` with `#line int1` names line 200, and a macro
+# file name works too. C/0048/0085 writes both; cxx asked for a pp-number and
+# refused it. The expansion goes through expand_macro(), which is an
+# accumulator -- it returns the tail of the chain it built, so the dummy head
+# is read back as `dummy.next` (taking the return value for the head is right
+# for a one-token line and wrong for `#line 300 "x.c"`).
+cat > "$tmp/linemac.c" <<'EOF'
+#include <stdio.h>
+#define N 42
+#define F "from_macro.c"
+#line N
+int a = __LINE__;
+#line N F
+int b = __LINE__;
+const char *f = __FILE__;
+#line 300 "renamed.c"
+int c = __LINE__;
+int main(void) { printf("%d %d %s %d\n", a, b, f, c); return 0; }
+EOF
+if "$compiler" -w -o "$tmp/linemac" "$tmp/linemac.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/linemac")" = "42 42 from_macro.c 300" ]; then
+    echo "testing #line with macro arguments ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing #line with macro arguments ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a block-scope extern and the file-scope definition ----------------
+# `extern int a;` inside a function declares the file-scope object, and the
+# `int a;` below defines it. Two symbols carry the name, the declaration comes
+# first in the module's list, and the emitter's "already emitted" set recorded
+# its name -- so the definition was dropped, the unit defined nothing, and the
+# link failed with `undefined reference to 'a'` (32 tests in the full run).
+# LLVM allows a global to be declared or defined in a module, not both, so the
+# second fix was to collect the defined names first and print no declaration of
+# one. Same for functions: a prototype before the body.
+cat > "$tmp/tentative.c" <<'EOF'
+#include <stdio.h>
+int f(void) { extern int a; a = 10; return a; }
+int a;
+int g(void);
+int g(void) { return a; }
+int main(void) { printf("%d %d\n", f(), g()); return 0; }
+EOF
+if "$compiler" -w -o "$tmp/tentative" "$tmp/tentative.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/tentative")" = "10 10" ]; then
+    echo "testing a block-scope extern and the file-scope definition ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a block-scope extern and the file-scope definition ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a long double compared against a constant -------------------------
+# An integer immediate used as a floating constant was printed as a double bit
+# pattern whatever type it was used with: `fcmp oeq x86_fp80 %x,
+# 0x0000000000000000` is "floating point constant does not have type
+# 'x86_fp80'", and LLVM refuses the module. That was the largest real defect
+# class in the full run (61 tests). Both printing paths now spell the literal
+# for the type the instruction uses, and an immediate in a wider instruction
+# gets that instruction's type.
+cat > "$tmp/ldcmp.c" <<'EOF'
+#include <stdio.h>
+int main(void) {
+    long double a = 0.0L, b = 1.5L, c = 128.0L, d = -0.0L;
+    double x = 0.0;
+    printf("%d %d %d %d %d %d\n", a == 0, a == 0.0L, b == 1.5, c == 128, b == 2.5, x == 0);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/ldcmp" "$tmp/ldcmp.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/ldcmp")" = "1 1 1 1 0 1" ]; then
+    echo "testing a long double compared against a constant ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a long double compared against a constant ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- repeating an identical definition (C23 onward) --------------------
+# C23 allows the same struct, union or enum to be defined again with an
+# identical definition; only a conflicting one is an error. In C17 both
+# references reject even the identical one, and cxx follows its target
+# standard (N3685) in every -std=, as it does for `()` and implicit
+# declarations. The comparison that spots a conflict must not assume a member
+# has a name -- an unnamed bit-field does not, and reading name->id there was
+# a segmentation fault.
+cat > "$tmp/redef.c" <<'EOF'
+#include <stdio.h>
+struct Same { unsigned char :0; unsigned char :0; unsigned char m3; };
+struct Same { unsigned char :0; unsigned char :0; unsigned char m3; };
+union USame { unsigned char :0; int m; };
+union USame { unsigned char :0; int m; };
+enum ESame { E1, E2 };
+enum ESame { E1, E2 };
+struct Same v = { 1 };
+union USame u = { 5 };
+int main(void) { printf("%d %d %d\n", v.m3, u.m, (int)E2); return 0; }
+EOF
+cat > "$tmp/redefbad.c" <<'EOF'
+struct Diff { int x; };
+struct Diff { long x; };
+EOF
+if "$compiler" -w -o "$tmp/redef" "$tmp/redef.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/redef")" = "1 5 1" ] &&
+   ! "$compiler" -w -c -o "$tmp/redefbad.o" "$tmp/redefbad.c" > "$tmp/log2" 2>&1 &&
+   grep -q 'redefinition' "$tmp/log2"; then
+    echo "testing an identical repeated definition ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing an identical repeated definition ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a bit-field straddling an element boundary -----------------------
+# `m3:3` starting at bit 6 reaches bit 8, so the byte holding its last bit is
+# not covered by the element the cursor had already passed. The element a
+# member owns is the bytes its *bits* occupy -- not its access unit, which for
+# `unsigned long m2:29` after `unsigned char m1:5` is eight bytes while the
+# bits take five. Getting that wrong either loses the field's last bits or
+# swallows the member that follows. With it right, C/0013's 676 tests all
+# match the reference. Each shape is checked in a translation unit of its own:
+# put together, clang and gcc disagree with each other about the result.
+cat > "$tmp/straddle.c" <<'EOF'
+#include <stdio.h>
+struct D { unsigned long m1:3; unsigned long :3; unsigned long m3:3; };
+struct D d[2] = {{ 1, 2 },{ 3, 4 }};
+int main(void) {
+    printf("%lu %lu %lu %lu\n", d[0].m1, d[0].m3, d[1].m1, d[1].m3);
+    return 0;
+}
+EOF
+cat > "$tmp/straddle2.c" <<'EOF'
+#include <stdio.h>
+struct S { unsigned char m1:5; unsigned long m2:29; unsigned char m3; };
+struct S s = { 1, 1000, 7 };
+int main(void) {
+    struct S loc = { 2, 2000, 9 };
+    printf("%lu %lu %lu | %lu %lu %lu\n", (unsigned long)s.m1, (unsigned long)s.m2, (unsigned long)s.m3,
+           (unsigned long)loc.m1, (unsigned long)loc.m2, (unsigned long)loc.m3);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/straddle" "$tmp/straddle.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/straddle")" = "1 2 3 4" ] &&
+   "$compiler" -w -o "$tmp/straddle2" "$tmp/straddle2.c" >> "$tmp/log" 2>&1 &&
+   [ "$("$tmp/straddle2")" = "1 1000 7 | 2 2000 9" ]; then
+    echo "testing a bit-field straddling an element boundary ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a bit-field straddling an element boundary ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a struct around a punned union -----------------------------------
+# The value of a member that is written punned makes every containing type
+# inline as well, and the *type* printer has to agree with the value printer.
+# print_init_ty()'s union branch kept the older test, so for
+#
+#     struct HOLD { int tag; union OUT o; };
+#     struct HOLD h = { 7, { { 1 } } };
+#
+# the type came out `{ i32, [4 x i8], %union.OUT }` while the value was
+# `{ { i8, [7 x i8] } } { ... }`: "element 2 of struct initializer doesn't match
+# struct element type". With both printers agreeing, C/0013 reaches 671 of 676
+# with no compile failure left.
+cat > "$tmp/holdpunned.c" <<'EOF'
+#include <stdio.h>
+union SUB { unsigned char m1; unsigned long m2; };
+union MID { unsigned char c1; union SUB s; };
+union OUT { unsigned long :0; union SUB m2; };
+struct HOLD { int tag; union OUT o; };
+struct DEEP { union OUT a; int b; union MID c; };
+union OUT  x = { { 1 } };
+union MID  y = { { 1 } };
+struct HOLD h = { 7, { { 1 } } };
+struct DEEP d = { { { 1 } }, 5, { { 1 } } };
+int main(void) {
+    union OUT loc = { { 2 } };
+    struct HOLD hl = { 3, { { 4 } } };
+    printf("%d %d | %d | %d %d | %d %d | %d | %d %d\n",
+           x.m2.m1, (int)x.m2.m2, y.s.m1, h.tag, h.o.m2.m1, d.a.m2.m1, d.b, d.c.s.m1,
+           loc.m2.m1, hl.tag, hl.o.m2.m1);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/holdpunned" "$tmp/holdpunned.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/holdpunned")" = "1 1 | 1 | 7 1 | 1 5 | 1 | 2 3" ]; then
+    echo "testing a struct around a punned union ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a struct around a punned union ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a union punned one level down ------------------------------------
+# dump_init()'s union branch decided the *type* spelling with `mem != canon`,
+# while an aggregate member's *value* is written by dump_init(child, ...),
+# which makes the same decision one level down. For
+#
+#     union SUB { unsigned char m1; unsigned long m2; };   /* canon: m2 */
+#     union OUT { unsigned long :0; union SUB m2; };
+#     union OUT x = { { 1 } };                             /* names SUB's m1 */
+#
+# SUB's image is the punned form, so OUT's element type has to be spelled that
+# way too; OUT's prefix stayed `%union.OUT` and LLVM answered "element 0 of
+# struct initializer doesn't match struct element type". One predicate now
+# decides it for all three printers. C/0013 went from 663 to 667 passing and
+# its compile failures from 8 to 4.
+cat > "$tmp/punned.c" <<'EOF'
+#include <stdio.h>
+union SUB { unsigned char m1; unsigned long m2; };
+union MID { unsigned char c1; union SUB s; };
+union OUT { unsigned long :0; union SUB m2; };
+union OUT x = { { 1 } };
+union MID y = { { 1 } };
+int main(void) {
+    union OUT loc = { { 2 } };
+    printf("%d %d | %d %d | %d\n", x.m2.m1, (int)x.m2.m2, y.s.m1, (int)y.s.m2, loc.m2.m1);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/punned" "$tmp/punned.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/punned")" = "1 1 | 1 1 | 2" ]; then
+    echo "testing a union punned one level down ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a union punned one level down ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- unnamed members in front of a braced initializer ------------------
+# `{ 1 }` does not go through struct_initializer2(): initializer2() sends a
+# braced initializer to struct_initializer1(), which had the same one-step skip
+# that R83b fixed on the unbraced path only. With two unnamed members in front,
+# the value went into the second of them and the member after it kept zero:
+#
+#     struct { unsigned char :0; unsigned char :0; unsigned char m3; } x = { 1 };
+#
+# A union's initializer names its first *named* member (6.7.9p9), so it skips
+# unnamed ones too. C/0013 went from 501 to 663 passing on this.
+cat > "$tmp/skipunnamed.c" <<'EOF'
+#include <stdio.h>
+struct L0 { unsigned char :0; unsigned char m3; } l0 = { 1 };
+struct L2 { unsigned char :0; unsigned char :0; unsigned char m3; } l2 = { 1 };
+struct L3 { unsigned char :0; unsigned char :3; unsigned char m3; } l3 = { 1 };
+struct L4 { unsigned char :3; unsigned char :0; unsigned char m3; } l4 = { 1 };
+struct L5 { unsigned char :0; unsigned char :0; unsigned char :0; unsigned char m3; } l5 = { 1 };
+struct M0 { unsigned char m1; unsigned char :0; unsigned char :0; unsigned char m3; } m0 = { 1, 2 };
+union  U0 { unsigned char :0; int m; } u0 = { 7 };
+union  U1 { unsigned long :0; unsigned long m:3; } u1 = { 5 };
+int main(void) {
+    struct L2 loc = { 9 };
+    printf("%d %d %d %d %d | %d %d | %d %d | %d\n",
+           l0.m3, l2.m3, l3.m3, l4.m3, l5.m3, m0.m1, m0.m3, u0.m, (int)u1.m, loc.m3);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/skipunnamed" "$tmp/skipunnamed.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/skipunnamed")" = "1 1 1 1 1 | 1 2 | 7 5 | 9" ]; then
+    echo "testing unnamed members before a braced initializer ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing unnamed members before a braced initializer ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a bit-field unit that lands off its own alignment ----------------
+# cxx's elements are the access units, laid where the bits are; LLVM puts an
+# element of a `{ ... }` type where its alignment asks. For
+#
+#     struct E { unsigned char m1; unsigned long m2:29; unsigned char m3; };
+#
+# the 29-bit field's unit is a four-byte element at byte 1, where LLVM would
+# place an i32 at byte 4 -- so the initializer wrote one place and the load
+# read another, and `e.m2` came out 2 << 24. Such a record now sets
+# layout_packed, which spells the type `<{ ... }>` (R64's mechanism) and puts
+# every element where it is written. C/0013 went from 425 to 501 passing.
+cat > "$tmp/unitfx.c" <<'EOF'
+#include <stdio.h>
+struct E { unsigned char m1; unsigned long m2:29; unsigned char m3; } e = { 1, 2, 3 };
+struct W { unsigned char m1; unsigned long   :29; unsigned char m3; } w = { 1, 2 };
+struct L { unsigned char m1; unsigned short m2:9;  unsigned char m3; } l = { 1, 300, 3 };
+int main(void) {
+    struct E le = { 4, 5, 6 };
+    printf("%d %d %d | %d %d | %d %d %d | %d %d %d | %zu %zu\n",
+           e.m1, (int)e.m2, e.m3, w.m1, w.m3, l.m1, (int)l.m2, l.m3,
+           le.m1, (int)le.m2, le.m3, sizeof(struct E), sizeof(struct L));
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/unitfx" "$tmp/unitfx.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/unitfx")" = "1 2 3 | 1 2 | 1 300 3 | 4 5 6 | 8 6" ]; then
+    echo "testing a bit-field unit off its own alignment ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a bit-field unit off its own alignment ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a union's bit-field member ---------------------------------------
+# Every member of a union starts at bit zero, and layout_struct() says so with
+# an early `continue` -- which used to skip the only place that sets
+# mem->unit_ty. A bit-field member of a union then reached the loader, the
+# storer and the image printer with a null access unit and the compiler died
+# (`union { int m:3; } u = { 1 };`). This was the whole of C/0013's compile
+# failures: 32 of them, down to 2.
+cat > "$tmp/unionbf.c" <<'EOF'
+#include <stdio.h>
+union U1 { unsigned long long m:3; } u1 = { 5 };
+union U2 { int m:3; } u2 = { 3 };
+union U3 { unsigned char m:3; unsigned char c; } u3 = { .c = 0xAB };
+union U4 { int m:3; int n:5; } u4 = { .n = 17 };
+union U5 { unsigned short m:9; unsigned char c; } u5 = { .c = 0x7F };
+int main(void) {
+    union U2 local = { -2 };
+    printf("%d %d %d %d %d %d | %zu %zu %zu\n", (int)u1.m, u2.m, u3.c, u4.n, u5.c, local.m,
+           sizeof(union U1), sizeof(union U2), sizeof(union U5));
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/unionbf" "$tmp/unionbf.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/unionbf")" = "5 3 171 -15 127 -2 | 8 4 2" ]; then
+    echo "testing a union's bit-field member ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a union's bit-field member ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a zero-width bit-field owns no element ----------------------------
+# The layout gives `unsigned char :0;` the offset of the member that follows,
+# and that member is the one the element belongs to. The emitter treated the
+# field as an element of its own, moved its cursor past the byte, and then
+# skipped the real member (`off < pos`) -- so the value and the byte were both
+# lost, and the emitted type grew an element the object does not have. The
+# suite's C/0013 is 676 files of this shape; 60 of its 303 output differences
+# went away with this.
+cat > "$tmp/zerowidth.c" <<'EOF'
+#include <stdio.h>
+struct A { unsigned char m1; unsigned char   :0; unsigned char m3; } a = { 1, 2 };
+struct B { unsigned char m1; unsigned char   :3; unsigned char m3; } b = { 1, 2 };
+struct D { unsigned char m1; unsigned long long:0; unsigned char m3; } d = { 1, 2 };
+struct Z { unsigned char m1; unsigned char   :0; };
+struct Z z = { 7 };
+int main(void) {
+    printf("%d %d | %d %d | %d %d | %zu %d\n",
+           a.m1, a.m3, b.m1, b.m3, d.m1, d.m3, sizeof(struct Z), z.m1);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/zerowidth" "$tmp/zerowidth.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/zerowidth")" = "1 2 | 1 2 | 1 2 | 1 7" ]; then
+    echo "testing a zero-width bit-field owns no element ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a zero-width bit-field owns no element ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
 # --- the input half of a '+' asm operand ------------------------------
 # GCC's `+` operand is one operand; LLVM's constraint string needs two. Where
 # the constraint names nothing but memory the input half names the same memory
@@ -4085,19 +4553,22 @@ else
     n_fail=$((n_fail + 1))
 fi
 
-# The qualifiers below a pointer still have to match.
+# A qualifier below a pointer is diagnosed, and converted anyway -- clang's
+# answer ("assigning to 'const int **' from 'int **' discards qualifiers"),
+# where gcc refuses. C/0137's five tests are written for clang's answer, and
+# 6.5.16.1p1 wants pointers to qualified or unqualified versions of compatible
+# types, which this pair is once the qualifier is set aside.
 cat > "$tmp/pointee_bad.c" <<'EOF'
 int g(int **p) { const int **q = p; (void)q; return 0; }
+int h(void) { volatile long long **a; long long *b = 0; a = &b; return **a != 0; }
 EOF
-if "$compiler" -w -c -o "$tmp/pointee_bad.o" "$tmp/pointee_bad.c" > "$tmp/log" 2>&1; then
-    echo "testing the qualifier trap below a pointer ... FAILED (accepted)"
-    n_fail=$((n_fail + 1))
-elif grep -q 'incompatible types when initializing' "$tmp/log"; then
+if "$compiler" -c -o "$tmp/pointee_bad.o" "$tmp/pointee_bad.c" > "$tmp/log" 2>&1 &&
+   grep -q 'discards qualifiers' "$tmp/log"; then
     echo "testing the qualifier trap below a pointer ... passed"
     n_pass=$((n_pass + 1))
 else
-    echo "testing the qualifier trap below a pointer ... FAILED (wrong message)"
-    sed 's/^/    /' "$tmp/log" | head -3
+    echo "testing the qualifier trap below a pointer ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
     n_fail=$((n_fail + 1))
 fi
 

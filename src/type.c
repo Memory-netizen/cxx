@@ -264,6 +264,16 @@ int64_t norm_bits(int64_t v, int width, bool is_unsigned) {
 
 bool is_arith(Type *ty) { return is_integer(ty) || is_flonum(ty); }
 
+// The member a union initializer names when it names none: the first *named*
+// one, because an unnamed bit-field takes no initializer and holds no value of
+// its own (6.7.9p9). A union of nothing but unnamed bit-fields has no named
+// member at all, and its first member is then the only thing to fall back to.
+Member *union_default_member(Type *ty) {
+    for (Member *m = ty->members; m; m = m->next)
+        if (m->name) return m;
+    return ty->members;
+}
+
 bool is_pointer(Type *ty) { return ty->kind == TY_PTR; }
 
 bool is_nullptr(Type *ty) { return ty->kind == TY_NULLPTR; }
@@ -660,7 +670,12 @@ bool is_compatible(Type *t1, Type *t2) {
             Member *m2 = t2->members;
             push_cmp(t1, t2);
             for (; m1 && m2; m1 = m1->next, m2 = m2->next) {
-                if (m1->name->id != m2->name->id) return false;
+                // A member may have no name: an unnamed bit-field, or the
+                // anonymous member a struct or union declaration gives. Two
+                // of those agree, and neither agrees with a named member.
+                uint32_t n1 = m1->name ? m1->name->id : 0;
+                uint32_t n2 = m2->name ? m2->name->id : 0;
+                if (n1 != n2) return false;
                 if (m1->is_align != m2->is_align) return false;
                 if (m1->align != m2->align) return false;
                 // The last member of a record with a flexible array member
@@ -891,6 +906,20 @@ static Type *pointee_unqual(Type *ty) {
 // The qualifiers of that same top level, for the superset test.
 static int pointee_qual(Type *ty) { return is_array(ty) ? ty->base->qual : ty->qual; }
 
+// Compatible once every qualifier is ignored, at every pointer level. A
+// qualifier buried under a pointer -- `volatile long long **` against
+// `long long **`, or the canonical `int **` against `const int **` -- is a
+// diagnostic in clang and a refusal in gcc; cxx takes clang's answer, because
+// the suite is written for it (5 tests in C/0137 read "incompatible types when
+// assigning" where clang says "discards qualifiers" and converts).
+static bool agrees_ignoring_qualifiers(Type *a, Type *b) {
+    a = type_unqual(a);
+    b = type_unqual(b);
+    if (a->kind != b->kind) return false;
+    if (is_pointer(a) && is_pointer(b)) return agrees_ignoring_qualifiers(a->base, b->base);
+    return is_compatible(a, b);
+}
+
 bool is_assignable(Type *dst, Node *src, int ctx) {
     add_type(src);
     Type *src_ty = src->ty;
@@ -910,10 +939,14 @@ bool is_assignable(Type *dst, Node *src, int ctx) {
     // references report that and compile it anyway, so it is a diagnostic
     // here too rather than a refusal.
     if (is_pointer(dst) && is_pointer(src_ty)) {
-        bool agrees = is_compatible(pointee_unqual(dst->base), pointee_unqual(src_ty->base));
+        bool agree = is_compatible(pointee_unqual(dst->base), pointee_unqual(src_ty->base));
+        // Qualifiers at every level are ignored for the conversion itself, so
+        // a difference buried under a pointer converts with a diagnostic
+        // rather than a refusal -- see agrees_ignoring_qualifiers().
+        bool agrees = agree || agrees_ignoring_qualifiers(pointee_unqual(dst->base), pointee_unqual(src_ty->base));
         bool void_pair = (is_objptr(dst) && is_voidptr(src_ty)) || (is_objptr(src_ty) && is_voidptr(dst));
         if (agrees || void_pair) {
-            if (!BIT_SUPERSET(pointee_qual(dst->base), pointee_qual(src_ty->base)))
+            if (!agree || !BIT_SUPERSET(pointee_qual(dst->base), pointee_qual(src_ty->base)))
                 warning(WG_DISCARDED_QUALIFIERS, src->tok, "%s discards qualifiers", asop_msg[ctx]);
             return true;
         }
