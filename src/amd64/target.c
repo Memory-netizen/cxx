@@ -479,6 +479,7 @@ Target T_amd64 = {
     .va_arg_ops_for_mixed = amd64_va_arg_mixed,
     .abi_param_slots = amd64_param_slots,
     .agg_byval_param = true,
+    .array_align16 = true,
     // Six general-purpose and eight SSE registers for arguments (the psABI's
     // counts). A variadic aggregate is passed in the overflow area unless all
     // of its eightbytes fit in the registers still free.

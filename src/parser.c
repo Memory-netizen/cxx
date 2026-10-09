@@ -29,6 +29,8 @@ static Type *decl_suffix(Token **rest, Token *tok, Type *ty, bool is_param);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
 static void parse_asm_name(Token **rest, Token *tok, char **name_out);
 static void set_asm_name(Sym *var, char *name);
+static void apply_alias_attr(Sym *var, Attr *attrs);
+static uint32_t new_unique_varname(uint32_t id);
 static Node *declaration(Token **rest, Token *tok, Type *ty, SClass sclass, int align, int funcspec, Attr *attrs);
 
 static void attr_decl_apply(Attr *attrs, int *funcspec, int *align, bool gnu_only);
@@ -291,6 +293,60 @@ static Node *leave_scope(Token *tok) {
     Node *node = scope_sp_release(scope, tok);
     scope = scope->next;
     return node;
+}
+
+// [GNU] __label__ declares labels whose scope is the block they appear in, so
+// that two blocks -- or two expansions of a macro carrying one in a statement
+// expression -- may each define the same name. Labels are resolved through one
+// function-wide list of interned ids, so a declared name is given an id of its
+// own here, mangled once per declaration: the label statement, the goto and
+// the labels-as-values form all ask this function for the id, and everything
+// downstream (the duplicate check, goto resolution, block assignment) keeps
+// working on ids that are already distinct.
+//
+// An entry is live while the scope that declared it is on the chain the parser
+// is inside; a lookup from outside the block finds nothing, which is what the
+// scope rule means. Entries whose scope has ended are dropped as they are met.
+static struct {
+    Scope *scp;
+    uint32_t name;
+    uint32_t id;
+} *local_labels;
+static uint32_t local_label_num;
+static int local_label_seq;
+
+static uint32_t label_id_of(uint32_t name) {
+    for (uint32_t i = local_label_num; i-- > 0;) {
+        if (local_labels[i].name != name) continue;
+        for (Scope *s = scope; s; s = s->next)
+            if (s == local_labels[i].scp) return local_labels[i].id;
+        local_labels[i] = local_labels[--local_label_num];
+    }
+    return name;
+}
+
+// __label__ Ident ("," Ident)* ";"
+static void label_decl(Token **rest, Token *tok) {
+    tok = tok->next;
+    for (;;) {
+        if (tok->kind != TK_IDENT) error(tok, "expected an identifier in ‘__label__’");
+        if (!local_labels)
+            local_labels = vnew(4, sizeof(local_labels[0]));
+        else
+            local_labels = vgrow(local_labels, local_label_num + 1);
+        local_labels[local_label_num].scp = scope;
+        local_labels[local_label_num].name = tok->id;
+        // An id of its own per declaration. new_unique_varname() is no use
+        // here: it looks the id up among the global symbols and hands it back
+        // unchanged when it finds none, which is what a label always is.
+        char *mangled = format("%s.%d", str(tok->id), local_label_seq++);
+        local_labels[local_label_num].id = intern(mangled, strlen(mangled));
+        local_label_num++;
+        tok = tok->next;
+        if (tok->kind != TK_COMMA) break;
+        tok = tok->next;
+    }
+    *rest = skip(tok, TK_SEMI);
 }
 
 static bool is_file_scope(void) { return scope == file_scope; }
@@ -679,6 +735,31 @@ static Sym *new_var(uint32_t id, Type *ty) {
 // The label is parsed before the symbol exists (it can precede a
 // function *definition*, whose Sym is only created inside that branch),
 // so it is returned through *name_out for the caller to attach.
+// GNU's other way of giving a symbol a name of its own:
+//
+//     static void foo_impl(void) __attribute__((alias("foo")));
+//
+// The declared name is another name for an object or function defined in this
+// translation unit, and cxx has exactly that notion already -- a symbol whose C
+// identifier differs from the name it is emitted under -- so the alias is
+// attached as the emitted name, the slot `__asm__("foo")` fills. A call to the
+// alias then refers to the target's definition, and the printer's rule of one
+// entry per object-file name leaves a single definition in the module.
+//
+// The string is read the way the asm name is (see parse_asm_name): adjacent
+// literals are already one TK_STRLIT, and str(tok->id) is the decoded content.
+static void apply_alias_attr(Sym *var, Attr *attrs) {
+    for (Attr *a = attrs; a; a = a->next) {
+        if (!a->info || a->info->ns != ATTR_NS_GNU || strcmp(a->info->name, "alias")) continue;
+        Token *arg = a->args ? a->args->next : NULL;
+        if (!arg || arg->kind != TK_STRLIT) error(a->tok, "‘alias’ attribute requires a string literal");
+        if (arg->enc_prefix != PREFIX_NONE) error(arg, "expected a plain string literal in ‘alias’");
+        if (!str(arg->id)[0]) error(arg, "expected non-empty string in ‘alias’");
+        set_asm_name(var, str(arg->id));
+        return;
+    }
+}
+
 static void parse_asm_name(Token **rest, Token *tok, char **name_out) {
     *name_out = NULL;
     if (tok->kind != TK_ASM) {
@@ -2063,6 +2144,8 @@ BuiltinDef builtin_defs[NUM_BUILTINFN] = {
     // The member designator is not an expression, so the shape comes from
     // parser code; the value is a constant, so irgen never sees it.
     [BUILTIN_OFFSETOF] = {"__builtin_offsetof", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
+    [BUILTIN_SYNC_LOCK_RELEASE] = {"__sync_lock_release", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
+                                   0},
     [BUILTIN_SYNC_SYNCHRONIZE] = {"__sync_synchronize", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL,
                                   0},
     [BUILTIN_VA_END] = {"__builtin_va_end", BCLASS_SPECIAL, NULL, BT_NONE, BT_NONE, false, -1, 0, 0, NULL, 0},
@@ -2231,6 +2314,36 @@ static struct {
     {"__builtin_smulll_overflow", BUILTIN_MUL_OVERFLOW},
 };
 
+// GCC's older atomics. Each is one of the operations above with the memory
+// order written into the name instead of passed as an argument: the
+// lock_test_and_set acquires, the lock_release releases, and the fetch_and_*
+// family is a full barrier. The parser reads the order from here and skips the
+// argument it would otherwise parse.
+//
+// The *_and_fetch forms are not here (they yield the new value, where the
+// atomicrmw node yields the old, and the operand has to be added back --
+// scaled when the object is a pointer), nor are the two compare-and-swap
+// forms (they take the old value by value), nor nand (no A_* opcode).
+static struct {
+    char *name;
+    int kind;
+    int order;
+} sync_aliases[] = {
+    {"__sync_lock_test_and_set", ATOMIC_EXCHANGE, MEM_ORDER_ACQUIRE},
+    {"__sync_fetch_and_add", ATOMIC_FETCH_ADD, MEM_ORDER_SEQ_CST},
+    {"__sync_fetch_and_sub", ATOMIC_FETCH_SUB, MEM_ORDER_SEQ_CST},
+    {"__sync_fetch_and_and", ATOMIC_FETCH_AND, MEM_ORDER_SEQ_CST},
+    {"__sync_fetch_and_or", ATOMIC_FETCH_OR, MEM_ORDER_SEQ_CST},
+    {"__sync_fetch_and_xor", ATOMIC_FETCH_XOR, MEM_ORDER_SEQ_CST},
+};
+
+// The implied memory order when `id` names one of them, -1 otherwise.
+static int sync_alias_order(uint32_t id) {
+    for (size_t i = 0; i < sizeof(sync_aliases) / sizeof(sync_aliases[0]); ++i)
+        if (intern(sync_aliases[i].name, strlen(sync_aliases[i].name)) == id) return sync_aliases[i].order;
+    return -1;
+}
+
 static size_t builtin_find(uint32_t id) {
     intern_builtin_ids();
     for (size_t i = 0; i < builtin_row_count; ++i)
@@ -2239,6 +2352,11 @@ static size_t builtin_find(uint32_t id) {
     for (size_t i = 0; i < sizeof(builtin_aliases) / sizeof(builtin_aliases[0]); ++i) {
         if (!alias_ids[i]) alias_ids[i] = intern(builtin_aliases[i].name, strlen(builtin_aliases[i].name));
         if (alias_ids[i] == id) return (size_t)builtin_aliases[i].kind;
+    }
+    static uint32_t sync_ids[sizeof(sync_aliases) / sizeof(sync_aliases[0])];
+    for (size_t i = 0; i < sizeof(sync_aliases) / sizeof(sync_aliases[0]); ++i) {
+        if (!sync_ids[i]) sync_ids[i] = intern(sync_aliases[i].name, strlen(sync_aliases[i].name));
+        if (sync_ids[i] == id) return (size_t)sync_aliases[i].kind;
     }
     return builtin_row_count;  // not a builtin
 }
@@ -2253,6 +2371,7 @@ static bool is_gcc_atomic_spelling(uint32_t id, int kind) {
         return true;
     for (size_t i = 0; i < sizeof(builtin_aliases) / sizeof(builtin_aliases[0]); ++i)
         if (intern(builtin_aliases[i].name, strlen(builtin_aliases[i].name)) == id) return true;
+    if (sync_alias_order(id) >= 0) return true;
     return id == intern("__atomic_compare_exchange_n", 27);
 }
 
@@ -2353,6 +2472,9 @@ static int armw_op_of[] = {
 // which every one of these builtins calls before it parses anything that
 // could nest another call.
 static bool gcc_atomic_args;
+// The implied memory order of a __sync_* form, or -1 for everything else. Set
+// once per builtin call, like the flag above.
+static int sync_order;
 
 static Node *atomic_object(Token **tok, Token *start) {
     Node *object = assign(tok, *tok);
@@ -2743,6 +2865,15 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
     bool is_weak = false;
     bool is_signal = false;
     gcc_atomic_args = is_gcc_atomic_spelling(tok->id, kind);
+    sync_order = sync_alias_order(tok->id);
+    // Read once, before the arguments are parsed: an argument may hold another
+    // builtin call, and that one sets this flag for itself.
+    int this_sync_order = sync_order;
+    // The __sync_* forms address a plain object, exactly as the __atomic_*
+    // spellings do. __sync_lock_release is a row of its own rather than an
+    // alias -- its argument list is not one of the operations above -- so it
+    // is named here too.
+    if (sync_order >= 0 || kind == BUILTIN_SYNC_LOCK_RELEASE) gcc_atomic_args = true;
     switch (kind) {
         case BUILTIN_TYPES_COMPATIBLE_P: {
             tok = skip(tok->next, TK_LPAREN);
@@ -2949,6 +3080,24 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             alloc->rhs = new_ulong(align, tok);
             return alloc;
         }
+        case BUILTIN_SYNC_LOCK_RELEASE: {
+            // __sync_lock_release(object): gcc defines it as storing zero with
+            // release semantics -- the other half of the lock that
+            // __sync_lock_test_and_set takes. One argument, no order.
+            tok = skip(tok->next, TK_LPAREN);
+            Node *object = atomic_object(&tok, start);
+            // gcc and clang both tolerate further arguments here as well as on
+            // __sync_lock_test_and_set (the Fujitsu suite passes one to each).
+            while (tok->kind == TK_COMMA) assign(&tok, tok->next);
+            *rest = skip(tok, TK_RPAREN);
+
+            Sym *zero_sym = new_lvar(id_anon, type_unqual(object->ty->base));
+            Node *zero_init = new_binary(ND_INIT, new_var_node(zero_sym, start), new_num(0, start), tok);
+            Node *target = new_unary(ND_DEREF, object, tok);
+            Node *store = new_binary(ND_AS, target, new_var_node(zero_sym, start), tok);
+            store->mem_order = MEM_ORDER_RELEASE + 1;
+            return new_binary(ND_COMMA, zero_init, store, tok);
+        }
         case ATOMIC_STORE:
         case ATOMIC_STORE_GENERIC: {
             // temp = desired; *object = temp with the given order.
@@ -3035,9 +3184,22 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             new_imcast(&operand, operand_ty);
             if (is_addsub && is_pointer(value_ty))
                 operand = new_binary(ND_MUL, operand, new_num(value_ty->base->size, operand->tok), operand->tok);
-            tok = skip(tok, TK_COMMA);
-            int order = atomic_order(&tok, MO_ATOMICRMW);
-            *rest = skip(tok, TK_RPAREN);
+            int order;
+            if (this_sync_order >= 0) {
+                // __sync_fetch_and_*(object, operand): the order is in the name.
+                order = this_sync_order;
+                // gcc and clang both tolerate further arguments on
+                // __sync_lock_test_and_set -- the Fujitsu suite's C/0044_0001
+                // passes a third -- and both refuse them on the fetch family,
+                // which is the rule here.
+                if (kind == ATOMIC_EXCHANGE)
+                    while (tok->kind == TK_COMMA) assign(&tok, tok->next);
+                *rest = skip(tok, TK_RPAREN);
+            } else {
+                tok = skip(tok, TK_COMMA);
+                order = atomic_order(&tok, MO_ATOMICRMW);
+                *rest = skip(tok, TK_RPAREN);
+            }
 
             int aop = armw_op_of[kind];
             if (is_flonum(value_ty) && (aop == A_ADD || aop == A_SUB)) aop = aop == A_ADD ? A_FADD : A_FSUB;
@@ -3703,6 +3865,19 @@ static Type *transparent_union_member(Type *param, Node *arg) {
     return param;
 }
 
+// The argument-count diagnostics of a call. A call through a pointer has no
+// function name to give -- the function type it points to is anonymous -- so
+// the name is used only when the type has one, and clang's wording ("too many
+// arguments to function call, expected 0, have 1") is used otherwise. Reading
+// ty->name unconditionally is what killed the compiler on
+// `int (*p)(); p(0);`.
+static void error_call_args(Token *tok, Type *ty, bool too_many) {
+    const char *what = too_many ? "too many" : "too few";
+    if (ty->name)
+        error(tok, "%s arguments to function ‘%.*s’; expected %d", what, ty->name->len, tok_text(ty->name), ty->nparam);
+    error(tok, "%s arguments to function call; expected %d", what, ty->nparam);
+}
+
 static Node *fncall(Token **rest, Token *tok, Node *fn) {
     if (fn->ty->kind != TY_FUNC && !is_funcptr(fn->ty))
         error(tok, "called object ‘%.*s’ is not a function or function pointer", fn->tok->len, tok_text(fn->tok));
@@ -3718,9 +3893,7 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
     tok = tok->next;
 
     if (tok->kind == TK_RPAREN) {
-        if (param_ty)
-            error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, tok_text(ty->name),
-                  ty->nparam);
+        if (param_ty) error_call_args(tok, ty, false);
         *rest = tok->next;
         return node;
     }
@@ -3766,15 +3939,13 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
             if (is_integer(arg->ty)) integer_promotion(&arg);
             if (arg->ty->kind == TY_FLOAT || arg->ty->kind == TY_F32) new_imcast(&arg, T.ty_double);
         } else {
-            error(tok, "too many arguments to function ‘%.*s’; expected %d", ty->name->len, tok_text(ty->name),
-                  ty->nparam);
+            error_call_args(tok, ty, true);
         }
         ++i;
         cur = cur->next = arg;
     } while (match(&tok, tok, TK_COMMA));
 
-    if (param_ty)
-        error(tok, "too few arguments to function ‘%.*s’; expected %d", ty->name->len, tok_text(ty->name), ty->nparam);
+    if (param_ty) error_call_args(tok, ty, false);
 
     *rest = skip(tok, TK_RPAREN);
 
@@ -4137,7 +4308,7 @@ static Node *unary(Token **rest, Token *tok) {
         case TK_AND: {
             pedantic(tok, "ISO C forbids taking the address of a label");
             Node *node = new_node(ND_LABEL_VAL, tok);
-            node->label = get_ident(tok->next);
+            node->label = label_id_of(get_ident(tok->next));
 
             node->goto_next = gotos;
             gotos = node;
@@ -5091,7 +5262,16 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             char *a = NULL;
             parse_asm_name(&tok, tok, &a);
             ty = decl_attrs(&tok, tok, ty);
-            set_asm_name(var, a);
+            // An explicit __asm__("name") wins over an alias attribute when one
+            // declaration carries both.
+            if (a) {
+                set_asm_name(var, a);
+            } else {
+                // The attribute may sit before or after the declarator: the
+                // one written after it lands on the type.
+                apply_alias_attr(var, attrs);
+                apply_alias_attr(var, ty->attrs);
+            }
         }
         sym_attr_flags(var, attrs, false);
         sym_attr_flags(var, ty->attrs, true);
@@ -5228,7 +5408,11 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             add_type(size);
             Node *alloc = new_node(ND_ALLOCA, tok);
             alloc->lhs = size;
-            alloc->rhs = new_ulong(var->align, tok);
+            // The length may have come from the initializer, after the
+            // alignment was settled, so it is taken again where the storage is
+            // handed out. An access may keep the lower alignment; this is the
+            // one that has to be right.
+            alloc->rhs = new_ulong(object_align(var->ty, var->align), tok);
             alloc->base_ty = base_ty;
             add_type(alloc);
             Node *vla_var = new_var_node(var, tok);
@@ -5636,7 +5820,7 @@ static Node *goto_stmt(Token **rest, Token *tok) {
         return node;
     }
     Node *node = new_node(ND_GOTO, tok);
-    node->label = get_ident(tok->next);
+    node->label = label_id_of(get_ident(tok->next));
     // Which handlers this jump runs is only known once the label is, so the
     // scope it starts from waits next to it (see resolve_goto_labels).
     note_jump_scope(node, scope);
@@ -5743,7 +5927,9 @@ static void check_label(uint32_t label, Token *tok) {
     Node *cur = labels;
     while (cur) {
         if (cur->label == label) {
-            diag("error", tok, "redefinition of label ‘%s’", str(label));
+            // The token carries the name that was written; the id may be the
+            // mangled one a __label__ declaration gave it.
+            diag("error", tok, "redefinition of label ‘%s’", str(tok->id));
             diag_exit("note", cur->tok, "previous definition is here");
         }
         cur = cur->goto_next;
@@ -5797,7 +5983,7 @@ static Node *label(Token **rest, Token *tok) {
             // a case label that a normal label leads into as deliberate.
             falls_through = false;
             Node *node = new_node(ND_LABEL, tok);
-            node->label = tok->id;
+            node->label = label_id_of(tok->id);
             note_jump_scope(node, scope);
             check_label(node->label, tok);
             node->goto_next = labels;
@@ -6605,6 +6791,12 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
             continue;
         }
 
+        // [GNU] __label__ Ident, ... ;
+        if (tok->kind == TK_LABEL_DECL) {
+            label_decl(&tok, tok);
+            continue;
+        }
+
         // Decl
         if (is_typename(tok, true) || (is_attr_start(tok) && attr_then_typename(tok))) {
             SClass sclass = 0;
@@ -7124,11 +7316,20 @@ static void layout_struct(Type *ty, bool is_union) {
     uint64_t bitpos = 0;
     int offset = 0;
     uint32_t idx = 0;
+    // What the members would ask for with no pragma in the way, and whether
+    // the pragma lowered anything. The two together say whether LLVM's own
+    // layout of the element types is the C layout (see `layout_packed`).
+    int natural_align = 1;
+    bool lowered = false;
 
     for (Member *mem = ty->members; mem; mem = mem->next) {
+        natural_align = MAX(natural_align, mem->align);
         int mem_align = (ty->is_packed || mem->is_packed) ? 1 : mem->align;
         if (mem->is_align) mem_align = mem->align;  // explicit alignment overrides packed
-        if (cur_pack > 0 && mem_align > cur_pack) mem_align = cur_pack;
+        if (cur_pack > 0 && mem_align > cur_pack) {
+            mem_align = cur_pack;
+            lowered = true;
+        }
         ty->align = MAX(ty->align, mem_align);
         mem->idx = idx++;
 
@@ -7175,6 +7376,15 @@ static void layout_struct(Type *ty, bool is_union) {
     offset = MAX(offset, (int)((bitpos + 7) / 8));
     if (attr_align) ty->align = MAX(ty->align, attr_align);
     ty->size = ALIGN_UP(offset, ty->align);
+
+    // `#pragma pack(4)` on `struct { double d; char c; }` lowers the record's
+    // own alignment as well, and with it the size -- 12, where LLVM's type
+    // would round 9 up to its own alignment of 8 and give 16. An explicit
+    // aligned(N) raises the alignment and is not a lowering.
+    if (cur_pack > 0 && natural_align > cur_pack && !attr_align) lowered = true;
+    ty->layout_packed = ty->is_packed || lowered;
+    for (Member *m = ty->members; !ty->layout_packed && m; m = m->next)
+        if (m->is_packed) ty->layout_packed = true;
 }
 
 // RecordSpec ::= Record Ident ("{" MemDecl+ "}")? | Record "{" MemDecl+ "}"
@@ -8681,7 +8891,12 @@ static Token *external_declaration(Token *tok) {
             //   extern int fscanf(...) __asm__("__isoc23_fscanf") __wur;
             //   int x __asm__("y") = 7;
             ty = decl_attrs(&tok, tok, ty);
-            set_asm_name(var, asm_name);
+            if (asm_name) {
+                set_asm_name(var, asm_name);
+            } else {
+                apply_alias_attr(var, attrs);
+                apply_alias_attr(var, ty->attrs);
+            }
 
             if (ty->kind == TY_VOID) error(var_name, "variable ‘%s’ declared void", str(var_name->id));
 
@@ -8950,6 +9165,36 @@ Module *parse(Token *tok) {
             md->data = sym;
         }
         sym = next;
+    }
+
+    // A name may be carried by two symbols. A block-scope declaration of an
+    // entity with external linkage and the file-scope definition of that
+    // entity are one thing to 6.2.2p2 -- linkage ties them together, not the
+    // visibility of the name, and the block's name is not visible here -- but
+    // the definition's lookup does not find the declaration, so it makes a
+    // second symbol. The printer keeps one entry per object-file name and the
+    // first one wins, so a declaration that came first left the module with
+    //     declare i32 @f(i32)   /   @x = external global i32
+    // and no definition, and the link failed with "undefined reference".
+    // Definitions go first; within each group the source order stands.
+    for (int pass = 0; pass < 2; pass++) {
+        Sym **head = pass ? &md->data : &md->fns;
+        Sym *defined = NULL, **defined_tail = &defined;
+        Sym *rest = NULL, **rest_tail = &rest;
+        for (Sym *sym = *head; sym;) {
+            Sym *next = sym->next;
+            if (sym->is_defined && !sym->is_inline_def) {
+                *defined_tail = sym;
+                defined_tail = &sym->next;
+            } else {
+                *rest_tail = sym;
+                rest_tail = &sym->next;
+            }
+            sym = next;
+        }
+        *defined_tail = rest;
+        *rest_tail = NULL;
+        *head = defined;
     }
     md->tys = reverse_list(Type, types, next);
     return md;

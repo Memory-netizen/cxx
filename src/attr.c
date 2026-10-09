@@ -13,6 +13,10 @@ static AttrInfo attrs[] = {
 
     // GNU attributes (__attribute__ and [[gnu::...]]).
     {"packed", ATTR_NS_GNU, 1, ATTR_TYPE | ATTR_FIELD},
+    // __attribute__((alias("target"))): the declared name is another name for
+    // an object or function defined in this translation unit. Handled in
+    // parser.c, where the symbol's emitted name is settled.
+    {"alias", ATTR_NS_GNU, 1, ATTR_DECL},
     {"aligned", ATTR_NS_GNU, 1, ATTR_DECL | ATTR_TYPE | ATTR_FIELD},
     {"noreturn", ATTR_NS_GNU, 1, ATTR_DECL},
     {"deprecated", ATTR_NS_GNU, 1, ATTR_DECL | ATTR_TYPE | ATTR_FIELD | ATTR_PARAM},

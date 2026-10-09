@@ -879,10 +879,21 @@ void dump_blk(Blk *b) {
 static void dump_init(Initializer *init, Type *ty);
 static Member *union_canon_member(Type *ty);
 
+// A record's braces. A packed record is written `<{ ... }>`: its body carries
+// an explicit `[N x i8]` element for every gap, which only reproduces the C
+// offsets if LLVM adds no padding of its own -- spelled with plain braces, the
+// `double` of `struct { char c; double i; } __attribute__((packed))` moves from
+// offset 1 to 8, and an initializer written against the type fills the wrong
+// bytes. Types and constants are spelled the same way, as clang does.
+static void record_open(Type *ty) { fprintf(out_file, ty->layout_packed ? "<{ " : "{ "); }
+
+static void record_close(Type *ty) { fprintf(out_file, ty->layout_packed ? " }>" : " }"); }
+
 void dump_type(Type *ty) {
     fprintf(out_file, "%%");
     print_ident(ty->uid);
-    fprintf(out_file, " = type { ");
+    fprintf(out_file, " = type ");
+    record_open(ty);
     Member *mem = ty->members;
     if (ty->kind == TY_STRUCT) {
         int pos = 0;
@@ -911,7 +922,8 @@ void dump_type(Type *ty) {
         print_type(mem->ty);
         if (mem->ty->size < ty->size) fprintf(out_file, ", [%d x i8]", ty->size - mem->ty->size);
     }
-    fprintf(out_file, " }\n");
+    record_close(ty);
+    fprintf(out_file, "\n");
 }
 
 // The union's canonical element: the member with the largest
@@ -928,10 +940,10 @@ static Member *union_canon_member(Type *ty) {
 
 // The anonymous member-typed element type: "{ <mem-ty> [, pad] }".
 static void print_union_elem_ty(Type *ty, Member *mem) {
-    fprintf(out_file, "{ ");
+    record_open(ty);
     print_type(mem->ty);
     if (mem->ty->size < ty->size) fprintf(out_file, ", [%d x i8]", ty->size - mem->ty->size);
-    fprintf(out_file, " }");
+    record_close(ty);
 }
 
 // A scalar union member value, cast through pointers as needed.
@@ -953,7 +965,7 @@ static void print_union_con(Con *c, Type *mem_ty) {
 
 // The union element value: the member-typed value plus padding.
 static void dump_union_elem(Type *ty, Member *mem, Initializer *child) {
-    fprintf(out_file, "{ ");
+    record_open(ty);
     if (mem->ty->kind == TY_STRUCT || mem->ty->kind == TY_ARRAY) {
         dump_init(child, mem->ty);
     } else {
@@ -962,7 +974,7 @@ static void dump_union_elem(Type *ty, Member *mem, Initializer *child) {
         print_union_con(child->val, mem->ty);
     }
     if (mem->ty->size < ty->size) fprintf(out_file, ", [%d x i8] zeroinitializer", ty->size - mem->ty->size);
-    fprintf(out_file, " }");
+    record_close(ty);
 }
 
 // Whether an initializer needs its type spelled out. A union initialized
@@ -1021,7 +1033,7 @@ static void print_init_ty(Initializer *init, Type *ty) {
     }
 
     if (ty->kind == TY_STRUCT) {
-        fprintf(out_file, "{ ");
+        record_open(ty);
         int pos = 0;
         bool first = true;
         for (Member *m = ty->members; m;) {
@@ -1049,7 +1061,7 @@ static void print_init_ty(Initializer *init, Type *ty) {
             if (!first) fprintf(out_file, ", ");
             fprintf(out_file, "[%d x i8]", ty->size - pos);
         }
-        fprintf(out_file, " }");
+        record_close(ty);
         return;
     }
 
@@ -1164,7 +1176,7 @@ static void dump_init(Initializer *init, Type *ty) {
             fprintf(out_file, "zeroinitializer");
             return;
         }
-        fprintf(out_file, "{ ");
+        record_open(ty);
         Member *mem = ty->members;
         // The walk `dump_type` makes, and it has to be that one: the elements
         // written here are the elements written there, in the same order, or
@@ -1207,7 +1219,7 @@ static void dump_init(Initializer *init, Type *ty) {
             if (!first) fprintf(out_file, ", ");
             fprintf(out_file, "[%d x i8] zeroinitializer", ty->size - pos);
         }
-        fprintf(out_file, " }");
+        record_close(ty);
         return;
     }
     if (!init || !init->is_inited) {
@@ -1270,7 +1282,9 @@ static void dump_str(Sym *data) {
             fprintf(out_file, "]");
         }
     }
-    fprintf(out_file, ", align %d\n", data->align);
+    // The storage alignment: the declared one, raised for a big array
+    // (see object_align). data->align itself is what _Alignof reports.
+    fprintf(out_file, ", align %d\n", object_align(data->ty, data->align));
     return;
 }
 
@@ -1304,7 +1318,9 @@ void dump_data(Sym *data) {
     else
         dump_init(data->init, data->ty);
 
-    fprintf(out_file, ", align %d\n", data->align);
+    // The storage alignment: the declared one, raised for a big array
+    // (see object_align). data->align itself is what _Alignof reports.
+    fprintf(out_file, ", align %d\n", object_align(data->ty, data->align));
 }
 
 // Whether the ABI lowering decides this type's shape: a record, or a scalar

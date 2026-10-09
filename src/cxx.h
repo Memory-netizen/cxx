@@ -277,6 +277,9 @@ struct Target {
     // where the copy is the callee's) or a plain pointer (AAPCS64 and RISC-V,
     // where the caller has already made the copy).
     bool agg_byval_param;
+    // x86-64's psABI aligns an array of 16 bytes or more to 16, whatever its
+    // element is; the other targets cxx builds for use the element's.
+    bool array_align16;
     // The register budget a variadic argument may use, when the target has
     // one: an aggregate is passed in the overflow area unless every one of
     // its eightbytes fits in what is left. Zero means "no such rule", and
@@ -393,6 +396,7 @@ enum {
     // finished by the time records are laid out. The value it leaves behind
     // rides in the token's integer.
     TK_PRAGMA,
+    TK_LABEL_DECL,  // [GNU] __label__
     TK_PUNCT,
 
     // Single-byte punctuators are encoded directly as their ASCII code.
@@ -1136,6 +1140,7 @@ enum {
     BUILTIN_FPCLASSIFY,
     // __sync_synchronize(): the GCC full barrier, an empty argument list.
     BUILTIN_SYNC_SYNCHRONIZE,
+    BUILTIN_SYNC_LOCK_RELEASE,
     // __builtin_offsetof(type, member-designator): an integer constant
     // expression, so it can size an array whatever the header spells it as.
     BUILTIN_OFFSETOF,
@@ -1291,6 +1296,11 @@ struct Type {
     int align;         // alignof() value
     bool is_unsigned;  // unsigned or signed
     bool is_packed;    // packed attribute on a record type
+    // The record's layout is not the one LLVM would give its element types --
+    // `__attribute__((packed))`, a packed member, or a `#pragma pack` that
+    // lowered something. The IR type is spelled `<{ ... }>` in that case, or
+    // the explicit padding elements would not land on the C offsets.
+    bool layout_packed;
     uint32_t id;
     uint32_t uid;
     // Declaration
@@ -1431,6 +1441,10 @@ Type *agg_param_shape_type(Type *ty, AggClass *c);
 // because one target can need both: RISC-V sends struct { float; float } as
 // two floats and struct { long; long } as one [2 x i64].
 bool agg_is_per_piece(AggClass *c);
+// The alignment an object of this type is placed at (see type.c): the
+// declared alignment, raised to 16 for an array of 16 bytes or more on a
+// target whose psABI asks for that. What _Alignof reports is the type's own.
+int object_align(Type *ty, int align);
 // The RISC-V ABI, shared by the two RISC-V targets. They differ in XLEN and
 // in whether they have floating-point registers at all, and the classifier
 // reads both off the active Target, so one copy serves rv64, rv32 and the

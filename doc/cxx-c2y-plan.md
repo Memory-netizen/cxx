@@ -14,8 +14,37 @@
 十进制浮点 `_Decimal32/64/128`。共 9 个提案 + 2 个头（`<complex.h>` `<tgmath.h>`）。
 相关位置应保留「有意不支持」注释，验收中排除。
 
+**也不支持（已删除/已改变语义的旧形式，见 §R56、§R57）**：两种写法 cxx **不实现**，
+而且 C23 已经不再需要它们——探针直接**过滤**，不计入失败：
+
+| 写法 | 状态 |
+|---|---|
+| 调用一个声明为 `f()`（无原型）的函数 | **弃用于所有 C 版本**，C23 起 `()` 等同 `(void)`，传参在两家邨也是错误 |
+| K&R（旧式）函数定义 `int f(a) int a; { }` | C23 **删除**：草案的 `function-definition` 产生式已经没有 `declaration-list` |
+
+过滤判定不靠正则，而是让参考编译器说话：clang 用同一条 `-Wdeprecated-non-prototype`
+同时命中这两种写法，而 `(void)` 原型不受影响（实测三样本：两个被过滤、一个干净）。
+
 **原则**：不改既有的正确行为去迁就外部头文件。典型案例是 `_FloatN` 保持关键字身份
 （H.5.1），而用 GNU 兼容宏让 glibc 走对分支。
+
+**当前阶段：debug——只修已有功能的 bug，不扩功能**。
+测试暴露出“未支持的功能”时，**先屏蔽并记为缺口**，不当场实现；
+debug 阶段结束后再统一计划是否扩充。探针把它们算进 `gap` 桶（与“超出范围”分开），
+于是“失败”只剩下**本该能用的东西真出了问题**。
+
+**缺口表（已知未支持，已屏蔽）**：
+
+| 缺口 | 见证 | 备注 |
+|---|---|---|
+| **SSE/MMX 内联函数族**（`__builtin_ia32_*`）及 `__SSE2__` | Fujitsu `C/0159`；`§R63` | 试过定义 `__SSE2__`，结果 cpython 从 381/385 掉到 **149/385**（头文件的 SIMD 分支全部散架），已撤回 |
+| **`__sync_*` 未实现的形式**：`*_and_fetch`、`__sync_{bool,val}_compare_and_swap`、`nand` | Fujitsu `C/0044_0001`；`§R68` | 已有 `fetch_and_*`、`lock_test_and_set`、`lock_release`、`synchronize`；`_and_fetch` 要把操作数加回去（指针还要按元素缩放），CAS 两形式按值接旧值，nand 没有 `A_*` 撠码 |
+| **十进制浮点** `_Decimal32/64/128` | §0 长期不做 | 已在上面“明确不做”之列 |
+| 复数（`_Complex`/`_Imaginary`/虚数后缀） | §0 长期不做 | 探针已按 `noproto` 桶过滤 |
+
+此前已落地的扩展（`__fp16` §R67、`__label__` §R70、`#pragma pack` §R65、`alias` 属性 §R69）**保留**；
+本阶段不再新增。
+
 
 ---
 
@@ -487,6 +516,604 @@ VLA 的 `len` 就是 `vla_len` 指针的低 32 位（见缺陷 1），所以把*
 | **记分（`doc/realworld.sh` 全量探针）** | **git 567/567 保持全过**；**cpython 368/385 → 377/385**（本轮修好的 9 个单元：`Modules/socketmodule.c`、`Python/crossinterp.c`（这两个是崩溃）、`Python/codegen.c`、`Python/compile.c`、`Python/pythonrun.c`、`Python/getcompiler.c`、`Objects/typeobject.c`、`Modules/expat/xmltok.c`、`Modules/expat/xmlrole.c`）；lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21 不变 |
 | **剩余阻塞项** | **cpython 8**（按性质分两类）。环境类 4 个：`Python/pystrhex.c`（`implicit declaration of function ‘__builtin_shufflevector’`）、`Modules/Hacl_Hash_Blake2s_Simd128.c`、`Modules/Hacl_Hash_Blake2b_Simd256.c`、`Modules/_testcapimodule.c`（`static assertion failed: __extension__ __alignof__(buf) >= 64`）——这四个都要 `vector_size` 向量类型，而它们之所以被启用，是因为这棵树的 `pyconfig.h` 是安装时用宿主 clang 配置出来的（它声明「本编译器有 `__builtin_shufflevector`、有 64 字节对齐的 SIMD」），cxx 本身不支持向量类型。真正的缺陷 4 个：`Modules/posixmodule.c`（`implicit declaration of function ‘__builtin_memset’`）、`Python/jit_unwind.c`（`premature end of input`）、`Modules/_testsinglephase.c`（`array initializer must be an initializer list`），以及（R14 复查后更正）`Modules/_ctypes/_ctypes_test.c` —— 它在 `__GNUC__` 下包含 `<complex.h>`，而 glibc 的 `bits/cmathcalls.h` 用 `_Mdouble_complex_`（`double _Complex`）声明函数，属于本计划 **有意不做** 的 `_Complex` 缺口，不是新缺陷 |
 
+### R71 阶段转向：debug——只修 bug，未支持功能先屏蔽记缺口 —— ✅ 政策与分类已落地
+
+按定调把阶段重点改为**修正已有功能的 bug**：测试暴露出“未支持的功能”时，
+**先屏蔽并记为缺口**，不当场实现；debug 阶段结束后再统一计划是否扩充。
+
+#### （一）探针多了一个 `gap` 桶
+
+`doc/fujitsu.sh` 的 `gap_feature()` 按缺口表把测试归类，与“超出范围”（OpenMP、K&R/无原型、复数）
+分开计数，并在汇总里**按特性列出**。于是“失败”只剩下**本该能用的东西真出了问题**。
+`FJ_GAPS=0` 可关掉过滤，直接看列表。
+
+**深样本（`FJ_PER_DIR=3`）的新账目**：
+
+```
+fujitsu: 377 of 378 passed, 1 failed
+   (out of scope: 61 OpenMP, 105 no-prototype/K&R; gaps: 7; unbuildable by the reference: 5)
+   gaps (a feature cxx does not have; section 0 of the plan):
+          7  SSE/MMX intrinsics
+```
+
+（原来是 380/384；现在 377/378，因为 7 个 `__SSE2__` 测试从“失败”移到了“缺口”。）
+
+#### （二）一次全样本扫描：真正的 bug 只剩一个崩溃
+
+用一个不套 clang 过滤的脚本把深样本里**所有与参考不一致的编译**列了出来，命中的类别只有三个：
+
+| 命中 | 真相 |
+|---|---|
+| `a type specifier is required for all declarations`（多个） | **全是 K&R 定义**（`int sub(p, idx)` 等）——已在 §0 的政策表里，**不是新缺口** |
+| `too many arguments to function ‘X’; expected 0`（多个） | 同一类（`f()` 无原型）——已屏蔽 |
+| **`cxx killed by signal 11`** —— `C/0048_0001.c` | **真正的 bug**：参考实现接受这个文件，而 cxx 内部错误 |
+
+也就是说，除了已知缺口，深样本里只剩**一个崩溃**——它是下一轮的直接目标。
+
+（扫描脚本本身的缺点：它没有套用 clang 的 `-Wdeprecated-non-prototype` 过滤，
+所以 K&R 那一类会冒出来；下次直接用 `doc/fujitsu.sh` 的分类。）
+
+| | |
+|---|---|
+| **验收** | `bash -n doc/fujitsu.sh` 通过；深样本新账目如上；方案已写入 §0（阶段政策 + 缺口表） |
+| **代码** | 本轮未改编译器（只改探针与文档）；因此各套件保持上一轮的结果 |
+
+### R70 `__label__`（GNU 的块内局部标签）—— ✅ 深样本里唯一的编译失败消失
+
+`C/0059_0002` 用 `__label__ test004_1, …;`，而且是写在一个**语句表达式**（`({ … })`）里的宏，
+同一个宏在一个函数里展开多次——这正是 `__label__` 的用途：名字**作用域限于所在块**，
+所以多个块可以各自定义同名标签。实测（gcc/clang 一致）：
+
+| 形态 | 输出 |
+|---|---|
+| `{ __label__ L; goto L; … L: … }` | `*OK*` |
+| 两个语句表达式各自 `__label__ a, done;` | `1 9` |
+| 同一块内同名标签两次 | **报错**（redefinition of label） |
+| 块外 `goto L` 指向块内的 `__label__` 标签 | **报错**（undeclared label） |
+
+**实现**：cxx 用一个**函数级的 id 列表**解析标签（重名检查、goto 匹配、块分配都在上面），
+所以 `__label__` 声明的名字**在解析时换成一个自己的 id**：带上声明顺序后缀，
+标签定义、`goto`、`&&label` 三处都用同一个查找，下游全部机制照旧运行在**已经互不相同**的 id 上。
+条目在“声明它的那个 scope 仍在当前链上”时有效，块外查不到——这就是作用域规则。
+
+> **一次白跑：**第一版借用了 `new_unique_varname()`，但它**只在 `globals` 里查重**，
+> 查不到就**原样返回 id**——而标签永远不在 `globals` 里，于是等于没改写，
+> 宏的第二次展开仍报 `redefinition of label ‘test004_1’`。改成自己的计数器后就对了。
+
+| | |
+|---|---|
+| **深样本（`FJ_PER_DIR=3`，384 个测试）** | 379 → **380 / 384**（修前 379）；剩下的都是 `#error __SSE2__`（§R63 的已知缺口）与超出范围项，**再无编译失败** |
+| **验收** | `test/conformance.sh` 252 → **255 passed / 0 gap**（新增：块内与语句表达式里的 `__label__`、同块重名必须报错、块外 goto 必须报错）；`C/0059_0002` 输出与参考逐字一致 |
+| **全量** | **与基线相同**：realworld cpython **381/385**、libpng 18/18、git 567/567、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；tests2 **106 通过 / 0 失败**；跨目标 arm64 51/0、rv64 51/0、rv32 51/0（+1 skipped）；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。 |
+
+### R69 更深的 Fujitsu 样本（每目录 3 个）挖出的三个缺口 —— ✅ 全部修好
+
+样本此前**每个目录只取一个文件**（204 / 37190），所以上一轮新加了 `FJ_PER_DIR` 旋钮。
+`FJ_PER_DIR=3`（384 个测试，376 通过）当场暴露三个新类别：
+
+| 测试 | 诊断 | 真因 |
+|---|---|---|
+| `C/0108_0001` | 链接失败 `undefined reference to \`foo_impl'` | **`__attribute__((alias("foo")))` 被接受后丢弃** |
+| `C/0044_0001` | `expected ‘)’ before ‘,’` | `__sync_lock_*` 上的**多余实参** |
+| `C/0077_0002` | `implicit declaration of function ‘__alignof’` | GNU 的**旧拼写 `__alignof`** |
+
+#### （一）`__attribute__((alias("target")))`
+
+gcc 与 clang 都把被声明的名字当作**同一翻译单元内已定义实体的另一个名字**（两家都输出 `OK OK OK`）；
+cxx 接受了属性但丢弃了它，于是调用指向一个没人定义的符号。
+
+cxx **已经有这个概念**：一个符号的 C 标识符与它发射时用的名字可以不同——就是
+`__asm__("name")` 占的位置（`set_asm_name`）。所以实现就是把属性的参数放进同一个槽位：对别名的调用变成对目标的引用，
+而打印器“一个目标文件名只发一条”的规则保证模块里只剩一个定义。
+
+> **一次白跑：**第一版把属性只从 `attrs`（声明说明符那一列）里找，而
+> `void f(void) __attribute__((alias("foo")));` 的属性在**声明符之后**，落在 `ty->attrs` 上——两个列表现在都查。
+
+#### （二）`__sync_lock_*` 上的多余实参
+
+`__sync_lock_test_and_set(&a, b, &dummy)`——gcc 和 clang **都接受并忽略**第三个实参（实测），
+而 `__sync_fetch_and_add(&a, 3, &d)` **两家都拒绝**（实测）；cxx 现在按同一规则：只在 `__sync_lock_test_and_set`
+与 `__sync_lock_release` 上跳过多余实参。
+
+#### （三）`__alignof`
+
+GNU 的旧拼写。词法表里有 `_Alignof`、`alignof`，而 `__alignof__` 靠“剥双下划线”能命中——
+**`__alignof` （尾部只有一个下划线）命中不了**，于是被当成普通标识符、进而报隐式函数声明。加一行即可。
+
+| | |
+|---|---|
+| **深样本（`FJ_PER_DIR=3`，384 个测试）** | 376 → **379 / 384**（修前 376）；剩下的里面只有一个编译失败：`C/0059_0002` 的 **`__label__`**（GNU 的局部标签声明，待做），其余是 `#error __SSE2__` 与超出范围项 |
+| **验收** | `test/conformance.sh` 248 → **252 passed / 0 gap**（新增：`alias` \uff08函数与对象各一）、`__sync_lock_*` 的多余实参必须接受、fetch 族必须仍拒绝、`__alignof`）；`C/0044_0001`、`C/0077_0002`、`C/0108_0001` 输出均与参考一致 |
+| **全量** | **与基线相同**：realworld cpython **381/385**、libpng 18/18、git 567/567、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；tests2 **106 通过 / 0 失败**；跨目标 arm64 51/0、rv64 51/0、rv32 51/0（+1 skipped）；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。 |
+
+### R68 GCC 的旧式 `__sync_*` 原子内建 —— ✅ `C/0044` 输出 `OK`
+
+上一轮定位到的 `C/0044`：`__sync_lock_test_and_set` 报 `implicit declaration of function`（连跑三次稳定）。
+cxx 已有 `__atomic_*` 一族与 **`__sync_synchronize`**，缺的是旧式的其余成员。
+
+**关键差别在于参数**：`__sync_*` 把**内存序写在名字里**，而 `__atomic_*` 把它作为最后一个参数。
+所以实现是“映射到现有操作码 + 跳过那个参数”，而不是新建一套语义：
+
+| 写法 | 映射到 | 隐含序 |
+|---|---|---|
+| `__sync_lock_test_and_set(p, v)` | `ATOMIC_EXCHANGE` | acquire |
+| `__sync_fetch_and_add/sub/and/or/xor(p, v)` | `ATOMIC_FETCH_*` | seq_cst（全屏障） |
+| `__sync_lock_release(p)` | 自己的行（写 0） | release |
+| `__sync_synchronize()` | 已有 | seq_cst |
+
+**未实现的部分与原因**（写在表旁边）：`*_and_fetch` 返回**新值**，而
+`ND_ATOMICRMW` 给的是旧值，要把操作数加回去（对指针还要按元素尺寸缩放）；两个
+compare-and-swap 形式按值接旧值；nand 没有对应的 `A_*` 操作码。
+
+> 测量在先：整个 Fujitsu 套件里 `__sync_*` 出现 16 种共 200+次，但 **`C/0044` 只用三种**
+> （lock_test_and_set / lock_release / synchronize），而三个真实项目（git/cpython/libpng）只用 `__sync_synchronize`——
+> 所以先把这三种加 fetch 族做完，其余作为可选后续。
+
+| | |
+|---|---|
+| **验收** | 子集运行值 `1 7 0 1 4 3 11 8 9` 与 gcc/clang **逐字一致**；`C/0044` 输出 `OK`；`test/conformance.sh` 247 → **248 passed / 0 gap**；`doc/c2ycov.sh` 109/0；c2y 101/0；`make test` exit 0 |
+| **全量** | **与基线相同**：realworld cpython **381/385**、libpng 18/18、git 567/567、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；tests2 **106 通过 / 0 失败**；跨目标 arm64 51/0、rv64 51/0、rv32 51/0（+1 skipped）；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。嵌套用例（`__sync_*` 套 `__atomic_*`、`__sync_*` 套 `__sync_*`）与两家一致：`1 11 11 11 0 13`——这是本轮自己发现并修掉的隐患留下的回归点。 |
+
+### R67 `__fp16`（ACLE 的半精度拼写）—— ✅ `C/0194` 整目录 50/50
+
+`C/0194` 的 `void test(__fp16 *restrict a, bool *restrict b, int n)` 报 `a type specifier is required for all
+declarations`。量出来的三家行为：
+
+| | gcc | clang | cxx 修前 | cxx 修后 |
+|---|---|---|---|---|
+| `__fp16` 是否存在 | **没有**（建议 `__bf16`） | 每个目标都有 | 没有 | 有 |
+| `sizeof(__fp16)` / 运算 | — | `2`、`1.5+2.5=4` | — | **`2`、`4`** |
+| 按值做参数/返回值（x86-64、riscv64） | — | **报错**：`parameters cannot have __fp16 type; did you forget * ?` | — | 接受（宽松，已记录） |
+| 指针/变量用法（`C/0194` 的形状） | — | 接受 | 报错 | **接受** |
+| aarch64 | — | 完全接受，IR 与 `_Float16` 同为 `half` | — | 同 |
+
+**实现**：`src/lexer.c` 的关键字表里加一行 `{"__fp16", 0, TK_F16}`——表中已有
+`__asm`/`__attribute`/`__inline`/`__restrict`/`__thread` 这类 GNU 拼写的先例。
+
+**两处有意的差异**（写在源码注释里）：
+
+1. clang 把 `__fp16` 当**独立类型**（`__builtin_types_compatible_p(__fp16, _Float16)` 为 **0**、
+   `_Generic` 走 `default`），而 cxx 是 `_Float16` 的另一种拼写。两者在**表示、运算与 ABI** 上一致
+   （对照 clang 的 IR：三个目标的参数/返回类型都是 `half`）；要做成独立类型得把新 `Type` 種类
+   贯穿每一个转换、提升与 ABI 位置，而换来的只有上面两个可观察差异。
+2. clang 在没有半精度参数的目标上禁止 `__fp16` 按值作参数或返回值，cxx 接受。这是**宽松**方向的差异。
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` 246 → **247 passed / 0 gap**（新增：`__fp16` 的全局变量、`restrict` 指针参数、运算与 `sizeof`）；`C/0194` 整目录 **50/50**；`doc/c2ycov.sh` 109/0；c2y 101/0；`make test` exit 0 |
+| **全量** | **与基线相同**：realworld cpython **381/385**、libpng 18/18、git 567/567、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；tests2 **106 通过 / 0 失败**；跨目标 arm64 51/0、rv64 51/0、rv32 51/0（+1 skipped）；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。 |
+
+### R66 `-Wpointer-sign` 覆盖 `char` 的两个变体 —— ✅ `C/0168` 现在与 clang 输出一致
+
+上一轮剩下的 `C/0168`：`strcpy(scharp, "cd")`，而 `scharp` 是 `signed char *`。量出的对照：
+
+| 实参类型 | gcc | clang | cxx 修前 | cxx 修后 |
+|---|---|---|---|---|
+| `char *` | ok | ok | ok | ok |
+| **`signed char *`** | ok（不响） | **warning** | **error** | **warning** |
+| `unsigned char *` | ok（不响） | warning | warning | warning |
+| `double *` 给 `int *`（真实不匹配） | error | error | error | **error**（不受影响） |
+
+**根因**：`sign_only_difference()`（`src/type.c:849`）要求两侧 `is_unsigned` 不同，
+而 x86-64 上 `char` 与 `signed char` **符号相同**，于是 `-Wpointer-sign` 不作声，转换落到后面的
+`incompatible types when passing argument`。`unsigned char` 那一侧因为符号确实不同而一直正常。
+
+**修法**：把“一侧是普通 `char`、另一侧是 `signed char`/`unsigned char`”也算作该警告的范围（尺寸相同已由前面的
+`a->size != b->size` 过滤）。clang 对这一情形的措辞是“converts between pointers to integer types where one is of the unique
+type 'char'”，也归入 `-Wpointer-sign`；gcc 完全不响。**cxx 主要模仿 clang**，所以取警告。
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` 243 → **246 passed / 0 gap**（新增：三种 `char` 变体的运行值、警告必须出现、`double *`→`int *` 必须仍被拒绝）；`doc/c2ycov.sh` 109/0；c2y 101/0；`make test` exit 0；`C/0168` 输出与 clang 一致（`Not memalias`） |
+| **Fujitsu 样本** | 130 → **131 / 134** |
+| **全量** | **与基线相同**：realworld cpython **381/385**、libpng 18/18、git 567/567、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；tests2 **106 通过 / 0 失败**；跨目标 arm64 51/0、rv64 51/0、rv32 51/0（+1 skipped）；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**。 |
+
+### R65 `#pragma pack` 与成员级 packed 也要到达 IR —— ✅ 修好（R64 的直接后续）
+
+R64 修好了 `__attribute__((packed))`，但同一类型的另两种写法仍在错：
+
+| 写法 | 布局（三家一致） | cxx 修前的 IR 类型 |
+|---|---|---|
+| `#pragma pack(1)` + `{ char c; double i; }` | size 9、align 1 | `{ i8, double }`（double 在偏移 8） |
+| `#pragma pack(2)` 同上 | size 10 | `{ i8, [1 x i8], double }`（double 在偏移 8） |
+| `{ char c; int i __attribute__((packed)); }` | size 5 | `{ i8, i32 }`（i 在偏移 4） |
+
+布局一直是对的（`layout_struct` 的 `packed_layout`、成员 cap 7135、最终对齐 7180 都看了 `cur_pack`），
+**差的只是 IR 拼写**：`is_packed` 只由属性置位，而它又是**布局的输入**（每个成员对齐到 1），
+不能顺手拿来表示“C 布局 ≠ LLVM 自然布局”。
+
+**修法**：新增独立字段 `Type.layout_packed`，在 `layout_struct` 里定下来：
+
+```c
+    if (cur_pack > 0 && natural_align > cur_pack && !attr_align) lowered = true;
+    ty->layout_packed = ty->is_packed || lowered;
+    for (Member *m = ty->members; !ty->layout_packed && m; m = m->next)
+        if (m->is_packed) ty->layout_packed = true;
+```
+
+其中 `lowered` 在两处置位：成员对齐被 cap 压低（7135），以及**记录自身**的对齐被压低（它同时决定尾部填充：
+`pack(4)` 下 `struct { double d; char c; }` 是 12 字节，而 LLVM 的类型会把 9 向上圆到它自己的 8 得到 16）；
+显式 `aligned(N)` 是**抬高**而非降低，不算。打印器改读 `layout_packed`，复合类型拷贝时一并拷贝。
+
+**验证**（运行值与类型拼写都对照两家）：
+
+| 用例 | gcc | clang | cxx |
+|---|---|---|---|
+| `pack(1)`/`pack(2)`/`pack(4)`/packed 成员 四种形状的运行值 | `1 2 3 4 5 6 7 8 9 10 12` | 同 | **同** |
+| clang 的类型拼写 | — | `P1 = <{ i8, double }>`、`MP = <{ i8, i32 }>` | **逐字一致** |
+| `pack(8)`（未降低任何东西） | — | `{ i8, double }` | `{ i8, [7 x i8], double }`（显式填充，布局相同） |
+
+> 一次操作失误值得记：修改脚本在失败前已经写了前三个文件，重跑又把字段插了一遍（`cxx.h` 里出现两份
+> `layout_packed`）。当场发现并去重，之后把“打补丁”与“验证”拆成两个脚本。
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` 242 → **243 passed / 0 gap**（新增：pack(1)/pack(2)/pack(4)/packed 成员四种形状的运行值与 `sizeof`）；`doc/c2ycov.sh` 109/0 |
+| **全量** | **与基线相同**：realworld cpython **381/385**、libpng 18/18、git 567/567、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；tests2 **106 通过 / 0 失败**；跨目标 arm64 51/0、rv64 51/0、rv32 51/0（+1 skipped）；`doc/probes.sh` 全部基线，**cxx2 = cxx3 = cxx4 逐字节相同**；Fujitsu 保持 130/134（该套件用属性写 packed，这一修是为了库代码里的 `#pragma pack`）。 |
+
+### R64 packed 记录必须发成 `<{ }>` —— ✅ 修好，`C/0091` 的输出错误消失
+
+上一轮剩下的失败里，`C/0091` 是最严重的一类：**cxx 打印 `NG`，两家参考实现打印 `OK`**——错误的代码生成。
+那个程序只有一个动作：`struct __attribute__((packed)) A { char c; double i; }`（`i` 在偏移 1），
+`struct A st = { 1, 2 };`，然后 `st.i = st.i + 1.0;`。
+
+**最小复现**（`~/cxxwork/repro/preparse/pk1.c`）：
+
+| 用例 | gcc | clang | cxx 修前 | cxx 修后 |
+|---|---|---|---|---|
+| `st = { 1, 2 }` 后读 `st.c st.i sizeof` | `1 2 9` | `1 2 9` | **`1 0 9`** | **`1 2 9`** |
+| 赋值形式（`st.c = 1; st.i = 2;`） | `1 2` | `1 2` | `1 2`（本来就对） | `1 2` |
+| `char c; long i;` 的同一形状 | `1 2` | `1 2` | **乱码** | **`1 2`** |
+
+**根因**：cxx 的类型体用**显式 `[N x i8]` 填充**给每个成员安上它的 C 偏移，
+但记录本身用普通花括号发出，于是 **LLVM 又按自然布局加了一层填充**：
+
+```
+cxx 修前：%struct.A = type { i8, double }                  → double 在偏移 8
+clang   ：%struct.A = type <{ i8, double }>                → double 在偏移 1
+```
+
+**访问一直是对的**（它们走字节 `getelementptr`：`getelementptr i8, ptr @st, i32 1` + `load double … align 1`），
+所以只有**初始化器**出错——它是按类型写的，而那个类型的布局不是 C 的。
+这也解释了为什么赋值形式（无初始化器）一直正常。
+
+**修法**：`record_open()` / `record_close()` 一对小助手，按 `ty->is_packed` 在 `<{ ` 与 `{ ` 之间切换，
+统一用于**六处**：类型定义（`dump_type`，与 `TY_UNION` 共用花括号）、
+初始化器里的类型（`print_init_ty`）、值（`dump_init`），以及 union 型别名成员的**匿名形式**（`print_union_elem_ty` 与 `dump_union_elem`，
+按 union 自身的 packedness）。类型与常量必须用同一种拼写，否则 LLVM 拒绝初始化器属于另一个类型。
+
+修后的 IR 与 clang 逐字一致：
+
+```
+%struct.A = type <{ i8, double }>
+@st = dso_local global %struct.A <{ i8 1, double 0x4000000000000000 }>, align 1
+```
+
+| | |
+|---|---|
+| **验收** | `test/conformance.sh` 241 → **242 passed / 0 gap**（新增：packed 结构（`double`/`long`/数组成员各一种）、packed union 的打穿初始化、按值返回的 packed 结构，加 `offsetof`）；`C/0091` 输出 `OK` |
+| **Fujitsu 样本** | 129 → **130 / 134** |
+| **全量** | **与基线相同**：realworld cpython **381/385**、libpng 18/18、git 567/567、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；tests2 **106 通过 / 0 失败**；跨目标 arm64 51/0、rv64 51/0、rv32 51/0（+1 skipped）；`doc/probes.sh` 全部基线（c2ycov 109/0），**cxx2 = cxx3 = cxx4 逐字节相同**。 |
+
+### R63 x86-64：数组 ≥ 16 字节的对齐修好；SIMD 预定义试过后撤回 —— ✅ Fujitsu 128 → **129/134**
+
+上一轮剩下 6 个失败里，`C/0163` 是最严重的一类：**cxx 的产物运行时段错误**（退出 139），
+而参考实现打印 `6 2`。那个程序用 `movaps` 读写三个 `double[]` 全局对象。
+
+#### （一）修好的：x86-64 psABI 的“数组 ≥ 16 字节即 16 字节对齐”
+
+`clang` 给 `double[2]` 全局发 `.p2align 4`（16），cxx 发 `.p2align 3`（8），而 `movaps` 需要 16——就是崩溃的原因。
+量出的规则（gcc/clang 一致；用 `clang -target` 验证了它是 **x86-64 专属**，aarch64/rv64/rv32 都用元素对齐）：
+
+| 对象 | 结果 |
+|---|---|
+| `double[2]`、`double[3]`、`float[4]`、`int[4]`、`short[8]`、`char[16]` | 16 字节对齐 |
+| `double[1]`、`float[3]`、`int[3]`、`struct { double a, b; }` | 元素/本身对齐（8、4、4、8） |
+| `_Alignof(struct { char buf[16]; char c; })` | **1**（size **17**），与 gcc/clang 一致 |
+
+三层区分，前两层我都先做错了一次，都是被现有探针当场抓住的：
+
+1. **对象对齐 ≠ 类型对齐**。第一版放进 `array_of()`，立刻把聚合体布局带坏：
+   `struct C { char buf[16]; char c; }` 从 **17/1** 变成 **32/16**。改到对象侧后三家一致。
+2. **存储对齐 ≠ 报告对齐**。第二版把提升写进 `var->align`，`__alignof__(plain)` 就从 8 变成 16——
+   **`doc/c2ycov.sh` 的“sizeof / alignof / _Countof / typeof”当场抓住**（109/0 → 108/1）。实测两家：`double[2]` 全局存在 16 对齐的地址上，
+   但 `__alignof__` 报 **8**；只有显式 `_Alignas(32)` 才报 32。
+3. **长度可能晚到**。`double init[] = { 1.0, 2.0 };` 在声明时 `size` 为 0；对齐改到发射点才算后，这个问题自然消失。
+
+最终：`object_align()` 住在 `type.c`（声明在 `cxx.h`），由目标字段 `T.array_align16` 开关（仅 amd64），
+只在**两个分配存储的地方**生效：全局发射（`dumpir.c` 的两处 `align`）与局部的 alloca；`var->align` 始终是声明对齐。
+
+#### （二）试过并**撤回**的：x86-64 的 SIMD 预定义
+
+起因是 `C/0159` 的 `#error Need macro __HPC_ACE__ or __SSE2__`：gcc/clang 都定义 `__MMX__`/`__SSE__`/`__SSE2__`/`__SSE_MATH__`/`__SSE2_MATH__`，
+cxx 一个都没有。我按 clang 的集合补上后，`C/0159` 越过了 `#error`（改卡在 clang 的 `<mmintrin.h>`：
+`__builtin_ia32_emms`）——但全量扫描立刻报警：
+
+| | 基线 | 定义了 `__SSE2__` 之后 |
+|---|---|---|
+| cpython | 381 / 385 | **149 / 385**（**235** 个 `implicit declaration`） |
+| libpng | 18 / 18 | 17 / 18 |
+
+机制很直接：这些宏告诉每个头文件“机器有 SSE2、编译器能降下配套的内联函数”，
+而 cxx 没有 `__builtin_ia32_*` 族，于是头文件的 SIMD 分支全部散架。
+
+> **结论：撤回。**声称一个自己降不了的特性是错的答案；不声称才是一个没有那些内联函数的编译器该做的事——
+> 这与“**cxx 最终身份始终不是 gcc 或者 clang，不应该假冒身份**”同一条道理。
+> 代价是 `C/0159` 回到失败（它本来就是“检查 SSE2 代码能不能编”的用例，而这个编译器不编 SSE2）。
+> 要真正解决，得先有 `__builtin_ia32_*`，那是另一块工作，已记为**已知缺口**。
+
+#### （三）顺带发现
+
+`asm("..." : "=m"(r) : "m"(a))`（**内存约束**）cxx 目前编不了，而 gcc/clang 很常见地接受；
+这也是无法用它直接验证栈上对齐的原因。
+
+| | |
+|---|---|
+| **Fujitsu 样本** | 128 → **129 / 134**（`C/0163` 的崩溃消失；`C/0159` 因预定义撤回依然失败，它从未通过） |
+| **验收** | `test/conformance.sh` 239 → **241 passed / 0 gap**（新增：16 字节数组全局上的 `movaps`、聚合体布局必须保持 `16/8 16/4 17/1 24/8`）；`doc/c2ycov.sh` **109/0**（它抓住了对齐那一步的回退） |
+| **跨目标** | arm64 51/0、rv64 51/0、rv32 51/0（+1 skipped）——该规则不适用于它们，实测确认 |
+| **全量** | **与基线相同**：realworld 回到 cpython **381/385**、libpng 18/18、git 567/567、lua 35/35、zlib 15/15、sqlite 1/1、tinycc 21/21；tests2 **106 通过 / 0 失败**；`doc/probes.sh` 全部基线（c2ycov 109/0），**cxx2 = cxx3 = cxx4 逐字节相同**。SIMD 预定义那一步曾把 cpython 打到 **149/385**（已撤回）。 |
+
+### R62 修好：定义优先登记 —— ✅ Fujitsu 125 → **128/134**，三个 `undefined reference` 消失
+
+根因（§R61 已测）：块作用域声明与文件作用域定义是**两个 `Sym`**，而
+`dumpir.c:1514` 的 `already_emitted()` 按**目标文件名**去重、**先到者胜**（它本是为了合并
+glibc 的 `strtoq`/`strtoll` → `__isoc23_strtoll` 这类 asm 别名）。`md->fns` 是按**源码声明顺序**建的，块声明在前，
+于是打印器输出了 `declare i32 @f(i32)`（或 `@x = external global i32`）并把定义跳过，链接报
+`undefined reference`。
+
+**修法**（`src/parser.c` 的收尾登记段）：把 `md->fns` 与 `md->data` 各做一次**稳定分组**，
+**定义（`is_defined && !is_inline_def`）在前、仅声明在后**，组内保持源码顺序。一个名字不可能有两个定义（C 禁止，cxx 也诊断），
+所以这个排序只会改变“声明 vs 定义”的胜负，而那正是要修的地方。
+
+#### 验证
+
+| 用例 | gcc | clang | cxx 修前 | cxx 修后 |
+|---|---|---|---|---|
+| `ord1` 块声明在前、函数定义在后 | ok | ok | **链接失败** | **ok** |
+| `blkfn`/《`blkfn2`（函数体内 `extern`） | ok | ok | 链接失败 | ok |
+| `obj1`/`obj2`（**对象**同一形状） | ok | ok | 链接失败 | **ok** |
+| `ord2`/`ord3`/《fn2`（定义或文件作用域声明在前） | ok | ok | ok | ok |
+| `ord4`（块声明后跟 `static` 定义，6.2.2p7） | 报错 | 报错 | 报错 | 报错 |
+
+`ord1` 的 IR 现在是 `define dso_local i32 @f(i32 %tmp0)`。
+
+| | |
+|---|---|
+| **Fujitsu 样本** | **125 → 128 / 134**，失败 9 → **6**（那 3 个 `undefined reference to ‘func…’` 全消） |
+| **验收** | `test/conformance.sh` **236 → 239 passed / 0 gap**（新增：块声明+后置定义运行值 42、定义在前、`static` 后置必须报错）；c2y 101/0；`make test` exit 0；`clang-format-21 --dry-run --Werror src/parser.c` 干净 |
+| **全量探针** | 全部基线；**cxx2 = cxx3 = cxx4 逐字节相同**；tests2 106/0 |
+| **realworld** | 与基线一致：git 567/567、cpython 381/385（同一批 4 个）、lua/zlib/libpng/sqlite/tinycc 全绿 |
+| **仍开着** | 两个 `Sym` 表示一个实体的**深层修法**（让块声明与文件作用域共享同一个 `Sym`，更贴近 6.2.2p2）；另外 `ord4` 目前靠 LLVM 校验报错（`use of undefined value ‘@f’`），而 gcc/clang 给的是具名的 `static declaration of ‘f’ follows non-static declaration`（cxx 已有该诊断，但它检查的是 `sclass`，块声明的 `sclass` 是 `SC_NONE`） |
+
+### R61 块作用域的函数声明：定义被丢掉 —— ⚠️ 已精确复现并追到发射阶段（待修）
+
+Fujitsu 样本里 3 个 `undefined reference to ‘func…’` 的共同形状：**函数在块作用域内声明，定义在文件作用域**。
+最小复现（`~/cxxwork/repro/preparse/ord1.c`）：
+
+```c
+int main(void) { { int f(int); return f(1) == 2 ? 0 : 1; } }
+int f(int x) { return x + 1; }
+```
+
+| 顺序 | gcc | clang | cxx |
+|---|---|---|---|
+| `ord1` 块声明在前、定义在后 | ok | ok | **链接失败** |
+| `ord2` 定义在前、块声明在后 | ok | ok | ok |
+| `ord3` 文件作用域声明在前 | ok | ok | ok |
+| `ord4` 块声明后跟 `static` 定义 | 报错 | 报错 | 报错（三家一致，正确） |
+
+`blkfn2.c`（函数体内显式 `extern int g(int);`）同样失败，所以不是“默认 extern”这一步的问题。
+
+**追踪结果**（临时探针已撤，下面是它打出的）：
+
+```
+[def] main  sym=A
+[blkdecl] f sym=B ns=(nil)      块声明造了符号 B（new_gvar），只在块作用域里登记
+[def] f sym=C ns=…            定义又造了符号 C（另一个 new_gvar）
+[reg] f sym=C defined=1 dead=0  C 带着函数体进了 md->fns
+[reg] f sym=B defined=0 dead=0  B 也进了
+[skip] f defined=0 dead=0       irgen 跳过 B（它确实没有体，正确）
+```
+
+也就是：**C 没有被跳过，但 IR 里只有 `call i32 @f(i32 1)` 与一条 `declare i32 @f(i32)`，没有 `define`**——
+丢弃发生在 `irgen` 的跳过检查**之后**，即发射/打印阶段（两个同名符号的处理）。
+
+根因已知的一半：块作用域声明把名字登记在**块的** namespace 里（`push_namespace(scope, …)`，`parser.c:5069`），
+块一结束就没了；文件作用域那条路径的 `find_ident()` 因此找不到它，又造了符号 C。
+按 6.2.2p5，无存储类说明符的函数声明等同 `extern`，**它与文件作用域那个实体是同一个**，所以两个符号应该是一个。
+
+| | |
+|---|---|
+| **下一步** | 先在发射阶段找到两个同名函数符号如何被归并（打印器的名字分配），再决定修在哪一头：让块声明与文件作用域共享同一个 `Sym`（更接近标准），还是让发射对同名符号取并集 |
+| **验收** | 本轮未修代码（临时探针已撤，`grep` 确认为零）；`test/conformance.sh` 236/0、c2y 101/0、`make test` exit 0；复现仍在（作为下一轮的入口） |
+
+### R60 十六进制小数可以没有小数点前的数字 —— ✅ 修好；过滤器再扩一类，Fujitsu 失败 31 → 9
+
+#### （一）真凶不是数字分隔符
+
+上一轮猜的是 C23 数字分隔符（`1'000`）——**猜错了**：cxx 已经支持它（实测三家：
+c23/c2y 下都接受；c17 下 cxx 接受而 gcc/clang 拒绝——一处已记录的宽松）。
+真正失败的是两类：**虚数字面量后缀**（`i` / `fi` / `iF` / `I`，属 §0 的 `_Complex`）
+与 **`0x.8p0f` 这种小数点前无数字的十六进制浮点**。
+
+#### （二）修法：`src/lexer.c` 前缀后的那个检查
+
+词法器在 `0x` 之后**紧接着**要求一个数字（`lexer.c:578`），而 6.4.4.2 的
+`hexadecimal-fractional-constant` 允许整数部分为空：`hexadecimal-digit-sequence_opt . hexadecimal-digit-sequence`。
+于是 `0x.8p0` 被拆成 `0` + 后缀 `.8p0`，报 `invalid suffix`。修法是在那里把前导 `0` 补回给读数器
+（与几行下面 `.5` 被规范化成 `0.5` 同一手法），但要求点后面必须有数字——`0x.p0`
+两边都没数字，不是常量。二进制/八进制没有小数形式，依然要求数字。
+
+| 形状 | gcc | clang | cxx（修后） |
+|---|---|---|---|
+| `0x.8p0`、`0x.8p0f`、`0x.8p0L` | ok | ok | **ok** |
+| `0x1.p0`、`0xA.p-2`、`0x1.8p0` | ok | ok | ok |
+| `0x.p0`、`0b.1`、`0x.8p` | 拒 | 拒 | **拒** |
+
+运行值与两家**逐位一致**：`0x.8p0`=0.5、`0x.8p1`=1.0、`0x.0000001p0`=4e-9、`0x.8p0L`=0.5。
+
+#### （三）过滤器再扩一类：`_Complex`
+
+按 §0，`_Complex` / `_Imaginary` / `<complex.h>` / `<tgmath.h>` 同样是“明确不做”，所以 `doc/fujitsu.sh` 的
+`out_of_scope()` 现在看三件事：① 源文件里的 `_Complex`/`_Imaginary`/两个头文件（关键字无歧义，文本判定安全）；
+② clang 的 `-Wdeprecated-non-prototype`（`f()` 与 K&R）；③ **cxx 自己的诊断** `invalid suffix ‘…i…’ on constant`
+（虚数面量后缀，两家参考实现都接受，所以只能问 cxx）。
+
+> 一处自己踩的坑：改写时把 `out_of_scope()` 的**调用**换成了关键字检查，函数还在但没人调——
+> 那 4 个 `expected 0` 又冒了出来，当场发现并改回。
+
+| | |
+|---|---|
+| **Fujitsu 样本（192 个测试）** | 失败 **45 → 31 → 9**；现在 **125 / 134 通过**，超出范围 20 OpenMP + 37 无原型/K&R/复数 + 1 参考编译器编不出 |
+| **剩下的 9 个全是彼此不同的真缺口** | ① **3 个 `undefined reference to ‘func’/‘func1’/‘func0801’`**（函数没被发须，最可疑）；② `incompatible types when passing argument`；③ `implicit declaration`；④ `#error Need macro __HPC_ACE__ or __SSE2__`（预定义宏）；⑤ `a type specifier is required`；⑥⑦ 退出码/输出各 1 |
+| **验收** | `test/conformance.sh` **234 → 236 passed / 0 gap**（新增：五种合法十六进制小数形状加运行值、`0x.p0` 必须被拒）；`test/c2y.sh` 101/0；`make test` exit 0；`clang-format-21 --dry-run --Werror src/lexer.c` 干净 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；tests2 仍 **106 通过 / 0 失败**；`doc/probes.sh` 全部基线（含 `d4` 9/0），**cxx2 = cxx3 = cxx4 逐字节相同**。 |
+
+### R59 `(...)` 才是 C23 里“真接受任意实参”的写法 —— ✅ cxx 已经支持（含定义里的一参 `va_start`）
+
+空括号在 C23 变成 `(void)`（§R56）之后，“传什么都行”的正当写法是**裸省略号** `(...)`。
+草案的语法直接允许它单独出现（A.3.2 / 6.7.7.1）：
+
+```
+parameter-type-list:
+        parameter-list
+        parameter-list , ...
+        ...
+```
+
+而 7.16p3 把它的语义说清了：“A function may be called with a variable number of arguments of varying
+types if its parameter type list ends with an ellipsis.”
+
+**与旧的无原型形式的关键区别**：`(...)` 是**原型**（prototype），`f()`（C17）不是。
+两者都不做形参类型检查（没有命名形参），但原型会做**默认实参提升**并且是可以定义的。
+
+**实测**（gcc / clang / cxx）：
+
+| 用例 | c17 | c23 | c2y |
+|---|---|---|---|
+| `void f(...);` + `f(1,2,3); f("x",1.5);` | gcc 接受、clang **报错**（“ISO C requires a named parameter before ‘...’”）、cxx 接受 | 三家接受 | 三家接受 |
+| `int count(...) { va_start(ap); }`（定义） | gcc/clang **报错**（`va_start` 要求命名参数）、cxx 接受 | 三家接受 | 三家接受 |
+| 运行值（`sum(1,2,3,4)` 累加） | — | cxx=gcc=clang=**14** | 同 |
+
+即：**c23/c2y 下三家逐格一致**，cxx 已经支持这个形式——包括定义里的**一参 `va_start(ap)`**（C23 的新形式）。
+c17 下 cxx 比 clang 宽松（与 gcc 一致）：那里裸省略号不是 ISO C，clang 报错、gcc 当扩展收下。
+
+| | |
+|---|---|
+| **结论** | “接受任意实参”在 C2y 里的写法是 `f(...)`；§R56、§R57 过滤掉的只是 `f()` 与 K&R 两种旧形式，不影响这一条 |
+| **验收** | 本轮未改代码；conformance 234/0、c2y 101/0、`make test` exit 0 保持不变 |
+
+### R58 把 `f()` 与 K&R 列为“不支持”并从探针过滤 —— ✅ Fujitsu 失败 45 → 31，剩下的都是真缺口
+
+按定调落实两件事：
+
+1. **文档明写**：范围章节 §0 的“明确不做”后面新增一段“**也不支持**”，列出这两种写法与它们在 C23 中的状态
+   （弃用到变语义 / 直接删除），并指向 §R56、§R57 的测量。
+2. **探针过滤**：`doc/fujitsu.sh` 新增 `out_of_scope()`，在编译之前用
+   `clang -std=c17 -Werror=deprecated-non-prototype` 问一次：被这条诊断命中的测试归入 `noproto` 桶，不计入失败。
+   选择用编译器而不是正则，是因为这两种写法的边界模糊（函数指针、typedef、多行声明符），
+   而 clang 对它们各有一条名字确切的诊断。
+
+**过滤器本身的验证**（三个手写样本）：
+
+| 样本 | 内容 | 结果 |
+|---|---|---|
+| p1 | `void f();` + `f(1, 2)` | 被过滤（`passing arguments to 'f' without a prototype`） |
+| p2 | `int add(a, b) int a; int b; { }` | 被过滤（`a function definition without a prototype`） |
+| p3 | `void g(void); g();` | **干净**（不误伤正常原型） |
+
+**过滤后的样本**（192 个测试）：
+
+| | 过滤前 | 过滤后 |
+|---|---|---|
+| 通过 | 125 / 170 | **125 / 156** |
+| 失败 | 45 | **31** |
+| 超出范围 | 20 OpenMP + 2 参考编译器编不出 | 20 OpenMP + **14 无原型/K&R** + 2 |
+
+剩下的失败都是真缺口，下一轮的直接工作项：
+
+| 数量 | 诊断 |
+|---|---|
+| **13** | `invalid suffix ‘X’ on constant`（+另 1 个 integer 版本）—— 疑似 C23 数字分隔符 `1'000` |
+| **7** | `expected ‘X’ after top level declarator` |
+| **2** | 链接失败：`undefined reference to ‘func’` / ‘func1’ —— 函数没被发尃，值得单独查 |
+| 1 + 1 | `#error "not defined macros in float.h"`、`#error Need macro __HPC_ACE__ or __SSE2__` |
+| 1 + 1 | `implicit declaration`、`incompatible types when passing argument` |
+
+| | |
+|---|---|
+| **验收** | 本轮只改文档与探针；conformance 234/0、c2y 101/0、`make test` exit 0 保持不变；`bash -n doc/fujitsu.sh` 通过，`FJ_FILTER_CC=` 可关掉过滤 |
+
+### R57 K&R（旧式）函数定义：C23 是**删除**，不是弃用 —— ✅ 三条证据一致
+
+空括号 `()` 与 K&R 是**两件事**，前者只是语义变了，后者连语法都没了。
+
+**证据一：草案的语法**（草案 38237–38241 行，A.3.4 / 6.9.2）
+
+```
+function-definition:
+        attribute-specifier-sequence_opt declaration-specifiers declarator function-body
+function-body:
+        compound-statement
+```
+
+C17 的形式是 `… declarator declaration-list_opt compound-statement`，草案里 **`declaration-list` 这个非终结符已经不存在**（全文 7 处都是 `member-declaration-list`，即结构体成员）。
+
+**证据二：草案的 6.11 弃用清单里也没有它们了**。C17 的 6.11.6（空括号函数声明符）与
+6.11.7（旧式函数定义）在草案里已经不在——当前清单是 6.11.2 链接、6.11.3 外部名、6.11.4 转义序列、6.11.5 八进制字面量、
+6.11.6 后缀运算符、6.11.7 存储类说明符位置、6.11.8 pragma、6.11.9 预定义宏名。它们不在清单里，是因为“弃用”这个状态已经结束：
+空括号改了语义（等同 `(void)`，见 §R56），而旧式定义被删除。
+
+**证据三：实测**（`int add(a, b) int a; int b; { … }`）
+
+| 模式 | gcc | clang | cxx |
+|---|---|---|---|
+| c17 / gnu17 | 接受 | 接受（警告：“a function definition without a prototype is deprecated in all versions of C”） | 报错 |
+| c23 / c2y | 仍接受（作为扩展） | **报错**：`unknown type name 'a'`（把标识符列表当原型解析） | 报错 |
+
+顺带一个事实：标识符列表**本来就只能出现在定义里**（C17 6.7.6.3p3：“An identifier list in a function
+declarator that is not part of a definition of that function shall be empty”），所以 `int add(a, b);` 三家在**所有模式**下都报错（实测）。
+
+| | |
+|---|---|
+| **对本项目的影响** | §7（is_fndef 预解析评估）把“`{` 判据与 K&R 天然冲突”列为反对理由之一——**这条理由现在消失了**：K&R 定义在 C2y 里根本不存在，而 cxx 本来就不支持它 |
+| **cxx 的现状** | 与 clang `-std=c23/-std=c2y` **一致**（拒绝）；在 c17 下与两家都不一致（那里它们接受）——作为**已记录的差距**保留，优先级低（旧代码才用） |
+| **验收** | 本轮未改代码（测量与记录）；conformance 234/0、c2y 101/0、`make test` exit 0 保持不变 |
+
+### R56 空参数列表 `f()`：已弃用，而且 C23 起不再“接受任何参数” —— ⚠️ cxx 在 C17 下判错（待修）
+
+起因是 Fujitsu 样本里 4 个 `too many arguments to function ‘X’; expected 0`。先把三家在三个模式下的行为量清：
+
+| 写法 | 模式 | gcc | clang | cxx |
+|---|---|---|---|---|
+| `void f();` + `f(1,2,3);`（无定义） | c17 | 接受 | 接受（警告） | **报错** |
+| 同上 | c23 / c2y | 报错 | 报错 | 报错 |
+| `typedef void g(); g *p; p(1,2);` | c17 | 接受 | 接受 | **报错** |
+| `void f() {}` + `f(1);`（定义） | c17 | 接受 | 接受 | **报错** |
+| 同上 | c23 / c2y | 报错 | 报错 | 报错 |
+| `void f() {}` + `f();` | 全部 | 接受 | 接受 | 接受 |
+
+clang 在 c17 下把结论说得很直白：
+
+```
+warning: passing arguments to 'f' without a prototype is deprecated in all
+         versions of C and is not supported in C23 [-Wdeprecated-non-prototype]
+```
+
+所以：**它从来就是弃用的（deprecated in all versions of C），而 C23 把它彻底取消**——
+C23 起 `()` 在**声明与定义两边都**等于 `(void)`，不再是“参数未指定”。
+
+**cxx 的现状**：`func_param()`（`src/parser.c:8087`）只分 `(void)` 与“有参数表”，
+`Type` 上**没有“无原型”这一位**，于是 `f()` 与 `f(void)` 在类型上完全相同，在**所有模式**下都按零参数检查。
+结果是 C23/C2y 下恰好正确，**C17 下错误**。
+
+| | |
+|---|---|
+| **修法（下一轮）** | ① `Type` 加一位“无原型”，`func_param()` 在空列表 + 非 C23 模式时置位（C23/C2y 下仍等同 `(void)`）；② 调用检查在无原型时接受任意个数的实参，但要做**默认实参提升**（`float`→`double`、整型提升），并发 clang 同名的 `-Wdeprecated-non-prototype` 警告；③ `is_compatible()` 要让“无原型声明”与“有原型声明”相容（6.7.6.3p15） |
+| **影响** | Fujitsu 样本的 4 个失败，以及 `typedef void g(); g *p; p(1,2);` 这类旧代码 |
+| **验收** | 本轮未改代码（只做了测量与记录）；`test/conformance.sh` 234/0、c2y 101/0、`make test` exit 0 保持不变 |
+
 ### R54/R55 Fujitsu 测试集接入 + `_Atomic` 作为限定符 —— ✅ 探针就位，首轮样本 125/170
 
 #### （一）`_Atomic` 是限定符（6.7.3p1）
@@ -589,8 +1216,8 @@ cxx 说 `lvalue required in ‘asm’ statement`，两家都接受）与 `libavf
 | | |
 |---|---|
 | **验收** | `test/conformance.sh` **229 → 233 passed / 0 gap**（新增：38 个原子类型名各用一遍加运行值、数组内加限定符、指针下方的陷阱仍被拒、丢失限定符仍告警）；`test/c2y.sh` 101/0；`make test` exit 0；arm64 51、rv64 51、rv32 51(+1 skipped)；`clang-format-21 --dry-run --Werror` 干净 |
-| **FFmpeg（`doc/ffmpeg.sh`）** | @@FFMPEG@@ |
-| **记分（`doc/realworld.sh` 全量探针）** | @@SCORE@@ |
+| **FFmpeg（`doc/ffmpeg.sh`）** | 崩溃 **0**，目标文件 **2251**；剩余 **12** 行 `error:`，类别：类型不匹配 2+1+2、`expected identifier` 2、**非法 IR 2**（`%union.SyncQueueFrame` 与 `%struct.SchedulerNode`）、`redefinition of type` 1、`lvalue required in ‘asm’` 1、`Elementtype` 1 |
+| **记分（`doc/realworld.sh` 全量探针）** | **与基线相同**：git 567/567、cpython 381/385（余下四个仍是 `Python/pystrhex.c` 的 `__builtin_shufflevector`、两个 HACL SIMD 单元、`Modules/_ctypes/_ctypes_test.c` 的 `<complex.h>`）、lua 35/35、zlib 15/15、libpng 18/18、sqlite 1/1、tinycc 21/21；tests2 仍 **106 通过 / 0 失败**；`doc/probes.sh` 全部基线（含 `d4` 9/0），**cxx2 = cxx3 = cxx4 逐字节相同**。 |
 
 ### R51 内核阻塞点的追查：驱动层的 `-Wp,` / `-Wa,` / `-x` —— ✅ 三类选项现已支持，内核剩下一个**结构性**选择
 

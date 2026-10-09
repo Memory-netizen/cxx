@@ -416,6 +416,23 @@ Type *agg_shape_type(AggClass *c) {
     return ty;
 }
 
+// The alignment an object of this type is placed at. For an array of 16 bytes
+// or more x86-64's psABI asks for 16 whatever the element is -- `char[16]`,
+// `float[4]` and `double[2]` alike -- because that is what SSE code assumes of
+// an object it loads with movaps; without it such a load faults.
+//
+// It is the object's alignment, not the type's: a member array is laid out
+// with its element's, so `struct { char buf[16]; char c; }` stays 17 bytes
+// with alignment 1, and the value a program reads back from _Alignof or
+// __alignof__ is the type's -- gcc and clang say 8 for a `double[2]` global
+// that is stored 16-aligned, and 32 only when the declaration says
+// _Alignas(32). Storage is where this belongs. No other target cxx builds for
+// has the rule.
+int object_align(Type *ty, int align) {
+    if (T.array_align16 && ty->kind == TY_ARRAY && ty->size >= 16) align = MAX(align, 16);
+    return align;
+}
+
 Type *array_of(Type *base, int len) {
     Type *ty = emalloc(sizeof(Type));
     ty->kind = TY_ARRAY;
@@ -497,6 +514,7 @@ void complete_copies(Type *ty) {
         c->align = ty->align;
         c->is_flexible = ty->is_flexible;
         c->is_packed = ty->is_packed;
+        c->layout_packed = ty->layout_packed;
     }
 }
 
@@ -833,7 +851,14 @@ static bool sign_only_difference(Type *a, Type *b) {
     b = type_unqual(b);
     if (a->kind == TY_ENUM || b->kind == TY_ENUM) return false;
     if (!is_integer(a) || !is_integer(b)) return false;
-    return a->size == b->size && a->is_unsigned != b->is_unsigned;
+    if (a->size != b->size) return false;
+    // Plain `char` is a type of its own, distinct from both `signed char` and
+    // `unsigned char`; clang reports the difference as -Wpointer-sign too
+    // ("... where one is of the unique type 'char'") even though on x86-64
+    // `char` and `signed char` agree on signedness. gcc says nothing at all,
+    // and cxx follows clang, as it does for the signedness case above.
+    if ((a->kind == TY_CHAR) != (b->kind == TY_CHAR)) return true;
+    return a->is_unsigned != b->is_unsigned;
 }
 
 // The type a pointer conversion compares, with the one qualifier level that

@@ -575,8 +575,17 @@ static void convert_pp_num(Token *t) {
             clean[ci++] = '0';
             clean[ci++] = pre;
             text += 2;
-            if (!is_valid_digit(*text, base))
+            if (base == 16 && *text == '.' && is_valid_digit(text[1], base)) {
+                // 6.4.4.2 lets the fraction stand alone -- `0x.8p0` -- and the
+                // reader wants the leading zero, so it goes back in the way a
+                // `.5` is canonicalised to `0.5` below. The dot itself is left
+                // for the loop, which records it as the fraction. A dot with
+                // digits on neither side is not a constant (`0x.p0`), and is
+                // refused by the branch below.
+                clean[ci++] = '0';
+            } else if (!is_valid_digit(*text, base)) {
                 error(t, "invalid suffix ‘%.*s’ on integer constant", (int)(end - text), text);
+            }
         }
     } else if (first_ch == '.') {
         clean[ci++] = '0';  // canonicalize
@@ -816,7 +825,18 @@ void convert_keywords(Token *tok) {
         {"__asm__", 0, TK_ASM},
         {"__attribute", 0, TK_ATTR},
         {"__attribute__", 0, TK_ATTR},
+        // GNU's older spelling of _Alignof; __alignof__ already resolves through
+        // the double-underscore stripping, but this one does not.
+        {"__alignof", 0, TK_ALIGNOF},
         {"__extension__", 0, TK_EXTENSION},
+        // [GNU] __label__: declares names whose scope is the enclosing block.
+        {"__label__", 0, TK_LABEL_DECL},
+        // The ACLE name for the half type. clang makes it a type of its own --
+        // _Generic and __builtin_types_compatible_p tell it from _Float16, and
+        // on targets without half-precision parameters it may only sit behind a
+        // pointer -- where cxx takes it as another spelling of _Float16, which
+        // matches on representation, arithmetic and ABI. gcc has no __fp16.
+        {"__fp16", 0, TK_F16},
         {"__inline", 0, TK_INLINE},
         {"__inline__", 0, TK_INLINE},
         {"__restrict", 0, TK_RESTRICT},

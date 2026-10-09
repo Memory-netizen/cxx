@@ -3175,6 +3175,546 @@ static report_fn usage_routine __attribute__((noreturn));
 int main(void) { return usage_routine == 0 ? 0 : 1; }
 EOF
 
+# --- __label__, GNU's block-local labels ------------------------------
+# `__label__ a, b;` declares names whose scope is the block, so that two
+# blocks -- or two expansions of a macro carrying one inside a statement
+# expression, which is what the Fujitsu suite's C/0059 does -- may each define
+# the same name. cxx resolves labels through one function-wide list of ids and
+# checks it for duplicates, so a declared name is given an id of its own,
+# mangled per declaration; the label statement, the goto and the
+# labels-as-values form all ask for it the same way.
+cat > "$tmp/labeldecl.c" <<'EOF'
+#include <stdio.h>
+#define T(idx) ({          \
+    __label__ a, done;     \
+    int v = 0;             \
+    if ((idx) == 1) goto a;\
+    v = 9;                 \
+    goto done;             \
+  a: v = 1;                \
+  done: v;                 \
+})
+void t1(void) {
+    {
+        __label__ L;
+        goto L;
+        printf("*NG*\n");
+    L:
+        printf("*OK*\n");
+    }
+}
+int main(void) { t1(); printf("%d %d\n", T(1), T(0)); return 0; }
+EOF
+if "$compiler" -w -o "$tmp/labeldecl" "$tmp/labeldecl.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/labeldecl" | tr '\n' ' ')" = "*OK* 1 9 " ]; then
+    echo "testing __label__ in blocks and statement expressions ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __label__ in blocks and statement expressions ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# The name is still one label inside its own block, and it is invisible
+# outside it.
+cat > "$tmp/labeldecl2.c" <<'EOF'
+int main(void) { { __label__ L; L: ; L: ; } return 0; }
+EOF
+if "$compiler" -w -c -o "$tmp/labeldecl2.o" "$tmp/labeldecl2.c" > "$tmp/log" 2>&1; then
+    echo "testing a repeated __label__ label in one block is an error ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+else
+    echo "testing a repeated __label__ label in one block is an error ... passed"
+    n_pass=$((n_pass + 1))
+fi
+
+cat > "$tmp/labeldecl3.c" <<'EOF'
+int main(void) { { __label__ L; L: ; } goto L; return 0; }
+EOF
+if "$compiler" -w -c -o "$tmp/labeldecl3.o" "$tmp/labeldecl3.c" > "$tmp/log" 2>&1; then
+    echo "testing a jump to a __label__ from outside its block ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+else
+    echo "testing a jump to a __label__ from outside its block ... passed"
+    n_pass=$((n_pass + 1))
+fi
+
+# --- __attribute__((alias("target"))) ---------------------------------
+# The declared name is another name for an object defined in this unit. cxx
+# accepted the attribute and dropped it, so the call went to a symbol nothing
+# defined ("undefined reference to foo_impl", the Fujitsu suite's C/0108).
+# The attribute sits after the declarator, which puts it on the type rather
+# than in the declaration specifiers' list -- both are consulted.
+cat > "$tmp/alias.c" <<'EOF'
+#include <stdio.h>
+void foo(void) { printf("OK\n"); }
+static void foo_impl(void) __attribute__((alias("foo")));
+int bar(void) { return 7; }
+extern int bar_alias(void) __attribute__((alias("bar")));
+int main(void) { foo_impl(); foo(); foo_impl(); printf("%d\n", bar_alias()); return 0; }
+EOF
+if "$compiler" -w -o "$tmp/alias" "$tmp/alias.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/alias" | tr '\n' ' ')" = "OK OK OK 7 " ]; then
+    echo "testing __attribute__((alias)) ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __attribute__((alias)) ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- extra arguments on __sync_lock_* ---------------------------------
+# gcc and clang both tolerate them on these two builtins (the Fujitsu suite
+# passes one to each); both refuse them on the fetch family, and so does cxx.
+cat > "$tmp/syncextra.c" <<'EOF'
+#include <stdio.h>
+int main(void) {
+    int a = 1, b = 2, d = 10;
+    int r = __sync_lock_test_and_set(&a, b, &d);
+    printf("%d %d\n", r, a);
+    __sync_lock_release(&a, &d);
+    printf("%d\n", a);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/syncextra" "$tmp/syncextra.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/syncextra" | tr '\n' ' ')" = "1 2 0 " ]; then
+    echo "testing extra arguments on the __sync_lock builtins ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing extra arguments on the __sync_lock builtins ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+cat > "$tmp/syncnoextra.c" <<'EOF'
+int main(void) { int a = 1, d = 9; return __sync_fetch_and_add(&a, 3, &d); }
+EOF
+if "$compiler" -w -c -o "$tmp/syncnoextra.o" "$tmp/syncnoextra.c" > "$tmp/log" 2>&1; then
+    echo "testing the fetch family still refuses extra arguments ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+else
+    echo "testing the fetch family still refuses extra arguments ... passed"
+    n_pass=$((n_pass + 1))
+fi
+
+# --- __alignof, GNU's older spelling ----------------------------------
+cat > "$tmp/alignof.c" <<'EOF'
+#include <stdio.h>
+struct S { char c; double d; };
+int main(void) {
+    printf("%zu %zu %zu\n", __alignof(int), __alignof(struct S), __alignof__(double));
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/alignof" "$tmp/alignof.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/alignof")" = "4 8 8" ]; then
+    echo "testing __alignof ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __alignof ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- GCC's older __sync_* atomics -------------------------------------
+# The Fujitsu suite's C/0044 uses __sync_lock_test_and_set and
+# __sync_lock_release on every integer width; cxx had neither (only
+# __sync_synchronize), so it stopped at "implicit declaration of function".
+# They are the __atomic_* operations with the memory order in the name: the
+# lock_test_and_set acquires, the lock_release releases, the fetch_and_*
+# family is a full barrier. clang has them all, gcc has them all.
+cat > "$tmp/sync.c" <<'EOF'
+#include <stdio.h>
+int main(void) {
+    char c = 1, r;
+    int a = 1;
+    r = __sync_lock_test_and_set(&c, 7);
+    printf("%d %d\n", r, c);
+    __sync_lock_release(&c);
+    printf("%d\n", c);
+    printf("%d\n", __sync_fetch_and_add(&a, 3));
+    printf("%d\n", __sync_fetch_and_sub(&a, 1));
+    printf("%d\n", __sync_fetch_and_or(&a, 8));
+    printf("%d\n", __sync_fetch_and_and(&a, 12));
+    printf("%d\n", __sync_fetch_and_xor(&a, 1));
+    __sync_synchronize();
+    printf("%d\n", a);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/sync" "$tmp/sync.c" > "$tmp/log" 2>&1; then
+    got=$("$tmp/sync" | tr '\n' ' ')
+    want="1 7 0 1 4 3 11 8 9 "
+    if [ "$got" = "$want" ]; then
+        echo "testing the __sync_* atomics ... passed"
+        n_pass=$((n_pass + 1))
+    else
+        echo "testing the __sync_* atomics ... FAILED"
+        echo "    got  $got"
+        echo "    want $want"
+        n_fail=$((n_fail + 1))
+    fi
+else
+    echo "testing the __sync_* atomics ... FAILED (compile)"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- __fp16, the ACLE spelling of the half type ----------------------
+# cxx has _Float16 as a type of its own and had no __fp16, so code that spells
+# the ACLE name -- the Fujitsu suite's C/0194 passes `__fp16 *restrict` -- was
+# refused. clang takes it on every target; gcc has only __bf16. cxx takes the
+# name as another spelling of _Float16, which matches clang on representation,
+# arithmetic and ABI. The two deliberate differences are recorded in the plan:
+# clang's _Generic/__builtin_types_compatible_p tell the two types apart, and
+# on targets without half-precision parameters clang lets __fp16 appear only
+# behind a pointer.
+cat > "$tmp/fp16.c" <<'EOF'
+#include <stdio.h>
+__fp16 g = 1.5;
+void take(__fp16 *restrict p, int n) {
+    for (int i = 0; i < n; i++) p[i] += 0.1f16;
+}
+int main(void) {
+    __fp16 a = 1.5, b = 2.5;
+    __fp16 c = a + b;
+    take(&g, 1);
+    printf("%zu %g %d\n", sizeof(__fp16), (double)c, (int)g);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/fp16" "$tmp/fp16.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/fp16")" = "2 4 1" ]; then
+    echo "testing __fp16 as the half type ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __fp16 as the half type ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- -Wpointer-sign covers the plain `char` variants ------------------
+# `char` is a type of its own, distinct from both `signed char` and
+# `unsigned char`. `sign_only_difference()` asked for a difference in
+# signedness, and on x86-64 `char` and `signed char` agree on it, so passing
+# `signed char *` where `char *` is wanted was refused outright instead of
+# warned about. clang warns for both variants; gcc says nothing; cxx follows
+# clang. A real mismatch (`double *` for `int *`) stays an error.
+cat > "$tmp/psign.c" <<'EOF'
+#include <string.h>
+#include <stdio.h>
+void sub(void) {
+    char cbuf[4];
+    signed char sbuf[4];
+    unsigned char ubuf[4];
+    strcpy(cbuf, "ab");
+    strcpy(sbuf, "cd");
+    strcpy(ubuf, "ef");
+    printf("%s %s %s\n", cbuf, sbuf, ubuf);
+}
+int main(void) { sub(); return 0; }
+EOF
+if "$compiler" -w -o "$tmp/psign" "$tmp/psign.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/psign")" = "ab cd ef" ]; then
+    echo "testing the char variants pass with a pointer-sign warning ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the char variants pass with a pointer-sign warning ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# The warning has to be reported without -w, and the mismatch must still be
+# refused: the relaxation is about the char family only.
+cat > "$tmp/psign2.c" <<'EOF'
+#include <string.h>
+void sub(void) { signed char buf[4]; strcpy(buf, "cd"); }
+EOF
+if "$compiler" -std=c23 -c -o "$tmp/psign2.o" "$tmp/psign2.c" 2> "$tmp/log"; then
+    if grep -q 'differ in signedness' "$tmp/log"; then
+        echo "testing the pointer-sign warning is reported ... passed"
+        n_pass=$((n_pass + 1))
+    else
+        echo "testing the pointer-sign warning is reported ... FAILED (silent)"
+        n_fail=$((n_fail + 1))
+    fi
+else
+    echo "testing the pointer-sign warning is reported ... FAILED (refused)"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+cat > "$tmp/psign3.c" <<'EOF'
+void f(int *p);
+void g(void) { double *d = 0; f(d); }
+EOF
+if "$compiler" -std=c23 -c -o "$tmp/psign3.o" "$tmp/psign3.c" > "$tmp/log" 2>&1; then
+    echo "testing a real pointer mismatch is still refused ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+else
+    echo "testing a real pointer mismatch is still refused ... passed"
+    n_pass=$((n_pass + 1))
+fi
+
+# --- #pragma pack and packed members reach the IR --------------------
+# The layout already honoured the pragma -- the sizes came out right -- but
+# `is_packed` is set from __attribute__((packed)) only, so a record packed by
+# the pragma was still written `{ i8, double }` and LLVM put the double at
+# offset 8 instead of 1. A member-level packed had the same gap. Both now set
+# the flag the printer reads, and a pragma that lowers nothing (pack(8) on
+# these shapes) still spells the record the plain way.
+cat > "$tmp/packpragma.c" <<'EOF'
+#include <stdio.h>
+#pragma pack(1)
+struct P1 { char c; double i; };
+#pragma pack()
+#pragma pack(2)
+struct P2 { char c; double i; };
+#pragma pack()
+struct MP { char c; int i __attribute__((packed)); };
+#pragma pack(4)
+struct D4P { double d; char c; };
+#pragma pack()
+struct P1 p1 = { 1, 2 };
+struct P2 p2 = { 3, 4 };
+struct MP mp = { 5, 6 };
+struct D4P d4 = { 7, 8 };
+int main(void) {
+    printf("%d %g %d %g %d %d %g %d %zu %zu %zu\n", p1.c, p1.i, p2.c, p2.i, mp.c, mp.i,
+           d4.d, d4.c, sizeof(struct P1), sizeof(struct P2), sizeof(struct D4P));
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/packpragma" "$tmp/packpragma.c" > "$tmp/log" 2>&1; then
+    got=$("$tmp/packpragma")
+    want="1 2 3 4 5 6 7 8 9 10 12"
+    if [ "$got" = "$want" ]; then
+        echo "testing #pragma pack and packed members ... passed"
+        n_pass=$((n_pass + 1))
+    else
+        echo "testing #pragma pack and packed members ... FAILED"
+        echo "    got  $got"
+        echo "    want $want"
+        n_fail=$((n_fail + 1))
+    fi
+else
+    echo "testing #pragma pack and packed members ... FAILED (compile)"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a packed record in LLVM IR --------------------------------------
+# The type body gives every member its C offset with explicit `[N x i8]`
+# padding, which only reproduces the layout if LLVM adds none of its own: the
+# record has to be spelled `<{ ... }>`. With plain braces a `double` after a
+# `char` moves from offset 1 to 8, and an initializer written against the type
+# fills the wrong bytes -- the Fujitsu suite's C/0091 read 0 instead of 2 and
+# printed NG. Accesses were never affected: they go through byte
+# getelementprs, which is why only the initializer showed it.
+cat > "$tmp/packed.c" <<'EOF'
+#include <stdio.h>
+#include <stddef.h>
+struct __attribute__((packed)) A { char c; double i; };
+struct __attribute__((packed)) B { char c; long i; short s; };
+struct __attribute__((packed)) C { char c; int a[2]; };
+union  __attribute__((packed)) U { char c; double d; };
+struct A a = { 1, 2 };
+struct B b = { 3, 4, 5 };
+struct C c = { 6, { 7, 8 } };
+union U u = { .d = 9 };
+static struct A make(void) { struct A x = { 10, 11 }; return x; }
+int main(void) {
+    struct A m = make();
+    a.i = a.i + 1.0;
+    printf("%d %g %d %ld %d %d %d %d %g | %d %g %zu %zu %zu\n",
+           a.c, a.i, b.c, b.i, b.s, c.c, c.a[0], c.a[1], u.d,
+           m.c, m.i, offsetof(struct A, i), offsetof(struct B, i), sizeof(struct A));
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/packed" "$tmp/packed.c" > "$tmp/log" 2>&1; then
+    got=$("$tmp/packed")
+    want=$(printf '1 3 3 4 5 6 7 8 9 | 10 11 1 1 9')
+    if [ "$got" = "$want" ]; then
+        echo "testing a packed record's type and initializer ... passed"
+        n_pass=$((n_pass + 1))
+    else
+        echo "testing a packed record's type and initializer ... FAILED"
+        echo "    got  $got"
+        echo "    want $want"
+        n_fail=$((n_fail + 1))
+    fi
+else
+    echo "testing a packed record's type and initializer ... FAILED (compile)"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- x86-64: an array of 16 bytes or more is 16-aligned --------------
+# The psABI's rule for objects, and what SSE code assumes of what it loads with
+# movaps. It is the object's alignment and not the type's: a member array keeps
+# its element's, so `struct { char buf[16]; char c; }` stays 17 bytes with
+# alignment 1. cxx used the element's for objects too, so a movaps on such a
+# global faulted -- the Fujitsu suite's C/0163 is exactly that program.
+cat > "$tmp/bigalign.c" <<'EOF'
+#include <stdio.h>
+double init[] = { 1.0, 2.0 };   /* completed by the initializer */
+double data[] = { 5.0, 6.0 };
+double res[] = { 0, 0 };
+struct S { char buf[16]; char c; };
+struct T { double a[2]; };
+int main(void) {
+#if defined(__x86_64__)
+    asm("movaps init(%rip), %xmm0\n\t"
+        "movaps data(%rip), %xmm1\n\t"
+        "addsd %xmm1, %xmm0\n\t"
+        "movaps %xmm0, res(%rip)");
+    printf("%g %g\n", res[0], res[1]);
+#else
+    printf("%g %g\n", init[0] + data[0], init[1]);
+#endif
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/bigalign" "$tmp/bigalign.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/bigalign")" = "6 2" ]; then
+    echo "testing a 16-byte array global is 16-aligned (movaps) ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a 16-byte array global is 16-aligned (movaps) ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# The rule must not reach the aggregate layout: gcc and clang both give these
+# sizes and alignments, and the type-side version of the fix broke them.
+cat > "$tmp/bigalign2.c" <<'EOF'
+#include <stdio.h>
+struct A { double a[2]; };
+struct B { float f[4]; };
+struct C { char buf[16]; char c; };
+struct D { char c; double a[2]; };
+int main(void) {
+    printf("%zu/%zu %zu/%zu %zu/%zu %zu/%zu\n",
+           sizeof(struct A), _Alignof(struct A), sizeof(struct B), _Alignof(struct B),
+           sizeof(struct C), _Alignof(struct C), sizeof(struct D), _Alignof(struct D));
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/bigalign2" "$tmp/bigalign2.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/bigalign2")" = "16/8 16/4 17/1 24/8" ]; then
+    echo "testing the 16-byte rule stays out of the aggregate layout ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the 16-byte rule stays out of the aggregate layout ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# --- a block-scope declaration and the file-scope definition ---------
+# 6.2.2p2: one identifier in two scopes with external linkage is one entity --
+# the linkage ties them, not the visibility of the name (the block's name is
+# not visible at file scope, which is why the definition's lookup did not find
+# the declaration). cxx made two symbols, and the printer, which emits one
+# entry per object-file name with the first one winning, kept the declaration
+# and dropped the definition: the link failed with "undefined reference".
+cat > "$tmp/blkscope.c" <<'EOF'
+#include <stdio.h>
+int f(int);                       /* file scope, so the block below is a redeclaration */
+static int counter = 0;
+int main(void) {
+    {
+        int g(int);               /* block scope: no storage class means extern */
+        extern int x;             /* the object case, same rule */
+        counter = g(1) + x;
+    }
+    printf("%d\n", counter);
+    return 0;
+}
+int g(int v) { return v + 40; }
+int x = 1;
+EOF
+if "$compiler" -w -o "$tmp/blkscope" "$tmp/blkscope.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/blkscope")" = "42" ]; then
+    echo "testing a block-scope declaration with a later definition ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a block-scope declaration with a later definition ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+# The definition may also come first, which always worked; and a `static`
+# definition after a non-static declaration stays an error (6.2.2p7).
+cat > "$tmp/blkscope2.c" <<'EOF'
+int h(int v) { return v + 1; }
+int main(void) { { int h(int); return h(1) == 2 ? 0 : 1; } }
+EOF
+if "$compiler" -w -o "$tmp/blkscope2" "$tmp/blkscope2.c" > "$tmp/log" 2>&1 &&
+   "$tmp/blkscope2"; then
+    echo "testing a definition before the block-scope declaration ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a definition before the block-scope declaration ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+cat > "$tmp/blkscope3.c" <<'EOF'
+int main(void) { { int k(int); return k(1); } }
+static int k(int v) { return v; }
+EOF
+if "$compiler" -w -c -o "$tmp/blkscope3.o" "$tmp/blkscope3.c" > "$tmp/log" 2>&1; then
+    echo "testing static after non-static stays an error ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+else
+    echo "testing static after non-static stays an error ... passed"
+    n_pass=$((n_pass + 1))
+fi
+
+# --- a hexadecimal fraction with no digits before the point ---------
+# 6.4.4.2 writes the fraction as `hexadecimal-digit-sequence_opt .
+# hexadecimal-digit-sequence`, so `0x.8p0` is the fraction alone -- the
+# Fujitsu suite's C/0015 writes `float d4 = 0x.8p0f;`. cxx demanded a digit
+# right after the prefix and called the rest an invalid suffix. A dot with
+# digits on neither side is not a constant, and neither is a hex float with no
+# exponent.
+cat > "$tmp/hexfrac.c" <<'EOF'
+#include <stdio.h>
+int main(void) {
+    double a = 0x.8p0;        /* 0.5 */
+    double b = 0x.8p1;        /* 1.0 */
+    float  c = 0x.8p0f;
+    double d = 0x.0000001p0;
+    long double e = 0x.8p0L;
+    double f = 0x1.p0;        /* the other side of the point */
+    printf("%.6f %.6f %.6f %.9f %.6Lf %.6f\n", a, b, (double)c, d, e, f);
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/hexfrac" "$tmp/hexfrac.c" > "$tmp/log" 2>&1 &&
+   [ "$("$tmp/hexfrac")" = "0.500000 1.000000 0.500000 0.000000004 0.500000 1.000000" ]; then
+    echo "testing a hexadecimal fraction with no digits before the point ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a hexadecimal fraction with no digits before the point ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
+cat > "$tmp/hexbad.c" <<'EOF'
+double a = 0x.p0;
+int main(void) { return 0; }
+EOF
+if "$compiler" -w -c -o "$tmp/hexbad.o" "$tmp/hexbad.c" > "$tmp/log" 2>&1; then
+    echo "testing 0x.p0 is not a constant ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+else
+    echo "testing 0x.p0 is not a constant ... passed"
+    n_pass=$((n_pass + 1))
+fi
+
 # --- _Atomic as a type qualifier -------------------------------------
 # 6.7.3p1 lists _Atomic with const, volatile and restrict, and as a qualifier
 # it designates an atomic type: `int * _Atomic p` makes the pointer itself the
