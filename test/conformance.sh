@@ -7128,6 +7128,106 @@ qual_case "const char * to const void * does not warn" 0 \
 qual_case "const char * to void * still warns" 1 'void f(void *); int g(const char *p) { f(p); return 0; }'
 qual_case "volatile char * to void * still warns" 1 'void f(void *); int g(volatile char *p) { f(p); return 0; }'
 
+# 6.7.4.1p2: a pointer to a function is not a pointer to an object type, so
+# it cannot be restrict-qualified. gcc and clang both refuse it; cxx accepted
+# it until this was probed.
+bad "restrict on a pointer to function is refused" <<'EOF'
+int (* restrict p)(void);
+EOF
+if "$compiler" -w -fsyntax-only -xc - >/dev/null 2>&1 <<'EOF'
+void *f(void * restrict dst, const void * restrict src);
+EOF
+then
+    echo "testing restrict on a pointer to void is still accepted ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing restrict on a pointer to void is still accepted ... FAILED"
+    n_fail=$((n_fail + 1))
+fi
+
+# A range designator whose value sits several designators deep has to be
+# evaluated once too: gcc gives `[0 ... 2].v = ++c` an `++c` of 1, and every
+# element the range covers the value it produced. The innermost form was all
+# that worked; `[0 ... 1][1] = ++c`, `[0 ... 2].v = ++c` and a range of ranges
+# re-evaluated once per covered element and handed the elements *different*
+# values.
+cat > "$tmp/deeprange.c" <<'EOF'
+#include <stdio.h>
+static int c;
+static int bump(void) { return ++c; }
+int main(void) {
+    int nested[2][2] = { [0 ... 1][0 ... 1] = bump() };
+    if (c != 1) { printf("nested c=%d\n", c); return 1; }
+    if (nested[0][0] != 1 || nested[1][1] != 1) { printf("nested %d %d\n", nested[0][0], nested[1][1]); return 2; }
+    int row[2][2] = { [0 ... 1][1] = bump() };
+    if (c != 2 || row[0][1] != 2 || row[1][1] != 2) { printf("row c=%d %d %d\n", c, row[0][1], row[1][1]); return 3; }
+    struct S { int v; } s[3] = { [0 ... 2].v = bump() };
+    if (c != 3 || s[0].v != 3 || s[2].v != 3) { printf("member c=%d %d %d\n", c, s[0].v, s[2].v); return 4; }
+    int cube[2][2][2] = { [0 ... 1][0 ... 1][0 ... 1] = bump() };
+    if (c != 4 || cube[0][0][0] != 4 || cube[1][1][1] != 4) { printf("cube c=%d\n", c); return 5; }
+    /* a range whose elements are later overridden one by one keeps its value
+       where it still shows, and the evaluation happens once */
+    int part[6] = { [0 ... 5] = bump(), [2 ... 3] = 9 };
+    if (c != 5 || part[0] != 5 || part[2] != 9 || part[5] != 5) { printf("part c=%d\n", c); return 6; }
+    /* dimensions beyond three: gcc takes a range per dimension to any depth,
+       and the value is produced once for the whole cross product */
+    int five[2][2][2][2][2] = { [0 ... 1][0 ... 1][0 ... 1][0 ... 1][0 ... 1] = bump() };
+    if (c != 6 || five[0][0][0][0][0] != 6 || five[1][1][1][1][1] != 6) { printf("five c=%d\n", c); return 7; }
+    /* a compound literal is an anonymous variable too, but its initializer is
+       not one of the range's temporaries: `bump()` runs once here as well */
+    struct P { int a, b; };
+    struct P pl[2][2] = { [0 ... 1][0 ... 1] = (struct P){ bump(), 2 } };
+    if (c != 7 || pl[0][0].a != 7 || pl[1][1].a != 7) { printf("lit c=%d %d\n", c, pl[1][1].a); return 8; }
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/deeprange" "$tmp/deeprange.c" > "$tmp/log" 2>&1 && "$tmp/deeprange"; then
+    echo "testing a deep range designator's single evaluation ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a deep range designator's single evaluation ... FAILED"
+    "$compiler" -w -o "$tmp/deeprange" "$tmp/deeprange.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# A range designator whose every element a later designator replaces is not
+# evaluated at all: gcc and clang drop the initializer, and so does the plain
+# designated path here (`{[0] = i++, [0] = 6}` leaves `i` alone). A range keeps
+# its value in the first element's `pre`, which an override survives, so this
+# is where `i++` would otherwise run for nothing.
+cat > "$tmp/deadrange.c" <<'EOF'
+#include <stdio.h>
+static int i;
+int main(void) {
+    int a[10] = { [2 ... 5] = i++, [2 ... 5] = 6 };
+    if (i != 0) { printf("same range i=%d\n", i); return 1; }
+    if (a[2] != 6 || a[5] != 6) { printf("same range a=%d %d\n", a[2], a[5]); return 2; }
+
+    int b[8] = { [0 ... 3] = i++, [0 ... 3] = i++ };
+    if (i != 1) { printf("twice i=%d\n", i); return 3; }
+    if (b[0] != 0 || b[3] != 0) { printf("twice b=%d %d\n", b[0], b[3]); return 4; }
+
+    /* one element survives, so the initializer is still evaluated -- once */
+    int c[6] = { [0 ... 5] = i++, [2 ... 3] = 9 };
+    if (i != 2) { printf("partly i=%d\n", i); return 5; }
+    if (c[0] != 1 || c[2] != 9 || c[5] != 1) { printf("partly c=%d\n", c[0]); return 6; }
+
+    /* nothing survives through a member either */
+    struct S { int v; } s[2] = { [0 ... 1].v = i++, [0 ... 1].v = 7 };
+    if (i != 2) { printf("member i=%d\n", i); return 7; }
+    if (s[0].v != 7 || s[1].v != 7) { printf("member s=%d\n", s[0].v); return 8; }
+    return 0;
+}
+EOF
+if "$compiler" -w -o "$tmp/deadrange" "$tmp/deadrange.c" > "$tmp/log" 2>&1 && "$tmp/deadrange"; then
+    echo "testing a fully replaced range is not evaluated ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a fully replaced range is not evaluated ... FAILED"
+    "$compiler" -w -o "$tmp/deadrange" "$tmp/deadrange.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then

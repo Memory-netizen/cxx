@@ -1,133 +1,136 @@
-TransUnit   ::= ExDecl+
-ExDecl      ::= FuncDef | Decl
-FuncDef     ::= DeclSpecs Declr CompStmt
-Decl        ::= DeclSpecs InitDecls? ";"
+translation-unit     ::= external-declaration+
+external-declaration ::= function-definition | declaration
+function-definition  ::= declaration-specifiers declarator compound-statement
+declaration          ::= declaration-specifiers init-declarator-list? ";"
 
-InitDecls   ::= InitDeclr ("," InitDeclr)*
-InitDeclr   ::= Declr ("=" Init)?
-Init        ::= AsExp | BracedInit
-BracedInit  ::= "{" ((Desig+ "=")? Init ("," (Desig+ "=")? Init)* ","?)? "}"
-Desig       ::= "[" (ConstExp | ConstRangeExp) "]" | "." Ident
+init-declarator-list ::= init-declarator ("," init-declarator)*
+init-declarator      ::= declarator ("=" initializer)?
+initializer          ::= assignment-expression | braced-initializer
+braced-initializer   ::= "{" ((designator+ "=")? initializer ("," (designator+ "=")? initializer)* ","?)? "}"
+designator           ::= "[" (constant-expression | constant-range-expression) "]" | "." identifier
 
-Declr       ::= Ptr? DirDeclr
-Ptr         ::= ("*" TypeQual*)+
-DirDeclr    ::= Ident
-             | "(" Declr ")"
-             | ArrDecl
-             | FuncDecl
+declarator        ::= pointer? direct-declarator
+pointer           ::= ("*" type-qualifier*)+
+direct-declarator ::= identifier
+                    | "(" declarator ")"
+                    | array-declarator
+                    | function-declarator
 
-ArrDecl     ::= DirDeclr "[" TypeQual* AsExp? "]"
-              | DirDeclr "[" "static" TypeQual* AsExp "]"
-              | DirDeclr "[" TypeQual+ "static" AsExp "]"
-              | DirDeclr "[" TypeQual* "*" "]"
+array-declarator ::= direct-declarator "[" type-qualifier* assignment-expression? "]"
+                   | direct-declarator "[" "static" type-qualifier* assignment-expression "]"
+                   | direct-declarator "[" type-qualifier+ "static" assignment-expression "]"
+                   | direct-declarator "[" type-qualifier* "*" "]"
 
-FuncDecl    ::= DirDeclr "(" ParamList? ")"
-ParamList   ::= ParamDecl ("," ParamDecl)* ("," "...")? | "..."
-ParamDecl   ::= DeclSpecs Declr
+function-declarator  ::= direct-declarator "(" parameter-type-list? ")"
+parameter-type-list  ::= parameter-declaration ("," parameter-declaration)* ("," "...")? | "..."
+parameter-declaration ::= declaration-specifiers declarator
 
-DeclSpecs   ::= DeclSpec+
-DeclSpec    ::= SCSpec | TypeSpecQual | FuncSpec
-SCSpec      ::= "typedef" | "static" | "extern" | "register"
-TypeSpecQual ::= TypeSpec | TypeQual | AlignSpec
-TypeSpec    ::= "void" | "_Bool" | "char" | "short" | "int" | "long"
-            | "signed" | "unsigned"
-            | RecordSpec
-            | EnumSpec
-            | TypedefName
-            | TypeofSpec
+declaration-specifiers ::= declaration-specifier+
+declaration-specifier  ::= storage-class-specifier | type-specifier-qualifier | function-specifier
+storage-class-specifier ::= "typedef" | "static" | "extern" | "register"
+type-specifier-qualifier ::= type-specifier | type-qualifier | alignment-specifier
+type-specifier ::= "void" | "_Bool" | "char" | "short" | "int" | "long"
+                 | "signed" | "unsigned"
+                 | struct-or-union-specifier
+                 | enum-specifier
+                 | typedef-name
+                 | typeof-specifier
 
-TypeQual    ::= "const" | "restrict" | "volatile"
-FuncSpec    ::= "inline" | "_Noreturn"
-TypedefName ::= Ident
-TypeofSpec  ::= ("typeof" | "typeof_unqual") "(" (Exp | TypeName) ")"
-AlignSpec   ::= "alignas" "(" (TypeName | ConstExp) ")"
+type-qualifier      ::= "const" | "restrict" | "volatile"
+function-specifier  ::= "inline" | "_Noreturn"
+typedef-name        ::= identifier
+typeof-specifier    ::= ("typeof" | "typeof_unqual") "(" (expression | type-name) ")"
+alignment-specifier ::= "alignas" "(" (type-name | constant-expression) ")"
 
-TypeName    ::= DeclSpecs AbsDeclr?
-AbsDeclr    ::= Ptr DirAbsDeclr? | DirAbsDeclr
-DirAbsDeclr ::= "(" AbsDeclr ")"
-              | ArrAbsDeclr
-              | FuncAbsDeclr
+type-name                   ::= declaration-specifiers abstract-declarator?
+abstract-declarator         ::= pointer direct-abstract-declarator? | direct-abstract-declarator
+direct-abstract-declarator  ::= "(" abstract-declarator ")"
+                              | array-abstract-declarator
+                              | function-abstract-declarator
 
-ArrAbsDeclr ::= DirAbsDeclr? "[" TypeQual* AsExp? "]"
-              | DirAbsDeclr? "[" "static" TypeQual* AsExp "]"
-              | DirAbsDeclr? "[" TypeQual+ "static" AsExp "]"
-              | DirAbsDeclr? "[" "*" "]"
+array-abstract-declarator ::= direct-abstract-declarator? "[" type-qualifier* assignment-expression? "]"
+                            | direct-abstract-declarator? "[" "static" type-qualifier* assignment-expression "]"
+                            | direct-abstract-declarator? "[" type-qualifier+ "static" assignment-expression "]"
+                            | direct-abstract-declarator? "[" "*" "]"
 
-FuncAbsDeclr ::= DirAbsDeclr? "(" ParamList? ")"
+function-abstract-declarator ::= direct-abstract-declarator? "(" parameter-type-list? ")"
 
-RecordSpec  ::= Record Ident ("{" MemDecl+ "}")? | Record "{" MemDecl+ "}"
-MemDecl     ::= TypeSpec+ (MemDeclr ("," MemDeclr)*)? ";"
-MemDeclr    ::= Declr
+struct-or-union-specifier ::= struct-or-union identifier ("{" member-declaration+ "}")? | struct-or-union "{" member-declaration+ "}"
+struct-or-union          ::= "struct" | "union"
+member-declaration       ::= type-specifier+ (member-declarator ("," member-declarator)*)? ";"
+member-declarator        ::= declarator
 
-EnumSpec    ::= "enum" Ident? "{" Enumr ("," Enumr)* ","? "}"
-            | "enum" Ident
-Enumr       ::= Ident ("=" ConstExp)?
+enum-specifier ::= "enum" identifier? "{" enumerator ("," enumerator)* ","? "}"
+                 | "enum" identifier
+enumerator     ::= identifier ("=" constant-expression)?
 
-Stmt        ::= LabelStmt | UnLabelStmt
-LabelStmt   ::= Label Stmt
-UnLabelStmt ::= ExpStmt | PrimBlk | JmpStmt
+statement           ::= labeled-statement | unlabeled-statement
+labeled-statement   ::= label statement
+unlabeled-statement ::= expression-statement | primary-block | jump-statement
 
-PrimBlk     ::= CompStmt | SelStmt | IterStmt
+primary-block ::= compound-statement | selection-statement | iteration-statement
 
-Label       ::= Ident ":"
-              | "case" ConstRangeExp ":"
-              | "case" ConstExp ":"
-              | "default" ":"
+label ::= identifier ":"
+        | "case" constant-range-expression ":"
+        | "case" constant-expression ":"
+        | "default" ":"
 
-CompStmt    ::= "{" BlkItem* "}"
-BlkItem     ::= Decl | UnLabelStmt | Label
+compound-statement ::= "{" block-item* "}"
+block-item         ::= declaration | unlabeled-statement | label
 
-ExpStmt     ::= ";" | Exp ";"
+expression-statement ::= ";" | expression ";"
 
-SelStmt     ::= "if" "(" SelHead ")" Stmt ("else" Stmt)?
-              | "switch" "(" SelHead ")" Stmt
-SelHead     ::= Exp | Decl Exp | SimDecl
+selection-statement ::= "if" "(" selection-header ")" statement ("else" statement)?
+                      | "switch" "(" selection-header ")" statement
+selection-header    ::= expression | declaration expression | simple-declaration
+simple-declaration  ::= declaration-specifiers declarator "=" initializer
 
-IterStmt    ::= "while" "(" Exp ")" Stmt
-              | "do" Stmt "while" "(" Exp ")" ";"
-              | "for" "(" (Decl | Exp? ";") Exp? ";" Exp? ")" Stmt
+iteration-statement ::= "while" "(" expression ")" statement
+                      | "do" statement "while" "(" expression ")" ";"
+                      | "for" "(" (declaration | expression? ";") expression? ";" expression? ")" statement
 
-JmpStmt     ::= "goto" (Ident | "*" Exp) ";"
-              | "continue" Ident? ";"
-              | "break" Ident? ";"
-              | "return" Exp? ";"
+jump-statement ::= "goto" (identifier | "*" expression) ";"
+                 | "continue" identifier? ";"
+                 | "break" identifier? ";"
+                 | "return" expression? ";"
 
-Exp         ::= AsExp ("," AsExp)*
-AsExp       ::= CondExp (AsOP AsExp)?
-AsOP        ::= "=" | "*=" | "/=" | "%=" | "+=" | "-="
-            | "<<=" | ">>=" | "&=" | "^=" | "|="
+expression            ::= assignment-expression ("," assignment-expression)*
+assignment-expression ::= conditional-expression (assignment-operator assignment-expression)?
+assignment-operator   ::= "=" | "*=" | "/=" | "%=" | "+=" | "-="
+                        | "<<=" | ">>=" | "&=" | "^=" | "|="
 
-MulExp      ::= CastExp  (("*" | "/" | "%") CastExp)*
-AddExp      ::= MulExp   (("+" | "-") MulExp)*
-ShiftExp    ::= AddExp   (("<<" | ">>") AddExp)*
-RelExp      ::= ShiftExp (("<" | ">" | "<=" | ">=") ShiftExp)*
-EqExp       ::= RelExp   (("==" | "!=") RelExp)*
-BAndExp     ::= EqExp    ("&" EqExp)*
-XorExp      ::= BAndExp  ("^" BAndExp)*
-BOrExp      ::= XorExp   ("|" XorExp)*
-LAndExp     ::= BOrExp   ("&&" BOrExp)*;
-LOrExp      ::= LAndExp  ("||" LAndExp)*;
-CondExp     ::= LOrExp   ("?" Exp? ":" CondExp)?
-ConstExp    ::= CondExp
+multiplicative-expression ::= cast-expression  (("*" | "/" | "%") cast-expression)*
+additive-expression       ::= multiplicative-expression (("+" | "-") multiplicative-expression)*
+shift-expression          ::= additive-expression (("<<" | ">>") additive-expression)*
+relational-expression     ::= shift-expression (("<" | ">" | "<=" | ">=") shift-expression)*
+equality-expression       ::= relational-expression (("==" | "!=") relational-expression)*
+AND-expression            ::= equality-expression ("&" equality-expression)*
+exclusive-OR-expression   ::= AND-expression ("^" AND-expression)*
+inclusive-OR-expression   ::= exclusive-OR-expression ("|" exclusive-OR-expression)*
+logical-AND-expression    ::= inclusive-OR-expression ("&&" inclusive-OR-expression)*;
+logical-OR-expression     ::= logical-AND-expression ("||" logical-AND-expression)*;
+conditional-expression    ::= logical-OR-expression ("?" expression? ":" conditional-expression)?
+constant-expression       ::= conditional-expression
+constant-range-expression ::= constant-expression "..." constant-expression
 
-CastExp     ::= UnaryExp | "(" TypeName ")" CastExp
-UnaryExp    ::= PostExp | UnaryOP CastExp | ("++" | "--") UnaryExp
-            | "sizeof" UnaryExp | "sizeof" "(" TypeName ")"
-            | "alignof" UnaryExp | "alignof" "(" TypeName ")"
-            | "_Countof" UnaryExp | "_Countof" "(" TypeName ")"
-            | "&&" Ident
+cast-expression  ::= unary-expression | "(" type-name ")" cast-expression
+unary-expression ::= postfix-expression | unary-operator cast-expression | ("++" | "--") unary-expression
+                   | "sizeof" unary-expression | "sizeof" "(" type-name ")"
+                   | "alignof" unary-expression | "alignof" "(" type-name ")"
+                   | "_Countof" unary-expression | "_Countof" "(" type-name ")"
+                   | "&&" identifier
 
-UnaryOp     ::= "+" | "-" | "~" | "!" | "&" | "*"
+unary-operator ::= "+" | "-" | "~" | "!" | "&" | "*"
 
-PostExp     ::= (PrimExp | CompLit) PostFix*
-CompLit     ::= "(" SCSpec* TypeName ")" BracedInit
-PostFix     ::= "(" ArgList? ")" | "[" Exp "]" | "." Ident | "++" | "--"
-ArgList     ::= AsExp ("," AsExp)*
+postfix-expression ::= (primary-expression | compound-literal) postfix-suffix*
+compound-literal   ::= "(" storage-class-specifier* type-name ")" braced-initializer
+postfix-suffix     ::= "(" argument-expression-list? ")" | "[" expression "]" | "." identifier | "++" | "--"
+argument-expression-list ::= assignment-expression ("," assignment-expression)*
 
-PrimExp     ::= "true" | "false" | "nullptr"
-              | Num | Str | Ident
-              | "(" Exp ")" | "(" CompStmt ")"
-              | GenSel
+primary-expression ::= "true" | "false" | "nullptr"
+                     | constant | string-literal | identifier
+                     | "(" expression ")" | "(" compound-statement ")"
+                     | generic-selection
 
-GenSel      ::= "_Generic" "(" (AsExp | TypeName) "," GenAssoc ("," GenAssoc)* ")"
-GenAssoc    ::= TypeName ":" AsExp | "default" ":" AsExp
+generic-selection   ::= "_Generic" "(" (assignment-expression | type-name) "," generic-association ("," generic-association)* ")"
+generic-association ::= type-name ":" assignment-expression | "default" ":" assignment-expression

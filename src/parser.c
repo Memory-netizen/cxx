@@ -1093,7 +1093,15 @@ static uint32_t typequal(Token **rest, Token *tok) {
 // Ptr ::= ("*" TypeQual*)+
 static Type *pointers(Token **rest, Token *tok, Type *ty) {
     while (match(&tok, tok, TK_STAR)) {
-        ty = pointer_to(ty, typequal(&tok, tok));
+        Token *quals = tok;
+        uint32_t qual = typequal(&tok, tok);
+        // 6.7.4.1p2: only a pointer whose referenced type is an object type
+        // may be restrict-qualified, and a function type is not one. (The
+        // standard's own `memcpy` declares `void * restrict`, so `void` is
+        // read as an object type here.) gcc and clang both refuse this one.
+        if ((qual & Q_RESTRICT) && ty->kind == TY_FUNC)
+            error(quals, "pointer to function type may not be ‘restrict’ qualified");
+        ty = pointer_to(ty, qual);
         ty = decl_attrs(&tok, tok, ty);
     }
     *rest = tok;
@@ -1347,34 +1355,288 @@ static Member *struct_designator(Token **rest, Token *tok, Type *ty) {
     return NULL;
 }
 
+// A side effect a range designator's initializer produced, and the slot the
+// walk that emits the initializer reaches it through: either the `pre` of an
+// array element -- emitted where that element is initialized -- or a scalar
+// leaf's `expr`. The value of a range has to be produced once, at the first
+// element it covers, so each of these is hoisted there in this order.
+static int pre_stmts(Node *pre, Node **out, int max);
+typedef struct RangeEffect {
+    Node **slot;
+    bool is_pre;
+} RangeEffect;
+
+// How many statements a `pre` chain may hold and still be taken apart.
+enum { PRE_STMTS_MAX = 32 };
+
+// The variable an expression reads, or NULL when it is not a plain read of
+// one: what a range creates is that variable behind the conversions
+// lvalue_convert() adds, and that is the peel below.
+static Sym *leaf_var(Node *expr) {
+    for (;;) {
+        if (!expr) return NULL;
+        if (expr->kind == ND_VAR) return expr->var;
+        if (expr->kind != ND_LVTOR && expr->kind != ND_IMCAST && expr->kind != ND_EXCAST) return NULL;
+        expr = expr->lhs;
+    }
+}
+
+// True when the effects collected so far store into `sym`: a leaf that reads
+// one of those temporaries is already "once" for every element of the range,
+// and hoisting it again would make each nesting level collect the level below
+// it -- a five-dimensional range would then collect one effect per element.
+// A compound literal is not one of these: its variable is initialized
+// elsewhere, and its side effects have to be hoisted like any other.
+static bool effect_defines(RangeEffect *out, int n, Sym *sym) {
+    Node *st[PRE_STMTS_MAX];
+    for (int i = 0; i < n; i++) {
+        if (!out[i].is_pre) continue;
+        int k = pre_stmts(*out[i].slot, st, PRE_STMTS_MAX);
+        for (int j = 0; j < k; j++)
+            if (st[j]->kind == ND_AS && st[j]->lhs->kind == ND_VAR && st[j]->lhs->var == sym) return true;
+    }
+    return false;
+}
+
+// How many effects one range may hoist. Past it the shape is one this walk
+// does not claim to understand, and the caller parses per element instead.
+// Each slot is counted once however many elements share it, so this bounds
+// the nesting rather than the number of elements a range covers.
+enum { RANGE_EFFECTS_MAX = 32 };
+
+// True when this slot is already in the list: a range hands the same subtree
+// to every element it covers, so a walk that does not check would see one
+// effect once per element.
+static bool effect_seen(RangeEffect *out, int n, Node **slot) {
+    for (int i = 0; i < n; i++)
+        if (out[i].slot == slot) return true;
+    return false;
+}
+
+// The side effects an initializer subtree holds, in the order the walk that
+// emits it reaches them -- the same order create_lvar_init() uses. `np`
+// carries the count in and out, so a leaf can see what the levels above it
+// collected. Returns -1 for a shape this cannot take apart.
+static int collect_range_effects(Initializer *init, Type *ty, RangeEffect *out, int *np) {
+    if (init->is_flexible) return -1;
+    if (ty->kind == TY_ARRAY) {
+        for (int i = 0; i < ty->len; i++) {
+            Initializer *child = init->child[i];
+            if (child->pre && !effect_seen(out, *np, &child->pre)) {
+                if (*np == RANGE_EFFECTS_MAX) return -1;
+                out[*np].slot = &child->pre;
+                out[*np].is_pre = true;
+                (*np)++;
+            }
+            if (collect_range_effects(child, ty->base, out, np) < 0) return -1;
+        }
+        return 0;
+    }
+    if (init->expr) {
+        // A leaf that reads a temporary collected above already has its one
+        // evaluation: hoisting it again is what made a five-dimensional range
+        // collect one effect per element.
+        Sym *read = leaf_var(init->expr);
+        if (read && effect_defines(out, *np, read)) return 0;
+        if (effect_seen(out, *np, &init->expr)) return 0;
+        if (*np == RANGE_EFFECTS_MAX) return -1;
+        out[*np].slot = &init->expr;
+        out[*np].is_pre = false;
+        (*np)++;
+        return 0;
+    }
+    if (ty->kind == TY_STRUCT) {
+        for (Member *mem = ty->members; mem; mem = mem->next)
+            if (collect_range_effects(init->child[mem->idx], mem->ty, out, np) < 0) return -1;
+    } else if (ty->kind == TY_UNION) {
+        Member *mem = init->mem ? init->mem : union_default_member(ty);
+        if (mem && collect_range_effects(init->child[mem->idx], mem->ty, out, np) < 0) return -1;
+    }
+    return 0;
+}
+
+// Give the whole range the value the first element's initializer produced,
+// evaluating it once: gcc gives `{[0 ... 1] = ++c}` the pair 1 1, and runs
+// `++c` once for `{[0 ... 2].v = ++c}` too. Unlike the expression the parse
+// left in the first element, the value may sit several designators deep, so
+// every side effect in the subtree is hoisted -- a `pre` as it is, a leaf
+// through a temporary of its own -- and every leaf is left reading what was
+// stored. False when the subtree holds a shape this cannot do that for.
+static bool share_range_value(Initializer *first, Type *ty, Token *tok) {
+    RangeEffect eff[RANGE_EFFECTS_MAX];
+    int n = 0;
+    if (collect_range_effects(first, ty, eff, &n) < 0) return false;
+
+    Node *chain = first->pre;
+    for (int i = 0; i < n; i++) {
+        if (eff[i].is_pre) {
+            Node *pre = *eff[i].slot;
+            *eff[i].slot = NULL;
+            chain = chain ? new_binary(ND_COMMA, chain, pre, tok) : pre;
+            continue;
+        }
+        Node *val = init_rvalue(*eff[i].slot);
+        Sym *tmp = new_lvar(intern("", 0), val->ty);
+        Node *dst = new_var_node(tmp, val->tok);
+        add_type(dst);
+        Node *store = new_binary(ND_AS, dst, val, val->tok);
+        store->ty = val->ty;
+        chain = chain ? new_binary(ND_COMMA, chain, store, tok) : store;
+
+        Node *use = new_var_node(tmp, val->tok);
+        add_type(use);
+        lvalue_convert(&use);
+        *eff[i].slot = use;
+    }
+    first->pre = chain;
+    return true;
+}
+
+// The same shape for another element of the range: the tree is copied, the
+// leaves keep reading the temporaries the first element's effects stored
+// into, and no `pre` comes along -- those run once, at the first element.
+static Initializer *copy_range_init(Initializer *src, Type *ty) {
+    Initializer *dst = new_initializer(ty, false);
+    dst->tok = src->tok;
+    dst->is_inited = src->is_inited;
+    dst->mem = src->mem;
+    dst->expr = src->expr;
+    if (ty->kind == TY_ARRAY) {
+        for (int i = 0; i < ty->len; i++) dst->child[i] = copy_range_init(src->child[i], ty->base);
+    } else if (ty->kind == TY_STRUCT) {
+        for (Member *mem = ty->members; mem; mem = mem->next)
+            dst->child[mem->idx] = copy_range_init(src->child[mem->idx], mem->ty);
+    } else if (ty->kind == TY_UNION && src->mem) {
+        dst->child[src->mem->idx] = copy_range_init(src->child[src->mem->idx], src->mem->ty);
+    }
+    return dst;
+}
+
+// The statements a `pre` chain runs, in order. -1 when the chain is longer
+// than the bound, in which case the caller prunes nothing.
+static int pre_stmts(Node *pre, Node **out, int max) {
+    if (!pre) return 0;
+    if (pre->kind == ND_COMMA) {
+        int n = pre_stmts(pre->lhs, out, max);
+        if (n < 0) return -1;
+        int m = pre_stmts(pre->rhs, out + n, max - n);
+        return m < 0 ? -1 : n + m;
+    }
+    if (max == 0) return -1;
+    out[0] = pre;
+    return 1;
+}
+
+// True when the expression reads the temporary `sym`. What a range creates is
+// that variable behind the conversions lvalue_convert() adds, so this peel is
+// all the walk needs. Any other shape is a definite no: a temporary is
+// anonymous, so nothing the program wrote can name one -- only the range
+// machinery places a read, and it places it in exactly these forms.
+static bool expr_reads(Node *expr, Sym *sym) {
+    for (;;) {
+        if (!expr) return false;
+        if (expr->kind == ND_VAR) return expr->var == sym;
+        if (expr->kind != ND_LVTOR && expr->kind != ND_IMCAST && expr->kind != ND_EXCAST) return false;
+        expr = expr->lhs;
+    }
+}
+
+// A statement of a `pre` chain: the store is what defines the temporary, so
+// only its right-hand side can read one.
+static bool stmt_reads(Node *node, Sym *sym) {
+    if (!node) return false;
+    if (node->kind == ND_COMMA) return stmt_reads(node->lhs, sym) || stmt_reads(node->rhs, sym);
+    if (node->kind == ND_AS) return expr_reads(node->rhs, sym);
+    return expr_reads(node, sym);
+}
+
+// True while anything in this initializer still reads `sym`.
+static bool init_reads(Initializer *init, Type *ty, Sym *sym, int depth) {
+    if (depth > 8) return true;  // deeper than this walk takes apart: keep
+    if (init->pre && stmt_reads(init->pre, sym)) return true;
+    if (init->expr && expr_reads(init->expr, sym)) return true;
+    if (ty->kind == TY_ARRAY) {
+        for (int i = 0; i < ty->len; i++)
+            if (init_reads(init->child[i], ty->base, sym, depth + 1)) return true;
+        return false;
+    }
+    if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
+        for (Member *mem = ty->members; mem; mem = mem->next)
+            if (init_reads(init->child[mem->idx], mem->ty, sym, depth + 1)) return true;
+    }
+    return false;
+}
+
+// Drop the stores whose temporary nothing reads any more -- a range designator
+// every element of which a later designator replaced. gcc and clang do not
+// evaluate such an initializer at all: `{[2 ... 5] = i++, [2 ... 5] = 6}`
+// leaves `i` alone in both, and the plain designated path here agrees, since
+// a later designator replaces the element the expression belonged to. A range
+// keeps its value in the first element's `pre`, which an override survives,
+// so the statement is dropped here instead -- side effect and all.
+// Returns true when something was dropped, so the caller can settle the
+// stores that only fed another dropped one.
+static bool prune_range_stores(Initializer *init, Type *ty, Initializer *root, Type *root_ty) {
+    bool changed = false;
+    if (init->pre) {
+        Node *st[PRE_STMTS_MAX];
+        int n = pre_stmts(init->pre, st, PRE_STMTS_MAX);
+        if (n > 0) {
+            Node *keep[PRE_STMTS_MAX];
+            int k = 0;
+            for (int i = 0; i < n; i++) {
+                Sym *dst = st[i]->kind == ND_AS && st[i]->lhs->kind == ND_VAR ? st[i]->lhs->var : NULL;
+                if (dst && !init_reads(root, root_ty, dst, 0)) {
+                    changed = true;
+                    continue;
+                }
+                keep[k++] = st[i];
+            }
+            if (changed) {
+                Node *chain = NULL;
+                for (int i = 0; i < k; i++)
+                    chain = chain ? new_binary(ND_COMMA, chain, keep[i], keep[i]->tok) : keep[i];
+                init->pre = chain;
+            }
+        }
+    }
+    if (ty->kind == TY_ARRAY) {
+        for (int i = 0; i < ty->len; i++)
+            if (prune_range_stores(init->child[i], ty->base, root, root_ty)) changed = true;
+    } else if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
+        for (Member *mem = ty->members; mem; mem = mem->next)
+            if (prune_range_stores(init->child[mem->idx], mem->ty, root, root_ty)) changed = true;
+    }
+    return changed;
+}
+
 // The elements an array range designator covers. The initializer is read
 // once and every element gets the value it produced: gcc gives
 // `{[0 ... 1] = ++c}` the pair 1 1 rather than 1 2, which is what tinycc's
-// tests2/90_struct-init.c measures. The first element carries the assignment
-// and the others read the temporary it stored into.
+// tests2/90_struct-init.c measures. The first element carries the effects
+// and the others read the temporaries they stored into.
 static void designation_range(Token **rest, Token *tok, Initializer *init, int begin, int end) {
     Token *tok2 = tok;
     if (begin < end && !static_init_ctx) {
         Initializer *first = init->child[begin];
         designation(&tok2, tok, first);
-        if (first->expr) {
-            Node *val = init_rvalue(first->expr);
-            Sym *tmp = new_lvar(intern("", 0), val->ty);
-            Node *dst = new_var_node(tmp, val->tok);
-            add_type(dst);
-            Node *store = new_binary(ND_AS, dst, val, val->tok);
-            store->ty = val->ty;
-            first->pre = store;
-            for (int i = begin; i <= end; i++) {
-                Node *use = new_var_node(tmp, first->tok);
-                add_type(use);
-                lvalue_convert(&use);
-                init->child[i]->expr = use;
-                init->child[i]->is_inited = true;
+        *rest = tok2;
+        if (share_range_value(first, init->ty->base, tok)) {
+            for (int i = begin + 1; i <= end; i++) {
+                Initializer *dst = copy_range_init(first, init->ty->base);
+                // An element this range overwrites may already carry effects
+                // of its own -- an earlier range's temporary, which is read
+                // by elements that earlier range still covers. They run where
+                // this element is initialized, so the copy keeps them and
+                // discards only the element's own value.
+                dst->pre = init->child[i]->pre;
+                init->child[i] = dst;
             }
-            *rest = tok2;
             return;
         }
+        // A shape the hoist does not understand -- a braced initializer over a
+        // range, which gcc refuses outright. Parse it for each element, as
+        // this did before, and drop what the first parse built.
     }
     for (int i = begin; i <= end; i++) designation(&tok2, tok, init->child[i]);
     *rest = tok2;
@@ -1811,6 +2073,12 @@ static Initializer *initializer(Token **rest, Token *tok, Type *ty, Type **new_t
     }
     Initializer *init = new_initializer(ty, true);
     initializer2(rest, tok, init, true);
+    // A range designator the whole of which a later designator replaced is not
+    // evaluated at all, which is what gcc and clang do and what the plain
+    // designated path does here. The stores are nested, so a store that only
+    // fed another dropped store goes with it: a few passes settle the list.
+    for (int pass = 0; pass < 4 && prune_range_stores(init, init->ty, init, init->ty); pass++) {
+    }
     if ((ty->kind == TY_STRUCT || ty->kind == TY_UNION) && ty->is_flexible) {
         ty = copy_type(ty);
         ty->origin = NULL;

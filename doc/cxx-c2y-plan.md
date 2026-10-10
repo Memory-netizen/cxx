@@ -542,7 +542,191 @@ cxx 两种情形都重复转换后的字母，于是 `"+g"(h)` 的输入被标�
 
 **缺口表更新**：§0 的“asm 匹配约束对间接输出”一行**移除**（已实现）。
 
+### R121 范围指示符 [a ... b]：求值次数、任意维与死初始化器消除 —— ✅ 已修
+
+用户提问：gcc 明确说明 `[2 ... 5] = i++;` 只求值一次，检查 cxx 的求值次数；随后又问
+`{[2 ... 5] = i++; [2 ... 5] = 6;}` 里那个 `i++` 是**被抛弃**还是**保留求值**。
+
+#### （一）求值次数：已修
+
+GCC 的规矩（Designated Initializers 一节）：范围指示符覆盖的每个元素拿到**同一个值**，
+初始化表达式**只求值一次**。clang 不支持这个扩展（`cannot compile this GNU array range
+designator extension yet`），参照只有 gcc。修前实测（`static int i; static int bump(void)
+{ return ++i; }`）：
+
+| 形状 | 修前 cxx | gcc | 修后 cxx |
+|---|---|---|---|
+| `int a[4] = { [0 ... 3] = bump() }` | i=1 ✓ | i=1 | i=1 ✓ |
+| `int b[2][2] = { [0 ... 1][0 ... 1] = bump() }` | **i=2** ✗，`b[0][0]=1, b[1][1]=2` ✗ | i=1，`1,1` | **i=1，`1,1`** ✓ |
+| `int b[2][2] = { [0 ... 1][1] = bump() }` | **i=2** ✗ | i=1 | i=1 ✓ |
+| `struct S { int v; } s[3] = { [0 ... 2].v = bump() }` | **i=3** ✗ | i=1 | i=1 ✓ |
+| `int c[2][2][2] = { [0 ... 1][0 ... 1][0 ... 1] = bump() }` | **i=4** ✗ | i=1 | i=1 ✓ |
+| `int b[3][2] = { [0 ... 2][0 ... 1] = bump() }` | **i=3** ✗ | i=1 | i=1 ✓ |
+| `struct P p[2] = { [0 ... 1] = (struct P){ bump(), 2 } }` | — | — | i=1 ✓ |
+
+**根因**：`designation_range()` 把「只求值一次」实现成「第一个元素自己的 `expr` 非空」。
+值一旦落在更深一层（`first->child[1]->expr`、`first->child[mem]…`），`first->expr` 是 NULL，
+代码走回退分支**逐个元素重新解析**，副作用与值都重来。
+
+**修法**：把「只求值一次」从「第一个元素的 `expr`」推广成「整棵子树的副作用」。
+
+1. 解析一次到 `first`；
+2. 按 `create_lvar_init()` 的发射顺序遍历子树，收集每个 `pre` 槽与每个叶子 `expr`
+   （`collect_range_effects()`，上限 16 项，超出即回退到旧路径）；
+3. 逐项上提到 `first->pre` 的链上：`pre` 是语句直接搬，叶子换成 `tmp = 值` 加「读 tmp」
+   （`share_range_value()`）；
+4. `begin+1 … end` 的元素拿到**同形状副本**（`copy_range_init()`：叶子读同一批临时量、
+   `pre` 为空）。
+
+实施中抓到并修掉的两个坑（都是**顺序/存活**问题，不是求值次数问题）：
+
+- **副本会丢掉元素原有的 `pre`**：`{[1 ... 5] = 9, [6 ... 10] = elt, [4 ... 7] = elt + 1}`
+  里第三个范围整片重写元素 6 的 Initializer，把第二个范围挂在它 `pre` 上的临时量 store
+  一起丢了，于是 `s[8 ... 10]` 读到未初始化的临时量得 0（`conformance.sh` 既有的
+  「range designator's single evaluation」用例当场抓住）。修法：副本保留目标元素原有的
+  `pre`（那是在它被初始化处运行的更早的效果），只丢它自己的值。
+- **顺序必须提在第一个被覆盖元素的位置**，不能提到范围所在数组的 `pre`：否则
+  `int a[6] = { [0] = x++, [2 ... 4] = x++ };` 会先算范围 —— 那是新 bug。已用 gcc 逐例对照
+  （元素在范围前/后、两个范围、范围后单元素覆盖、嵌套花括号行内范围、静态/文件作用域的常量
+  范围、单元素范围、复合字面量）确认顺序与取值一致。
+
+静态初始化器（`static_init_ctx`）不受影响：那里全是常量，本来就没有临时量。
+
+#### （二）被**完全**覆盖的范围初始化器：已修（求值次数 + 死初始化器消除）
+
+用户问的那一行：`int a[10] = { [2 ... 5] = i++; [2 ... 5] = 6; }` —— 最终值两边都是 `6`，
+但那个 `i++` 是否被求值，修前三家不同：
+
+| 形状 | 修前 cxx | gcc | clang | 修后 cxx |
+|---|---|---|---|---|
+| 普通 `{ [0] = i++, [0] = 6 }`（元素被完全覆盖） | i=0（抛弃） | i=0 | i=0 | i=0 ✓ |
+| 普通 `{ [0] = 6, [0] = i++ }` | i=1 | i=1 | i=1 | i=1 ✓ |
+| **范围** `{ [2 ... 5] = i++, [2 ... 5] = 6 }` | **i=1（保留求值）** ✗ | i=0（抛弃） | i=0 | **i=0** ✓ |
+| **范围** `{ [2 ... 5] = i++, [3] = 6 }`（部分存活） | i=1 ✓ | i=1 | 不支持 | i=1 ✓ |
+| **范围** `{ [0 ... 3] = i++, [0 ... 3] = i++ }` | **i=2** ✗ | i=1 | 不支持 | **i=1** ✓ |
+| **范围** `{ [0 ... 1].v = i++, [0 ... 1].v = 7 }` | **i=1** ✗ | i=0 | 不支持 | **i=0** ✓ |
+
+规律：**一个初始化器当且仅当它至少有一个目标元素存活时才求值**（死初始化器消除）。普通指定
+初始化器三条路径都满足；cxx 自己也满足（后面的设计符**替换**那个元素的 Initializer，副作用随之
+消失）；只有**范围**路径不满足 —— 范围把临时量 store 挂在「第一个被覆盖元素」的 `pre` 上，
+后面的设计符即便把该范围**所有**元素都覆盖掉，那个 store 仍在（§（一）为了修 `s[8 ... 10]`
+还特意保留 `pre`，正是这一点让它更明显）。
+
+**修法**：在对象初始化器解析完成后（`initializer()` 里 `initializer2()` 之后）做一次死 store
+消除。范围建的临时量都是匿名 `Sym`，只有范围机制会读它们，且读法就是 `ND_VAR` 及其
+`ND_LVTOR`/`ND_IMCAST`/`ND_EXCAST` 外壳 —— 所以「这棵树里还有谁读这个临时量」是一个**窄**判定：
+
+1. `pre_stmts()` 把一条 `pre` 链摊平成有序语句表（超过 16 条就不动，宁可不剪）；
+2. `init_reads()` 在整棵树里找该临时量的读法（数组按元素、结构体/联合按成员；深度超过 8 层即
+   判定「有人在读」，保守保留）；
+3. 没人读的 store（连同它的副作用表达式）从链上摘掉并重建，重复几趟以收拾「只喂给另一个被摘
+   store」的那些。
+
+**踩到的坑**：第一版把「不认识的表达式形状」当成「可能读」✗，于是 `= 6`（一个 `ND_NUM`）被
+判成读，剪枝从不触发。正确判据相反：匿名临时量**不可能**出现在程序自己写的表达式里，只有范围
+机制放置读法，所以不认识的形状就是**不读**。
+
+#### （三）更多维：`[a ... b][c ... d] = expr` 到任意深度
+
+用户的追问：gcc 是否支持 `[2 ... 5][1 ... 3] = assign_expr`，甚至更多维？——**支持，任意深度**。
+实测（`static int n; int f(void){ return ++n; }`，值写进所有元素）：gcc 在 2D…8D 全部 `n=1`，
+且每个元素都拿到同一个值；`= assign_expr` 也照收（赋值表达式、逗号表达式、条件表达式、复合字面量
+都测过）。
+
+修完前两节后 cxx 只跟到 4D —— 5D 又退回「逐元素重解析」。根因在收集器的**计数**：范围把同一棵
+子树交给它覆盖的每个元素，各元素的槽位地址却不相同，于是同一批副作用被按**元素个数**重复收集
+（实测各层计数 1, 3, 5, 9, 17, 33 …），5D 就撞上 `RANGE_EFFECTS_MAX`。两处修正：
+
+1. **同一槽位只算一次**（`effect_seen()`）——只解决「同一槽被多元素共享」这一半；
+2. **读「本层或上层已经收下的临时量」的叶子不再上提**（`effect_defines()`）——这才是指数增长的
+   来源：每一层都把下一层的读数再包一层临时量。判据必须看**共享的**计数：第一版把计数按子树切片
+   传下去 ✗，叶子只能看到自己那一片，判据恒假 ✗，于是仍旧 1,3,5,9,17,33；改成调用方与被调方
+   共用一个计数后，各层稳定为常数。
+
+**踩到的坑（与上一条同源）**：第一版的「纯读」判据把任何 `ND_VAR` 都当成「不必上提」✗ —— 可
+复合字面量 `(struct P){ bump(), 2 }` 也是匿名变量，于是它被当成纯读共享给每个元素，
+`bump()` 每个元素跑一次（`range_order.sh` 的复合字面量一行当场抓到，且 5D 之下的计数探针全绿，
+只有这一行变红）。正确判据是「读的是本遍历已经收下的临时量」——复合字面量的变量是在别处初始化
+的，它的副作用照旧要上提。
+
+最终：**2D … 8D 全部与 gcc 一致**（`n=1`，各元素取值相同），复合字面量、成员设计符、混合
+单下标/范围、赋值/逗号/条件表达式值、嵌套花括号列表、范围后跟设计符等 12 种形状逐例一致。
+
+#### （四）验收
+
+| 项目 | 结果 |
+|---|---|
+| `make test` | **exit 0**；conformance **319 / 0 gap**（两条断言覆盖：二维/行+列/成员/三维/五维/复合字面量/部分覆盖，以及完全覆盖不求值）、c2y 101 / 0 |
+| bootstrap | **cxx2 = cxx3 = cxx4 逐字节相同**，21/21 目标文件 |
+| `doc/tcctests.sh` | 106 ok / 0 failed（含 tinycc `tests2/90_struct-init.c`） |
+| `clang-format-21 --dry-run --Werror` | 通过 |
+| 与 gcc 逐例对照 | 求值次数 8 例（1D…8D）、形状 12 例、顺序/覆盖 10 例、死初始化器 7 例，取值与副作用全部一致 |
+
+### R120 语法文档改用 N3685 附录 A 的拼写 + 限定符位置审计（含一处新缺陷）—— ✅
+ + 限定符位置审计（含一处新缺陷）—— ✅
+
+#### （一）`doc/token.txt` 与 `doc/cfg.txt` 重写为标准拼写
+
+记号不变（`::=`、`|`、终结符加引号），**产生式一条不多一条不少**，只把终结符/非终结符的拼写换成
+N3685 附录 A 的形式（`TransUnit`→`translation-unit`、`DeclSpecs`→`declaration-specifiers`、
+`DirDeclr`→`direct-declarator`、`AsExp`→`assignment-expression`、`CondExp`→`conditional-expression`、
+`PrimExp`→`primary-expression`、`CompStmt`→`compound-statement`、`Ident`→`identifier`、
+`strlit`→`string-literal`、`intlit`→`integer-literal`、`charlit`→`character-literal`、
+`predef_constant`→`predefined-constant`、`ucn`→`universal-character-name` …）。C23 改了名的
+两处照新名走：**`character-constant`→`character-literal`**、**`integer-constant`→`integer-literal`**
+（`floating-constant`→`floating-literal` 同理）。
+
+| 项 | 结果 |
+|---|---|
+| `token.txt` | 47 条产生式 → **47 条**（纯改名） |
+| `cfg.txt` | 73 条 → **76 条**：+3 条是把原先**悬空**的非终结符补上定义 —— `constant-range-expression`（6.6.2）、`simple-declaration`（6.7.1）、`struct-or-union`（6.7.3.2）。原先 `Num`/`Str`/`UnaryOP` 三处引用也没有定义，按标准名接到 `constant`/`string-literal`/`unary-operator` |
+| 笔误 | 标点表里 `'|='`（单引号）改为 `"|="` |
+| 一致性 | `cfg.txt` 用到的名字现在**全部**有定义（或定义在 `token.txt` 里）：`uses but does not define: (none)` |
+| 终结符 | 编码前缀/后缀补上引号（`("u8" | "u" | "U" | "L")`、`("ll" | "LL")`、`("wb" | "WB")`），与文件里其它终结符一致 |
+
+#### （二）限定符位置审计：还有没有「指针不接受 `_Atomic`」那类遗漏？
+
+方法同当初发现该缺陷时一样：把**标准允许某个 token 出现的每个位置**都写成探针，cxx / gcc / clang
+三家一起过一遍（`-fsyntax-only`），只看三家不一致的行。共 45 个探针位置。
+
+**结论：`_Atomic` 那一类遗漏已经没有了。** 九个位置全部接受，与两家一致：
+
+| 位置 | cxx |
+|---|---|
+| `int * _Atomic p`、`int ** _Atomic p`、`int * _Atomic * p`、`int * _Atomic const p` | 接受 ✓ |
+| 抽象声明符 `sizeof(int (* _Atomic)(void))`、`sizeof(int (* _Atomic)[3])` | 接受 ✓ |
+| 原型参数 `void f(int a[_Atomic 5])`、`void f(int a[_Atomic static 5])` | 接受 ✓ |
+| `struct S { _Atomic int a; }`、`typedef _Atomic int ai`、`_Atomic(T) *p`、`_Atomic struct S s` | 接受 ✓ |
+
+同一轮探针抓到**一处新缺陷**（方向相反：标准禁止而 cxx 静默接受）：
+
+| 缺陷 | 现象 | 依据 | 处置 |
+|---|---|---|---|
+| `restrict` 用在函数指针上 | `int (* restrict p)(void);` cxx 接受，**clang 与 gcc 都拒绝** | **6.7.4.1p2**：只有「所指类型是对象类型的指针」才可 restrict 限定，函数类型不是（标准自己的 `memcpy` 写 `void * restrict`，可见 `void` 按对象类型读） | **本轮已修**：`pointers()` 里加一条诊断 `pointer to function type may not be ‘restrict’ qualified`；`void * restrict` 仍旧接受（探针固化） |
+
+**仍然保留、本轮不动的一处**（早前已记录的缺口，本轮换了个方向看清了它）：
+
+| 缺口 | 现象 | 依据 |
+|---|---|---|
+| 非最外层数组派生的限定符与 `static` | `void f(int a[3][static 5]);`、`void f(int a[3][const 5]);`、`void f(int a[const 3][const 5]);` cxx **接受**，clang/gcc 都拒绝（clang：`type qualifier used in non-outermost array type derivation`） | **6.7.6.2p1**：「可选的类型限定符与关键字 `static` **只应**出现在带数组类型的函数参数的声明中，且**只在最外层**数组类型派生里」。cxx 现在只分 `is_param`（非参数已经在报 `… outside of function prototype`），缺的是「最外层」这一维；修法：把 `outermost` 从 `func_param()` 一路传进 `declarator()`/`decl_suffix()`/`array_dimensions()`，遇到带括号的嵌套声明符就清掉 |
+
+**两处「不一致但 cxx 更标准」/「按设计不做」**，记录以免当成缺陷：
+
+- `[[maybe_unused]] case 1:` —— cxx 接受，**clang 拒绝**（`attribute cannot be applied to a statement`）。附录 A 的 `label` 产生式带 `attribute-specifier-sequenceopt`，cxx 是对的，clang 还没跟上。
+- `_Complex double x;`、`_Decimal32 x;` —— 计划 §0「明确不做（长期）」的两族。副作用值得知道：这两个拼写不是关键字，于是被当成标识符，诊断是 `a type specifier is required for all declarations`，看不出「本编译器不支持复数」。若要改善，只需把 `_Complex`/`_Imaginary`/`_Decimal32/64/128` 收进关键字表并报「not supported」（不改语法）。
+
+#### （三）验收
+
+| 项目 | 结果 |
+|---|---|
+| `make test` | **exit 0**；conformance **317 / 0 gap**（+2：函数指针 restrict 被拒、`void * restrict` 仍接受）、c2y 101 / 0 |
+| bootstrap | **cxx2 = cxx3 = cxx4 逐字节相同**，21/21 目标文件 |
+| `doc/tcctests.sh` | 106 ok / 0 failed |
+| `clang-format-21 --dry-run --Werror` | 通过 |
+| 语法文档 | `token.txt` 47 条、`cfg.txt` 76 条，两份都无悬空非终结符、无遗留旧拼写 |
+
 ### R119 A 类内建声明化收尾：6 行转声明式、两处既有缺陷、表可表达任意固定原型 —— ✅
+：6 行转声明式、两处既有缺陷、表可表达任意固定原型 —— ✅
 
 按 `doc/builtin-redesign.md` 把 A 类做完：把**能由固定 C 函数原型表达却仍留在 B 类**的 6 行搬走 ——
 `__builtin_unreachable`、`__sync_synchronize`、`__builtin_memcpy`、`__builtin_memmove`、

@@ -1,5 +1,5 @@
-token     ::= keyword | Ident | constant | strlit | punctuator
-pp-token  ::= header_name | Ident | pp_number | charlit | strlit | punctuator | other
+token                ::= keyword | identifier | constant | string-literal | punctuator
+preprocessing-token  ::= header-name | identifier | pp-number | character-literal | string-literal | punctuator | other
 
 keyword   ::= "_Alignas" | "_Alignof" | "_Atomic" | "_BitInt" | "_Bool"
             | "_Countof" | "_Generic" | "_Noreturn" | "_Static_assert" | "_Thread_local"
@@ -15,82 +15,82 @@ keyword   ::= "_Alignas" | "_Alignof" | "_Atomic" | "_BitInt" | "_Bool"
             | "typeof" | "typeof_unqual" | "union"| "unsigned" | "void"
             | "volatile" | "while"
 
-Ident          ::= ident_start ident_continue*
-ident_start    ::= nondigit | ucn(XID_Start) | char(XID_Start)
-ident_continue ::= digit | nondigit | ucn(XID_Continue) | char(XID_Continue)
+identifier          ::= identifier-start identifier-continue*
+identifier-start    ::= nondigit | universal-character-name(XID_Start) | character(XID_Start)
+identifier-continue ::= digit | nondigit | universal-character-name(XID_Continue) | character(XID_Continue)
 
-nondigit       ::= [_a-zA-Z$]
-digit          ::= [0-9]
-nonzero_digit  ::= [1-9]
-bindigit       ::= [01]
-octdigit       ::= [0-7]
-hexdigit       ::= [0-9a-fA-F]
-digit_seq      ::= digit (\'?digit)*
-bin_seq        ::= bindigit (\'?bindigit)*
-oct_seq        ::= octdigit (\'?octdigit)*
-hex_seq        ::= hexdigit (\'?hexdigit)*
+nondigit                   ::= [_a-zA-Z$]
+digit                      ::= [0-9]
+nonzero-digit              ::= [1-9]
+binary-digit               ::= [01]
+octal-digit                ::= [0-7]
+hexadecimal-digit          ::= [0-9a-fA-F]
+digit-sequence             ::= digit (\'?digit)*
+binary-digit-sequence      ::= binary-digit (\'?binary-digit)*
+octal-digit-sequence       ::= octal-digit (\'?octal-digit)*
+hexadecimal-digit-sequence ::= hexadecimal-digit (\'?hexadecimal-digit)*
 
-constant ::= intlit | floatlit | enum_const | charlit | predef_constant
+constant ::= integer-literal | floating-literal | enumeration-constant | character-literal | predefined-constant
 
-predef_constant ::= "false" | "true" | "nullptr"
+predefined-constant ::= "false" | "true" | "nullptr"
 
-intlit  ::= (declit | octlit | hexlit | binlit) int_suf?
+integer-literal ::= (decimal-literal | octal-literal | hexadecimal-literal | binary-literal) integer-suffix?
 
-declit  ::= nonzero_digit (\'?digit)*
-hexlit  ::= 0[xX]    hex_seq
-octlit  ::= 0[\'oO]? oct_seq
-binlit  ::= 0[bB]    bin_seq
+decimal-literal     ::= nonzero-digit (\'?digit)*
+hexadecimal-literal ::= 0[xX]    hexadecimal-digit-sequence
+octal-literal       ::= 0[\'oO]? octal-digit-sequence
+binary-literal      ::= 0[bB]    binary-digit-sequence
 
-int_suf ::= [uU]
-          | [lL]
-          | (ll | LL)
-          | (wb | WB)
-          | [uU] [lL]
-          | [uU] (ll | LL)
-          | [uU] (wb | WB)
-          | [lL] [uU]
-          | (ll | LL) [uU]
-          | (wb | WB) [uU]
+integer-suffix ::= [uU]
+                 | [lL]
+                 | ("ll" | "LL")
+                 | ("wb" | "WB")
+                 | [uU] [lL]
+                 | [uU] ("ll" | "LL")
+                 | [uU] ("wb" | "WB")
+                 | [lL] [uU]
+                 | ("ll" | "LL") [uU]
+                 | ("wb" | "WB") [uU]
 
-floatlit   ::= dec_float | hex_float
+floating-literal ::= decimal-floating-literal | hexadecimal-floating-literal
 
-dec_float  ::= fract exp? [fFlL]? | digit_seq exp [fFlL]?
-hex_float  ::= 0[xX] hexfract binexp [fFlL]?
+decimal-floating-literal     ::= fractional-literal exponent-part? [fFlL]? | digit-sequence exponent-part [fFlL]?
+hexadecimal-floating-literal ::= 0[xX] hexadecimal-fractional-literal binary-exponent-part [fFlL]?
 
-fract      ::= digit_seq "." digit_seq? | "." digit_seq
-exp        ::= [eE][-+]? digit_seq
-hexfract   ::= hex_seq ("." hex_seq?)? | "." hex_seq
-binexp     ::= [pP][-+]? digit_seq
+fractional-literal             ::= digit-sequence "." digit-sequence? | "." digit-sequence
+exponent-part                  ::= [eE][-+]? digit-sequence
+hexadecimal-fractional-literal ::= hexadecimal-digit-sequence ("." hexadecimal-digit-sequence?)? | "." hexadecimal-digit-sequence
+binary-exponent-part           ::= [pP][-+]? digit-sequence
 
-enum_const ::= Ident
+enumeration-constant ::= identifier
 
-charlit    ::= (u8 | u | U | L)? "'" c_char+ "'"
-c_char     ::= [^\'\\\n] | esc_seq
+character-literal ::= ("u8" | "u" | "U" | "L")? "'" c-char+ "'"
+c-char            ::= [^\'\\\n] | escape-sequence
 
-esc_seq    ::= simple_esc | oct_esc | hex_esc | ucn
-simple_esc ::= "\\" [\'\"\?\\abefnrtv]
-oct_esc    ::= "\\" octdigit octdigit? octdigit? | "\\o" "{" octdigit+ "}"
-hex_esc    ::= "\\x" ( hexdigit+ | "{" hexdigit+ "}" )
-ucn        ::= "\\u" hexdigit{4} | "\\U" hexdigit{8} | "\\[uU]" "{" hexdigit+ "}"
+escape-sequence             ::= simple-escape-sequence | octal-escape-sequence | hexadecimal-escape-sequence | universal-character-name
+simple-escape-sequence      ::= "\\" [\'\"\?\\abefnrtv]
+octal-escape-sequence       ::= "\\" octal-digit octal-digit? octal-digit? | "\\o" "{" octal-digit+ "}"
+hexadecimal-escape-sequence ::= "\\x" ( hexadecimal-digit+ | "{" hexadecimal-digit+ "}" )
+universal-character-name    ::= "\\u" hexadecimal-digit{4} | "\\U" hexadecimal-digit{8} | "\\[uU]" "{" hexadecimal-digit+ "}"
 
-strlit     ::= (u8 | u | U | L)? "\"" s_char* "\""
-s_char     ::= [^\"\\\n] | esc_seq
+string-literal ::= ("u8" | "u" | "U" | "L")? "\"" s-char* "\""
+s-char         ::= [^\"\\\n] | escape-sequence
 
 punctuator ::= "[" | "]" | "(" | ")" | "{" | "}" | "." | "->"
              | "++" | "--" | "&" | "*" | "+" | "-" | "~" | "!"
              | "/" | "%" | "<<" | ">>" | "<" | ">" | "<=" | ">="
              | "==" | "!=" | "^" | "|" | "&&" | "||" | "?" | ":"
              | "::" | ";" | "..." | "=" | "*=" | "/=" | "%="
-             | "+=" | "-=" | "<<=" | ">>=" | "&=" | "^=" | '|='
+             | "+=" | "-=" | "<<=" | ">>=" | "&=" | "^=" | "|="
              | "," | "#" | "##" | "<:" | ":>" | "<%" | "%>"
              | "%:" | "%:%:"
 
-header_name ::= "<" h_char+ ">" | "\"" q_char+ "\""
-h_char      ::= [^\n>]
-q_char      ::= [^\n\"]
+header-name ::= "<" h-char+ ">" | "\"" q-char+ "\""
+h-char      ::= [^\n>]
+q-char      ::= [^\n\"]
 
-pp_number          ::= "."? digit pp_number_continue*
-pp_number_continue ::= ident_continue
+pp-number          ::= "."? digit pp-number-continue*
+pp-number-continue ::= identifier-continue
                      | "'" (digit | nondigit)
                      | [eEpP][+-]
                      | "."
