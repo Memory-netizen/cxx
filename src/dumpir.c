@@ -1,6 +1,199 @@
 #include "cxx.h"
 
 static FILE *out_file;
+// ---------------------------------------------------------------- output ----
+// The IR leaves in small pieces -- 323 call sites, 231 of them a bare literal,
+// averaging five bytes -- and putting each through fprintf cost 397 instructions,
+// three quarters of it the machinery around the format engine rather than the
+// formatting itself: 24% of the whole front end to write out 1.4 MB. So the pieces
+// go into a buffer, the file sees one write per block, and the formatting this
+// program actually uses is done here. Anything unexpected is a fatal error rather
+// than a silent difference in the output.
+#define OBUF_SIZE (256 * 1024)
+static char obuf[OBUF_SIZE];
+static size_t obuf_len;
+static size_t obuf_total;  // what fprintf would have returned
+
+static void oflush(void) {
+    if (obuf_len && out_file) {
+        fwrite(obuf, 1, obuf_len, out_file);
+        obuf_len = 0;
+    }
+}
+
+static void oput(const char *s, size_t n) {
+    obuf_total += n;
+    if (n >= OBUF_SIZE) {
+        oflush();
+        if (out_file) fwrite(s, 1, n, out_file);
+        return;
+    }
+    if (obuf_len + n > OBUF_SIZE) oflush();
+    memcpy(obuf + obuf_len, s, n);
+    obuf_len += n;
+}
+
+static void och(char c) { oput(&c, 1); }
+
+static void ou64(uint64_t v, unsigned base, int width, bool upper, char pad, bool left) {
+    static const char lo[] = "0123456789abcdef";
+    static const char up[] = "0123456789ABCDEF";
+    const char *digits = upper ? up : lo;
+    char tmp[72];
+    int n = 0;
+    do {
+        tmp[n++] = digits[v % base];
+        v /= base;
+    } while (v);
+    if (!left)
+        for (int i = n; i < width; i++) och(pad);
+    while (n > 0) och(tmp[--n]);
+    if (left)
+        for (int i = n; i < width; i++) och(pad);
+}
+
+static int ofmt(const char *fmt, ...) {
+    size_t start = obuf_total;
+    va_list ap;
+    va_start(ap, fmt);
+
+    const char *lit = fmt;
+    const char *p = fmt;
+    while (*p) {
+        if (*p != '%') {
+            p++;
+            continue;
+        }
+        if (p > lit) oput(lit, (size_t)(p - lit));
+        p++;
+
+        // printf's order: flags, width, precision, length, conversion. A `*` is a
+        // width when it comes before the '.' and a precision after it -- %*.s is a
+        // width of spaces with an empty string, which is how this file indents.
+        bool left = false, zero = false;
+        for (;; p++) {
+            if (*p == '-') left = true;
+            else if (*p == '0') zero = true;
+            else break;
+        }
+        if (*p == '+' || *p == ' ' || *p == '#')
+            fatal("dumpir: unsupported flag '%%%c' in \"%s\"", *p, fmt);
+        int width = 0;
+        if (*p == '*') {
+            width = va_arg(ap, int);
+            p++;
+        } else {
+            while (*p >= '0' && *p <= '9') width = width * 10 + (*p++ - '0');
+        }
+        if (width < 0) {
+            left = true;
+            width = -width;
+        }
+        int prec = -1;
+        if (*p == '.') {
+            p++;
+            prec = 0;
+            while (*p >= '0' && *p <= '9') prec = prec * 10 + (*p++ - '0');
+        }
+        if (*p == '*') {
+            prec = va_arg(ap, int);
+            p++;
+        }
+        int mod = 0;  // 0 = int, 1 = long, 2 = long long, 4 = size_t, 5 = ptrdiff_t
+        if (*p == 'l') {
+            p++;
+            mod = 1;
+            if (*p == 'l') {
+                p++;
+                mod = 2;
+            }
+        } else if (*p == 'z') {
+            p++;
+            mod = 4;
+        } else if (*p == 't') {
+            p++;
+            mod = 5;
+        } else if (*p == 'h') {
+            p++;
+            if (*p == 'h') p++;
+        }
+
+        char c = *p ? *p++ : 0;
+        switch (c) {
+        case '%':
+            och('%');
+            break;
+        case 'c':
+            och((char)va_arg(ap, int));
+            break;
+        case 's': {
+            const char *sv = va_arg(ap, const char *);
+            if (!sv) sv = "(null)";
+            size_t n = strlen(sv);
+            if (prec >= 0 && (size_t)prec < n) n = (size_t)prec;
+            if (!left)
+                for (int i = (int)n; i < width; i++) och(' ');
+            oput(sv, n);
+            if (left)
+                for (int i = (int)n; i < width; i++) och(' ');
+            break;
+        }
+        case 'd':
+        case 'i': {
+            int64_t v;
+            if (mod == 1) v = va_arg(ap, long);
+            else if (mod == 2) v = va_arg(ap, long long);
+            else if (mod == 4) v = (int64_t)va_arg(ap, size_t);
+            else if (mod == 5) v = (int64_t)va_arg(ap, ptrdiff_t);
+            else v = va_arg(ap, int);
+            uint64_t u;
+            if (v < 0) {
+                och('-');
+                u = (uint64_t)(-(v + 1)) + 1;  // INT64_MIN safe
+            } else {
+                u = (uint64_t)v;
+            }
+            ou64(u, 10, width, false, zero ? '0' : ' ', left);
+            break;
+        }
+        case 'u':
+        case 'x':
+        case 'X':
+        case 'o':
+        case 'b': {
+            uint64_t u;
+            if (mod == 1) u = va_arg(ap, unsigned long);
+            else if (mod == 2) u = va_arg(ap, unsigned long long);
+            else if (mod == 4) u = va_arg(ap, size_t);
+            else if (mod == 5) u = (uint64_t)va_arg(ap, ptrdiff_t);
+            else u = va_arg(ap, unsigned int);
+            ou64(u, c == 'u' ? 10 : c == 'o' ? 8 : c == 'b' ? 2 : 16, width, c == 'X', zero ? '0' : ' ', left);
+            break;
+        }
+        case 'e':
+        case 'f':
+        case 'g': {
+            // One site uses %.17e; the rest of the float work can stay in stdio.
+            double d = va_arg(ap, double);
+            char tmp[64];
+            int n = snprintf(tmp, sizeof(tmp), "%.*e", prec < 0 ? 6 : prec, d);
+            if (n > 0) oput(tmp, (size_t)n < sizeof(tmp) ? (size_t)n : sizeof(tmp) - 1);
+            break;
+        }
+        default:
+            fatal("dumpir: unsupported format '%%%c' in \"%s\"", c, fmt);
+        }
+        lit = p;
+    }
+    if (p > lit) oput(lit, (size_t)(p - lit));
+    va_end(ap);
+    return (int)(obuf_total - start);
+}
+
+// Every fprintf in this file wrote to out_file, so the stream argument is dropped
+// here rather than at 323 call sites: the pieces go to the buffer above.
+#define fprintf(stream, ...) ofmt(__VA_ARGS__)
+
 static Module *curm;
 extern bool opt_fpic;
 extern bool opt_fcommon;
@@ -113,7 +306,7 @@ static void print_ident(uint32_t id) {
     for (int i = 0; i < len; i++) {
         unsigned char c = ident[i];
         if (c <= 0x7F) {
-            fputc(c, out_file);
+            och((char)c);
         } else
             fprintf(out_file, "\\%02X", c);
     }
@@ -1822,4 +2015,5 @@ void dump_module(Module *md, FILE *out) {
     // first, so the entries are sorted; the default is 65535.
     dump_init_array("llvm.global_ctors", true);
     dump_init_array("llvm.global_dtors", false);
+    oflush();
 }
