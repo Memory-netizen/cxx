@@ -1839,7 +1839,21 @@ bool is_ident1(uint32_t c);
 // Exposed for the -E printer, which has to know when two tokens would merge
 // into one.
 int read_punct(char *p, uint32_t *kind);
+extern bool opt_pedantic;
 bool is_ident2(uint32_t c);
+
+// The same two answers for ASCII, without the call. Nearly every character the
+// lexer looks at is ASCII, and each one was costing a call to the UTF-8 decoder
+// plus a call to the predicates above. unicode.c checks these against the tables
+// for all 128 values before main() runs, so they cannot drift.
+static inline __attribute__((always_inline)) bool is_ident1_ascii(uint8_t c) {
+    return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || c == '_' || (c == '$' && !opt_pedantic);
+}
+
+static inline __attribute__((always_inline)) bool is_ident2_ascii(uint8_t c) {
+    return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9') || c == '_' ||
+           (c == '$' && !opt_pedantic);
+}
 int display_width(char *p, int len);
 
 //
@@ -1962,14 +1976,22 @@ void warning(int group, Token *tok, const char *msg, ...) __attribute__((format(
 
 // -pedantic: diagnose the constructs ISO C forbids and cxx accepts as GNU
 // extensions. -pedantic-errors makes them errors instead of warnings.
-extern bool opt_pedantic;
 extern bool opt_pedantic_errors;
 void pedantic(Token *tok, const char *msg, ...) __attribute__((format(printf, 2, 3)));
 void diag(char *level, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 void diag_loc(char *level, Loc at, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 void diag_exit(char *level, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 
+// Small objects -- tokens, nodes, the parse's own bookkeeping -- come from a pool
+// of contiguous chunks. Anything that may be large says so and gets its own block
+// from the system: keeping the test for that out of emalloc's hot path is worth
+// about 1% of the front end, since it is asked millions of times and answers
+// "no" all but a handful.
+// Past this, a request gets its own block instead of a pool chunk.
+#define BIG_THRESHOLD (128 * 1024)
+
 void *emalloc(size_t n);
+void *emalloc_big(size_t n);
 void *vnew(size_t len, size_t esz);
 void *vgrow(void *data, size_t len);
 

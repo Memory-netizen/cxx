@@ -203,7 +203,29 @@ static char *convert_universal_chars(char *p, int len, SrcFile *file) {
             *cur++ = *p++;
             *cur++ = *p++;
         } else {
-            *cur++ = *p++;
+            // A run with no backslash and no high bit is a straight copy, and
+            // copying it a byte at a time (six million instructions on tccgen)
+            // bought nothing: ASCII needs no decoding, it is its own UTF-8.
+            // Everything up to the next backslash is copied unchanged -- ASCII
+            // is its own UTF-8, so nothing here needs decoding -- and one memchr
+            // finds that backslash instead of a test per byte. The copy is bulk
+            // for a long run and byte-wise for a short one: at -O0 memcpy is a
+            // libc call, which costs more than the copy when the run is a few
+            // bytes (which is what a string full of escapes produces).
+            char *bs = memchr(p, '\\', (size_t)(end - p));
+            char *stop = bs ? bs : end;
+            size_t n = (size_t)(stop - p);
+            if (n == 0) {
+                // A backslash with nothing after it: no other branch can take
+                // it, and it still has to be consumed or this loop never ends.
+                *cur++ = *p++;
+            } else if (n >= 16) {
+                memcpy(cur, p, n);
+                cur += n;
+                p = stop;
+            } else {
+                while (p < stop) *cur++ = *p++;
+            }
         }
     }
 
@@ -216,17 +238,25 @@ static char *convert_universal_chars(char *p, int len, SrcFile *file) {
 static int read_ident(char *start) {
     char *p = start;
     uint32_t c;
+    bool first_ascii = false;
     if (*p == '\\' && (p[1] == 'u' || p[1] == 'U')) {
         c = read_universal_char(&p, p + 2, p[1], cur_file);
         if (c <= 0x9F)
             error_at(cur_file, (uint32_t)(start - cur_file->contents),
                      "universal character %.*s is not valid in an identifier", (int)(p - start), start);
+    } else if ((unsigned char)*p < 0x80) {
+        // ASCII: the byte is the code point, so there is nothing to decode and
+        // no table to consult -- and no error to report, since an ASCII byte
+        // that is not an identifier start is simply not an identifier.
+        if (!is_ident1_ascii((unsigned char)*p)) return 0;
+        p++;
+        first_ascii = true;
     } else {
         bool success = false;
         c = decode_utf8(&p, p, &success);
         if (!success) error_at(cur_file, (uint32_t)(start - cur_file->contents), "invalid UTF-8 in identifier");
     }
-    if (!is_ident1(c)) {
+    if (!first_ascii && !is_ident1(c)) {
         if (c > 0x7F)
             error_at(cur_file, (uint32_t)(start - cur_file->contents), "invalid character %.*s in identifier",
                      (int)(p - start), start);
@@ -240,6 +270,13 @@ static int read_ident(char *start) {
             if (c <= 0x9F)
                 error_at(cur_file, (uint32_t)(uc_start - cur_file->contents),
                          "universal character %.*s is not valid in an identifier", (int)(p - uc_start), uc_start);
+        } else if ((unsigned char)*p < 0x80) {
+            // The same shortcut per character. Note p does not move before the
+            // test: the non-ASCII path has already stepped past the code point,
+            // which is why it returns p - start - 1 and this returns p - start.
+            if (!is_ident2_ascii((unsigned char)*p)) return p - start;
+            p++;
+            continue;
         } else {
             bool success = false;
             c = decode_utf8(&p, p, &success);
@@ -1125,7 +1162,8 @@ static char *read_file(char *path) {
     struct stat st;
     if (fp != stdin && fstat(fileno(fp), &st) == 0 && S_ISREG(st.st_mode)) {
         cap = (size_t)st.st_size + 2;
-        buf = emalloc(cap);
+        // A source file is exactly the kind of large request this is for.
+        buf = cap >= BIG_THRESHOLD ? emalloc_big(cap) : emalloc(cap);
         buflen = fread(buf, 1, (size_t)st.st_size, fp);
     } else {
         // A pipe or something else without a size: read in steps. The arena hands
@@ -1213,32 +1251,93 @@ SrcFile *new_file(char *name, int file_no, char *contents) {
 // whole buffer each time. A file with neither a carriage return nor a
 // backslash needs no rewriting at all, and memchr() -- vectorised -- decides
 // that without touching it.
+// Whether anything here needs rewriting at all: a carriage return, or a
+// backslash-newline to splice. A backslash that splices nothing -- and C source
+// is full of them, in strings and in macros -- does not, so this walks the
+// backslashes only rather than every byte of the file. p[len] is the terminator,
+// so reading p[1] at the last byte is safe.
+static bool needs_newline_fix(char *p, size_t len) {
+    // Any carriage return at all means the pass runs, so by the time the walk
+    // below starts there is no '\r' left in the buffer: a backslash followed by
+    // one has already been answered, and testing for it again would be a
+    // condition that cannot fire.
+    if (memchr(p, '\r', len)) return true;
+    char *end = p + len;
+    while ((p = memchr(p, '\\', (size_t)(end - p)))) {
+        if (p[1] == '\n') return true;
+        p++;
+    }
+    return false;
+}
+
 static void canonicalize_and_splice(char *p) {
-    // A file with no carriage return needs no newline rewriting, and one with no
-    // backslash needs no splicing: memchr() -- vectorised -- settles both without
-    // touching the text, which is most files.
+    // Most files need nothing, and the check is what tells them so.
     size_t len = strlen(p);
-    if (!memchr(p, '\r', len) && !memchr(p, '\\', len)) return;
+    if (!needs_newline_fix(p, len)) return;
 
-    int i = 0, j = 0, swallowed = 0;
+    // Two pointers: r reads, w writes. They are equal until the first thing that
+    // has to disappear, and afterwards w trails r -- which is why the bulk copy
+    // below is memmove and not memcpy: the regions overlap, and memcpy's contract
+    // forbids that (glibc's may copy backwards for large sizes).
+    char *end = p + len;
+    char *r = p, *w = p;
+    int swallowed = 0;
 
-    while (p[i]) {
-        if (p[i] == '\r') {
-            i += (p[i + 1] == '\n') ? 2 : 1;
-            p[j++] = '\n';
-            while (swallowed-- > 0) p[j++] = '\n';
-        } else if (p[i] == '\\' && (p[i + 1] == '\n' || p[i + 1] == '\r')) {
-            i += (p[i + 1] == '\r' && p[i + 2] == '\n') ? 3 : 2;
+    while (r < end) {
+        if (*r == '\r') {
+            r += (r[1] == '\n') ? 2 : 1;
+            *w++ = '\n';
+            while (swallowed-- > 0) *w++ = '\n';
+        } else if (*r == '\\' && (r[1] == '\n' || r[1] == '\r')) {
+            r += (r[1] == '\r' && r[2] == '\n') ? 3 : 2;
             swallowed++;
-        } else if (p[i] == '\n') {
-            p[j++] = p[i++];
-            while (swallowed-- > 0) p[j++] = '\n';
+        } else if (*r == '\n' && swallowed > 0) {
+            *w++ = *r++;
+            while (swallowed-- > 0) *w++ = '\n';
         } else {
-            p[j++] = p[i++];
+            // Nothing to do until the next byte that needs attention, so copy the
+            // run in one go. memchr is vectorised and so is memmove, which turns a
+            // handful of instructions per byte into a fraction of one -- but a
+            // short run is not worth two calls, so those stay byte-wise.
+            // The run ends at the first byte that needs attention: a carriage
+            // return, a newline that has swallowed newlines waiting to be handed
+            // back, or a backslash that really splices. Backslashes that splice
+            // nothing -- strings, macros, and C source is full of them -- do not
+            // end it, or the copy would be cut into byte-sized pieces at every
+            // one of them.
+            //
+            // Since the branches above have already taken a carriage return, a
+            // lone newline and a splicing backslash, stop is always past r here:
+            // the copy below always advances, which is what keeps this loop
+            // finite. (The same shape without that guarantee is how the first
+            // version of this change hung.)
+            char *stop = end;
+            if (swallowed > 0) {
+                char *c = memchr(r, '\n', (size_t)(end - r));
+                if (c && c < stop) stop = c;
+            }
+            char *a = memchr(r, '\r', (size_t)(end - r));
+            if (a && a < stop) stop = a;
+            char *q = r;
+            while ((q = memchr(q, '\\', (size_t)(end - q)))) {
+                if (q[1] == '\n' || q[1] == '\r') {
+                    if (q < stop) stop = q;
+                    break;
+                }
+                q++;
+            }
+            size_t n = (size_t)(stop - r);
+            if (n >= 16) {
+                memmove(w, r, n);
+                w += n;
+                r = stop;
+            } else {
+                while (r < stop) *w++ = *r++;
+            }
         }
     }
-    while (swallowed-- > 0) p[j++] = '\n';
-    p[j] = '\0';
+    while (swallowed-- > 0) *w++ = '\n';
+    *w = '\0';
 }
 
 // Replaces \r or \r\n with \n.

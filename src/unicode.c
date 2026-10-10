@@ -110,6 +110,9 @@ static bool ascii_paths_ok(void) {
         bool zero = c <= 0x1F || c == 0x7F;
         if (start != in_range(xid_start, XID_START_LEN, c)) return false;
         if (cont != in_range(xid_continue, XID_CONTINUE_LEN, c)) return false;
+        // And the two the lexer uses to skip this file entirely for ASCII.
+        if (is_ident1_ascii((uint8_t)c) != is_ident1(c)) return false;
+        if (is_ident2_ascii((uint8_t)c) != is_ident2(c)) return false;
         if (zero != in_range(zero_width, ZERO_WIDTH_LEN, c)) return false;
         if (in_range(double_width, DOUBLE_WIDTH_LEN, c)) return false;
     }

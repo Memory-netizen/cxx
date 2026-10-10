@@ -1,0 +1,62 @@
+cxx front end: where the time goes inside the lexer
+  workload : tinycc/tccgen.c,  cxx -cc1 -cc1-input tccgen.c -cc1-output /tmp/x.ll
+  build    : make (DEBUG=1 = -g -O0), so callgrind attributes every statement
+  tool     : valgrind --tool=callgrind  ->  callgrind_annotate --tree=both
+  raw log  : doc/lexer-hotspots.txt (the same run, whole file, nothing hidden)
+
+TOTALS (self instructions, whole front end = 548,237,763)
+  40,864,377   7.45%  lexer.c:canonicalize_and_splice
+  31,760,765   5.79%  util.c:emalloc
+  28,984,578   5.29%  lexer.c:tokenize
+  20,263,629   3.70%  parser.c:param_sym_of
+  17,995,660   3.28%  unicode.c:decode_utf8
+  17,780,888   3.24%  lexer.c:read_ident
+  16,949,596   3.09%  lexer.c:new_token
+  16,450,431   3.00%  lexer.c:convert_universal_chars
+
+canonicalize_and_splice -- a per-byte state machine, 40.9M total
+  15,326,010   2.80%  p[j++] = p[i++];                      <- the copy of every byte
+   5,646,377   1.03%  } else if (p[i] == '\\' && ...) {      <- 4 branches per byte:
+   5,642,180   1.03%  while (p[i]) {
+   5,641,960   1.03%  if (p[i] == '\r') {
+   5,639,980   1.03%  } else if (p[i] == '\n') {
+   ~22.6M total for the branch chain -> the common byte pays four tests
+   the memchr guard costs 2,394 instructions (0.00%) and the strlen/memchr
+   calls 0.04%: the 'skip when nothing to do' path is essentially free.
+
+tokenize -- 28.98M self, but its callees are where the work is
+  => read_ident                50,957,451   9.29%   (165,136 calls)
+  => convert_universal_chars   18,860,500   3.44%   ( 82,053 calls)
+  => intern                    18,347,218   3.35%   ( 82,053 calls)
+  => read_punct                 9,273,264   1.69%   ( 83,083 calls)
+  => new_token                 24,056,592   4.39%   (three call sites, ~266k calls)
+      while (isspace(*q))                 3,445,404   0.63%
+      if (isspace(*p))                    2,800,314   0.51%
+      if (isdigit(*p) || ...)             2,445,378   0.45%
+  => ctype.h:__ctype_b_loc              1,303,932   0.24%   (325,983 calls!)
+
+read_ident -- and the finding that matters most
+  => unicode.c:decode_utf8    14,183,479   2.59%   (616,673 calls)
+  => unicode.c:is_ident2      11,814,512   2.15%   (616,673 calls)
+  => unicode.c:decode_utf8     3,798,128   0.69%   (165,136 calls, first char)
+  => unicode.c:is_ident1       3,380,444   0.62%   (165,136 calls)
+  => unicode.c:decode_utf8 (convert_universal_chars) 3,798,128 + is_ident1 3,380,444
+  616,673 / 165,136 = 3.7 characters per identifier, every one of them decoded
+  as UTF-8 and tested against the Unicode tables -- for source that is ASCII.
+
+intern -- 94,367 hashes
+  => util.c:fnv_hash_32       12,199,978   2.23%   (~129 instructions per hash)
+      bucket scan (len + memcmp)  2,443,277 + 1,596,075  -> ~1.2 compares per lookup
+
+new_token -- 291,821 allocations
+  => util.c:emalloc            9,048,829   1.65%   (~31 instructions per token)
+      the field stores              1.2-2.1M each
+
+WHAT TO DO, in the order the numbers suggest
+  1. read_ident / convert_universal_chars: an ASCII fast path that skips
+     decode_utf8 and the Unicode predicates for bytes < 0x80 (~4-5% together).
+  2. canonicalize_and_splice: order the branch chain so the ordinary byte pays
+     one test instead of four (~1.5-2%).
+  3. isspace/isdigit in tokenize: range tests instead of ctype (~0.5-1%).
+  4. intern's hash: 2.23% for 94k lookups, ~129 instructions each.
+  5. new_token's emalloc: 1.65%; a token arena would fold it into a pointer bump.

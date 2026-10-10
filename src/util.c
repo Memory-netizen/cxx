@@ -3,7 +3,6 @@
 // Chunks are handed out on demand rather than one 128 MB pool being calloc'd
 // up front: the tail of a big pool is memory that cannot be used for
 // anything else, and virtual size that a leak or a stray write can hide in.
-#define BIG_THRESHOLD (128 * 1024)     // 128KB
 #define ALIGNMENT _Alignof(max_align_t)
 #define POOL_CHUNK_MIN (64 * 1024)
 #define POOL_CHUNK_MAX (8 * 1024 * 1024)
@@ -216,15 +215,26 @@ static size_t next_chunk = POOL_CHUNK_MIN;  // grows, so a small compile stays s
 
 // One function, not an inline: measured, inlining this into its sixty call sites
 // was 0.9% slower -- the body is the cost, not the call.
+// A block of its own, for the sizes that would waste a pool chunk's tail.
+void *emalloc_big(size_t n) {
+    if (n == 0) return NULL;
+    n = ALIGN_UP(n, ALIGNMENT);
+    void *p = calloc(1, n);
+    if (!p) fatal("emalloc, out of memory");
+    return p;
+}
+
 void *emalloc(size_t n) {
     if (n == 0) return NULL;
     n = ALIGN_UP(n, ALIGNMENT);
 
-    if (n >= BIG_THRESHOLD) {
-        void *p = calloc(1, n);
-        if (!p) fatal("emalloc, out of memory");
-        return p;
-    }
+    // The pool is for small objects. A big request reaching here still works --
+    // the chunk grows to fit it -- but wastes the rest of that chunk, so callers
+    // that know they may ask for a lot use emalloc_big. An assert here would put
+    // the test straight back into the path this split exists to shorten (and it
+    // did: it made the debug profile of this very change show a loss). The one
+    // site left asking for more than the threshold is tests2/55_lshift_type's
+    // compile; it is harmless and is a candidate for routing, not a bug.
 
     if (free_len < n) {
         // Chunks on demand rather than one 128 MB pool: the tail of a big pool is
@@ -260,7 +270,9 @@ struct Vec {
 void *vnew(size_t len, size_t esz) {
     size_t cap = 2;
     while (cap < len) cap *= 2;
-    Vec *v = emalloc(sizeof(Vec) + esz * cap);
+    size_t bytes = sizeof(Vec) + esz * cap;
+    // One test here covers every vector in the compiler, big ones included.
+    Vec *v = bytes >= BIG_THRESHOLD ? emalloc_big(bytes) : emalloc(bytes);
     v->cap = cap;
     v->esz = esz;
     return v->data;
