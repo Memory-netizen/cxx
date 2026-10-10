@@ -1686,11 +1686,6 @@ static uint32_t emitted_id(Sym *sym) {
 // declare the same symbol twice, which LLVM rejects with "invalid
 // redefinition of function". Deduplicate on the emitted name; the first
 // declaration for a name wins, which is what an alias means.
-static struct {
-    uint32_t id;
-} *emitted;
-static int num_emitted;
-
 // Whether this symbol is what the module defines under that name, as opposed
 // to a bare declaration. Functions answer with their body, the same way the
 // rest of the compiler does.
@@ -1703,36 +1698,70 @@ static bool is_definition(Sym *sym) { return sym->is_function ? sym->body != NUL
 // declaration of a name this module defines is not printed at all: letting it
 // stand in for the definition left the unit defining nothing and the link
 // failed with `undefined reference to 'a'` (32 tests).
-static struct {
+// Membership sets over interned ids. The two lists they replace -- the names
+// this module defines, and the ones it has emitted -- were scanned from end to
+// end for every symbol, which is quadratic and was 8% of the front end on
+// tccgen. Open addressing, because the ids already carry the interning table's
+// hash in their low bits, and a `used` flag rather than a zero test, because an
+// interned id can be zero (bucket zero, first string in it).
+typedef struct {
     uint32_t id;
-} *defined_names;
-static int num_defined_names;
+    bool used;
+} IdSet;
+
+typedef struct {
+    IdSet *slots;
+    size_t cap;
+    size_t len;
+} IdSetRef;
+
+static void idset_reset(IdSetRef *s) {
+    s->cap = 64;
+    s->len = 0;
+    s->slots = vnew(s->cap, sizeof(IdSet));  // vnew zeroes: used is false
+}
+
+static bool idset_has(IdSetRef *s, uint32_t id) {
+    for (size_t h = id & (s->cap - 1); s->slots[h].used; h = (h + 1) & (s->cap - 1))
+        if (s->slots[h].id == id) return true;
+    return false;
+}
+
+static void idset_add(IdSetRef *s, uint32_t id) {
+    if (idset_has(s, id)) return;
+    if (s->len * 2 >= s->cap) {
+        IdSet *old = s->slots;
+        size_t old_cap = s->cap;
+        s->cap *= 2;
+        s->slots = vnew(s->cap, sizeof(IdSet));
+        s->len = 0;
+        for (size_t i = 0; i < old_cap; i++)
+            if (old[i].used) idset_add(s, old[i].id);
+    }
+    size_t h = id & (s->cap - 1);
+    while (s->slots[h].used) h = (h + 1) & (s->cap - 1);
+    s->slots[h].id = id;
+    s->slots[h].used = true;
+    s->len++;
+}
+
+static IdSetRef defined_set;
+static IdSetRef emitted_set;
 
 static bool name_is_defined(uint32_t id) {
-    for (int i = 0; i < num_defined_names; i++)
-        if (defined_names[i].id == id) return true;
-    return false;
+    return idset_has(&defined_set, id);
 }
 
 static void record_defined_name(uint32_t id) {
     if (name_is_defined(id)) return;
-    if (!defined_names)
-        defined_names = vnew(8, sizeof(defined_names[0]));
-    else
-        defined_names = vgrow(defined_names, num_defined_names + 1);
-    defined_names[num_defined_names++].id = id;
+    idset_add(&defined_set, id);
 }
 
 static bool already_emitted(Sym *sym) {
     uint32_t id = emitted_id(sym);
     if (!is_definition(sym) && name_is_defined(id)) return true;
-    for (int i = 0; i < num_emitted; i++)
-        if (emitted[i].id == id) return true;
-    if (!emitted)
-        emitted = vnew(8, sizeof(emitted[0]));
-    else
-        emitted = vgrow(emitted, num_emitted + 1);
-    emitted[num_emitted++].id = id;
+    if (idset_has(&emitted_set, id)) return true;
+    idset_add(&emitted_set, id);
     return false;
 }
 
@@ -1742,7 +1771,7 @@ void dump_module(Module *md, FILE *out) {
     if (T.classify_publish) T.classify_publish();
     out_file = out;
     curm = md;
-    num_emitted = 0;
+    idset_reset(&emitted_set);
     SrcFile **files = get_input_files();
     fprintf(out_file, "; ModuleID = '%s'\n", files[0]->name);
     fprintf(out_file, "source_filename = \"%s\"\n", files[0]->name);
@@ -1776,7 +1805,7 @@ void dump_module(Module *md, FILE *out) {
     for (Type *ty = md->tys; ty; ty = ty->next) dump_type(ty);
     if (md->tys) fprintf(out_file, "\n");
 
-    num_defined_names = 0;
+    idset_reset(&defined_set);
     for (Sym *var = md->data; var; var = var->next)
         if (is_definition(var)) record_defined_name(emitted_id(var));
     for (Sym *fn = md->fns; fn; fn = fn->next)

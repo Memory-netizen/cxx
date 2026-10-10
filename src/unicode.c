@@ -97,6 +97,29 @@ static bool in_range(uint32_t *range, size_t num_intervals, uint32_t c) {
     return false;
 }
 
+// ASCII is worth answering without the binary search: the tables are sorted, so
+// the intervals that cover it are their first ones, and real source is nearly
+// all ASCII. A separate 128-bit table would need a lazy init, its own state and
+// a second source of truth; these comparisons need none of that. The check
+// below runs once, before main, and refuses to start if a regenerated table ever
+// makes them disagree with the search they stand in for.
+static bool ascii_paths_ok(void) {
+    for (uint32_t c = 0; c < 0x80; c++) {
+        bool start = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+        bool cont = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || c == '_' || (c >= 'a' && c <= 'z');
+        bool zero = c <= 0x1F || c == 0x7F;
+        if (start != in_range(xid_start, XID_START_LEN, c)) return false;
+        if (cont != in_range(xid_continue, XID_CONTINUE_LEN, c)) return false;
+        if (zero != in_range(zero_width, ZERO_WIDTH_LEN, c)) return false;
+        if (in_range(double_width, DOUBLE_WIDTH_LEN, c)) return false;
+    }
+    return true;
+}
+
+__attribute__((constructor)) static void check_ascii_fast_paths(void) {
+    if (!ascii_paths_ok()) fatal("unicode tables changed: the ASCII fast paths are stale");
+}
+
 // Returns true if a given character is acceptable as
 // the first character of an identifier.
 bool is_ident1(uint32_t c) {
@@ -106,6 +129,11 @@ bool is_ident1(uint32_t c) {
     // `$` is a GNU extension: accepted by default, rejected by -pedantic,
     // as in gcc and clang.
     if (c == '$') return !opt_pedantic;
+    // Every ASCII answer that could be true was returned above -- the table's
+    // ASCII intervals are exactly A-Z and a-z -- so ASCII only has to be kept
+    // out of the search. Without this, every operator, space and bracket in the
+    // source pays for a ten-step binary search: 7.8% of the front end on tccgen.
+    if (c < 0x80) return false;
     return in_range(xid_start, XID_START_LEN, c);
 }
 
@@ -117,12 +145,18 @@ bool is_ident2(uint32_t c) {
     if (c == '_') return true;
     if (c == '$') return !opt_pedantic;
     if ('0' <= c && c <= '9') return true;
+    // Likewise: the table's ASCII intervals are 0-9, A-Z, _ and a-z, all of
+    // which the checks above have already answered.
+    if (c < 0x80) return false;
     return in_range(xid_continue, XID_CONTINUE_LEN, c);
 }
 
 // Returns the number of columns needed to display a given
 // character in a fixed-width font.
 static int char_width(uint32_t c) {
+    // The one caller that reaches this table for ASCII is char_width(), once per
+    // character of every line a diagnostic prints.
+    if (c < 0x80) return c <= 0x1F || c == 0x7F ? 0 : 1;  // no wide ASCII
     if (in_range(zero_width, ZERO_WIDTH_LEN, c)) return 0;
     if (in_range(double_width, DOUBLE_WIDTH_LEN, c)) return 2;
     return 1;

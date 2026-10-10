@@ -889,14 +889,37 @@ void convert_keywords(Token *tok) {
         {"volatile", 0, TK_VOLATILE},
         {"while", 0, TK_WHILE},
     };
+    // 76 keywords, so an open-addressed table at a load factor well under half:
+    // what this replaces is a walk over every row for every identifier token,
+    // and identifiers are most of the tokens in real source. The id carries the
+    // interning table's own hash in its low bits, which indexes this one.
+    //
+    // `used` is not the id: an interned id is `bucket | (index << 12)`, so the
+    // first string in bucket zero has the id zero -- a valid id that an
+    // "empty means zero" test would both hide and let a probe chain stop at.
+    enum { KW_SLOTS = 256 };
+    static struct {
+        uint32_t id;
+        uint32_t kind;
+        bool used;
+    } kw_tab[KW_SLOTS];
+
     if (!kw[0].id) {
-        for (size_t i = 0; i < sizeof(kw) / sizeof(kw[0]); ++i) kw[i].id = intern(kw[i].keyword, strlen(kw[i].keyword));
+        for (size_t i = 0; i < sizeof(kw) / sizeof(kw[0]); ++i) {
+            kw[i].id = intern(kw[i].keyword, strlen(kw[i].keyword));
+            uint32_t h = kw[i].id & (KW_SLOTS - 1);
+            // First row wins, as the linear scan did, if a spelling were listed twice.
+            while (kw_tab[h].used && kw_tab[h].id != kw[i].id) h = (h + 1) & (KW_SLOTS - 1);
+            kw_tab[h].id = kw[i].id;
+            kw_tab[h].kind = kw[i].type;
+            kw_tab[h].used = true;
+        }
     }
     while (tok->kind != TK_EOF) {
         if (tok->kind == TK_IDENT) {
-            for (size_t i = 0; i < sizeof(kw) / sizeof(kw[0]); ++i)
-                if (tok->id == kw[i].id) {
-                    tok->kind = kw[i].type;
+            for (uint32_t h = tok->id & (KW_SLOTS - 1); kw_tab[h].used; h = (h + 1) & (KW_SLOTS - 1))
+                if (kw_tab[h].id == tok->id) {
+                    tok->kind = kw_tab[h].kind;
                     break;
                 }
         }
@@ -1124,13 +1147,16 @@ SrcFile **file_tab;
 uint32_t file_tab_cap;
 static uint32_t file_uid_seq;
 
+// emalloc() callocs on both of its paths -- the pool it hands out of and the
+// large blocks -- so what vnew() returns is already zeroed; a junk value in one
+// of these buffers would mean something wrote out of bounds, not that the
+// allocator left it unset.
 static void register_file(SrcFile *f) {
     f->uid = ++file_uid_seq;
     if (f->uid >= file_tab_cap) {
         uint32_t cap = file_tab_cap ? file_tab_cap : 64;
         while (cap <= f->uid) cap *= 2;
         SrcFile **tab = vnew(cap, sizeof(SrcFile *));
-        for (uint32_t i = 0; i < cap; i++) tab[i] = NULL;  // vnew does not zero
         for (uint32_t i = 0; i < file_tab_cap; i++) tab[i] = file_tab[i];
         file_tab = tab;
         file_tab_cap = cap;
@@ -1150,66 +1176,62 @@ SrcFile *new_file(char *name, int file_no, char *contents) {
 
 // Translation phases 2.
 // Removes backslashes followed by a newline.
-static void remove_backslash_newline(char *p) {
-    int i = 0, j = 0;
-    int n = 0;
+// Translation phases 1 and 2 in one pass: \r\n and \r become \n, and a
+// backslash-newline disappears. The newlines a splice swallows are handed back
+// at the next real newline, so that a logical line number still matches the
+// physical one -- which is what the two separate passes did, one copying the
+// whole buffer each time. A file with neither a carriage return nor a
+// backslash needs no rewriting at all, and memchr() -- vectorised -- decides
+// that without touching it.
+static void canonicalize_and_splice(char *p) {
+    // A file with no carriage return needs no newline rewriting, and one with no
+    // backslash needs no splicing: memchr() -- vectorised -- settles both without
+    // touching the text, which is most files.
+    size_t len = strlen(p);
+    if (!memchr(p, '\r', len) && !memchr(p, '\\', len)) return;
 
-    // We want to keep the number of newline characters so that
-    // the logical line number matches the physical one.
-    // This counter maintain the number of newlines we have removed.
+    int i = 0, j = 0, swallowed = 0;
+
     while (p[i]) {
-        if (p[i] == '\\' && p[i + 1] == '\n') {
-            i += 2;
-            n++;
+        if (p[i] == '\r') {
+            i += (p[i + 1] == '\n') ? 2 : 1;
+            p[j++] = '\n';
+            while (swallowed-- > 0) p[j++] = '\n';
+        } else if (p[i] == '\\' && (p[i + 1] == '\n' || p[i + 1] == '\r')) {
+            i += (p[i + 1] == '\r' && p[i + 2] == '\n') ? 3 : 2;
+            swallowed++;
         } else if (p[i] == '\n') {
             p[j++] = p[i++];
-            while (n-- > 0) p[j++] = '\n';
+            while (swallowed-- > 0) p[j++] = '\n';
         } else {
             p[j++] = p[i++];
         }
     }
-
-    while (n-- > 0) p[j++] = '\n';
+    while (swallowed-- > 0) p[j++] = '\n';
     p[j] = '\0';
 }
 
 // Replaces \r or \r\n with \n.
-static void canonicalize_newline(char *p) {
-    int i = 0, j = 0;
 
-    while (p[i]) {
-        if (p[i] == '\r' && p[i + 1] == '\n') {
-            i += 2;
-            p[j++] = '\n';
-        } else if (p[i] == '\r') {
-            i++;
-            p[j++] = '\n';
-        } else {
-            p[j++] = p[i++];
-        }
-    }
-
-    p[j] = '\0';
-}
 
 static void build_line_offsets(SrcFile *f) {
     if (!f || f->num_lines > 0) return;
 
+    // The length and the number of lines, by searching rather than by walking a
+    // byte at a time: memchr is vectorised, and the two loops that used to scan
+    // the source character by character were 4% of the front end on tccgen.
+    size_t size = strlen(f->contents);
     int count = 1;
-    char *p = f->contents;
-    while (*p)
-        if (*p++ == '\n') count++;
+    for (char *p = f->contents; (p = memchr(p, '\n', f->contents + size - p)); p++) count++;
 
-    f->size = p - f->contents;
+    f->size = size;
     f->num_lines = count;
-
     f->line_offsets = emalloc(sizeof(uint32_t) * count);
 
     int idx = 1;
     f->line_offsets[0] = 0;
-    p = f->contents;
-    while (*p)
-        if (*p++ == '\n') f->line_offsets[idx++] = p - f->contents;
+    for (char *p = f->contents; (p = memchr(p, '\n', f->contents + size - p));)
+        f->line_offsets[idx++] = (uint32_t)(++p - f->contents);
 }
 
 void get_location(SrcFile *f, uint32_t offset, int *out_line, int *out_col) {
@@ -1249,8 +1271,7 @@ Token *tokenize_file(char *path) {
     // If exists, just skip them because they are useless bytes.
     if (!memcmp(p, "\xef\xbb\xbf", 3)) p += 3;
 
-    canonicalize_newline(p);
-    remove_backslash_newline(p);
+    canonicalize_and_splice(p);
 
     static int file_no = 0;
     SrcFile *file = new_file(path, file_no + 1, p);
