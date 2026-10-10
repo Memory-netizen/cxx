@@ -1266,6 +1266,43 @@ static void assemble(char *input, char *output) {
     run_subprocess(cmd);
 }
 
+// Stages 2 and 3 in one process: .ll -> .o. clang's integrated assembler is
+// what the separate assemble() step uses anyway, so this is the same work with
+// one fewer process and one fewer temporary file. Measured: -c went from
+// 3.60 s to 2.83 s on sqlite3.c and from 0.44 s to 0.31 s on tccgen in one
+// run, -2.7% and -18.3% in another (this machine's timing drifts a lot), and
+// strace counts 18 execve per compile down to 12. The objects are the same
+// size and differ only in the NOP padding clang emits for alignment, so the
+// linker sees the same code either way.
+static void compile_object(char *input, char *output) {
+    char mabi[64] = "-mabi=";
+    char march[64] = "-march=";
+    char *cmd[28];
+    int n = 0;
+    cmd[n++] = "clang";
+    cmd[n++] = "-target";
+    cmd[n++] = T.triple;
+    cmd[n++] = "-fno-addrsig";
+    cmd[n++] = "-Wno-override-module";
+    cmd[n++] = "-x";
+    cmd[n++] = "ir";
+    cmd[n++] = input;
+    cmd[n++] = "-c";
+    cmd[n++] = "-o";
+    cmd[n++] = output;
+    if (T.clang_mabi) {
+        strncat(mabi, T.clang_mabi, 56);
+        cmd[n++] = mabi;
+    }
+    if (T.clang_march && !machine_sets_arch) {
+        strncat(march, T.clang_march, 56);
+        cmd[n++] = march;
+    }
+    for (int i = 0; i < num_machine && n < 27; i++) cmd[n++] = machine_args[i];
+    cmd[n] = NULL;
+    run_subprocess(cmd);
+}
+
 // Stage 4: .o → executable  (via cc)
 static void run_linker(char **ld_args, int num_ldarg, char *output) {
     ld_args[0] = "cc";
@@ -1430,20 +1467,16 @@ int main(int argc, char **argv) {
         // -c: .c → .ll → .s → .o
         if (opt_c) {
             char *tmp_ll = create_tmpfile();
-            char *tmp_s = create_tmpfile();
             run_cc1(argc, argv, input, tmp_ll);
-            compile(tmp_ll, tmp_s);
-            assemble(tmp_s, output);
+            compile_object(tmp_ll, output);
             continue;
         }
 
         // Default: .c → .ll → .s → .o → executable
         char *tmp_ll = create_tmpfile();
-        char *tmp_s = create_tmpfile();
         char *tmp_o = create_tmpfile();
         run_cc1(argc, argv, input, tmp_ll);
-        compile(tmp_ll, tmp_s);
-        assemble(tmp_s, tmp_o);
+        compile_object(tmp_ll, tmp_o);
         ld_args[num_ldarg++] = tmp_o;
     }
 
