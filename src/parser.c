@@ -595,14 +595,15 @@ static Node *cur_sw;
 static NameSpace *find_ident(Token *tok, bool search_par, bool is_extern) {
     Scope *sc = scope;
     while (sc) {
-        NameSpace *hit = NULL;
-        if (sc->ht)
-            for (NameSpace *ns = sc->ht[tok->id & (sc->ht_cap - 1)]; ns; ns = ns->hnext)
-                if (tok->id == ns->id) {
-                    hit = ns;
-                    break;
-                }
-        for (NameSpace *ns = hit ?: sc->vars; ns; ns = ns->next)
+        // The bucket holds every declaration of this name in this scope, in
+        // the same order as the vars list: push_namespace links each one into
+        // both, newest first, and the rehash keeps that order. So walking the
+        // bucket is the walk the code below used to make down sc->vars -- over
+        // the names this one can match instead of over every name in the
+        // scope, which is where the tens of millions of steps per compile
+        // went. A scope with no names has no table, and then there is nothing
+        // to find in it.
+        for (NameSpace *ns = sc->ht ? sc->ht[tok->id & (sc->ht_cap - 1)] : NULL; ns; ns = ns->hnext)
             if (tok->id == ns->id) {
                 if (!is_extern) return ns;
                 if (ns->lnk == LK_EXTERN || ns->lnk == LK_INTERN) return ns;
