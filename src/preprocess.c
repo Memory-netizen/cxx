@@ -505,13 +505,13 @@ static Token *eval_has_c_attribute(Token *tok) {
 
 static Token *eval_has_attribute(Token *tok) { return eval_has_attr(tok, has_attribute_id, false, "__has_attribute"); }
 
-// __has_extension(x) and __building_module(x) are clang's operators, and
-// clang's own headers are written in terms of them: xmmintrin.h guards a
-// block on `!__building_module(_Builtin_intrinsics)`, hresetintrin.h one on
-// `__has_extension(gnu_asm)`. cxx builds no module and implements no clang
-// extension, so both answer 0 -- which is what clang itself says for a plain
-// translation unit and for every extension that was not asked for. The
-// argument is skipped parenthesized, so whatever is inside is not expanded.
+// __building_module(x) is clang's, and clang's own headers are written in
+// terms of it: xmmintrin.h guards a block on
+// `!__building_module(_Builtin_intrinsics)`. cxx builds no module, so it
+// answers 0 -- which is what clang itself says for a plain translation unit.
+// (__has_extension was answered the same way until the feature table above
+// replaced it.) The argument is skipped parenthesized, so whatever is inside
+// is not expanded.
 static Token *eval_zero_operator(Token *tok, uint32_t id) {
     Token dummy = {};
     Token *cur = &dummy;
@@ -547,7 +547,6 @@ static int64_t eval_const_tokens(Token *expr) {
     expr = eval_has_embed(expr);
     expr = eval_has_c_attribute(expr);
     expr = eval_has_attribute(expr);
-    expr = eval_zero_operator(expr, has_extension_id);
     expr = eval_zero_operator(expr, building_module_id);
 
     // we replace remaining non-macro identifiers with "0"
@@ -2457,6 +2456,7 @@ static Token *time_macro(Token **rest, Token *tmpl) {
 }
 
 static Token *builtin_fn_macro(Token **rest, Token *tmpl) {
+    if (tmpl->next->kind != TK_LPAREN) error(tmpl->next, "missing ‘(’ after ‘%s’", str(tmpl->id));
     Token *tok = skip(tmpl->next, TK_LPAREN);
     if (tok->kind != TK_IDENT) {
         tok->line_delta = line_delta;
@@ -2465,6 +2465,63 @@ static Token *builtin_fn_macro(Token **rest, Token *tmpl) {
     }
     *rest = skip(tok->next, TK_RPAREN);
     return ident_to_num(tmpl, is_builtin_fn(tok->id));
+}
+
+// __has_feature(x) and __has_extension(x): what this compiler can do, in the
+// vocabulary clang's own headers and several libraries probe with. They are
+// macros rather than #if-only operators -- `#ifdef __has_feature` has to be
+// true, since that is how a header guards its use -- and the argument names a
+// feature as written.
+//
+// One row per feature. `is_extension` is what clang calls it, and that is what
+// the two answers differ by: __has_feature says yes only to a standard
+// feature, __has_extension to both, which is how clang treats C. A name no row
+// claims answers 0 silently, as it does in clang.
+typedef struct {
+    char *name;
+    uint32_t id;  // interned on first use
+    bool is_extension;
+} CFeature;
+
+static CFeature c_features[] = {
+    // Standard C features this compiler implements.
+    {"c_alignas", 0, false},
+    {"c_alignof", 0, false},
+    {"c_atomic", 0, false},
+    {"c_countof", 0, false},
+    {"c_fixed_enum", 0, false},
+    {"c_generic_selections", 0, false},
+    {"c_static_assert", 0, false},
+    {"c_thread_local", 0, false},
+    {"enumerator_attributes", 0, false},
+    // An attribute whose message form is implemented.
+    {"attribute_deprecated_with_message", 0, false},
+    // ... and what clang files as an extension: __has_extension says yes.
+    {"c_attributes", 0, true},
+    {"gnu_asm", 0, true},
+};
+
+// True when `id` names a feature of this compiler. __has_extension counts the
+// extensions too, __has_feature only the standard features.
+static bool feature_available(uint32_t id, bool with_extensions) {
+    for (size_t i = 0; i < sizeof(c_features) / sizeof(c_features[0]); i++) {
+        if (!c_features[i].id) c_features[i].id = intern(c_features[i].name, strlen(c_features[i].name));
+        if (c_features[i].id == id) return with_extensions || !c_features[i].is_extension;
+    }
+    return false;
+}
+
+static Token *feature_macro(Token **rest, Token *tmpl) {
+    bool with_extensions = tmpl->id == has_extension_id;
+    if (tmpl->next->kind != TK_LPAREN) error(tmpl->next, "missing ‘(’ after ‘%s’", str(tmpl->id));
+    Token *tok = skip(tmpl->next, TK_LPAREN);
+    if (tok->kind != TK_IDENT) {
+        tok->line_delta = line_delta;
+        tok->filename = display_name;
+        error(tok, "macro %s requires an identifier", with_extensions ? "__has_extension" : "__has_feature");
+    }
+    *rest = skip(tok->next, TK_RPAREN);
+    return ident_to_num(tmpl, feature_available(tok->id, with_extensions));
 }
 
 SrcFile *scratch;
@@ -2532,6 +2589,8 @@ void init_macros(void) {
     add_builtin("__DATE__", date_macro);
     add_builtin("__TIME__", time_macro);
     add_builtin("__has_builtin", builtin_fn_macro);
+    add_builtin("__has_feature", feature_macro);
+    add_builtin("__has_extension", feature_macro);
 
     for (Macro *m = macros; m; m = m->next) m->is_builtin = true;
 

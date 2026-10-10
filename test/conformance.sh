@@ -6380,8 +6380,8 @@ fi
 # `__has_extension(gnu_asm)`. cxx answered "called object '0' is not a
 # function", which is one unknown identifier followed by its argument list.
 cat > "$tmp/hasext.c" <<'EOF'
-#if __has_extension(gnu_asm)
-#error "cxx implements no clang extension"
+#if !__has_extension(gnu_asm)
+#error "cxx implements GNU asm, which clang files as an extension"
 #endif
 #if __building_module(_Builtin_intrinsics)
 #error "cxx builds no module"
@@ -7225,6 +7225,95 @@ if "$compiler" -w -o "$tmp/deadrange" "$tmp/deadrange.c" > "$tmp/log" 2>&1 && "$
 else
     echo "testing a fully replaced range is not evaluated ... FAILED"
     "$compiler" -w -o "$tmp/deadrange" "$tmp/deadrange.c" 2>&1 | head -3 | sed 's/^/    /'
+    n_fail=$((n_fail + 1))
+fi
+
+# 6.7.6.2p1: the type qualifiers and the keyword static of an array
+# declarator may appear only in a function parameter with an array type, and
+# then only in the outermost array type derivation. cxx accepted every shape
+# below, which gcc and clang both refuse.
+bad "a qualifier in a non-outermost array derivation" <<'EOF'
+void f(int a[3][const 5]);
+EOF
+bad "'static' in a non-outermost array derivation" <<'EOF'
+void f(int a[3][static 5]);
+EOF
+bad "a qualifier behind a pointer derivation" <<'EOF'
+void g(int (*p)[const 5]);
+EOF
+# The outermost derivation may still carry them, parentheses around the
+# declarator do not stop it being outermost, and an array of pointers is not a
+# pointer to an array either.
+if "$compiler" -w -fsyntax-only -xc - >/dev/null 2>&1 <<'EOF'
+void f(int a[const 5]);
+void g(int a[const 3][5], int b[static 5], int (*p)[5], int c[3][*]);
+void h(int (a)[const 5], int (b[const 5]));
+void i(int *a[const 5], int *const b[static 5]);
+int (*j(int a[const 5]))[3];
+EOF
+then
+    echo "testing the outermost array derivation keeps its qualifiers ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing the outermost array derivation keeps its qualifiers ... FAILED"
+    "$compiler" -w -fsyntax-only -xc - <<'EOF' 2>&1 | head -3 | sed 's/^/    /'
+void f(int a[const 5]);
+void g(int a[const 3][5], int b[static 5], int (*p)[5], int c[3][*]);
+void h(int (a)[const 5], int (b[const 5]));
+void i(int *a[const 5], int *const b[static 5]);
+int (*j(int a[const 5]))[3];
+EOF
+    n_fail=$((n_fail + 1))
+fi
+
+# __has_feature / __has_extension: the C features this compiler implements,
+# in clang's vocabulary. clang's own headers probe them -- stddef.h guards its
+# body with `!defined(__STDDEF_H) || __has_feature(modules)` -- and before this
+# __has_feature was not a macro at all, so that line read as `0 ( modules )`.
+cat > "$tmp/feat.c" <<'EOF'
+/* both are macros, which is how a header guards its use */
+#ifndef __has_feature
+#error __has_feature is not defined
+#endif
+#ifndef __has_extension
+#error __has_extension is not defined
+#endif
+/* a standard feature of this compiler: both answer 1 */
+#if !__has_feature(c_atomic) || !__has_extension(c_atomic)
+#error c_atomic
+#endif
+/* what clang files as an extension: only __has_extension answers 1 */
+#if __has_feature(gnu_asm) || !__has_extension(gnu_asm)
+#error gnu_asm
+#endif
+#if __has_feature(c_attributes) || !__has_extension(c_attributes)
+#error c_attributes
+#endif
+/* what this compiler does not have, and what nothing knows, answer 0 */
+#if __has_feature(modules) || __has_extension(modules) || __has_feature(no_such_feature_xyz)
+#error modules
+#endif
+/* the operators are usable outside #if, like any macro */
+enum { has_atomic = __has_feature(c_atomic), has_asm = __has_extension(gnu_asm) };
+int main(void) { return has_atomic == 1 && has_asm == 1 ? 0 : 1; }
+EOF
+if "$compiler" -w -o "$tmp/feat" "$tmp/feat.c" > "$tmp/log" 2>&1 && "$tmp/feat"; then
+    echo "testing __has_feature and __has_extension ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __has_feature and __has_extension ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+printf '#if __has_feature(1)\n#endif\n' > "$tmp/featbad.c"
+if "$compiler" -E "$tmp/featbad.c" > "$tmp/log" 2>&1; then
+    echo "testing __has_feature requires an identifier ... FAILED (accepted)"
+    n_fail=$((n_fail + 1))
+elif grep -q 'requires an identifier' "$tmp/log"; then
+    echo "testing __has_feature requires an identifier ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing __has_feature requires an identifier ... FAILED (wrong diagnostic)"
     n_fail=$((n_fail + 1))
 fi
 

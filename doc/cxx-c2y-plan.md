@@ -542,7 +542,91 @@ cxx 两种情形都重复转换后的字母，于是 `"+g"(h)` 的输入被标�
 
 **缺口表更新**：§0 的“asm 匹配约束对间接输出”一行**移除**（已实现）。
 
+### R123 `__has_feature` / `__has_extension`：特性表 + 两个内建宏 —— ✅ 已完成
+
+来源是 §R217 一带记录的待办：cxx 既没有 `__has_feature`，`__has_extension` 也只是个「永远答 0」
+的 `#if` 运算符，于是 clang 自己头文件里的 `#if !defined(__STDDEF_H) || __has_feature(modules)`
+被读成 `0 ( modules )`，报 `called object ‘0’ is not a function or function pointer`。
+
+**先量两家的词汇表**（`-std=c2y`，这是 cxx 的目标模式；gcc 没有 `__has_feature`，参照只有 clang）：
+
+| 名字 | clang `__has_feature` | clang `__has_extension` | cxx 是否真有该特性 |
+|---|---|---|---|
+| `c_alignas`、`c_alignof`、`c_atomic`、`c_generic_selections`、`c_static_assert`、`c_thread_local`、`c_fixed_enum`、`c_countof`、`enumerator_attributes` | 1 | 1 | 有 |
+| `c_attributes`（`[[…]]`）、`gnu_asm` | **0** | **1** | 有（clang 把这两个归为扩展） |
+| `modules`、`statement_expr`、`c_embed`、`c_nullptr`、`c_float16`、`c_complex`、各 `cxx_*`、各 sanitizer 名 | 0 | 0 | cxx 没有（`_Complex` 属长期不做） |
+
+两条语义要点，都是从实测拿到的：**未知名字答 0 且不诊断**（clang 如此）；**参数不是标识符时报错**
+（clang：`builtin feature check macro requires a parenthesized identifier`）。
+
+**实现**（`src/preprocess.c`，一行表项 = 一个特性）：
+
+```c
+typedef struct { char *name; uint32_t id; bool is_extension; } CFeature;
+static CFeature c_features[] = { {"c_alignas", 0, false}, … {"c_attributes", 0, true}, {"gnu_asm", 0, true} };
+```
+
+`__has_feature(x)`：命中且**不是**扩展 → 1；`__has_extension(x)`：命中即可（标准特性或扩展）→ 1；
+其余 0。两者都注册成**内建宏**（`add_builtin`，与 `__has_builtin` 同路），而不是只在 `#if` 里求值的
+运算符 —— 因为 `#ifdef __has_feature` 必须为真，头文件正是用这个来保护自己的用法（`__building_module`
+仍走旧的「恒 0」路径，cxx 不建模块）。
+
+顺带把「名字后面没有括号」的诊断改成 clang 的样子：`missing ‘(’ after ‘__has_feature’`
+（原来报 `expected ‘(’ before ‘;’`，看不出是哪个宏）。
+
+**验收**：
+
+| 项目 | 结果 |
+|---|---|
+| 与 clang 对照 | 13 行行为逐行相同：两个 `#ifdef`、表内特性的两种问法、未知名字答 0、`#if` 之外当宏用（`enum { x = __has_feature(c_atomic) }`）、`#define HAS(x) __has_feature(x)` 的间接用法、一行两个、以及原来那行 `!defined(__STDDEF_H) \|\| __has_feature(modules)` |
+| 原来的阻塞点 | clang 资源目录的 `stddef.h`（正文就用那个 guard）现在**能编译**；`stdatomic.h`、`immintrin.h`、`stdalign.h` 预处理也都通过 |
+| `make test` | **exit 0**；conformance **323 → 325 / 0 gap**（新增两条；既有的「`__has_extension` 恒 0」断言按新行为改写为「`gnu_asm` 应答 1」）、c2y 101 / 0 |
+| bootstrap | **cxx2 = cxx3 = cxx4 逐字节相同**，21/21 目标文件 |
+| `doc/tcctests.sh` | 106 ok / 0 failed |
+| `clang-format-21 --dry-run --Werror` | 通过 |
+
+**加一个特性的做法**：`c_features[]` 加一行，其余不动 —— 但**只有 cxx 真的支持**才可以答 1：
+这张表就是「本编译器能力」的声明，答错会让头文件走错分支。
+
+### R122 6.7.6.2p1：数组派生的限定符与 `static` 只许出现在参数的最外层派生 —— ✅ 已修
+
+来源是 §R120 限定符位置审计里**只记录未修**的那一处；§0 的当前阶段是 debug（只修已有功能的
+bug，不扩功能），而这一条正是 bug：cxx **接受**两家都拒绝的写法。
+
+| 形状 | 修前 cxx | 修后 cxx | gcc | clang |
+|---|---|---|---|---|
+| `void f(int a[3][const 5]);` | accept ✗ | **`type qualifier used in non-outermost array type derivation`** ✓ | 拒 | 同句 |
+| `void f(int a[3][static 5]);` | accept ✗ | **`‘static’ used in non-outermost array type derivation`** ✓ | 拒 | 同句 |
+| `void f(int a[const 3][const 5]);` | accept ✗ | 同第一条 ✓ | 拒 | 拒 |
+| `void f(int (*p)[static 5]);` | accept ✗ | 同第二条 ✓ | 拒 | 拒 |
+| `void f(int (*p)[const 5]);` | accept ✗ | 同第一条 ✓ | 拒 | 拒 |
+| `void f(int a[][const 5]);`、`int a[n][const 5]` | accept ✗ | 同第一条 ✓ | 拒 | 拒 |
+| `void f(int a[const 5]);`、`[static 5]`、`[const 3][5]`、`[const static 5]`、`[restrict 5]` | accept ✓ | accept ✓ | 收 | 收 |
+| `void f(int (a)[const 5]);`、`int (a[const 5])`（多余括号） | accept ✓ | accept ✓ | 收 | 收 |
+| `void f(int *a[const 5]);`（数组**在外**、指针在内） | accept ✓ | accept ✓ | 收 | 收 |
+| `void f(int (*p)[5]);`、`[3][*]`、`[static 3][5]` | 不变 | 不变 ✓ | — | — |
+
+**实现**：两个解析器级标志（与既有 `static_init_ctx`、`gcc_atomic_args` 同风格，避免把参数一路
+穿过四个声明符函数的二十多个调用点）：
+
+- `param_outermost`：进入**每个参数**的声明符时置位，由该声明符的**第一个**数组派生消费；
+- `in_nested_declr`：进入带括号的声明符时置位；若在其中解析到 `*`，就清掉 `param_outermost`
+  —— `int (*p)[5]` 里指针在数组**外面**，所以那个数组不是最外层派生。
+
+**两个坑**：
+
+1. **带括号的声明符会被读两遍**（`declarator()` 先试读一遍求形状，再用外层类型重读一遍），
+   第一遍就把标志消费掉了，于是 `int (a[const 5])` 被误拒 ✗（两家都收）。修法：试读前保存、
+   重读前恢复。
+2. **参数表自成一套**：`int (*g(int a[const 5]))[3]` 里内层函数的参数仍是最外层派生，所以
+   `func_param()` 对每个参数重置两个标志（两家都收）。
+
+**验收**：`make test` exit 0（conformance **319 → 323 / 0 gap**：3 个 `bad` + 1 个正向，正向覆盖
+多余括号、数组套指针、`[3][*]`、嵌套函数声明符里的参数）、c2y 101 / 0；bootstrap **逐字节相同**；
+`doc/tcctests.sh` 106 ok / 0 failed；`clang-format-21` 通过；17 个边界形状与两家逐行一致。
+
 ### R121 范围指示符 [a ... b]：求值次数、任意维与死初始化器消除 —— ✅ 已修
+
 
 用户提问：gcc 明确说明 `[2 ... 5] = i++;` 只求值一次，检查 cxx 的求值次数；随后又问
 `{[2 ... 5] = i++; [2 ... 5] = 6;}` 里那个 `i++` 是**被抛弃**还是**保留求值**。

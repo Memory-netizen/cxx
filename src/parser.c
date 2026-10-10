@@ -61,6 +61,18 @@ static int64_t sizeof_value(Type *ty);
 static Node *init_rvalue(Node *expr);
 static void designation(Token **rest, Token *tok, Initializer *init);
 static void designation_range(Token **rest, Token *tok, Initializer *init, int begin, int end);
+// 6.7.6.2p1: the type qualifiers and the keyword static of an array
+// declarator may appear only in a declaration of a function parameter with an
+// array type, and then only in the outermost array type derivation. Both
+// references refuse `void f(int a[3][const 5])` and `void f(int (*p)[5])`,
+// which is what these two flags are for: the first says the derivation about
+// to be parsed is the parameter's outermost one, the second that a `*` here
+// would put a pointer in front of the array (so the array is not outermost
+// after all). A parameter list of its own -- `int (*g(int a[const 5]))[3]` --
+// starts both afresh.
+static bool param_outermost;
+static bool in_nested_declr;
+
 // True while a static initializer is being parsed: its expressions have to be
 // constants, so a range designator has no temporary to evaluate into -- and
 // needs none, since every element gets the same constant.
@@ -1093,6 +1105,10 @@ static uint32_t typequal(Token **rest, Token *tok) {
 // Ptr ::= ("*" TypeQual*)+
 static Type *pointers(Token **rest, Token *tok, Type *ty) {
     while (match(&tok, tok, TK_STAR)) {
+        // A pointer parsed inside a parenthesized declarator ends up outside
+        // the array that follows it: `int (*p)[5]` is a pointer to an array,
+        // so the array derivation is not the parameter's outermost one.
+        if (in_nested_declr) param_outermost = false;
         Token *quals = tok;
         uint32_t qual = typequal(&tok, tok);
         // 6.7.4.1p2: only a pointer whose referenced type is an object type
@@ -1125,9 +1141,19 @@ static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool is_par
         (tok->next->kind != TK_RPAREN && tok->next->kind != TK_ELLIPSIS && !is_typename(tok->next, true))) {
         Token *start = tok;
         Type dummy = {};
+        bool saved_nested = in_nested_declr;
+        bool saved_outermost = param_outermost;
+        in_nested_declr = true;
         abstract_declarator(&tok, start->next, &dummy, is_param);
         tok = skip(tok, TK_RPAREN);
         ty = decl_suffix(rest, tok, ty, is_param);
+        in_nested_declr = saved_nested;
+        // The declarator inside the parentheses is read twice -- once for its
+        // shape here, once for real below -- so what the trial read consumed
+        // is re-armed for the second read. `int (a[const 5])` is the
+        // parameter's outermost derivation, and the flags have to say so
+        // twice.
+        param_outermost = saved_outermost;
         ty = decl_attrs(rest, *rest, ty);
         return abstract_declarator(&tok, start->next, ty, is_param);
     }
@@ -8825,6 +8851,11 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
             // `register struct tree const *tree`.
             if (psclass & ~SC_REG)
                 error(start, "storage class ‘%s’ is not allowed on a parameter", sclass_name[psclass & ~SC_REG]);
+            // This parameter's own declarator: the first array derivation in
+            // it is the outermost one, and a `*` at this level does not put a
+            // pointer in front of it.
+            param_outermost = true;
+            in_nested_declr = false;
             Type *paramty = abstract_declarator(&tok, tok, basety, true);
             apply_postdecl_attrs(paramty);
             // A declaration attribute in front of the type belongs to this
@@ -8922,17 +8953,26 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
     Token *l_bracket = tok;  // for the AST dumper; see array_bracket_note
     tok = skip(tok, TK_LBRACKET);
 
+    // This is the parameter's outermost derivation unless something already
+    // consumed the flag: the one that carries it is the one the qualifiers and
+    // `static` are allowed in (6.7.6.2p1).
+    bool outermost = param_outermost;
+    param_outermost = false;
+
     Token *tmp = tok;
     uint32_t qual = typequal(&tok, tok);
     if (!is_param && qual) error(tmp, "type qualifier used in array declarator outside of function prototype");
+    if (is_param && !outermost && qual) error(tmp, "type qualifier used in non-outermost array type derivation");
 
     tmp = tok;
     bool is_static = match(&tok, tok, TK_STATIC);
     if (!is_param && is_static) error(tmp, "‘static’ used in array declarator outside of function prototype");
+    if (is_param && !outermost && is_static) error(tmp, "‘static’ used in non-outermost array type derivation");
 
     tmp = tok;
     if (!qual) qual = typequal(&tok, tok);
     if (!is_param && qual) error(tmp, "type qualifier used in array declarator outside of function prototype");
+    if (is_param && !outermost && qual) error(tmp, "type qualifier used in non-outermost array type derivation");
 
     if (is_static) {
         len = assign(&tok, tok);
@@ -9031,9 +9071,17 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
     if (tok->kind == TK_LPAREN) {
         Token *start = tok;
         Type dummy = {};
+        bool saved_nested = in_nested_declr;
+        bool saved_outermost = param_outermost;
+        in_nested_declr = true;
         declarator(&tok, start->next, &dummy);
         tok = skip(tok, TK_RPAREN);
         ty = decl_suffix(rest, tok, ty, false);
+        in_nested_declr = saved_nested;
+        // The declarator inside the parentheses is read twice (see the same
+        // note in abstract_declarator), so what the trial read consumed is
+        // re-armed for the second read.
+        param_outermost = saved_outermost;
         ty = decl_attrs(rest, *rest, ty);
         return declarator(&tok, start->next, ty);
     }
