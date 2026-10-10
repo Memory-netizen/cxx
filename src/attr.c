@@ -1,6 +1,11 @@
 #include "attr.h"
 
+#include <stdint.h>
 #include <string.h>
+
+// Names are compared by their interned id (see attr_lookup), which is
+// the only piece of the interning table this file needs.
+uint32_t intern(char *s, uint32_t len);
 
 static AttrInfo attrs[] = {
     // Standard attributes (C23 6.7.12): version is the YYYYMM of
@@ -66,19 +71,29 @@ static uint32_t ns_of(char *ns) {
     return (uint32_t)-1;
 }
 
+// The interned id of each row, filled on first use. Comparing those is what
+// the loop below does now: it used to call strlen() and strncmp() on every row
+// of every lookup, and attribute parsing runs for each declaration.
+static uint32_t attr_ids[sizeof(attrs) / sizeof(attrs[0])];
+
 AttrInfo *attr_lookup(char *ns, char *name) {
     uint32_t n = ns_of(ns);
     if (n == (uint32_t)-1) return NULL;
 
+    // glibc's headers spell the reserved forms __name__; what they stand for
+    // is `name`, and interning that is the only string work left here. The
+    // spelling costs one table entry per name, which is not where this
+    // compiler's memory goes.
     int len = strlen(name);
-    if (len > 4 && !strncmp(name, "__", 2) && !strcmp(name + len - 2, "__")) {
+    if (len > 4 && name[0] == '_' && name[1] == '_' && name[len - 2] == '_' && name[len - 1] == '_') {
         name += 2;
         len -= 4;
     }
+    uint32_t id = intern(name, len);
 
     for (size_t i = 0; i < sizeof(attrs) / sizeof(attrs[0]); i++) {
-        AttrInfo *a = &attrs[i];
-        if (a->ns == n && strlen(a->name) == (size_t)len && !strncmp(a->name, name, len)) return a;
+        if (!attr_ids[i]) attr_ids[i] = intern(attrs[i].name, strlen(attrs[i].name));
+        if (attrs[i].ns == n && attr_ids[i] == id) return &attrs[i];
     }
     return NULL;
 }

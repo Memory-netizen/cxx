@@ -935,6 +935,34 @@ static Sym **strlit_ht;
 static int strlit_cap;
 static int strlit_n;
 
+// The names of the objects the compiler generates for itself: string
+// literals and file-scope compound literals. One sequence per prefix -- the
+// first of a kind keeps the plain name and the rest are numbered after it --
+// because a program cannot spell either name (a '.' is not a character an
+// identifier can carry), so they can only collide with each other. The
+// lookup for a free name that used to run here walked the whole list of
+// globals once per literal, which is what made a file with thousands of
+// literals quadratic.
+static int strlit_seq;
+static int complit_seq;
+
+static uint32_t generated_name(char *prefix, int *seq) {
+    int n = (*seq)++;
+    if (n == 0) return intern(prefix, strlen(prefix));
+    char *name = format("%s.%d", prefix, n);
+    return intern(name, strlen(name));
+}
+
+// The index a generated name already carries: the digits after its last dot,
+// or 0 when it has no suffix yet (it is the first of its kind). Continuing
+// from the newest one is all that is needed, since names are handed out in
+// order and the list they are looked up in is newest first.
+static int next_name_index(char *name) {
+    char *dot = strrchr(name, '.');
+    if (!dot || dot[1] < '0' || dot[1] > '9') return 0;
+    return atoi(dot + 1) + 1;
+}
+
 static Sym *new_string_literal(uint32_t id, Type *ty) {
     if (!strlit_cap) {
         strlit_cap = 64;
@@ -966,7 +994,7 @@ static Sym *new_string_literal(uint32_t id, Type *ty) {
         // length follows from the interned content id: the element
         // pointer alone distinguishes u8"x"/"x"/L"x"/U"x"/u"x".
         if (v->init_data == id && v->ty->base == ty->base) return v;
-    uint32_t uid = new_unique_varname(intern(".str", 4));
+    uint32_t uid = generated_name(".str", &strlit_seq);
     Sym *var = new_gvar(uid, ty);
     var->is_str = true;
     var->init_data = id;
@@ -2058,12 +2086,16 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
 static int anon_seq;
 
 void insert_ty(Type *ty, char *kind) {
+    // The list is newest first, so the first entry with this id is the most
+    // recent one; its name already says how many came before it, and the next
+    // one follows from that. Only when there is none does the search have to
+    // reach the end -- and then there is nothing to number.
     int i = -1;
-    Type *t = types;
-    while (t) {
-        if (t->id == ty->id) i++;
-        t = t->next;
-    }
+    for (Type *t = types; t; t = t->next)
+        if (t->id == ty->id) {
+            i = next_name_index(str(t->uid));
+            break;
+        }
     char *name;
     if (!ty->id || ty->is_anon) {
         // A record with no name of its own: a tagless `struct { ... }` (given
@@ -2748,6 +2780,13 @@ BuiltinDef *builtin_def(int kind) {
 }
 
 int is_builtin_fn(uint32_t id) {
+    // Every builtin cxx knows is spelled in the implementation's namespace, so
+    // an ordinary identifier costs two character tests instead of a walk over
+    // the whole table. This runs for every identifier in every expression
+    // (primary()), which is what makes the walk worth avoiding. str() is a
+    // direct index into the interning table, not a search.
+    char *s = str(id);
+    if (s[0] != '_' || (s[1] != '_' && (s[1] < 'A' || s[1] > 'Z'))) return BUILTIN_NONE;
     size_t i = builtin_find(id);
     // The row's index *is* its kind; the search already rejects the empty
     // BUILTIN_NONE slot.
@@ -4426,7 +4465,7 @@ static Node *postfix(Token **rest, Token *tok) {
         tok = skip(tok, TK_RPAREN);
         Sym *var;
         if (is_file_scope() || sclass & SC_STATIC) {
-            uint32_t uid = new_unique_varname(intern(".compoundliteral", 16));
+            uint32_t uid = generated_name(".compoundliteral", &complit_seq);
             var = new_gvar(uid, ty);
             var->is_compliteral = true;
             // The object a compound literal names has no linkage, so at file
