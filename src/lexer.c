@@ -1115,12 +1115,38 @@ static char *read_file(char *path) {
 
 SrcFile **get_input_files(void) { return input_files; }
 
+
+// Every file the compiler opens, by its own handle. The display-name id cannot
+// serve here: two files can carry the same name, and #line moves the name away
+// from the file. The compiler's own sources (scratch space, <built-in>, the
+// command line) go through new_file() as well, so they are covered too.
+static SrcFile **file_tab;
+static uint32_t file_tab_cap;
+static uint32_t file_uid_seq;
+
+static void register_file(SrcFile *f) {
+    f->uid = ++file_uid_seq;
+    if (f->uid >= file_tab_cap) {
+        uint32_t cap = file_tab_cap ? file_tab_cap : 64;
+        while (cap <= f->uid) cap *= 2;
+        SrcFile **tab = vnew(cap, sizeof(SrcFile *));
+        for (uint32_t i = 0; i < cap; i++) tab[i] = NULL;  // vnew does not zero
+        for (uint32_t i = 0; i < file_tab_cap; i++) tab[i] = file_tab[i];
+        file_tab = tab;
+        file_tab_cap = cap;
+    }
+    file_tab[f->uid] = f;
+}
+
+SrcFile *file_of(uint32_t uid) { return uid && uid < file_tab_cap ? file_tab[uid] : NULL; }
+
 SrcFile *new_file(char *name, int file_no, char *contents) {
     SrcFile *file = emalloc(sizeof(SrcFile));
     file->name = name;
     file->id = intern(name, strlen(name));
     file->file_no = file_no;
     file->contents = contents;
+    register_file(file);
     return file;
 }
 

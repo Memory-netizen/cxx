@@ -338,7 +338,8 @@ int64_t norm_bits(int64_t v, int width, bool is_unsigned);
 
 struct SrcFile {
     char *name;
-    uint32_t id;
+    uint32_t id;   // interned display name; #line can point it at another file
+    uint32_t uid;  // this file's own handle, unique for the life of the process
     int file_no;
     char *contents;
     size_t size;
@@ -546,6 +547,27 @@ enum {
 
     TK_NKIND,  // number of token kinds
 };
+
+// Everything one diagnostic needs, and nothing else: which file, where in it,
+// how long the spelling is, and the line correction an expansion carries.
+// A Token has exactly these fields plus the ones the compiler needs while it
+// is still lexing and parsing, so a Loc can be taken from a token at any point
+// and outlive the pool the token came from.
+typedef struct Loc {
+    uint32_t filename;   // interned display name, which #line can change
+    uint32_t file_uid;   // SrcFile::uid, the file the offset is really in
+    uint32_t loc;        // byte offset into the file's contents
+    uint32_t len;        // length of the spelling
+    int32_t line_delta;  // line correction for a token that came out of a macro
+} Loc;
+
+// The location a diagnostic should name: a token that came out of a macro
+// expansion reports where the expansion was written, which is what walking the
+// origin chain finds.
+Loc loc_of(Token *tok);
+
+// The file a handle names, for the stages that keep locations but no tokens.
+SrcFile *file_of(uint32_t uid);
 
 struct Token {
     Token *next;
@@ -1941,6 +1963,7 @@ extern bool opt_pedantic;
 extern bool opt_pedantic_errors;
 void pedantic(Token *tok, const char *msg, ...) __attribute__((format(printf, 2, 3)));
 void diag(char *level, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));
+void diag_loc(char *level, Loc at, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 void diag_exit(char *level, Token *tok, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 
 void *emalloc(size_t n);

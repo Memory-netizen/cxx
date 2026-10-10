@@ -73,21 +73,45 @@ static void emit_diag(char *level, uint32_t filename, int line_delta, SrcFile *d
         fprintf(stderr, "^\n");
 }
 
+// The fields emit_diag already takes, gathered into the one type a caller
+// that no longer has tokens can carry around.
+static void emit_diag_loc(char *level, Loc at, const char *msg, va_list ap) {
+    emit_diag(level, at.filename, at.line_delta, file_of(at.file_uid), at.loc, msg, ap);
+}
+
+// The location a diagnostic should name: an expansion reports where it was
+// written, which is what walking the origin chain finds -- the same walk diag()
+// below makes.
+Loc loc_of(Token *tok) {
+    Token *orig = tok;
+    while (orig->origin) orig = orig->origin;
+    Loc at = {orig->filename, orig->file->uid, orig->loc, orig->len, orig->line_delta};
+    return at;
+}
+
+// diag()'s sibling for the stages that keep locations but no tokens.
+void diag_loc(char *level, Loc at, const char *msg, ...) {
+    va_list ap;
+    va_start(ap, msg);
+    emit_diag_loc(level, at, msg, ap);
+    va_end(ap);
+}
+
 void diag(char *level, Token *tok, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    Token *orig = tok;
-    while (orig->origin) orig = orig->origin;
-    emit_diag(level, orig->filename, orig->line_delta, orig->file, orig->loc, msg, ap);
+    // Through Loc: the same four fields emit_diag wants, taken from the token
+    // here. Every message the compiler prints goes this way, so the path is
+    // exercised by the whole test suite rather than by the few callers that
+    // keep a location past the tokens.
+    emit_diag_loc(level, loc_of(tok), msg, ap);
     va_end(ap);
 }
 
 void diag_exit(char *level, Token *tok, const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);
-    Token *orig = tok;
-    while (orig->origin) orig = orig->origin;
-    emit_diag(level, orig->filename, orig->line_delta, orig->file, orig->loc, msg, ap);
+    emit_diag_loc(level, loc_of(tok), msg, ap);
     va_end(ap);
     exit(1);
 }

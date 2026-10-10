@@ -542,6 +542,139 @@ cxx 两种情形都重复转换后的字母，于是 `"+g"(h)` 的输入被标�
 
 **缺口表更新**：§0 的“asm 匹配约束对间接输出”一行**移除**（已实现）。
 
+### R141 ②slice2 落地：`SrcFile` 唯一 uid + `Loc` 20 字节 + **全部诊断已走 Loc 路径** —— ✅ 已落地并证明等价
+
+按 §R140 的修正方案实现：
+
+1. `SrcFile` 增 `uint32_t uid` —— `new_file()` 里一个计数器（`register_file()`），**与显示名 id 分开**；
+   `new_file` 是每个文件（含 scratch、`<built-in>`、命令行）的唯一入口，所以全部登记；
+   表用 `vnew` 分配并**显式清零**（`vnew` 不清零，这是不会构建报错的那类坑）。
+2. `Loc` 去掉指针，改为 `{filename, file_uid, loc, len, line_delta}` = **20 字节**（实测 `sizeof(Loc) == 20`）。
+3. `loc_of()` 填 `file->uid`，`emit_diag_loc()` 用 `file_of(at.file_uid)` 取回文件。
+4. **把 `diag()` / `diag_exit()` 本体改成走 `loc_of` + `emit_diag_loc`** —— 于是全编译器
+   **每一条诊断**都经过 Loc 路径，而不是只有少数几个保留位置的调用者经过。这是真正证明
+   「Loc 装得下诊断所需的一切」的方式：整个测试套件都在跑这条路径。
+
+**验收（Loc 路径为唯一路径的情况下）**：
+
+| 项 | 结果 |
+|---|---|
+| `make test` | exit 0 —— conformance **325 / 0**、c2y **101 / 0** |
+| bootstrap | **cxx2 = cxx3 = cxx4 逐字节相同**，21/21 目标文件 |
+| tcctests | **106 ok / 0 failed** |
+| 宏展开错误 | `/tmp/d1.c:2:25: error: expected expression before ')'` + caret，与改前逐字相同 |
+| note 对（重定义） | `error: redefinition of 'f'` + `note: previous definition is here`（两处位置都正确） |
+| **`#line` 改名** | `#line 100 "other.c"` 后报 `other.c:100:25: …` —— **显示名与物理文件不同的那一类**，正是 `filename` 与 `file_uid` 必须分开的理由 |
+
+下一步（slice 3）：把 `tok->file` 的 28 处读者改为 `file_of(tok->file->uid)` 形态并删掉 `Token.file`
+（−4）+ 尾部打包（−2）→ 结构 62 → 56（约 −21 MB）；随后才是③（`Node.tok` → `Loc` + 在 `fold_ast`
+之后释放 token 池，−230 MB）。
+
+### R140 ②slice2 撤回 + 一个拦住设计错误的发现：`SrcFile::id` 不是文件的唯一键 —— ✅ 已查实并还原
+
+slice 2 本想把 `Loc` 变成自包含（用文件 **id** 而不是 `SrcFile *`，让 `Loc` 从 24 字节降到 20，
+并为后面去掉 `Token.file` 铺路）。**构建失败拦住了它**，查因后发现设计前提是错的：
+
+```c
+SrcFile *new_file(char *name, int file_no, char *contents) {
+    ...
+    file->id = intern(name, strlen(name));   // 显示名的 interned id，不是文件句柄
+```
+
+- `SrcFile::id` 是**文件名（显示名）的 interned id**，同名文件共享同一个值，**不能当唯一键**；
+- 而且 `#line` 会把显示名换成另一个（`tok->filename = display_name` 而 `tok->file = cur_file`），
+  二者本来就可以不同 —— 所以 `Loc` 里**两个字段都必要**（显示名给诊断打印，文件给内容/行表）。
+
+**已还原**：`Loc` 回到 slice 1 的形态（带 `SrcFile *file`，24 字节），`loc_of`/`emit_diag_loc` 回到
+`at.file`；构建通过，`make test` exit 0（conformance **325 / 0**、c2y 101 / 0），slice 1 的
+`Loc`/`loc_of`/`diag_loc` 仍在位。
+
+**修正后的 slice 2**：给 `SrcFile` 添一个**新的唯一 uid**（`new_file()` 里一个计数器，1 行）+
+按 uid 建表 + `Loc.file_uid`；然后逐个改掉 `tok->file` 的 28 处读者（preprocess 14、util 5、
+dumptok 5、lexer 2、dumpast 1、main 1），`filename` 保留给 `#line`；最后去掉 `Token.file`
+（−4）并把尾部 6 字节打包成 4（−2）—— 结构 62 → 56，**−8 字节 = 约 −21 MB**（token 阶段 137 MB）。
+之后才是③（`Node.tok` → `Loc`，`fold_ast` 之后释放 token 池，−230 MB）。
+
+### R139 ① `Token` 压缩：实测推翻我自己的估算 —— ✅ 已定量，需改配方
+
+§R138 把「压缩 `struct Token`」列为低风险第一步，估 −38 MB。**实测结果不同**：
+
+| | 值 |
+|---|---|
+| `sizeof(Token)` | **64 字节**（`_Alignof` = 8，不是 16） |
+| 布局 | `next` 8 + `origin` 8 + 值 union 16 + `file` 8 + `loc`/`len`/`filename`/`line_delta` 16 + 尾部 6 = 62 → **补齐到 64** |
+| 尾部小字段 | `{uint16_t lit_suffix \| uint8_t enc_prefix}` 2 + `kind` 1 + 3 个 `bool` 3 = **6 字节** |
+
+**结论：单靠位域打包是无效的。** 尾部 6 字节压到 4 只省 2，结构仍是 62→60，按 8 字节对齐
+**照样是 64** —— 要真正变小，必须一次减掉 ≥8 字节。可选的 8 字节只有三处：
+
+| 候选 | 省 | 改动面 | 风险 |
+|---|---|---|---|
+| `SrcFile *file` → 32 位 `file_no`（`lexer.c` 已有 `input_files[]` 表） | 4（+ 尾部打包 2 → 共 6 ✗ 不够，需再省 2） | `->file` 读取 28 处（preprocess 14、util 5、dumptok 5、lexer 2、dumpast 1、main 1） | 中：`new_file` 造的 scratch/内建文件**未必**进 `input_files[]`，需先核实 |
+| `origin` → `Loc` 链 | 8 | 与步骤②③同一批 | 中：宏展开诊断靠它 |
+| 值 union（16）移出为旁表 | 16 | 大 | 高 |
+
+也就是说：**①不是零风险的第一步，它要么与②③合并做，要么先做「`file`→`file_no` + 尾部打包」并核实 scratch 文件**。
+按实测，正确的顺序是**先②（`Loc`）再③（释放 token 池 + 顺手去掉 `origin` 与 `file` 指针）**——
+届时 `Token` 由 64 降到约 48（−25%，约 34 MB），且这 34 MB 是叠加在③的 −230 MB 之上的。
+
+**修订后的执行顺序**：②`Loc` 类型与转换点（纯重构，ASan + 全套闸门守住）→ ③`Node.tok`→`Loc`、
+`fold_ast` 之后释放 token 池、同时去掉 `Token.origin` 与 `Token.file` 指针（−230 MB − 34 MB）→
+④ `-g` 时再给 IR 加 `loc` 钩子。①降级为③的一部分。
+
+### R138 多池 + `Loc` 抽取方案评估 —— 📋 方向正确，但**改动面比设想集中**，建议分四级落地
+
+用户提议：把分配改成「永不释放池 + 类型池 + 预处理池 + token 池 + node 池」，按阶段批量释放；
+把诊断所需字段抽成 `Loc`（文件/行/偏移/长度），各阶段统一使用，`tok`→AST 只浅复制指针；
+宏展开时共享 `Loc` 因而 `origin` 可去；IR 阶段是否预留 `loc` 供 `-g`。
+
+**一、实测基础（§R137）**：sqlite3.c `-fsyntax-only` 峰值 356,600 KB，请求 345.3 MB ——
+tokens **230.3 MB（66.7%）**、parse/AST **114.9 MB（33.3%）**；按结构 `Node` 147.3 MB、
+`Token` 137.1 MB、Type 15.0、Sym 13.9、other 32.0。`-c`：+irgen 66.4 MB（16.1%）= 411.6 MB。
+
+**二、改动面（本轮实测，比预期小很多）**：
+
+| 项 | 数量 | 说明 |
+|---|---|---|
+| 读取 token 的站点（`->tok`/`.tok`） | **175** | parser.c 111、type.c 31、preprocess.c 13、dumpast.c 3 |
+| 诊断调用点 | **494** | parser.c 333、preprocess.c 66、type.c 23、lexer.c 22… |
+| **`parse()`/`fold_ast()` 之后仍需 token 的** | **约 35–40** | **type.c 的 31 处 + 少量 parser 尾部**；`irgen.c` 一处都不读 token（它的诊断全是 `fatal()`） |
+| `struct Token` | 约 50 字节 | 2,709,107 个 → 137.1 MB |
+
+也就是说：**parser 自己那 333 个诊断和 111 个 token 读取不需要改**（它们都在 token 池存活期间跑），
+真正要改成 `Loc` 的只是**跨过释放点的那三四十处**。这使方案从「大手术」变成「中等改动」。
+
+**三、逐项评估**：
+
+| 方案部件 | 收益 | 代价 | 风险 | 结论 |
+|---|---|---|---|---|
+| **按阶段释放 token 池**（释放点应定在 **`fold_ast` 之后**，不是 `parse` 之后——折叠期 type.c 仍在用 token 报诊断） | fso 峰值 **345 → 约 115 MB（−67%）**；`-c` **412 → 约 181 MB（−56%）** | 约 40 处改 Loc + 释放点接线 | 中等：悬垂指针类 bug，**必须配 ASan 构建**（valgrind 在本机跑不了 cxx，实测过） | **值得做，是最大的一笔** |
+| **`Loc` 抽取**（`{file_idx, loc, len}` 12–16 字节，按值传递） | 前提性工作；也是 `-g` 的必需品 | 新类型 + 约 40 处转换 | 低-中：诊断文本/宏展开提示必须逐字复现（conformance 的 `bad` 断言 + driver 的 `__LINE__`/`_Pragma` 用例守住） | **做，但只覆盖跨释放点的部分**；让 parser 继续用 `Token`，别全区铺开 |
+| **`origin` 去掉**（2,709,107 × 8 = **22 MB**） | 22 MB + 复制更简单 | Loc 里要带上展开链（每次宏调用一个，共享） | 中：`__LINE__`/`__FILE__` 与「in expansion of」都靠它 | **与 Loc 一起做**，不要单独动 |
+| **压缩 `struct Token`**（`origin` 8 + `filename` 4→16 位索引 + `line_delta` 4 + 3 个 bool→位域） | 约 50 → 36 字节 ⇒ **省约 38 MB** | 局部改动，不动生命周期 | **低** | **建议作为第一步**（不碰生命周期就能拿到 ~11% 峰值） |
+| **池子拆成 6 个** | 主要是「能否选择性释放」；碎片与对齐几乎为零（请求 345.3 MB vs 峰值 348 MB） | N 个分配器 + 每个分配点要指名池 | 低 | **只需 3 个**：永不释放（Sym/loc/type 的稳态部分）、token、node/type 阶段池。**「预处理池」是多余的** —— 预处理那 93 MB 全是 token 副本，本就在 token 池里 |
+| **IR 预留 `loc` 跟 `-g`** | 未来 `-g` 的 DWARF 需要 | —— | —— | **现在不设计**：`-g` 属功能开发，当前阶段是 debug；只要保持 `Loc` 与阶段无关，irgen 以后引用它即可 |
+
+**四、对原方案的改进点**：
+
+1. **释放点写成 `fold_ast` 之后**（原方案说 parse 之后；实测折叠期 type.c 仍以 token 报诊断）。
+2. **`Loc` 只覆盖跨释放点的路径**，不要全区替换 —— 333 个 parser 诊断留在 `Token` 上，
+   改动量因此从「数百处」降到「三四十处」。
+3. **3 个池而不是 6 个**；「预处理池」并入 token 池（实测那 93 MB 就是 token 副本）。
+4. **先做零风险的 Token 压缩**（−38 MB），再做生命周期改造（−230 MB）—— 两笔账分开量。
+5. **`Loc` 用值类型 + 文件索引**（12–16 字节），不要「指针 + 另一个 24 字节对象」；
+   宏展开链每次展开共享一个，正是 `origin` 的替代。
+6. **安全网必须是 ASan 构建的 cxx**（`-fsanitize=address`）跑全套 conformance + bootstrap +
+   tcctests + 三个交叉目标 —— 这一改动的失败模式正是 use-after-free，valgrind 在本机不可用（实测）。
+7. **别把它当性能优化**：前端已在 gcc 持平线（§R135），这一改动的目标是内存；速度只有
+   局部性带来的间接收益，量不出来也不该写进收益。
+
+**五、总体判断**：诊断对（token 阶段占 67%），`Loc` 是正确的抽象（也是 `-g` 的前置），
+但原方案的改动面被高估了 —— 真正的必改点只有约 40 处 + 一个释放点 + 新类型。
+建议分四级：① 压缩 `Token`（低风险，−38 MB）→ ② 引入 `Loc` 并只改跨释放点的诊断
+（纯重构，无内存变化，用 ASan + 全套闸门守住）→ ③ 把 `Node.tok` 换成 `Loc` 并**在 `fold_ast`
+之后释放 token 池**（−230 MB）→ ④ 需要 `-g` 时再给 IR 加 `loc` 钩子。
+
 ### R137 token / AST / IR 三阶段内存分布 —— ✅ 已实测（sqlite3.c）
 
 在唯一的分配 choke point（`util.c` 的 `emalloc`，bump pool）按阶段与结构打点，`-O2`：

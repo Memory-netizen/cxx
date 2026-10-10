@@ -702,3 +702,46 @@ tccgen.c 同形但更小：7,552 个 `Sym`= 1.6 MB，可省 0.3 MB。
 
 本轮的量测脚本已还原，`src/` 无残留。
 
+### 8n. 内存池 + `Loc` 方案评估的结论（细节见计划 §R138）
+
+改动面实测比设想集中：读取 token 的站点 175 处（parser 111、type.c 31、preprocess 13、dumpast 3），
+诊断调用 494 处，但**跨过「释放 token 池」这一点之后仍需 token 的只有约 35–40 处**
+（type.c 的 31 处加 parser 尾部；`irgen.c` 一处都不读 token，它的诊断全是 `fatal()`）。
+因此：**释放点定在 `fold_ast` 之后**（不是 `parse` 之后）、**`Loc` 只覆盖跨释放点的路径**、
+**池子只要 3 个**（永不释放 / token / node+type；「预处理池」多余，那 93 MB 就是 token 副本）。
+先做零风险的 `Token` 压缩（约 50 → 36 字节，−38 MB），再做生命周期改造
+（fso 峰值 345 → 约 115 MB，`-c` 412 → 约 181 MB）；安全网是 **ASan 构建的 cxx** 跑全套闸门 ——
+这一改动的失败模式正是 use-after-free，而 valgrind 在本机跑不了 cxx（实测）。
+
+### 8o. `sizeof(Token)` 实测 64 字节：位域打包是无效的（修正 §8n 的第一步估算）
+
+| | 值 |
+|---|---|
+| `sizeof(Token)` / `_Alignof` | **64 / 8** |
+| 布局 | `next` 8、`origin` 8、值 union 16、`file` 8、`loc`/`len`/`filename`/`line_delta` 16、尾部小字段 6 → 62 → 补齐 64 |
+| 尾部 | `{uint16_t lit_suffix \| uint8_t enc_prefix}` 2 + `kind` 1 + 3 `bool` 3 = 6 |
+
+尾部从 6 压到 4 只省 2 字节，62→60 按 8 字节对齐**仍是 64** —— 所以要变小必须一次减 ≥8：
+候选是 `file` 指针→`file_no`（4，另需尾部打包凑 6 ✗ 还差 2）、`origin`→`Loc` 链（8）、
+值 union 移出（16）。因此**把①并入③**：先用 `Loc` 换掉 `origin`、把 `file` 换成 `file_no`，
+`Token` 由 64 降到约 48（−25%，约 34 MB），叠加在「`fold_ast` 之后释放 token 池」
+（fso 345→约 115 MB）之上。②（`Loc` 类型与转换点）成为第一个真正的动作。
+
+### 8p. `SrcFile::id` 是显示名的 id，不是文件唯一键（slice 2 撤回）
+
+`new_file()` 里 `file->id = intern(name, strlen(name))` —— 那是**显示名**的 interned id：
+同名文件共享同一个值，而 `#line` 还会把显示名与真实文件分开（`tok->filename = display_name`、
+`tok->file = cur_file`）。所以 `Loc` 不能拿它当文件键，两个字段（显示名 / 文件）都必须留。
+slice 2 的自包含 `Loc`（20 字节、按 id 查表）已**还原**，tree 回到 slice 1 + 合并 clang 的状态，
+`make test` 325 / 0。修正方案：给 `SrcFile` 加一个新的唯一 uid + 按 uid 建表，
+再逐处改掉 `tok->file` 的 28 个读者，最后去掉 `Token.file` 并把尾部打包 —— 64 → 56 字节，约 −21 MB。
+
+### 8q. 诊断已经全部走 `Loc` 路径（slice 2 完成）
+
+`SrcFile` 得到唯一 `uid`（与显示名 id 分开，因为 `#line` 会把两者拉开），`Loc` 变成 20 字节的自包含值
+（`sizeof(Loc) == 20`，实测），`diag()`/`diag_exit()` 的本体改为 `loc_of()` + `emit_diag_loc()` ——
+于是**每一条诊断**都在跑新路径。验收：`make test` 325 / 0、bootstrap **逐字节相同 + 21/21 对象**、
+tcctests 106 / 0；三类消息逐字不变，其中 `#line 100 "other.c"` 报 `other.c:100:25` 正是
+「显示名 ≠ 物理文件」的那一类。剩下的是 slice 3：改掉 `tok->file` 的 28 处读者并删掉该字段
+（−6 字节/记号 ≈ −21 MB），再进入③（释放 token 池，−230 MB）。
+
