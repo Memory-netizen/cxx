@@ -819,6 +819,14 @@ static Sym *new_gvar(uint32_t id, Type *ty) {
 // before main, so it keeps alive exactly what the object itself keeps alive.
 static Sym *cur_init;
 
+// The function whose body is being parsed, for the name __func__ names, and
+// the string literal built for it the first time one of the three spellings
+// is used. See the definition of __func__ in function_definition: the
+// declaration is written as if it were there, but the object is made on
+// demand.
+static uint32_t cur_func_name_id;
+static Sym *cur_func_strlit;
+
 // True while the initializer being parsed belongs to an object that reaches
 // the output whatever the reference graph says: a block-scope static, or a
 // compound literal with static storage duration. Those initializers run at
@@ -4211,6 +4219,16 @@ static Node *primary(Token **rest, Token *tok) {
                     node->ty = et->is_unsigned ? T.ty_ullong : T.ty_llong;
             }
         } else {
+            // The one name whose object is built at the use: __func__ and its
+            // two GNU spellings, which the name space entry marks by having
+            // no variable yet. The type is the one the entry was pushed with,
+            // so building it here makes the same object as before, only later
+            // -- and all three spellings share it, as they do when a
+            // definition builds it up front.
+            if (!sc->var && (sc->id == id_func || sc->id == id_function || sc->id == id_pretty)) {
+                if (!cur_func_strlit) cur_func_strlit = new_string_literal(cur_func_name_id, sc->ty);
+                sc->var = cur_func_strlit;
+            }
             // A builtin the compiler defines has no address to take: the name
             // is only usable where it is called, and a module that referred to
             // the symbol itself would name something that does not exist. gcc
@@ -9344,16 +9362,30 @@ static Token *external_declaration(Token *tok) {
             // follows gcc here.
             Type *fn_name = array_of(T.ty_char, str_len(var->id) + 1);
 
-            NameSpace *tmp = push_namespace(scope, id_func, SYM_VAR, fn_name, var_name);
-            NameSpace *tmp2 = push_namespace(scope, id_function, SYM_VAR, fn_name, var_name);
-            NameSpace *tmp3 = push_namespace(scope, id_pretty, SYM_VAR, fn_name, var_name);
+            // The three names are declared, but what they name is built when
+            // one of them is used: a definition that never mentions __func__
+            // would otherwise intern and keep a string for the whole file.
+            // Measured on sqlite3.c, 2,610 of 5,113 string literals were
+            // these, and the ones the program actually asked for paid for the
+            // table they grew.
+            push_namespace(scope, id_func, SYM_VAR, fn_name, var_name);
+            push_namespace(scope, id_function, SYM_VAR, fn_name, var_name);
+            push_namespace(scope, id_pretty, SYM_VAR, fn_name, var_name);
 
-            tmp3->var = tmp2->var = tmp->var = new_string_literal(var->id, fn_name);
+            // A nested function has its own name, and the three spellings
+            // still name one object: the slot is saved for the body and the
+            // string is shared by the ones that ask for it.
+            uint32_t saved_name_id = cur_func_name_id;
+            Sym *saved_strlit = cur_func_strlit;
+            cur_func_name_id = var->id;
+            cur_func_strlit = NULL;
 
             fn_prologue_first = fn_prologue_last = NULL;
             fn_vla_guard_num = 0;
             fn_vla_decls = 0;
             var->body = compound_stmt2(&tok, tok, true);
+            cur_func_name_id = saved_name_id;
+            cur_func_strlit = saved_strlit;
             // More than one variable length array in the function: the reuse
             // guard of each would free the objects of the others, which are
             // still alive. Only a lone one keeps its guard.

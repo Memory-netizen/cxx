@@ -1,0 +1,31 @@
+cxx: /home/memory/cxx/cxx
+gcc (Ubuntu 16-20260315-1ubuntu1~24~ppa1) 16.0.1 20260315 (experimental) [trunk r16-8100-gaca3bae8ee]
+Ubuntu clang version 23.1.2 (++20260919103626+4b1925210476-1~exp1~20260919223755.77)
+runs per measurement: 3, modes: fso full, load: 1.27 0.99 0.62
+
+workload           mode        gcc    clang      cxx cxx/gcc |     gcc   clang     cxx
+                              secs     secs     secs         |      MB      MB      MB
+sqlite3            fso        0.51     0.86     4.58    8.98 |      84     125     349
+sqlite3            full       7.52     2.84     9.84    1.30 |     292     183     417
+cpython-parser     cxx does not know: -fno-strict-overflow -fvisibility=hidden 
+cpython-parser     fso        0.19     0.43     2.06   10.84 |      52     106     151
+cpython-parser     full       1.36     0.68     3.11    2.28 |     123     131     172
+cpython-ceval      cxx does not know: -fno-strict-overflow -fvisibility=hidden 
+cpython-ceval      fso        0.23     0.41     2.97   12.91 |      57     109     146
+cpython-ceval      full       1.58     0.65     4.08    2.58 |     131     137     159
+cpython-compile    cxx does not know: -fno-strict-overflow -fvisibility=hidden 
+cpython-compile     fso        0.13     0.24     1.94   14.92 |      40     101      91
+cpython-compile    full       0.24     0.27     2.48   10.33 |      57     115      92
+cpython-pickle     cxx does not know: -fno-strict-overflow -fvisibility=hidden 
+cpython-pickle     fso        0.18     0.31     2.68   14.88 |      48     104     115
+cpython-pickle     full       0.63     0.44     3.28    5.20 |      84     122     120
+ffmpeg-h264slice   fso          -!       -!       -!       * |       0       0       0
+ffmpeg-h264slice   full         -!       -!       -!       * |       0       0       0
+ffmpeg-h264dec     fso          -!       -!       -!       * |       0       0       0
+ffmpeg-h264dec     full         -!       -!       -!       * |       0       0       0
+tinycc-tccgen      fso        0.07     0.12     0.42    6.00 |      29      95      72
+tinycc-tccgen      full       0.36     0.19     0.68    1.88 |      63     110      96
+zlib-deflate       fso        0.01     0.03     0.05    5.00 |      17      88      72
+zlib-deflate       full       0.09     0.05     0.13    1.44 |      34     100      89
+lua-lparser        fso        0.02     0.04     0.06    3.00 |      17      88      72
+lua-lparser        full       0.12     0.07     0.14    1.16 |      36     100      88
