@@ -8802,28 +8802,56 @@ loop_end:
 // scope is gone by the time the definition is parsed, so the definition path
 // finds it here and adopts it -- which is what keeps a bound expression that
 // named an earlier parameter pointing at the parameter the body sees.
-typedef struct ParamSym ParamSym;
-struct ParamSym {
-    Type *ty;
+// Keyed by the type pointer, in an open-addressed table. The list this replaces
+// is appended to for every parameter of every function in the translation unit
+// and never reset, so walking it is quadratic in the file -- 4.25% of the front
+// end on tccgen, and the third lookup of this shape (find_ident, already_emitted).
+// A pointer is 8-aligned, so its address shifted down indexes the table; `used` is
+// not a zero test, because a shifted key of zero is a real key.
+typedef struct {
+    uintptr_t key;
     Sym *var;
-};
-static ParamSym *param_syms;
-static uint32_t num_param_syms;
+    bool used;
+} ParamSlot;
+
+static ParamSlot *param_map;
+static size_t param_map_cap, param_map_len;
+
+static void param_map_add(uintptr_t key, Sym *var) {
+    if (!param_map) {
+        param_map_cap = 256;
+        param_map = vnew(param_map_cap, sizeof(ParamSlot));  // vnew zeroes
+    } else if (param_map_len * 2 >= param_map_cap) {
+        ParamSlot *old = param_map;
+        size_t old_cap = param_map_cap;
+        param_map_cap *= 2;
+        param_map = vnew(param_map_cap, sizeof(ParamSlot));
+        param_map_len = 0;
+        for (size_t i = 0; i < old_cap; i++)
+            if (old[i].used) param_map_add(old[i].key, old[i].var);
+    }
+    size_t h = key & (param_map_cap - 1);
+    while (param_map[h].used && param_map[h].key != key) h = (h + 1) & (param_map_cap - 1);
+    param_map[h].key = key;
+    param_map[h].var = var;
+    param_map[h].used = true;
+    param_map_len++;
+}
+
+static Sym *param_map_get(uintptr_t key) {
+    if (!param_map_cap) return NULL;
+    for (size_t h = key & (param_map_cap - 1); param_map[h].used; h = (h + 1) & (param_map_cap - 1))
+        if (param_map[h].key == key) return param_map[h].var;
+    return NULL;
+}
 
 static void note_param_sym(Type *ty, Sym *var) {
-    if (!param_syms)
-        param_syms = vnew(8, sizeof(ParamSym));
-    else
-        param_syms = vgrow(param_syms, num_param_syms + 8);
-    param_syms[num_param_syms].ty = ty;
-    param_syms[num_param_syms].var = var;
-    num_param_syms++;
+    param_map_add((uintptr_t)ty >> 3, var);
+    param_map_add((uintptr_t)ty >> 3, var);
 }
 
 static Sym *param_sym_of(Type *ty) {
-    for (uint32_t i = 0; i < num_param_syms; i++)
-        if (param_syms[i].ty == ty) return param_syms[i].var;
-    return NULL;
+    return param_map_get((uintptr_t)ty >> 3);
 }
 
 // The prototype scope the last function declarator opened, or NULL. A
