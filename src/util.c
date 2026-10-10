@@ -1,8 +1,12 @@
 #include "cxx.h"
 
-#define POOL_SIZE (128 * 1024 * 1024)  // 128MB
+// Chunks are handed out on demand rather than one 128 MB pool being calloc'd
+// up front: the tail of a big pool is memory that cannot be used for
+// anything else, and virtual size that a leak or a stray write can hide in.
 #define BIG_THRESHOLD (128 * 1024)     // 128KB
 #define ALIGNMENT _Alignof(max_align_t)
+#define POOL_CHUNK_MIN (64 * 1024)
+#define POOL_CHUNK_MAX (8 * 1024 * 1024)
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
 #define COLOR_RESET "\033[0m"
@@ -205,12 +209,17 @@ void error_at(SrcFile *file, uint32_t loc, const char *msg, ...) {
     exit(1);
 }
 
+
 static char *pool;
 static size_t free_len;
+static size_t next_chunk = POOL_CHUNK_MIN;  // grows, so a small compile stays small
 
+// One function, not an inline: measured, inlining this into its sixty call sites
+// was 0.9% slower -- the body is the cost, not the call.
 void *emalloc(size_t n) {
     if (n == 0) return NULL;
     n = ALIGN_UP(n, ALIGNMENT);
+
     if (n >= BIG_THRESHOLD) {
         void *p = calloc(1, n);
         if (!p) fatal("emalloc, out of memory");
@@ -218,10 +227,16 @@ void *emalloc(size_t n) {
     }
 
     if (free_len < n) {
-        void *new_pool = calloc(1, POOL_SIZE);
-        if (!new_pool) fatal("emalloc, out of memory");
-        pool = new_pool;
-        free_len = POOL_SIZE;
+        // Chunks on demand rather than one 128 MB pool: the tail of a big pool is
+        // memory that can serve nothing else, and virtual space a stray write can
+        // hide in. Doubling keeps the number of calls down for a large job.
+        size_t chunk = next_chunk;
+        while (chunk < n) chunk *= 2;
+        if (next_chunk < POOL_CHUNK_MAX) next_chunk *= 2;
+        char *p = calloc(1, chunk);
+        if (!p) fatal("emalloc, out of memory");
+        pool = p;
+        free_len = chunk;
     }
 
     void *p = pool;

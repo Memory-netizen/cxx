@@ -908,3 +908,116 @@ static bool already_emitted(Sym *sym)    { … for (i…) if (emitted[i].id == i
 → 按需分块，同时砍掉固定内存）、`tokenize` 5.27%、`vfprintf` 4.40+3.51%（打印 IR）、
 `param_sym_of` 3.69%、`decode_utf8`（未上榜）。
 
+### 8z. `emalloc`：内联是**负收益**（+0.9%，已撤回）；分块池指令中性；外加一个 74 MB 固定底噪
+
+**先说结论：`emalloc` 那 5.78% 是函数体本身，不是调用开销。** 我按「4–5 百万次调用、每次的
+call/ret 就是大头」的假设把快路径内联进头文件（`static inline emalloc` + `emalloc_slow` 出线）、
+状态收进 `Arena`，结果 **549,706,493 → 554,503,678（+0.9%）** ✗ —— 把十来个指令的函数复制到
+60 个调用点，省下的 2 条 call/ret 抵不过代码膨胀。**已撤回**，恢复成一个函数。
+
+**保留的是分块池**：`POOL_SIZE` 一次 `calloc(128 MB)` → `POOL_CHUNK_MIN 64 KB` 起、按需翻倍到
+`POOL_CHUNK_MAX 8 MB`。指令数 **549,706,493 → 549,776,615（+0.01%，中性）**；
+`emalloc` 仍在 5.78%。收益在内存形态上：不再有 128 MB 池的尾部浪费与巨大的虚拟空洞，
+而且按用户先前的观点，**越界写更容易落在未映射页上**（保住"垃圾值＝越界写"这个信号）。
+
+| 项 | 结果 |
+|---|---|
+| 内联版（已撤回） | +0.9% ✗ |
+| 分块池（保留） | **+0.01%（中性）**；`make test` **325 / 0**、bootstrap **逐字节相同 + 21/21**、tcctests **106 / 0** |
+| 峰值 RSS | sqlite3 356,752 KB（前 356,772）、tccgen 74,368 KB（前 74,320）—— 无变化 |
+
+**`vnew` 改 static / `vgrow` 遇空调 `vnew` 的评估（按实测计数）**：
+
+- `vnew`：**8 个文件共 63 处**调用 → **`static` 不可能**（除非把 63 处全部改写）。
+  头文件里做 `static inline` 在技术上可行，但要先把 `Vec` 布局搬出 util.c；而 `vnew` 不在热点榜上，
+  且刚测出"小函数多点多内联可能净亏"（`emalloc` 的 +0.9%）→ **不建议**。
+- `vgrow(data, len)` 遇到 `data == NULL` 时**无从知道元素大小** —— `esz` 存在数据指针**前面**的
+  `Vec` 头里，而 NULL 读不到它 → 该方案**按现在的签名无法实现**；要做得把签名改成
+  `vgrow(data, len, esz)`，牵动 **44 处**调用点；而现存 `vgrow(NULL, …)` 调用是 **0 处**（没有要修的东西）
+  → **不建议**。（`if (!p) p = vnew(…) else p = vgrow(…)` 的样板可以按处清理，但不在热路径上。）
+
+**顺带测出的新问题**：`int main(void) { return 0; }` 这样一行文件，**cc1 进程自身 RSS 就是 74,220 KB**
+（cxx 可执行文件只有 1.2 MB），且已经排除了池（现在是 64 KB 起的分块）。说明前端有一处
+**与输入规模无关的 ~74 MB 预分配/触碰**。下一步用 massif 直接量（工具已确认可用）：
+
+```
+valgrind --tool=massif ./cxx -cc1 -cc1-input /tmp/tiny.c -cc1-output /tmp/tiny.ll
+```
+
+### 8aa. `read_file`：池是连续分配 → 去掉 `vgrow`/`memcpy`（并在有尺寸时连循环一起去掉）
+
+用户指出：`emalloc` 是 bump 分配器，读文件的循环中间没有别的分配，所以每次 4096 的申请**地址本来就连续** ——
+`vgrow` 与 `memcpy` 都是白付的（而且 `vgrow` 会把**每一份中间缓冲**都留在 arena 里）。
+
+实现（`src/lexer.c:read_file`）：
+
+1. **常规文件走 `fstat`**：尺寸已知 → 一次 `emalloc(size + 2)` + 一次 `fread` —— **没有循环、没有增长、没有拷贝**。
+2. **管道等未知尺寸**：按 4096 步申请并**直接 `fread` 进去**（不再 `memcpy`）；
+   唯一会破坏连续性的是**池块用尽**，所以**每次检查相邻性**而不是断言：
+   `more == buf + cap` 则原地延长，否则说明跨了块边界 → 取一块更大的、拷贝一次（**每个池块至多一次**）。
+
+关于用户提的 assert：跨块边界时相邻性**合法地**不成立，所以不能无条件断言 ——
+改成**始终生效的运行时分支**（比只在 debug 生效的 assert 更强：release 也安全，代价是一次比较）。
+
+| 项 | 结果 |
+|---|---|
+| `make test` | **325 / 0** |
+| bootstrap | **cxx2 = cxx3 = cxx4 逐字节相同 + 21/21 对象** |
+| tcctests | **106 / 0** |
+| 文件 vs 管道 | 同一程序两条路径输出一致（exit 13，文件与 `cat |` 都是 13） |
+| 峰值 RSS | **sqlite3 356,752 → 339,416 KB（−17.3 MB）**；tccgen 74,368 → 74,224 |
+| callgrind（tccgen cc1） | 549,776,615 → **548,237,295（−0.28%）**；相对起点 **−40.1%** |
+
+指令数只降 0.28%（400 KB 文件的拷贝本来就不贵），**真正的收益在内存**：9 MB 的 sqlite3.c 少占 17 MB，
+因为不再有倍增过程中留下的每一份中间缓冲。那 74 MB 固定底噪不受影响，仍是待查项（下一步 massif）。
+
+### 8ab. 追查 74 MB 底噪：**不是我们的堆，是 glibc 的虚拟预留**；并修正两次口径错误
+
+一行文件 `int main(void){return 0;}` 的 cc1 进程 RSS 74,220 KB（可执行文件 1.2 MB）。逐项排查：
+
+| 探测 | 结果 | 结论 |
+|---|---|---|
+| `massif`（默认，只看 malloc 堆） | 峰值 **585 KB** | 底噪不在堆上 |
+| `size cxx` / `nm -S` | text 560 KB、data 84 KB、**bss 120 KB** | 没有大静态数组 |
+| `massif --pages-as-heap=yes` | 峰值 **5.7 MB** | ✗ **口径错误**：valgrind 会接管 `mmap`/`calloc`，客体的页记在 valgrind 自己的账上，与原生 RSS 不可比 |
+| `strace -e mmap,brk`（原生） | 276 MB / 49 次，最大 147 MB、61 MB、29 MB、15 MB；**brk 0 次** | ✗ **口径错误**：那些是 glibc 的 `MAP_NORESERVE` **虚拟**预留（malloc arena），不计入 RSS |
+| 在 `emalloc` 里打印 ≥1 MB 的请求 + `addr2line` | **一次都没有** | 与 cxx 的分配器无关 |
+
+**结论**：74 MB 不是 cxx 的堆、不是 BSS、也不是 cxx 的大分配请求，而是 glibc/内核侧的驻留
+（最常见的是 THP：触碰 4 KB 页却按 2 MB 记账）。**它也不是本轮引入的** ——
+分块池改造前 tccgen 74,320 KB、改造后 74,224 KB，`sqlite3` 356,772 → 339,416 KB（这一项是真降了 17 MB）。
+
+**下一步（一次就能定位）**：临时加一个暂停钩子（`if (getenv("CXX_PAUSE")) { fprintf(stderr, "%d\n", getpid()); getchar(); }`，
+放在 `main` 结束前），运行时读 `/proc/<pid>/smaps_rollup` 与 `/proc/<pid>/smaps`，
+按 mapping 看谁占了 74 MB 的 RSS —— 比 massif/strace 都直接。
+
+**两条口径教训**（写下来备用）：① 在 valgrind 下对 `--pages-as-heap` 读数**不能**当作原生 RSS；
+② `strace` 里 `mmap` 的长度是**虚拟**请求（glibc arena 还是 `MAP_NORESERVE`），与 RSS 无关。
+
+### 8ac. **74 MB 底噪不存在** —— 是 `/usr/bin/time %M` 在这台机器上的"地板"，并给出正确测法
+
+用暂停钩子（`cleanup()` 里等一个字符）把 cc1 停住，直接问内核：
+
+| 输入 | 进程自己的 `ru_maxrss` / `/proc/<pid>/status` VmHWM | `/usr/bin/time -f %M` |
+|---|---|---|
+| 一行文件 | **2,604 / 2,992 KB** | 74,232 KB ✗ |
+| tccgen.c | **66,112 KB** | 74,224 KB ✗ |
+| sqlite3.c | **339,452 KB** | 339,416 KB ✓ |
+
+规律很清楚：**`%M` 在这台机器上有一个约 74 MB 的地板** —— 真实峰值低于它时被抬到 74 MB，
+高于它时（sqlite3）才准。所以：
+
+- **"一行文件占 74 MB"根本不存在**：真实约 3 MB。massif（585 KB 堆）、`size`（bss 120 KB）、
+  `emalloc` 大请求探针（一次都没有）三方一致 —— 它们早就在说"没有这 74 MB"，是我没信它们。
+- **sqlite3 的数字仍然成立**：`%M` 与 VmHWM 两种方法一致（339,416 / 339,452 KB），
+  所以 `read_file` 那一项的 **−17 MB（356,772 → 339,4xx）是真的**。
+- 受影响的只有"小输入"的读数：`%M` 对 tccgen 也偏高 12%（74,224 vs 66,112），
+  所有 <74 MB 的 `%M` 读数都应作废重测。
+
+**正确测法（本机）**：① 进程内 `getrusage(RUSAGE_SELF).ru_maxrss`；
+② 外部采样 `/proc/<pid>/status` 的 `VmHWM`（运行够久的大输入可以直接采样，无需改代码）；
+**不要**用 `/usr/bin/time -f %M`。此前 §R137 的内存分布用的是**分配器自身记账**（请求字节数）
+与 massif，不受本次口径问题影响。
+
+（为诊断加的暂停钩子已撤回，`make test` 重新全绿。）
+

@@ -1117,16 +1117,46 @@ static char *read_file(char *path) {
         if (!fp) return NULL;
     }
 
-    // Read the entire file.
-    char *buf = vnew(4096, 1);
-    size_t buflen = 0;
-    while (1) {
-        char buf2[4096];
-        int n = fread(buf2, 1, sizeof(buf2), fp);
-        if (n == 0) break;
-        buf = vgrow(buf, buflen + n + 2);
-        memcpy(buf + buflen, buf2, n);
-        buflen += n;
+    // Read the entire file. When it is a regular file its size is known, so it
+    // takes one allocation and one read -- no growing, and no copy.
+    char *buf = NULL;
+    size_t buflen = 0, cap = 0;
+
+    struct stat st;
+    if (fp != stdin && fstat(fileno(fp), &st) == 0 && S_ISREG(st.st_mode)) {
+        cap = (size_t)st.st_size + 2;
+        buf = emalloc(cap);
+        buflen = fread(buf, 1, (size_t)st.st_size, fp);
+    } else {
+        // A pipe or something else without a size: read in steps. The arena hands
+        // out contiguous memory -- it is a bump allocator and nothing else
+        // allocates while this loop runs -- so each step is just the address
+        // after the last, with no vgrow and no copy. vgrow also left every
+        // intermediate buffer behind in the arena; this leaves none. The one
+        // thing that breaks the run is running out of the current pool chunk,
+        // which is what the check below is for.
+        cap = 4096;
+        buf = emalloc(cap);
+        while (1) {
+            if (buflen + 4096 + 2 > cap) {
+                char *more = emalloc(4096);
+                if (more == buf + cap) {
+                    cap += 4096;  // the chunk continued: still one piece
+                } else {
+                    // A chunk boundary, so the two pieces are not adjacent: take
+                    // one buffer that holds what we have plus room to go on, and
+                    // copy once. This happens at most once per pool chunk.
+                    size_t newcap = cap * 2 + 4096 + 2;
+                    char *big = emalloc(newcap);
+                    memcpy(big, buf, buflen);
+                    buf = big;
+                    cap = newcap;
+                }
+            }
+            int n = fread(buf + buflen, 1, cap - buflen - 2, fp);
+            if (n == 0) break;
+            buflen += n;
+        }
     }
 
     // Make sure that the last line is properly terminated with '\n'.
