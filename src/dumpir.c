@@ -302,7 +302,7 @@ static void print_ident(uint32_t id) {
         return;
     }
 
-    fprintf(out_file, "\"");
+    oput("\"", sizeof("\"") - 1);
     for (int i = 0; i < len; i++) {
         unsigned char c = ident[i];
         if (c <= 0x7F) {
@@ -310,7 +310,7 @@ static void print_ident(uint32_t id) {
         } else
             fprintf(out_file, "\\%02X", c);
     }
-    fprintf(out_file, "\"");
+    oput("\"", sizeof("\"") - 1);
 }
 
 // GNU asm labels (`int f(void) __asm__("real");`) rename a symbol in the
@@ -386,9 +386,9 @@ static void dump_init_array(const char *name, bool ctors) {
         fprintf(out_file, "%s{ i32, ptr, ptr } { i32 %d, ptr @", i ? ", " : "",
                 ctors ? sorted[i]->ctor_prio : sorted[i]->dtor_prio);
         print_sym_name(sorted[i]->id);
-        fprintf(out_file, ", ptr null }");
+        oput(", ptr null }", sizeof(", ptr null }") - 1);
     }
-    fprintf(out_file, "]\n");
+    oput("]\n", sizeof("]\n") - 1);
 }
 
 static void print_sym_name(uint32_t id) {
@@ -409,7 +409,7 @@ static void print_param_type(Type *ty, int i, bool bare);
 
 static void print_type(Type *ty) {
     if (!ty) {
-        fprintf(out_file, "void");
+        oput("void", sizeof("void") - 1);
         return;
     }
     if (ty->kind == TY_ARRAY) {
@@ -418,7 +418,7 @@ static void print_type(Type *ty) {
         // the one length LLVM accepts for a global that is never allocated.
         fprintf(out_file, "[%d x ", ty->len < 0 ? 0 : ty->len);
         print_type(ty->base);
-        fprintf(out_file, "]");
+        oput("]", sizeof("]") - 1);
         return;
     }
     if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
@@ -426,12 +426,12 @@ static void print_type(Type *ty) {
             // An unnamed aggregate is an internal one -- the { iN, i1 } an
             // overflow builtin returns. LLVM spells those inline, and
             // "%0" would not even name a type.
-            fprintf(out_file, "{ ");
+            oput("{ ", sizeof("{ ") - 1);
             for (Member *m = ty->members; m; m = m->next) {
                 print_type(m->ty);
-                if (m->next) fprintf(out_file, ", ");
+                if (m->next) oput(", ", sizeof(", ") - 1);
             }
-            fprintf(out_file, " }");
+            oput(" }", sizeof(" }") - 1);
             return;
         }
         fprintf(out_file, "%%");
@@ -443,7 +443,7 @@ static void print_type(Type *ty) {
         return;
     }
     if (ty->kind == TY_LDOUBLE && T.ldouble_is_fp80) {
-        fprintf(out_file, "x86_fp80");
+        oput("x86_fp80", sizeof("x86_fp80") - 1);
         return;
     }
     if (ty->kind == TY_ENUM) {
@@ -478,8 +478,8 @@ static void print_label(Con *c, char *sym, char *dot) {
     uint32_t fn_id = intern(sym, strlen(sym));
     uint32_t lbl_id = intern(dot + 2, strlen(dot + 2));
 
-    if (c->bits.i) fprintf(out_file, "getelementptr (i8, ptr ");
-    fprintf(out_file, "blockaddress(@");
+    if (c->bits.i) oput("getelementptr (i8, ptr ", sizeof("getelementptr (i8, ptr ") - 1);
+    oput("blockaddress(@", sizeof("blockaddress(@") - 1);
     print_ident(fn_id);
     fprintf(out_file, ", %%blk%d)", get_blkid(fn_id, lbl_id));
     if (c->bits.i) fprintf(out_file, ", i64 %" PRIi64 ")", c->bits.i);
@@ -570,14 +570,14 @@ static void printcon(Con *c, Type *ty) {
             }
         }
         if (c->bits.i) {
-            fprintf(out_file, "getelementptr (i8, ptr @");
+            oput("getelementptr (i8, ptr @", sizeof("getelementptr (i8, ptr @") - 1);
             print_ident(c->sym);
             fprintf(out_file, ", i64 %" PRIi64 ")", c->bits.i);
         } else if (c->sym) {
-            fprintf(out_file, "@");
+            oput("@", sizeof("@") - 1);
             print_ident(c->sym);
         } else {
-            fprintf(out_file, "null");
+            oput("null", sizeof("null") - 1);
         }
     }
 }
@@ -616,7 +616,7 @@ static void print_operand(Ref r) {
             // same as (void *)0. LLVM wants the literal null for a pointer
             // operand, not the integer 0.
             if (r.val != 0) fatal("non-zero integer immediate with pointer type");
-            fprintf(out_file, "null");
+            oput("null", sizeof("null") - 1);
         } else if ((r.ty->kind & TY_BITINT) == (TY_BITINT | 1) && (r.val == 0 || r.val == 1)) {
             // A 1-bit value: LLVM writes these true/false, which is also
             // how clang spells the is_zero_undef immarg.
@@ -625,10 +625,10 @@ static void print_operand(Ref r) {
             fprintf(out_file, "%d", r.val);
         }
     } else if (r.type == RGlb) {
-        fprintf(out_file, "@");
+        oput("@", sizeof("@") - 1);
         print_sym_name((uint32_t)r.val);
     } else if (r.type == RLabel) {
-        fprintf(out_file, "blockaddress(@");
+        oput("blockaddress(@", sizeof("blockaddress(@") - 1);
         print_sym_name(dump_curf->id);
         fprintf(out_file, ", %%blk%d)", dump_curf->blks[r.val].blk_id);
     } else {
@@ -654,94 +654,94 @@ void dump_blk(Blk *b) {
         fprintf(out_file, "%*.s; preds = ", 48 - indent, "");
         for (uint32_t i = 0; i < b->num_pred; i++) {
             fprintf(out_file, "%%blk%d", b->pred[i]->blk_id);
-            if (i < b->num_pred - 1) fprintf(out_file, ", ");
+            if (i < b->num_pred - 1) oput(", ", sizeof(", ") - 1);
         }
     }
-    fprintf(out_file, "\n");
+    oput("\n", sizeof("\n") - 1);
     Phi *p = b->phi;
     while (p) {
         fprintf(out_file, "  %%tmp%d = phi ", p->result.val);
         print_type(p->result.ty);
         for (int i = p->num_arg - 1; i >= 0; i--) {
-            fprintf(out_file, " [ ");
+            oput(" [ ", sizeof(" [ ") - 1);
             print_operand(p->arg[i]);
             fprintf(out_file, ", %%blk%d ]", p->blk[i]->blk_id);
-            if (i) fprintf(out_file, ", ");
+            if (i) oput(", ", sizeof(", ") - 1);
         }
-        fprintf(out_file, "\n");
+        oput("\n", sizeof("\n") - 1);
         p = p->next;
     }
 
     Ir *ir = b->head;
     while (ir) {
-        fprintf(out_file, "  ");
+        oput("  ", sizeof("  ") - 1);
         if (!refeq(ir->dst, R)) fprintf(out_file, "%%tmp%d = ", ir->dst.val);
 
         switch (ir->op) {
             // memmory
             case IR_ALLOCA:
-                fprintf(out_file, "alloca ");
+                oput("alloca ", sizeof("alloca ") - 1);
                 print_type(ir->dst.ty->base);
                 if (ir->narg == 2) {
-                    fprintf(out_file, ", ");
+                    oput(", ", sizeof(", ") - 1);
                     print_type(ir->args[0].ty);
-                    fprintf(out_file, " ");
+                    oput(" ", sizeof(" ") - 1);
                     print_operand(ir->args[0]);
                 }
-                fprintf(out_file, ", align ");
+                oput(", align ", sizeof(", align ") - 1);
                 print_operand(ir->args[ir->narg - 1]);
-                fprintf(out_file, "\n");
+                oput("\n", sizeof("\n") - 1);
                 break;
             case IR_LORD: {
                 // The address operand is not always a pointer: a record
                 // value is a first-class IR value here, so loading one has a
                 // record type and no base to inspect.
                 Type *at = ir->args[0].ty->kind == TY_PTR ? ir->args[0].ty : NULL;
-                fprintf(out_file, "load ");
-                if (at && (at->base->qual & Q_ATOMIC)) fprintf(out_file, "atomic ");
-                if (at && (at->base->qual & Q_VOLATILE)) fprintf(out_file, "volatile ");
+                oput("load ", sizeof("load ") - 1);
+                if (at && (at->base->qual & Q_ATOMIC)) oput("atomic ", sizeof("atomic ") - 1);
+                if (at && (at->base->qual & Q_VOLATILE)) oput("volatile ", sizeof("volatile ") - 1);
                 print_type(ir->dst.ty);
-                fprintf(out_file, ", ptr ");
+                oput(", ptr ", sizeof(", ptr ") - 1);
                 print_operand(ir->args[0]);
                 if (at && (at->base->qual & Q_ATOMIC)) fprintf(out_file, " %s", mem_order_str[ir->mem_order]);
-                fprintf(out_file, ", align ");
+                oput(", align ", sizeof(", align ") - 1);
                 print_operand(ir->args[1]);
-                fprintf(out_file, "\n");
+                oput("\n", sizeof("\n") - 1);
                 break;
             }
             case IR_STR: {
-                fprintf(out_file, "store ");
+                oput("store ", sizeof("store ") - 1);
                 Type *dt = ir->args[1].ty->kind == TY_PTR ? ir->args[1].ty : NULL;
-                if (dt && (dt->base->qual & Q_ATOMIC)) fprintf(out_file, "atomic ");
-                if (dt && (dt->base->qual & Q_VOLATILE)) fprintf(out_file, "volatile ");
+                if (dt && (dt->base->qual & Q_ATOMIC)) oput("atomic ", sizeof("atomic ") - 1);
+                if (dt && (dt->base->qual & Q_VOLATILE)) oput("volatile ", sizeof("volatile ") - 1);
                 print_type(ir->args[0].ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 print_operand(ir->args[0]);
-                fprintf(out_file, ", ptr ");
+                oput(", ptr ", sizeof(", ptr ") - 1);
                 print_operand(ir->args[1]);
                 if (ir->args[1].ty->base->qual & Q_ATOMIC) fprintf(out_file, " %s", mem_order_str[ir->mem_order]);
-                fprintf(out_file, ", align ");
+                oput(", align ", sizeof(", align ") - 1);
                 print_operand(ir->args[2]);
-                fprintf(out_file, "\n");
+                oput("\n", sizeof("\n") - 1);
                 break;
             }
             case IR_FENCE:
-                fprintf(out_file, "fence");
-                if (ir->is_signal) fprintf(out_file, " syncscope(\"singlethread\")");
+                oput("fence", sizeof("fence") - 1);
+                if (ir->is_signal) oput(" syncscope(\"singlethread\")", sizeof(" syncscope(\"singlethread\")") - 1);
                 fprintf(out_file, " %s\n", mem_order_str[ir->mem_order]);
                 break;
             case IR_GEP:
-                fprintf(out_file, "getelementptr ");
+                oput("getelementptr ", sizeof("getelementptr ") - 1);
                 print_type(ir->args[0].ty->base);
-                fprintf(out_file, ", ptr ");
+                oput(", ptr ", sizeof(", ptr ") - 1);
                 print_operand(ir->args[0]);
                 for (uint32_t i = 1; i < ir->narg; i++) {
-                    fprintf(out_file, ", ");
+                    oput(", ", sizeof(", ") - 1);
                     print_type(ir->args[i].ty);
-                    fprintf(out_file, " ");
+                    oput(" ", sizeof(" ") - 1);
                     print_operand(ir->args[i]);
                 }
-                fprintf(out_file, "\n");
+                oput("\n", sizeof("\n") - 1);
                 break;
             case IR_EXTRACTVAL:
                 // The field taken is this dst's ty. The aggregate it comes
@@ -749,48 +749,48 @@ void dump_blk(Blk *b) {
                 // an overflow builtin returns -- or a bare compare type,
                 // which is how a cmpxchg carries one; the latter implies
                 // the { T, i1 } the instruction produces.
-                fprintf(out_file, "extractvalue ");
+                oput("extractvalue ", sizeof("extractvalue ") - 1);
                 if (is_record(ir->args[0].ty)) {
                     print_type(ir->args[0].ty);
                 } else {
-                    fprintf(out_file, "{ ");
+                    oput("{ ", sizeof("{ ") - 1);
                     print_type(ir->args[0].ty);
-                    fprintf(out_file, ", i1 }");
+                    oput(", i1 }", sizeof(", i1 }") - 1);
                 }
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 print_operand(ir->args[0]);
-                fprintf(out_file, ", ");
+                oput(", ", sizeof(", ") - 1);
                 print_operand(ir->args[1]);
-                fprintf(out_file, "\n");
+                oput("\n", sizeof("\n") - 1);
                 break;
             case IR_CMPXCHG:
-                fprintf(out_file, "cmpxchg ");
-                if (ir->is_weak) fprintf(out_file, "weak ");
-                if (ir->args[0].ty->base->qual & Q_VOLATILE) fprintf(out_file, "volatile ");
-                fprintf(out_file, "ptr ");
+                oput("cmpxchg ", sizeof("cmpxchg ") - 1);
+                if (ir->is_weak) oput("weak ", sizeof("weak ") - 1);
+                if (ir->args[0].ty->base->qual & Q_VOLATILE) oput("volatile ", sizeof("volatile ") - 1);
+                oput("ptr ", sizeof("ptr ") - 1);
                 print_operand(ir->args[0]);
-                fprintf(out_file, ", ");
+                oput(", ", sizeof(", ") - 1);
                 print_type(ir->args[1].ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 print_operand(ir->args[1]);
 
-                fprintf(out_file, ", ");
+                oput(", ", sizeof(", ") - 1);
                 print_type(ir->args[2].ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 print_operand(ir->args[2]);
                 fprintf(out_file, " %s %s", mem_order_str[ir->mem_order], mem_order_str[ir->mem_order1]);
                 fprintf(out_file, ", align %d\n", ir->args[1].ty->align);
                 break;
 
             case IR_ATOMICRMW:
-                fprintf(out_file, "atomicrmw ");
-                if (ir->args[1].ty->base->qual & Q_VOLATILE) fprintf(out_file, "volatile ");
+                oput("atomicrmw ", sizeof("atomicrmw ") - 1);
+                if (ir->args[1].ty->base->qual & Q_VOLATILE) oput("volatile ", sizeof("volatile ") - 1);
                 fprintf(out_file, "%s ", atomicrmw_op[ir->args[0].val]);
-                fprintf(out_file, "ptr ");
+                oput("ptr ", sizeof("ptr ") - 1);
                 print_operand(ir->args[1]);
-                fprintf(out_file, ", ");
+                oput(", ", sizeof(", ") - 1);
                 print_type(ir->args[2].ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 print_operand(ir->args[2]);
 
                 fprintf(out_file, " %s", mem_order_str[ir->mem_order]);
@@ -798,43 +798,43 @@ void dump_blk(Blk *b) {
                 break;
 
             case IR_MEMCPY:
-                fprintf(out_file, "call void @llvm.memcpy.p0.p0.i64(ptr ");
+                oput("call void @llvm.memcpy.p0.p0.i64(ptr ", sizeof("call void @llvm.memcpy.p0.p0.i64(ptr ") - 1);
                 print_operand(ir->args[0]);
-                fprintf(out_file, ", ptr ");
+                oput(", ptr ", sizeof(", ptr ") - 1);
                 print_operand(ir->args[1]);
-                fprintf(out_file, ", i64 ");
+                oput(", i64 ", sizeof(", i64 ") - 1);
                 print_operand(ir->args[2]);
-                fprintf(out_file, ", i1 false)\n");
+                oput(", i1 false)\n", sizeof(", i1 false)\n") - 1);
                 break;
             case IR_MEMSET:
-                fprintf(out_file, "call void @llvm.memset.p0.i64(ptr ");
+                oput("call void @llvm.memset.p0.i64(ptr ", sizeof("call void @llvm.memset.p0.i64(ptr ") - 1);
                 print_operand(ir->args[0]);
-                fprintf(out_file, ", i8 ");
+                oput(", i8 ", sizeof(", i8 ") - 1);
                 print_operand(ir->args[1]);
-                fprintf(out_file, ", i64 ");
+                oput(", i64 ", sizeof(", i64 ") - 1);
                 print_operand(ir->args[2]);
-                fprintf(out_file, ", i1 false)\n");
+                oput(", i1 false)\n", sizeof(", i1 false)\n") - 1);
                 break;
             case IR_TLSADDR:
-                fprintf(out_file, "call ptr @llvm.threadlocal.address.p0(ptr ");
+                oput("call ptr @llvm.threadlocal.address.p0(ptr ", sizeof("call ptr @llvm.threadlocal.address.p0(ptr ") - 1);
                 print_operand(ir->args[0]);
-                fprintf(out_file, ")\n");
+                oput(")\n", sizeof(")\n") - 1);
                 break;
             case IR_SELECT:
                 // select i1 <cond>, <ty> <t>, <ty> <f>
-                fprintf(out_file, "select ");
+                oput("select ", sizeof("select ") - 1);
                 print_type(ir->args[0].ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 print_operand(ir->args[0]);
-                fprintf(out_file, ", ");
+                oput(", ", sizeof(", ") - 1);
                 print_type(ir->args[1].ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 print_operand(ir->args[1]);
-                fprintf(out_file, ", ");
+                oput(", ", sizeof(", ") - 1);
                 print_type(ir->args[2].ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 print_operand(ir->args[2]);
-                fprintf(out_file, "\n");
+                oput("\n", sizeof("\n") - 1);
                 break;
             case IR_ASM: {
                 // call [<ty>] asm [sideeffect] "<template>", "<constraints>"(<args>)
@@ -843,45 +843,45 @@ void dump_blk(Blk *b) {
                 // terminator that follows, since that is where they belong.
                 fprintf(out_file, ir->asm_flags & ASM_GOTO ? "callbr " : "call ");
                 if (refeq(ir->dst, R))
-                    fprintf(out_file, "void");
+                    oput("void", sizeof("void") - 1);
                 else
                     print_type(ir->dst.ty);
                 // `sideeffect` is what says the statement may not be dropped
                 // or moved. A template with no output has it whether or not
                 // the statement said `volatile`; the parser settled that.
-                fprintf(out_file, " asm ");
-                if (ir->asm_flags & (ASM_VOLATILE | ASM_GOTO)) fprintf(out_file, "sideeffect ");
-                fprintf(out_file, "\"");
+                oput(" asm ", sizeof(" asm ") - 1);
+                if (ir->asm_flags & (ASM_VOLATILE | ASM_GOTO)) oput("sideeffect ", sizeof("sideeffect ") - 1);
+                oput("\"", sizeof("\"") - 1);
                 for (char *p = ir->asm_tmpl; *p; p++) fprintf(out_file, "%s", escape_char_to_string(*p));
-                fprintf(out_file, "\", \"");
+                oput("\", \"", sizeof("\", \"") - 1);
                 for (char *p = ir->asm_cons; *p; p++) fprintf(out_file, "%s", escape_char_to_string(*p));
-                fprintf(out_file, "\"(");
+                oput("\"(", sizeof("\"(") - 1);
                 for (uint32_t i = 0; i < ir->narg; i++) {
-                    if (i) fprintf(out_file, ", ");
+                    if (i) oput(", ", sizeof(", ") - 1);
                     // An indirect constraint takes an address, and LLVM
                     // insists on knowing what it points at: `ptr` alone is
                     // rejected ("operand for indirect constraint must have
                     // elementtype attribute").
                     if (ir->asm_ind && ir->asm_ind[i] && ir->args[i].ty && ir->args[i].ty->kind == TY_PTR) {
-                        fprintf(out_file, "ptr elementtype(");
+                        oput("ptr elementtype(", sizeof("ptr elementtype(") - 1);
                         print_type(ir->args[i].ty->base);
-                        fprintf(out_file, ") ");
+                        oput(") ", sizeof(") ") - 1);
                     } else {
                         print_type(ir->args[i].ty);
-                        fprintf(out_file, " ");
+                        oput(" ", sizeof(" ") - 1);
                     }
                     print_operand(ir->args[i]);
                 }
-                fprintf(out_file, ")\n");
+                oput(")\n", sizeof(")\n") - 1);
                 break;
             }
             case IR_CALL:
-                fprintf(out_file, "call ");
+                oput("call ", sizeof("call ") - 1);
                 if (refeq(ir->dst, R))
-                    fprintf(out_file, "void");
+                    oput("void", sizeof("void") - 1);
                 else
                     print_type(ir->dst.ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 // The explicit callee type is required only for variadic
                 // calls (LangRef: the fnty "is only required if the
                 // signature specifies a varargs type"); it drives
@@ -901,24 +901,24 @@ void dump_blk(Blk *b) {
                     // function type", so print_param_type is asked for the
                     // bare form.
                     bool first = true;
-                    fprintf(out_file, "(");
+                    oput("(", sizeof("(") - 1);
                     if (ir->is_sret && fty->ret) {
-                        fprintf(out_file, "ptr");
+                        oput("ptr", sizeof("ptr") - 1);
                         first = false;
                     }
                     for (Type *p = fty->params; p; p = p->next) {
                         int cntt = abi_param_count(p);
                         for (int k = 0; k < cntt; k++) {
-                            if (!first) fprintf(out_file, ", ");
+                            if (!first) oput(", ", sizeof(", ") - 1);
                             print_param_type(p, k, true);
                             first = false;
                         }
                     }
-                    if (!first) fprintf(out_file, ", ");
-                    fprintf(out_file, "...) ");
+                    if (!first) oput(", ", sizeof(", ") - 1);
+                    oput("...) ", sizeof("...) ") - 1);
                 }
                 print_operand(ir->args[0]);
-                fprintf(out_file, "(");
+                oput("(", sizeof("(") - 1);
                 // A pointer at the head of the list carries the result of a
                 // memory-class aggregate; a pointer to one further along is a
                 // copy the callee may not write back. Both are spelled out,
@@ -934,7 +934,7 @@ void dump_blk(Blk *b) {
                 for (uint32_t i = 1; i < ir->narg; i++) {
                     Type *at = ir->args[i].ty;
                     if (sret && i == 1) {
-                        fprintf(out_file, "ptr noalias sret(");
+                        oput("ptr noalias sret(", sizeof("ptr noalias sret(") - 1);
                         print_type(at->base);
                         fprintf(out_file, ") align %d ", at->base->align);
                     } else if (is_byval(ir, i)) {
@@ -942,25 +942,25 @@ void dump_blk(Blk *b) {
                         // pointer to a record that the program passed itself
                         // is an ordinary argument, and reading its pointee as
                         // a copy would be wrong.
-                        fprintf(out_file, "ptr byval(");
+                        oput("ptr byval(", sizeof("ptr byval(") - 1);
                         print_type(at->base);
                         fprintf(out_file, ") align %d ", at->base->align);
                     } else {
                         print_type(at);
-                        fprintf(out_file, " ");
+                        oput(" ", sizeof(" ") - 1);
                     }
                     print_operand(ir->args[i]);
-                    if (i < ir->narg - 1) fprintf(out_file, ", ");
+                    if (i < ir->narg - 1) oput(", ", sizeof(", ") - 1);
                 }
-                fprintf(out_file, ")\n");
+                oput(")\n", sizeof(")\n") - 1);
                 break;
             case IR_SP_SAVE:
-                fprintf(out_file, "call ptr @llvm.stacksave.p0()\n");
+                oput("call ptr @llvm.stacksave.p0()\n", sizeof("call ptr @llvm.stacksave.p0()\n") - 1);
                 break;
             case IR_SP_RESTORE:
-                fprintf(out_file, "call void @llvm.stackrestore.p0(ptr ");
+                oput("call void @llvm.stackrestore.p0(ptr ", sizeof("call void @llvm.stackrestore.p0(ptr ") - 1);
                 print_operand(ir->args[0]);
-                fprintf(out_file, ")\n");
+                oput(")\n", sizeof(")\n") - 1);
                 break;
             // conversion
             case IR_EXT:
@@ -979,29 +979,29 @@ void dump_blk(Blk *b) {
                 }
                 fprintf(out_file, "%s ", op_str[ir->op][idx]);
                 print_type(ir->args[0].ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 print_operand(ir->args[0]);
-                fprintf(out_file, " to ");
+                oput(" to ", sizeof(" to ") - 1);
                 print_type(ir->dst.ty);
-                fprintf(out_file, "\n");
+                oput("\n", sizeof("\n") - 1);
                 break;
             }
             case IR_BITCAST:
-                fprintf(out_file, "bitcast ");
+                oput("bitcast ", sizeof("bitcast ") - 1);
                 print_type(ir->args[0].ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 print_operand(ir->args[0]);
-                fprintf(out_file, " to ");
+                oput(" to ", sizeof(" to ") - 1);
                 print_type(ir->dst.ty);
-                fprintf(out_file, "\n");
+                oput("\n", sizeof("\n") - 1);
                 break;
             // fneg
             case IR_NEG:
-                fprintf(out_file, "fneg ");
+                oput("fneg ", sizeof("fneg ") - 1);
                 print_type(ir->args[0].ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 print_operand(ir->args[0]);
-                fprintf(out_file, "\n");
+                oput("\n", sizeof("\n") - 1);
                 break;
             // arithmetic
             case IR_ADD:
@@ -1024,11 +1024,11 @@ void dump_blk(Blk *b) {
                 if (is_flonum(ir->args[0].ty)) idx = 2;
                 fprintf(out_file, "%s ", op_str[ir->op][idx]);
                 print_type(ir->args[0].ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 print_operand(ir->args[0]);
-                fprintf(out_file, ", ");
+                oput(", ", sizeof(", ") - 1);
                 print_operand_as(ir->args[1], ir->args[0].ty);
-                fprintf(out_file, "\n");
+                oput("\n", sizeof("\n") - 1);
                 break;
             }
             default:
@@ -1037,18 +1037,18 @@ void dump_blk(Blk *b) {
         ir = ir->next;
     }
 
-    fprintf(out_file, "  ");
+    oput("  ", sizeof("  ") - 1);
     switch (b->jmp.type) {
         case IR_RET:
-            fprintf(out_file, "ret ");
+            oput("ret ", sizeof("ret ") - 1);
             if (!refeq(b->jmp.arg, R)) {
                 print_type(b->jmp.arg.ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 print_operand(b->jmp.arg);
             } else {
-                fprintf(out_file, "void");
+                oput("void", sizeof("void") - 1);
             }
-            fprintf(out_file, "\n");
+            oput("\n", sizeof("\n") - 1);
             break;
         case IR_CALLBR:
             // The other half of an asm goto: the block control falls through
@@ -1057,23 +1057,23 @@ void dump_blk(Blk *b) {
             // numbers them in.
             fprintf(out_file, "        to label %%blk%d [", b->succ1->blk_id);
             for (uint32_t i = 0; i < b->narg; i++) {
-                if (i) fprintf(out_file, ", ");
+                if (i) oput(", ", sizeof(", ") - 1);
                 fprintf(out_file, "label %%blk%d", b->succ[i]->blk_id);
             }
-            fprintf(out_file, "]\n");
+            oput("]\n", sizeof("]\n") - 1);
             break;
         case IR_JMP:
             fprintf(out_file, "br label %%blk%d\n", b->succ1->blk_id);
             break;
         case IR_JNZ:
-            fprintf(out_file, "br i1 ");
+            oput("br i1 ", sizeof("br i1 ") - 1);
             print_operand(b->jmp.arg);
             fprintf(out_file, ", label %%blk%d, label %%blk%d\n", b->succ1->blk_id, b->succ2->blk_id);
             break;
         case IR_SWITCH:
-            fprintf(out_file, "switch ");
+            oput("switch ", sizeof("switch ") - 1);
             print_type(b->jmp.arg.ty);
-            fprintf(out_file, " ");
+            oput(" ", sizeof(" ") - 1);
             print_operand(b->jmp.arg);
             // The bracketed case list is part of the syntax even when it is
             // empty. A `case` range whose bounds are reversed (6.6.2)
@@ -1082,25 +1082,25 @@ void dump_blk(Blk *b) {
             // switch table").
             fprintf(out_file, ", label %%blk%d [\n", b->succ1->blk_id);
             for (uint32_t i = 0; i < b->narg; i++) {
-                fprintf(out_file, "    ");
+                oput("    ", sizeof("    ") - 1);
                 print_type(b->jmp.args[i].ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 print_operand(b->jmp.args[i]);
                 fprintf(out_file, ", label %%blk%d\n", b->succ[i]->blk_id);
             }
-            fprintf(out_file, "  ]\n");
+            oput("  ]\n", sizeof("  ]\n") - 1);
             break;
         case IR_INDIRECTBR:
-            fprintf(out_file, "indirectbr ");
+            oput("indirectbr ", sizeof("indirectbr ") - 1);
             print_type(b->jmp.arg.ty);
-            fprintf(out_file, " ");
+            oput(" ", sizeof(" ") - 1);
             print_operand(b->jmp.arg);
-            fprintf(out_file, ", [");
+            oput(", [", sizeof(", [") - 1);
             for (uint32_t i = 0; i < b->narg; i++) {
-                if (i) fprintf(out_file, ", ");
+                if (i) oput(", ", sizeof(", ") - 1);
                 fprintf(out_file, "label %%blk%d", b->succ[i]->blk_id);
             }
-            fprintf(out_file, "]\n");
+            oput("]\n", sizeof("]\n") - 1);
             break;
         default:
             break;
@@ -1132,7 +1132,7 @@ static void record_close(Type *ty) { fprintf(out_file, ty->layout_packed ? " }>"
 void dump_type(Type *ty) {
     fprintf(out_file, "%%");
     print_ident(ty->uid);
-    fprintf(out_file, " = type ");
+    oput(" = type ", sizeof(" = type ") - 1);
     record_open(ty);
     Member *mem = ty->members;
     if (ty->kind == TY_STRUCT) {
@@ -1149,7 +1149,7 @@ void dump_type(Type *ty) {
                     ? (off * 8 + (mem->is_bitfield ? mem->bit_offset + mem->bit_width : mem->ty->size * 8) + 7) / 8
                     : pos;
             if (end <= pos) continue;
-            if (!first) fprintf(out_file, ", ");
+            if (!first) oput(", ", sizeof(", ") - 1);
             first = false;
             if (pos < off) {
                 fprintf(out_file, "[%d x i8], ", off - pos);
@@ -1168,7 +1168,7 @@ void dump_type(Type *ty) {
             }
         }
         if (pos < ty->size) {
-            if (!first) fprintf(out_file, ", ");
+            if (!first) oput(", ", sizeof(", ") - 1);
             fprintf(out_file, "[%d x i8]", ty->size - pos);
         }
     } else if (ty->kind == TY_UNION) {
@@ -1182,7 +1182,7 @@ void dump_type(Type *ty) {
         }
     }
     record_close(ty);
-    fprintf(out_file, "\n");
+    oput("\n", sizeof("\n") - 1);
 }
 
 // The union's canonical element: the member with the largest
@@ -1215,7 +1215,7 @@ static void print_union_elem_ty(Type *ty, Member *mem, Initializer *child) {
 // A scalar union member value, cast through pointers as needed.
 static void print_union_con(Con *c, Type *mem_ty) {
     if (c->type == CAddr && mem_ty->kind != TY_PTR) {
-        fprintf(out_file, "ptrtoint (ptr ");
+        oput("ptrtoint (ptr ", sizeof("ptrtoint (ptr ") - 1);
         printcon(c, mem_ty);
         fprintf(out_file, " to i%d)", mem_ty->size * 8);
         return;
@@ -1223,7 +1223,7 @@ static void print_union_con(Con *c, Type *mem_ty) {
     if (c->type == CBits && mem_ty->kind == TY_PTR) {
         fprintf(out_file, "inttoptr (i%d ", mem_ty->size * 8);
         printcon(c, mem_ty);
-        fprintf(out_file, " to ptr)");
+        oput(" to ptr)", sizeof(" to ptr)") - 1);
         return;
     }
     printcon(c, mem_ty);
@@ -1239,7 +1239,7 @@ static void dump_union_elem(Type *ty, Member *mem, Initializer *child) {
         dump_init(child, mem->ty);
     } else {
         print_type(mem->ty);
-        fprintf(out_file, " ");
+        oput(" ", sizeof(" ") - 1);
         // An unnamed bit-field member takes no initializer, so there may be no
         // value here at all; the bytes it covers are zero. Handing the null
         // Con to print_union_con() is what killed the compiler.
@@ -1361,7 +1361,7 @@ static void print_init_ty(Initializer *init, Type *ty) {
                 m = m->next;
                 continue;
             }
-            if (!first) fprintf(out_file, ", ");
+            if (!first) oput(", ", sizeof(", ") - 1);
             first = false;
             if (pos < off) {
                 fprintf(out_file, "[%d x i8], ", off - pos);
@@ -1380,7 +1380,7 @@ static void print_init_ty(Initializer *init, Type *ty) {
             m = m->next;
         }
         if (pos < ty->size) {
-            if (!first) fprintf(out_file, ", ");
+            if (!first) oput(", ", sizeof(", ") - 1);
             fprintf(out_file, "[%d x i8]", ty->size - pos);
         }
         record_close(ty);
@@ -1390,12 +1390,12 @@ static void print_init_ty(Initializer *init, Type *ty) {
     if (ty->kind == TY_ARRAY) {
         // An array has no padding between its elements, so a packed struct of
         // per-element element types has its layout.
-        fprintf(out_file, "<{ ");
+        oput("<{ ", sizeof("<{ ") - 1);
         for (int i = 0; i < ty->len; i++) {
-            if (i) fprintf(out_file, ", ");
+            if (i) oput(", ", sizeof(", ") - 1);
             print_init_ty(init->child[i], ty->base);
         }
-        fprintf(out_file, " }>");
+        oput(" }>", sizeof(" }>") - 1);
         return;
     }
 
@@ -1432,14 +1432,14 @@ static void dump_init(Initializer *init, Type *ty) {
     if (ty->kind == TY_UNION) {
         if (!init || !init->is_inited) {
             print_type(ty);
-            fprintf(out_file, " zeroinitializer");
+            oput(" zeroinitializer", sizeof(" zeroinitializer") - 1);
             return;
         }
         Member *mem = init->mem ? init->mem : union_default_member(ty);
         if (!mem) {
             // An empty union: nothing to initialize, and the image is empty.
             print_type(ty);
-            fprintf(out_file, " zeroinitializer");
+            oput(" zeroinitializer", sizeof(" zeroinitializer") - 1);
             return;
         }
         Member *canon = union_canon_member(ty);
@@ -1452,7 +1452,7 @@ static void dump_init(Initializer *init, Type *ty) {
         } else {
             print_type(ty);
         }
-        fprintf(out_file, " ");
+        oput(" ", sizeof(" ") - 1);
         dump_union_elem(ty, mem, child);
         return;
     }
@@ -1461,25 +1461,25 @@ static void dump_init(Initializer *init, Type *ty) {
         // The packed form, element by element, each with the type it was
         // written as: `dump_init()` writes them in the order and the shape
         // `init_needs_inline()` saw.
-        fprintf(out_file, "<{ ");
+        oput("<{ ", sizeof("<{ ") - 1);
         for (int i = 0; i < ty->len; i++) {
-            if (i) fprintf(out_file, ", ");
+            if (i) oput(", ", sizeof(", ") - 1);
             print_init_ty(init->child[i], ty->base);
         }
-        fprintf(out_file, " }> <{ ");
+        oput(" }> <{ ", sizeof(" }> <{ ") - 1);
         for (int i = 0; i < ty->len; i++) {
-            if (i) fprintf(out_file, ", ");
+            if (i) oput(", ", sizeof(", ") - 1);
             dump_init(init->child[i], ty->base);
         }
-        fprintf(out_file, " }>");
+        oput(" }>", sizeof(" }>") - 1);
         return;
     }
 
     print_init_ty(init, ty);
-    fprintf(out_file, " ");
+    oput(" ", sizeof(" ") - 1);
     if (ty->kind == TY_ARRAY) {
         if (!init || !init->is_inited) {
-            fprintf(out_file, "zeroinitializer");
+            oput("zeroinitializer", sizeof("zeroinitializer") - 1);
             return;
         }
         // `c"..."` is an [N x i8] constant, so it needs an integer element:
@@ -1487,27 +1487,27 @@ static void dump_init(Initializer *init, Type *ty) {
         // of one byte, and writing its array as a string gave LLVM
         // "'[227 x i8]' but expected '[227 x %struct.FormatEntry]'".
         if (is_integer(ty->base) && ty->base->size == 1) {
-            fprintf(out_file, "c\"");
+            oput("c\"", sizeof("c\"") - 1);
             for (int i = 0; i < ty->len; i++) {
                 if (!init->child[i]->val)
-                    fprintf(out_file, "\\00");
+                    oput("\\00", sizeof("\\00") - 1);
                 else
                     fprintf(out_file, "%s", escape_char_to_string(init->child[i]->val->bits.i));
             }
-            fprintf(out_file, "\"");
+            oput("\"", sizeof("\"") - 1);
         } else {
-            fprintf(out_file, "[");
+            oput("[", sizeof("[") - 1);
             for (int i = 0; i < ty->len; i++) {
-                if (i) fprintf(out_file, ", ");
+                if (i) oput(", ", sizeof(", ") - 1);
                 dump_init(init->child[i], ty->base);
             }
-            fprintf(out_file, "]");
+            oput("]", sizeof("]") - 1);
         }
         return;
     }
     if (ty->kind == TY_STRUCT) {
         if (!init || !init->is_inited) {
-            fprintf(out_file, "zeroinitializer");
+            oput("zeroinitializer", sizeof("zeroinitializer") - 1);
             return;
         }
         record_open(ty);
@@ -1534,7 +1534,7 @@ static void dump_init(Initializer *init, Type *ty) {
                 mem = mem->next;
                 continue;
             }
-            if (!first) fprintf(out_file, ", ");
+            if (!first) oput(", ", sizeof(", ") - 1);
             first = false;
             if (pos < off) {
                 fprintf(out_file, "[%d x i8] zeroinitializer, ", off - pos);
@@ -1544,9 +1544,9 @@ static void dump_init(Initializer *init, Type *ty) {
                 // The tail of a straddling unit: one byte element per byte,
                 // each carrying the bits that fall in it.
                 for (int i = pos; i < end; i++) {
-                    if (i > pos) fprintf(out_file, ", ");
+                    if (i > pos) oput(", ", sizeof(", ") - 1);
                     int64_t b = bitfield_image(ty, init, i, 1);
-                    fprintf(out_file, "i8 ");
+                    oput("i8 ", sizeof("i8 ") - 1);
                     printcon(&(Con){0, CBits, 0, {b}}, T.ty_char);
                 }
                 pos = end;
@@ -1556,7 +1556,7 @@ static void dump_init(Initializer *init, Type *ty) {
             if (mem->is_bitfield) {
                 int64_t val = bitfield_image(ty, init, pos, mem->unit_ty->size);
                 print_type(mem->unit_ty);
-                fprintf(out_file, " ");
+                oput(" ", sizeof(" ") - 1);
                 printcon(&(Con){0, CBits, 0, {val}}, mem->unit_ty);
                 pos += mem->unit_ty->size;
                 mem = mem->next;
@@ -1567,7 +1567,7 @@ static void dump_init(Initializer *init, Type *ty) {
             }
         }
         if (pos < ty->size) {
-            if (!first) fprintf(out_file, ", ");
+            if (!first) oput(", ", sizeof(", ") - 1);
             fprintf(out_file, "[%d x i8] zeroinitializer", ty->size - pos);
         }
         record_close(ty);
@@ -1576,7 +1576,7 @@ static void dump_init(Initializer *init, Type *ty) {
     if (!init || !init->is_inited) {
         // zeroinitializer works for any type; the bare "0" was rejected
         // for pointer globals (tentative definitions)
-        fprintf(out_file, "zeroinitializer");
+        oput("zeroinitializer", sizeof("zeroinitializer") - 1);
         return;
     }
     // nullptr_t is pointer-sized and pointer-valued, so it takes the same
@@ -1586,16 +1586,16 @@ static void dump_init(Initializer *init, Type *ty) {
         // A zero value is the null pointer, whose LLVM literal is simply
         // ; only a non-zero integer needs inttoptr.
         if (init->val->bits.i == 0) {
-            fprintf(out_file, "null");
+            oput("null", sizeof("null") - 1);
             return;
         }
         fprintf(out_file, "inttoptr (i%d ", T.ty_voidptr->size * 8);
         printcon(init->val, init->ty);
-        fprintf(out_file, " to ptr)");
+        oput(" to ptr)", sizeof(" to ptr)") - 1);
         return;
     }
     if (!is_ptr_init && init->val->type == CAddr) {
-        fprintf(out_file, "ptrtoint (ptr ");
+        oput("ptrtoint (ptr ", sizeof("ptrtoint (ptr ") - 1);
         printcon(init->val, init->ty);
         fprintf(out_file, " to i%d)", T.ty_voidptr->size * 8);
         return;
@@ -1606,31 +1606,31 @@ static void dump_init(Initializer *init, Type *ty) {
 static void dump_str(Sym *data) {
     char *p = str(data->init_data);
     int len = data->ty->len;
-    fprintf(out_file, "private unnamed_addr constant ");
+    oput("private unnamed_addr constant ", sizeof("private unnamed_addr constant ") - 1);
     print_type(data->ty);
     if (len == 1) {
-        fprintf(out_file, " zeroinitializer");
+        oput(" zeroinitializer", sizeof(" zeroinitializer") - 1);
     } else {
         if (data->ty->base->size == 1) {
-            fprintf(out_file, " c\"");
+            oput(" c\"", sizeof(" c\"") - 1);
             for (int i = 0; i < len; i++) fprintf(out_file, "%s", escape_char_to_string(p[i]));
-            fprintf(out_file, "\"");
+            oput("\"", sizeof("\"") - 1);
         } else if (data->ty->base->size == 2) {
             uint16_t *buf = (uint16_t *)p;
-            fprintf(out_file, " [");
+            oput(" [", sizeof(" [") - 1);
             for (int i = 0; i < data->ty->len; i++) {
-                if (i) fprintf(out_file, ", ");
+                if (i) oput(", ", sizeof(", ") - 1);
                 fprintf(out_file, "i16 %d", buf[i]);
             }
-            fprintf(out_file, "]");
+            oput("]", sizeof("]") - 1);
         } else if (data->ty->base->size == 4) {
             uint32_t *buf = (uint32_t *)p;
-            fprintf(out_file, " [");
+            oput(" [", sizeof(" [") - 1);
             for (int i = 0; i < data->ty->len; i++) {
-                if (i) fprintf(out_file, ", ");
+                if (i) oput(", ", sizeof(", ") - 1);
                 fprintf(out_file, "i32 %d", buf[i]);
             }
-            fprintf(out_file, "]");
+            oput("]", sizeof("]") - 1);
         }
     }
     // The storage alignment: the declared one, raised for a big array
@@ -1647,9 +1647,9 @@ static const char *sclass_name[] = {
 void dump_data(Sym *data) {
     if (already_emitted(data)) return;
     if (data->is_dead) return;
-    fprintf(out_file, "@");
+    oput("@", sizeof("@") - 1);
     print_sym_name(data->id);
-    fprintf(out_file, " = ");
+    oput(" = ", sizeof(" = ") - 1);
     if (data->is_str) {
         dump_str(data);
         return;
@@ -1659,10 +1659,10 @@ void dump_data(Sym *data) {
     bool is_tls = sclass & SC_THREAD;
     sclass &= ~(SC_THREAD);
 
-    if (!data->is_defined && !data->sclass && opt_fcommon) fprintf(out_file, "common ");
+    if (!data->is_defined && !data->sclass && opt_fcommon) oput("common ", sizeof("common ") - 1);
     if (data->sclass || !opt_fpic) fprintf(out_file, "%s ", sclass_name[sclass]);
-    if (is_tls) fprintf(out_file, "thread_local ");
-    fprintf(out_file, "global ");
+    if (is_tls) oput("thread_local ", sizeof("thread_local ") - 1);
+    oput("global ", sizeof("global ") - 1);
 
     if (sclass & SC_EXTERN)
         print_type(data->ty);
@@ -1697,7 +1697,7 @@ static void print_ret_type(Type *ty) {
         AggClass c;
         T.classify_aggregate(ty, &c);
         if (c.npiece == 0) {
-            fprintf(out_file, "void");
+            oput("void", sizeof("void") - 1);
             return;
         }
         // One piece has no record at all: the function hands the bare value
@@ -1758,14 +1758,14 @@ static void print_param_type(Type *ty, int i, bool bare) {
                 // A copy is a pointer whatever the spelling, and a call's
                 // type list has no room for byval or align: clang writes a
                 // bare `ptr` there and the attribute goes on the operand.
-                fprintf(out_file, "ptr");
+                oput("ptr", sizeof("ptr") - 1);
                 return;
             }
             // SysV has the callee copy the argument, which the IR spells
             // byval; AAPCS64 and RISC-V have the caller copy it and pass a
             // plain pointer, so byval there would ask for a second copy.
             if (T.agg_byval_param) {
-                fprintf(out_file, "ptr byval(");
+                oput("ptr byval(", sizeof("ptr byval(") - 1);
                 print_type(ty);
                 fprintf(out_file, ") align %d", ty->align);
             } else {
@@ -1808,23 +1808,23 @@ void dump_fn(Sym *fn) {
     // translation unit holds the external one.
     bool defined = fn->is_defined && !fn->is_inline_def;
     if (!defined) {
-        fprintf(out_file, "declare ");
+        oput("declare ", sizeof("declare ") - 1);
     } else {
-        fprintf(out_file, "define ");
+        oput("define ", sizeof("define ") - 1);
         if (fn->sclass & SC_STATIC)
-            fprintf(out_file, "internal ");
+            oput("internal ", sizeof("internal ") - 1);
         else if (!opt_fpic)
-            fprintf(out_file, "dso_local ");
+            oput("dso_local ", sizeof("dso_local ") - 1);
     }
 
     print_ret_type(fn->ty->ret);
-    fprintf(out_file, " @");
+    oput(" @", sizeof(" @") - 1);
     print_sym_name(fn->id);
-    fprintf(out_file, "(");
+    oput("(", sizeof("(") - 1);
 
     uint32_t pi = 0;
     if (fn->abi_sret) {
-        fprintf(out_file, "ptr noalias sret(");
+        oput("ptr noalias sret(", sizeof("ptr noalias sret(") - 1);
         print_type(fn->ty->ret);
         fprintf(out_file, ") align %d", fn->ty->ret->align);
         if (defined) fprintf(out_file, " %%tmp%d", pi);
@@ -1833,7 +1833,7 @@ void dump_fn(Sym *fn) {
     for (Type *param = fn->ty->params; param; param = param->next) {
         int cntt = abi_param_count(param);
         for (int k = 0; k < cntt; k++) {
-            if (pi) fprintf(out_file, ", ");
+            if (pi) oput(", ", sizeof(", ") - 1);
             print_param_type(param, k, false);
             if (defined) fprintf(out_file, " %%tmp%d", pi);
             pi++;
@@ -1842,20 +1842,20 @@ void dump_fn(Sym *fn) {
     // The separator belongs between the last parameter and the ellipsis,
     // so a definition with no named parameter (a bare "...") has none.
     if (fn->ty->is_variadic) fprintf(out_file, "%s...", pi ? ", " : "");
-    fprintf(out_file, ")");
+    oput(")", sizeof(")") - 1);
     if (!defined) {
-        fprintf(out_file, "\n\n");
+        oput("\n\n", sizeof("\n\n") - 1);
         return;
     }
-    if (T.llvm_features) fprintf(out_file, " #0");
-    fprintf(out_file, " {\n");
+    if (T.llvm_features) oput(" #0", sizeof(" #0") - 1);
+    oput(" {\n", sizeof(" {\n") - 1);
     Blk *curb = fn->start;
     while (curb) {
         dump_blk(curb);
         curb = curb->next;
-        if (curb) fprintf(out_file, "\n");
+        if (curb) oput("\n", sizeof("\n") - 1);
     }
-    fprintf(out_file, "}\n\n");
+    oput("}\n\n", sizeof("}\n\n") - 1);
 }
 
 // The name a symbol is emitted under: the asm label when it has one,
@@ -1975,28 +1975,28 @@ void dump_module(Module *md, FILE *out) {
     // emits it. There are no operands to bind them -- outside a function there
     // is no register allocation -- so each is one directive.
     for (int i = 0; i < md->num_masm; i++) {
-        fprintf(out_file, "module asm \"");
+        oput("module asm \"", sizeof("module asm \"") - 1);
         for (char *p = md->masm[i]; *p; p++) fprintf(out_file, "%s", escape_char_to_string(*p));
-        fprintf(out_file, "\"\n");
+        oput("\"\n", sizeof("\"\n") - 1);
     }
-    if (md->num_masm) fprintf(out_file, "\n");
+    if (md->num_masm) oput("\n", sizeof("\n") - 1);
     if (T.llvm_features) fprintf(out_file, "attributes #0 = { \"target-features\"=%s }\n\n", T.llvm_features);
     if (T.llvm_abi)
         fprintf(out_file, "!llvm.module.flags = !{!0}\n!0 = !{i32 1, !\"target-abi\", !%s}\n\n", T.llvm_abi);
-    fprintf(out_file, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
-    fprintf(out_file, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n");
-    fprintf(out_file, "declare ptr @llvm.threadlocal.address.p0(ptr)\n");
+    oput("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n", sizeof("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n") - 1);
+    oput("declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n", sizeof("declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n") - 1);
+    oput("declare ptr @llvm.threadlocal.address.p0(ptr)\n", sizeof("declare ptr @llvm.threadlocal.address.p0(ptr)\n") - 1);
     // llvm.bswap.iN is not declared here: it is an overloaded intrinsic,
     // so relying on "declared on first use" lets LLVM pick the overload
     // from the call itself.
     if (curm->has_vla) {
-        fprintf(out_file, "declare ptr @llvm.stacksave.p0()\n");
-        fprintf(out_file, "declare void @llvm.stackrestore.p0(ptr)\n");
+        oput("declare ptr @llvm.stacksave.p0()\n", sizeof("declare ptr @llvm.stacksave.p0()\n") - 1);
+        oput("declare void @llvm.stackrestore.p0(ptr)\n", sizeof("declare void @llvm.stackrestore.p0(ptr)\n") - 1);
     }
-    fprintf(out_file, "\n");
+    oput("\n", sizeof("\n") - 1);
 
     for (Type *ty = md->tys; ty; ty = ty->next) dump_type(ty);
-    if (md->tys) fprintf(out_file, "\n");
+    if (md->tys) oput("\n", sizeof("\n") - 1);
 
     idset_reset(&defined_set);
     for (Sym *var = md->data; var; var = var->next)
@@ -2005,7 +2005,7 @@ void dump_module(Module *md, FILE *out) {
         if (is_definition(fn)) record_defined_name(emitted_id(fn));
 
     for (Sym *var = md->data; var; var = var->next) dump_data(var);
-    if (md->data) fprintf(out_file, "\n");
+    if (md->data) oput("\n", sizeof("\n") - 1);
 
     for (Sym *fn = md->fns; fn; fn = fn->next) dump_fn(fn);
 
