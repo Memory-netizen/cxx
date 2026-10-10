@@ -10,7 +10,7 @@ static bool is_leadingws;
 
 // Create a new token.
 static Token *new_token(uint32_t kind, char *start, char *end) {
-    Token *tok = emalloc(sizeof(Token));
+    Token *tok = ALLOC(Token);
     tok->kind = kind;
     tok->loc = (uint32_t)(start - cur_file->contents);
     tok->len = end - start;

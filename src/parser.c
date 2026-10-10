@@ -102,7 +102,7 @@ static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Mem
 static Member *get_struct_member(Member *mem, Token *tok);
 
 Node *new_node(NodeKind kind, Token *tok) {
-    Node *node = emalloc(sizeof(Node));
+    Node *node = ALLOC(Node);
     node->kind = kind;
     node->tok = tok;
     return node;

@@ -1253,3 +1253,90 @@ callgrind_annotate --tree=both --threshold=100 --show-percs=yes <data> src/lexer
 并把不变量写进注释（"stop is always past r here, which is what keeps this loop finite"），
 另加一条**有界终止性检查**（400 文件 × 10 秒）作为这种失败模式的回归网。
 
+### 8ak. 当前热点（重新测量）—— 头号目标已从"自己的数据结构"变成"打印 IR"
+
+重新profile（调试构建，符号完整；同一工作量 tccgen cc1）：
+
+| 项 | 旧（548M） | 现在（**482,813,282**） |
+|---|---|---|
+| 总指令数 | 548,237,295 | **482,813,282（−11.9%）** |
+
+**self cost 前 20（括号为与上一次榜单的变化）**：
+
+| 占比 | 函数 | 说明 |
+|---|---|---|
+| 6.15% | `util.c:emalloc` | 仍是第一：每次编译 250~300 万次调用，每次约 11 条 |
+| 6.00% | `lexer.c:tokenize` | 词法主循环自身 |
+| **5.01%** | **`vfprintf-internal:__printf_buffer`** | **IR 打印（libc）** |
+| 4.20% | `parser.c:param_sym_of` | 形参查找 |
+| **4.00%** | `Xprintf_buffer_write` | IR 打印 |
+| 3.51% | `lexer.c:new_token` | 造记号 |
+| 3.45% | `lexer.c:read_ident` | 标识符扫描 |
+| 2.86% | `__vfprintf_internal` | IR 打印 |
+| 2.67% | `__memcpy_avx`（memmove） | **新加的整段拷贝**（收益的一部分） |
+| **2.56%** | `cxx.h:read_ident` | 内联进 read_ident 的 ASCII 谓词 |
+| 2.55% | `convert_universal_chars` | （原 3.00%） |
+| **2.53%** | `util.c:fnv_hash_32` | intern 的哈希 |
+| 2.36% | `__printf_buffer`（process-arg） | IR 打印 |
+| 2.06% | `printf_buffer_to_file_done` | IR 打印 |
+| 1.98% | `__strchrnul_avx2` | printf 内部的 strlen/strchr |
+| 1.61% | `preprocess.c:expand_macro'2` | 宏展开 |
+| 1.54% | `fprintf` | IR 打印 |
+| 1.52% | `parser.c:enum_decl` | |
+| 1.44% | `preprocess.c:copy_token` | |
+| 1.34% | `util.c:intern` | |
+
+**已经离开榜单的**（本会话的成果）：`canonicalize_and_splice` 7.45% ✓、`already_emitted` 8.16% ✓、
+`decode_utf8` 3.28% ✓、`is_ident2_ascii` 2.58% ✓、`convert_keywords` 6.60% ✓、`read_punct` 1.69% ✓、
+`build_line_offsets` 4.06% ✓。
+
+**结论：头号目标换人了。** 把 printf 家族的条目相加 —— 5.01 + 4.00 + 2.86 + 2.36 + 2.06 + 1.98 + 1.54 =
+**约 19.8%** —— 全部花在**把 IR 文本经 stdio 打印出去**上（`-c`/`-S` 必经；`dumpir.c` 自身的代码已经不在前 20）。
+两个次一级的簇：**词法**（`tokenize` 6.00 + `read_ident` 3.45+2.56 + `new_token` 3.51 + `fnv_hash_32` 2.53 +
+`intern` 1.34 ≈ **19.4%**）与 **预处理**（`expand_macro` 1.61 + `copy_token` 1.44 + `preprocess2` 1.26 ≈ 4.3%）。
+
+**下一步候选（按数字）**：① IR 打印改自建缓冲写出（目标那 ~20%，量级最大）；
+② `emalloc` 6.15% —— 记号/节点的 arena 可折成指针加法；③ 词法簇里 `fnv_hash_32` 2.53% 与 `param_sym_of` 4.20%。
+
+日志：`doc/hotspots.txt`（含 self / inclusive 两张榜与运行说明）。
+
+### 8al. 记号/节点的分配内联（"arena"）—— **release 实测 −3.12%**，`emalloc` 跌出榜首
+
+`emalloc` 那 6.15% 几乎全是**调用开销**：每次编译 250~300 万次调用，每次约 11 条指令外加 call/ret。
+绝大部分调用来自两个构造器（`new_node`、`new_token`）与预处理里的记号复制。它们可以**自己做 bump**：
+
+```c
+static inline __attribute__((always_inline)) void *arena_alloc_fixed(size_t n) {
+    if (n > arena_free) return emalloc(n);  // 罕见：换一块 chunk
+    char *p = arena_pool;
+    arena_pool += n;
+    arena_free -= n;
+    return p;
+}
+#define ALLOC(type) ((type *)arena_alloc_fixed((sizeof(type) + (EMALLOC_ALIGN - 1)) & ~(size_t)(EMALLOC_ALIGN - 1)))
+```
+
+- 大小是**编译期常量**，所以对齐也是编译期的：运行时没有取整运算。
+- 池的两个变量（`arena_pool`/`arena_free`）由 `util.c` 导出，`emalloc` 用的是同一份状态。
+- **返回的内存与 `emalloc` 一样是清零的**：chunk 来自 `calloc`，每个字节只发放一次、从不复用 ——
+  `new_node` 只写 `kind`/`tok` 等少数字段，其余依赖清零，这一点由 bootstrap 的逐字节相同来保证。
+- 共 12 处：parser 1、lexer 1、preprocess 5、opt_ast 5。**其余所有分配仍走 `emalloc()`。**
+- 仍有 1 处 `emalloc(sizeof(...))` 未转（写法不同），保持原样、只多付一次调用。
+
+**为什么这次内联是对的，而之前内联到 60 处是错的**（两次都实测过）：
+上一轮把 `emalloc` 整个内联进**所有**调用点是 **+0.9%**（代码膨胀抵不过省下的 call/ret）；
+这次只内联进**两个高频构造器所在的 12 处**、且是"一个判断 + 三条指令"的极简快路径 →
+**−3.12%**。内联的收益取决于"省下的调用"与"复制的代码"之比，而这个比值取决于**站点数**。
+
+| 项 | 结果 |
+|---|---|
+| **release A/B（tccgen cc1）** | 272,817,234 → **264,311,120（−3.12%）** |
+| **相对本轮 release 起点（290,760,902）** | **−9.10%** |
+| 调试剖面 | 482,813,282 → 476,279,202；**`emalloc` 从 6.15%/第一跌出前八** |
+| 闸门 | `make test` **325 / 0**、bootstrap **逐字节相同 + 21/21**、tcctests **106 / 0** |
+| 终止性回归网 | 300 个真实文件 × 10 秒上限 → **hangs: 0** |
+
+**流程教训（第二次同类）**：我给每个文件写了"期望站点数"断言，`preprocess.c` 实际是 5 处而非 3 处 →
+脚本在**改了两个文件之后**中止，留下半应用的树（构建报错）。这类批量改动应当**要么可重入、要么先算清再改**，
+断言只应用来报告差异而不是中止在中途。
+

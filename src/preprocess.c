@@ -218,7 +218,7 @@ static Token *skip_line(Token *tok) {
 }
 
 static Token *copy_token(Token *tok) {
-    Token *t = emalloc(sizeof(Token));
+    Token *t = ALLOC(Token);
     *t = *tok;
     t->next = NULL;
     return t;
@@ -254,7 +254,7 @@ static char *quote_string(char *str) {
 
 static void write_scratch_space(Token *tok, char *str);
 static Token *new_str_token(char *str, Token *tmpl) {
-    Token *new = emalloc(sizeof(Token));
+    Token *new = ALLOC(Token);
     int len = strlen(str);
     new->kind = TK_STRLIT;
     new->id = intern(str, len);
@@ -265,7 +265,7 @@ static Token *new_str_token(char *str, Token *tmpl) {
 }
 
 static Token *ident_to_num(Token *tok, int64_t val) {
-    Token *new = emalloc(sizeof(Token));
+    Token *new = ALLOC(Token);
     new->kind = TK_NUM;
     new->ival = int128_set_i(val);
     char *fmt = format("%ld", val);
@@ -958,7 +958,7 @@ static char *join_spelling(Token *tok) {
 // by trusting the caller here: phase 6 decodes every string literal from its
 // spelling, this one included.
 static Token *new_str_token_spelled(char *spelling, Token *tmpl) {
-    Token *new = emalloc(sizeof(Token));
+    Token *new = ALLOC(Token);
     new->kind = TK_STRLIT;
     new->id = intern(spelling, strlen(spelling));
     write_scratch_space(new, spelling);
@@ -1590,7 +1590,7 @@ static void emit_embed(Token **cur, Token *embed_tok, unsigned char *data, long 
         for (int64_t i = 0; i < n; i++) {
             // The replacement is a comma-separated list.
             if (i > 0) {
-                Token *comma = emalloc(sizeof(Token));
+                Token *comma = ALLOC(Token);
                 comma->kind = TK_COMMA;
                 char *buf = format(",");
                 write_scratch_space(comma, buf);

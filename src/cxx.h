@@ -1988,10 +1988,34 @@ void diag_exit(char *level, Token *tok, const char *msg, ...) __attribute__((for
 // about 1% of the front end, since it is asked millions of times and answers
 // "no" all but a handful.
 // Past this, a request gets its own block instead of a pool chunk.
+#define EMALLOC_ALIGN _Alignof(max_align_t)
 #define BIG_THRESHOLD (128 * 1024)
 
 void *emalloc(size_t n);
 void *emalloc_big(size_t n);
+
+// The pool's bump pointer and what is left in the current chunk. Nodes and tokens
+// are allocated millions of times per translation unit, and for them emalloc's
+// call plus its checks were nearly all of its 6% -- so those two constructors
+// take the bump themselves: one test and three instructions. Every other
+// allocation in the compiler still calls emalloc().
+//
+// What this hands back is zeroed exactly as emalloc's is: the chunks come from
+// calloc and each byte is handed out once, never reused.
+extern char *arena_pool;
+extern size_t arena_free;
+
+static inline __attribute__((always_inline)) void *arena_alloc_fixed(size_t n) {
+    if (n > arena_free) return emalloc(n);  // the rare case: a fresh chunk
+    char *p = arena_pool;
+    arena_pool += n;
+    arena_free -= n;
+    return p;
+}
+
+// n is a compile-time constant, so the round-up is too: no arithmetic at run time.
+#define ALLOC(type) \
+    ((type *)arena_alloc_fixed((sizeof(type) + (EMALLOC_ALIGN - 1)) & ~(size_t)(EMALLOC_ALIGN - 1)))
 void *vnew(size_t len, size_t esz);
 void *vgrow(void *data, size_t len);
 

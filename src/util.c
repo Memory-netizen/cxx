@@ -209,8 +209,8 @@ void error_at(SrcFile *file, uint32_t loc, const char *msg, ...) {
 }
 
 
-static char *pool;
-static size_t free_len;
+char *arena_pool;
+size_t arena_free;
 static size_t next_chunk = POOL_CHUNK_MIN;  // grows, so a small compile stays small
 
 // One function, not an inline: measured, inlining this into its sixty call sites
@@ -236,7 +236,7 @@ void *emalloc(size_t n) {
     // site left asking for more than the threshold is tests2/55_lshift_type's
     // compile; it is harmless and is a candidate for routing, not a bug.
 
-    if (free_len < n) {
+    if (arena_free < n) {
         // Chunks on demand rather than one 128 MB pool: the tail of a big pool is
         // memory that can serve nothing else, and virtual space a stray write can
         // hide in. Doubling keeps the number of calls down for a large job.
@@ -245,13 +245,13 @@ void *emalloc(size_t n) {
         if (next_chunk < POOL_CHUNK_MAX) next_chunk *= 2;
         char *p = calloc(1, chunk);
         if (!p) fatal("emalloc, out of memory");
-        pool = p;
-        free_len = chunk;
+        arena_pool = p;
+        arena_free = chunk;
     }
 
-    void *p = pool;
-    pool += n;
-    free_len -= n;
+    void *p = arena_pool;
+    arena_pool += n;
+    arena_free -= n;
     return p;
 }
 

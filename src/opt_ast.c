@@ -27,18 +27,18 @@ static bool is_ptr_const(Node *node) {
 // compares against `null`, a floating operand against 0.0 (see cast() in
 // irgen.c -- an integer 0 next to an IR `ptr` would not be valid IR).
 static Node *new_truth(Node *x) {
-    Node *zero = emalloc(sizeof(Node));
+    Node *zero = ALLOC(Node);
     zero->kind = ND_NUM;
     zero->ty = T.ty_int;
     zero->tok = x->tok;
 
-    Node *cast = emalloc(sizeof(Node));
+    Node *cast = ALLOC(Node);
     cast->kind = ND_IMCAST;
     cast->lhs = zero;
     cast->ty = x->ty;
     cast->tok = x->tok;
 
-    Node *node = emalloc(sizeof(Node));
+    Node *node = ALLOC(Node);
     node->kind = ND_NE;
     node->lhs = x;
     node->rhs = cast;
@@ -52,7 +52,7 @@ static Node *new_truth(Node *x) {
 // storage width), so truncation, sign extension and wrap-around all
 // follow from the type.
 static Node *folded_int(Int128 v, Type *ty, Node *tmpl) {
-    Node *node = emalloc(sizeof(Node));
+    Node *node = ALLOC(Node);
     node->kind = ND_NUM;
     node->ty = ty;
     node->tok = tmpl->tok;
@@ -295,7 +295,7 @@ static Node *fold_binary_int(Node *node) {
 // Create a folded fpval constant node (interchange types and long
 // double), rounded once to the target format.
 static Node *folded_fp128(Fp128 v, Type *ty, Node *tmpl) {
-    Node *node = emalloc(sizeof(Node));
+    Node *node = ALLOC(Node);
     node->kind = ND_NUM;
     node->ty = ty;
     node->tok = tmpl->tok;
