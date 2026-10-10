@@ -14,7 +14,7 @@ static Token *new_token(uint32_t kind, char *start, char *end) {
     tok->kind = kind;
     tok->loc = (uint32_t)(start - cur_file->contents);
     tok->len = end - start;
-    tok->file = cur_file;
+    tok->file_uid = (cur_file)->uid;
     tok->filename = cur_file->id;
     if (kind == TK_NL || kind == TK_WS || kind == TK_COMMENT) return tok;
     tok->is_sol = is_sol;
@@ -405,7 +405,7 @@ static void convert_utf32_str_literal(Token *tok, char *str) {
 }
 
 void convert_str_literal(Token *tok) {
-    char *str = convert_universal_chars(tok_text(tok), tok->len, tok->file);
+    char *str = convert_universal_chars(tok_text(tok), tok->len, file_of(tok->file_uid));
     switch (tok->enc_prefix) {
         case PREFIX_NONE:
         case PREFIX_u8:
@@ -1120,8 +1120,8 @@ SrcFile **get_input_files(void) { return input_files; }
 // serve here: two files can carry the same name, and #line moves the name away
 // from the file. The compiler's own sources (scratch space, <built-in>, the
 // command line) go through new_file() as well, so they are covered too.
-static SrcFile **file_tab;
-static uint32_t file_tab_cap;
+SrcFile **file_tab;
+uint32_t file_tab_cap;
 static uint32_t file_uid_seq;
 
 static void register_file(SrcFile *f) {
@@ -1137,8 +1137,6 @@ static void register_file(SrcFile *f) {
     }
     file_tab[f->uid] = f;
 }
-
-SrcFile *file_of(uint32_t uid) { return uid && uid < file_tab_cap ? file_tab[uid] : NULL; }
 
 SrcFile *new_file(char *name, int file_no, char *contents) {
     SrcFile *file = emalloc(sizeof(SrcFile));

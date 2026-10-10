@@ -12,7 +12,7 @@ static void print_indent(void) {
 static void print_loc(Node *node) {
     if (!node->tok) return;
     int line, col;
-    get_location(node->tok->file, node->tok->loc, &line, &col);
+    get_location(file_of(node->tok->file_uid), node->tok->loc, &line, &col);
     fprintf(stdout, "  Loc=<%s:%d:%d>", str(node->tok->filename), line + node->tok->line_delta, col);
 }
 

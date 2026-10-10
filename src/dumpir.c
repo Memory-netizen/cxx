@@ -1667,9 +1667,15 @@ void dump_fn(Sym *fn) {
 
 // The name a symbol is emitted under: the asm label when it has one,
 // otherwise the C identifier.
-static char *emitted_name(Sym *sym) {
-    if (sym->asm_name) return sym->asm_name;
-    return str(sym->id);
+
+
+// The same name as the interned id that stands for it: the symbol's own id, or
+// the asm name interned once. The two lists below compare these rather than the
+// strings -- doing it with strcmp cost 12% of the front end's instructions on
+// tccgen, the same "compare an id, not a string" that find_ident needed.
+static uint32_t emitted_id(Sym *sym) {
+    if (sym->asm_name) return intern(sym->asm_name, strlen(sym->asm_name));
+    return sym->id;
 }
 
 // Set of names already emitted in this module.
@@ -1681,7 +1687,7 @@ static char *emitted_name(Sym *sym) {
 // redefinition of function". Deduplicate on the emitted name; the first
 // declaration for a name wins, which is what an alias means.
 static struct {
-    char *name;
+    uint32_t id;
 } *emitted;
 static int num_emitted;
 
@@ -1698,35 +1704,35 @@ static bool is_definition(Sym *sym) { return sym->is_function ? sym->body != NUL
 // stand in for the definition left the unit defining nothing and the link
 // failed with `undefined reference to 'a'` (32 tests).
 static struct {
-    char *name;
+    uint32_t id;
 } *defined_names;
 static int num_defined_names;
 
-static bool name_is_defined(char *name) {
+static bool name_is_defined(uint32_t id) {
     for (int i = 0; i < num_defined_names; i++)
-        if (!strcmp(defined_names[i].name, name)) return true;
+        if (defined_names[i].id == id) return true;
     return false;
 }
 
-static void record_defined_name(char *name) {
-    if (name_is_defined(name)) return;
+static void record_defined_name(uint32_t id) {
+    if (name_is_defined(id)) return;
     if (!defined_names)
         defined_names = vnew(8, sizeof(defined_names[0]));
     else
         defined_names = vgrow(defined_names, num_defined_names + 1);
-    defined_names[num_defined_names++].name = name;
+    defined_names[num_defined_names++].id = id;
 }
 
 static bool already_emitted(Sym *sym) {
-    char *name = emitted_name(sym);
-    if (!is_definition(sym) && name_is_defined(name)) return true;
+    uint32_t id = emitted_id(sym);
+    if (!is_definition(sym) && name_is_defined(id)) return true;
     for (int i = 0; i < num_emitted; i++)
-        if (!strcmp(emitted[i].name, name)) return true;
+        if (emitted[i].id == id) return true;
     if (!emitted)
         emitted = vnew(8, sizeof(emitted[0]));
     else
         emitted = vgrow(emitted, num_emitted + 1);
-    emitted[num_emitted++].name = name;
+    emitted[num_emitted++].id = id;
     return false;
 }
 
@@ -1772,9 +1778,9 @@ void dump_module(Module *md, FILE *out) {
 
     num_defined_names = 0;
     for (Sym *var = md->data; var; var = var->next)
-        if (is_definition(var)) record_defined_name(emitted_name(var));
+        if (is_definition(var)) record_defined_name(emitted_id(var));
     for (Sym *fn = md->fns; fn; fn = fn->next)
-        if (is_definition(fn)) record_defined_name(emitted_name(fn));
+        if (is_definition(fn)) record_defined_name(emitted_id(fn));
 
     for (Sym *var = md->data; var; var = var->next) dump_data(var);
     if (md->data) fprintf(out_file, "\n");

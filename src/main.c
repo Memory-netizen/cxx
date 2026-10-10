@@ -900,7 +900,7 @@ static void print_tokens(Token *tok) {
             int line, col;
             Token *orig = tok;
             while (orig->origin) orig = orig->origin;
-            get_location(orig->file, orig->loc, &line, &col);
+            get_location(file_of(orig->file_uid), orig->loc, &line, &col);
             if (!opt_P)
                 while (cur_line < line + orig->line_delta) {
                     fprintf(out, "\n");

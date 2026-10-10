@@ -542,6 +542,136 @@ cxx 两种情形都重复转换后的字母，于是 `"+g"(h)` 的输入被标�
 
 **缺口表更新**：§0 的“asm 匹配约束对间接输出”一行**移除**（已实现）。
 
+### R144 优化①：`dumpir` 的按名查重改成按 id —— ✅ 已落地（tccgen 指令数 **−13.8%**）
+
+**工具上的更正**（用户指出）：valgrind/callgrind 在这台 WSL 上**完全可用** —— 我此前"跑不了"的结论错了，
+因为我 profile 的是会 `fork+exec` 的驱动进程。正确调用是直接 profile cc1：
+
+```
+valgrind --tool=callgrind ./cxx -cc1 -cc1-input <src> -cc1-output /tmp/x.ll
+```
+
+这也让「按结构插桩」那套易错手段可以退休（§R142 里 tag 不清零的错误就是这么来的）。
+
+**发现**：tccgen 的 cc1 里 **`__strcmp_avx2` 占 12.28% 指令**，来源是 `dumpir.c` 的两处按名线性查重：
+
+```c
+static bool already_emitted(Sym *sym) {
+    char *name = emitted_name(sym);
+    ...
+    for (int i = 0; i < num_emitted; i++) if (!strcmp(emitted[i].name, name)) return true;
+static bool name_is_defined(char *name) {
+    for (int i = 0; i < num_defined_names; i++) if (!strcmp(defined_names[i].name, name)) return true;
+```
+
+`emitted_name()` 返回的正是 `str(sym->id)`（interned 字符串）或 `asm_name` —— **又是「在已哈希去重的
+符号上做全量字符串比较」**，与 §R131 的 `find_ident` 同病。我上一轮把 `dumpir` 判成"调试路径、
+不在编译路径上"是错的：`-c`/`-S` 每次都要打印 IR。
+
+**改法**：新增 `emitted_id(sym)`（asm 名 intern 一次，否则直接用 `sym->id`），两张表从
+`{char *name}` 改成 `{uint32_t id}`，`name_is_defined`/`record_defined_name` 收 id，
+`emitted_name()` 随之退休（无调用者，留着会触发 `-Wunused-function`）。
+
+**验收**：
+
+| 项 | 结果 |
+|---|---|
+| **callgrind 指令数（tccgen cc1）** | 914,592,386 → **788,204,173（−13.8%）** |
+| 热点榜 | `__strcmp_avx2`（12.28%）**从榜上消失**；`already_emitted` 6.74% → 6.36%（只剩 O(n) 循环本身） |
+| `make test` | exit 0 —— conformance **325 / 0**、c2y **101 / 0** |
+| bootstrap | **cxx2 = cxx3 = cxx4 逐字节相同**，21/21 目标文件（**IR 文本一字未改**） |
+| tcctests | **106 ok / 0 failed** |
+
+**改后的热点榜**（tccgen cc1，788M 指令）与下一步目标：
+
+| 占比 | 函数 | 可做的方向 |
+|---|---|---|
+| 7.74% | `unicode.c:in_range` | 区间查表 → 二分/跳表 |
+| 6.36% | `dumpir.c:already_emitted` | 剩下的 O(n) 扫描 → 按 id 的哈希集合 |
+| 5.49% | `lexer.c:convert_keywords` | 关键词表 → 按 id 命中（表里已有 id） |
+| 5.46% + 5.42% + 4.06% | `remove_backslash_newline` / `canonicalize_newline` / `build_line_offsets` | 三趟逐字符扫描 → 合成一趟 |
+| 4.03% | `util.c:emalloc` | `POOL_SIZE` 128 MB 一次 calloc → 按需分块 |
+| 3.68% / 3.07% / 2.57% | `tokenize` / `vfprintf`（打印 IR）/ `param_sym_of` | 分别在词法、IR 打印、参数查找 |
+
+### R143 查 dumptok/dumpast（用户提醒）—— 顺带把③的改动面大幅缩小，并修正我两处错误
+
+**先答问题**：`dumptok.c` 与 `dumpast.c` 在 slice 3 里都已转换（`tok->file` → `file_of(tok->file_uid)`），
+构建、残留检查与四道闸门都过了。但用户提醒得有道理 —— 真正要问的是**它们相对于「释放 token 池」
+这一点在流水线的什么位置**。
+
+**流水线（main.c 行号）**：
+
+| 行 | 动作 | 需要 token？ |
+|---|---|---|
+| 1014 | `tokenize_file` | — |
+| 1017 | `dump_raw_tokens`（`-dump-raw-tokens`） | 是 |
+| 1019 | `preprocess` | — |
+| 1021 | `dump_tokens`（`-dump-tokens`） | 是 |
+| 1030 | `-E` → `print_tokens` → return | 是 |
+| 1035/1037 | `filter_tokens` / `join_adjacent_string_literals` | — |
+| 1039 | `parse` | — |
+| **1041** | **`dump_ast`（`-ast-dump`）** | **是**（`dumpast.c` 读 3 处 token 文本） |
+| **1043** | **`fold_ast`** | **是** |
+| 1050 | `-fsyntax-only` → return | — |
+| 1052 | `irgen` | **否**（`irgen.c`/`dumpir.c` 各 0 处） |
+
+**token 读者的完整人口（这次含所有文件）**：`parser.c` 111、**`opt_ast.c` 17**、`preprocess.c` 13、
+`dumpast.c` 3；`dumptok.c`/`irgen.c`/`dumpir.c`/`lexer.c`/`main.c` 各 0。
+**它们全部在 1043 之前。**
+
+**由此得到三条结论**：
+
+1. **`fold_ast` 定义在 `opt_ast.c:905`**（我此前说「在 type.c」是错的）。它一边改写节点一边
+   `node->tok = x->tok` 保留位置，并用 `node->tok` 报 17 处诊断 —— 也就是说**折叠器本身**是
+   「跨过释放点」的主要嫌疑，而它在释放点**之前**跑完。
+2. **把释放点定在 `fold_ast` 之后、`irgen` 之前，就没有任何 token 读者在释放之后运行** ——
+   irgen 与 dumpir 一处都不读 token。所以 **③ 不需要转换那 ~35–40 处诊断**：§R138 把改动面估成
+   「约 40 处要改 Loc」是基于「它们跨过释放点」的错误前提。**③ 的实际工作量 = 给 token 单独开一个池 +
+   在 `fold_ast` 之后释放 + 验证**，比原计划小一个数量级。
+3. **但这是三条硬约束**，必须写进代码注释并尽量加断言：
+   - `dump_ast` 必须留在 `fold_ast` **之前**（它依赖 token 池）；
+   - `-fsyntax-only` 的返回点在 `fold_ast` 之后，释放必须在返回前完成；
+   - `irgen`/`dumpir` 的诊断必须保持不读 token（现状全是 `fatal()`，一旦有人加了带位置的诊断，
+     释放后就是悬垂指针）。
+   （`Node.tok` 在释放后仍指向已释放的池，但那之后没人读它 —— 这一点要靠上面的约束来守，而不是靠类型。）
+
+**修正后的③（下一轮）**：① 给 token 阶段单独的 arena（`emalloc` 之外的第二套 bump 池，
+只由 `new_token`/`copy_token` 等 token 分配使用）；② `fold_ast` 之后释放它；
+③ 用「分配器统计 + 峰值 RSS」验证（预期 sqlite3 `-fsyntax-only` 345 → 约 115 MB）；
+④ 顺带用 `-dump-tokens`/`-ast-dump` 用例确认两个打印器仍正常。
+
+### R142 ②slice3 落地：`Token.file` → 4 字节 uid + 尾部打包，**`sizeof(Token)` 64 → 56** —— ✅ 已落地；内存效果**未证实**
+
+按 §R140/R141 的修正方案实现：
+
+- `Token.file`（8 字节指针）→ `Token.file_uid`（4 字节），文件表（`file_tab`）从 lexer.c 导出，
+  `file_of()` 改为头文件里的 **static inline**（`tok_text()` 是最热的那条路径，不能变成跨 TU 调用）。
+- 尾部打包：`{uint16_t lit_suffix | uint8_t enc_prefix}` + `kind` + 3 个 `bool`（6 字节）
+  → `uint16_t lit_suffix` + `uint8_t kind` + `uint8_t enc_prefix:4` + 三个 `bool:1`（4 字节）。
+  位域读取与原来的普通字段写法相同，**调用点一处未改**。
+- 全部写者/读者转换：`tok->file = X` → `tok->file_uid = X->uid`；`tok->file->` → `file_of(tok->file_uid)->`；
+  裸 `tok->file` → `file_of(tok->file_uid)`（lexer/preprocess/util/dumpast/dumptok/main 共 6 个文件）。
+
+**验收**：
+
+| 项 | 结果 |
+|---|---|
+| `sizeof(Token)` | **56**（改前实测 64，−12.5%） |
+| `make test` | exit 0 —— conformance **325 / 0**、c2y **101 / 0** |
+| bootstrap | **cxx2 = cxx3 = cxx4 逐字节相同**，21/21 目标文件（字段布局改了而输出不变，这是关键证据） |
+| tcctests | **106 ok / 0 failed** |
+| sqlite3 `-fsyntax-only` 峰值 RSS | **356,772 KB**，改前记录 356,600 KB —— **没有可测到的下降** ✗ |
+
+**为什么峰值没动，以及我的错误**：我按「2,709,107 个 Token × 8 字节 ≈ 21 MB」预期下降，但那个
+2,709,107 来自 §R137 的分结构统计，而**那次插桩的 tag 从不清零** —— `mem_tag` 在某个构造器里置位后
+一直保留，后续分配都被计入该 tag。所以「Token 137.1 MB / 2,709,107 次」是**上界而非实数**，
+真实的 `Token` 数量可能远小于此，8 字节 × 真实数量也就只有几 MB，测不出来。
+
+**因此下一步不是③，而是先把人口数准**：给 `new_token` 加一个只计数的探针（不改 tag 语义），
+量出 sqlite3 真实的 Token 数量与字节数，再决定「释放 token 池」（③）的收益到底有多少 ——
+§R137 的**阶段**分布是准的（按阶段边界记账，不受 tag 影响）：tokens 230.3 MB / parse 114.9 MB，
+所以③的上界（把整个 token 阶段释放掉）仍是 −230 MB 量级，只是 Token 结构本身占多少要重测。
+
 ### R141 ②slice2 落地：`SrcFile` 唯一 uid + `Loc` 20 字节 + **全部诊断已走 Loc 路径** —— ✅ 已落地并证明等价
 
 按 §R140 的修正方案实现：

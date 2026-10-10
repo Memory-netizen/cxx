@@ -745,3 +745,40 @@ tcctests 106 / 0；三类消息逐字不变，其中 `#line 100 "other.c"` 报 `
 「显示名 ≠ 物理文件」的那一类。剩下的是 slice 3：改掉 `tok->file` 的 28 处读者并删掉该字段
 （−6 字节/记号 ≈ −21 MB），再进入③（释放 token 池，−230 MB）。
 
+### 8r. `Token` 64 → 56 字节（slice 3），但峰值 RSS 没动 —— 并修正 §8m 的一处口径
+
+slice 3：`Token.file`（8 字节指针）→ `file_uid`（4 字节，配 `file_of()` 内联访问器与 lexer.c 的文件表），
+尾部 6 字节打包成 4（`lit_suffix` 2 + `kind` 1 + `enc_prefix:4`/三个 `bool:1` 1），
+写者读者全数转换。**`sizeof(Token)` = 56**（改前 64）；`make test` 325 / 0、bootstrap **逐字节相同 + 21/21 对象**、
+tcctests 106 / 0；sqlite3 `-fsyntax-only` 峰值 **356,772 KB**，与改前记录的 356,600 KB 无差异 ✗。
+
+原因是我预期的基数错了：§8m 的「Token 137.1 MB / 2,709,107 次」来自按结构打点的插桩，而那次
+**`mem_tag` 置位后从不清零**，后续分配都被算进最后一个 tag —— 所以那个数是**上界**。
+§8m 的**阶段**分布不受影响（按阶段边界记账）：tokens 230.3 MB、parse 114.9 MB，仍然成立。
+下一步：用只计数、不改 tag 的探针量出真实 Token 数量与字节数，再定③（释放 token 池）的收益。
+
+### 8s. dumptok/dumpast 的时机检查：③ 的改动面因此小一个数量级
+
+流水线（main.c）：`dump_raw_tokens`(1017) 与 `dump_tokens`(1021) 在 `parse` 之前；
+**`dump_ast`(1041) 在 `parse` 之后、`fold_ast`(1043) 之前**；`irgen`(1052) 一处都不读 token。
+token 读者的完整人口：parser 111、**opt_ast 17**（`fold_ast` 就定义在 `opt_ast.c:905`）、
+preprocess 13、dumpast 3 —— **全部在 `fold_ast` 之前**。
+所以把释放点定在 `fold_ast` 之后，**没有任何读者在释放之后运行**：③ 不需要转换诊断，
+只需「给 token 单独开池 + 在 `fold_ast` 后释放 + 验证」。三条硬约束要记住：
+`dump_ast` 必须留在 `fold_ast` 前、`-fsyntax-only` 的返回前要释放、`irgen`/`dumpir` 的诊断不得读 token。
+
+### 8t. callgrind 可用（更正），优化①：`dumpir` 按 id 查重 —— tccgen 指令数 −13.8%
+
+**工具更正**：valgrind 在这台 WSL 上可用，正确姿势是直接 profile cc1 进程
+（`valgrind --tool=callgrind ./cxx -cc1 -cc1-input <src> -cc1-output /tmp/x.ll`）；
+我此前 profile 的是会 fork 的驱动，所以只看到几个函数。**按结构插桩那套易错手段可以退休。**
+
+tccgen 的 cc1（914,592,386 条指令）里 **`__strcmp_avx2` 占 12.28%**，来自 `dumpir.c` 的
+`already_emitted`/`name_is_defined` 两处按名线性查重 —— 比的是 `str(sym->id)` 这种**已经
+interned 的字符串**，与 `find_ident` 同病；而 `dumpir` 是每次 `-c`/`-S` 都跑的 IR 打印器，
+不是调试路径（我上一轮的判断有误）。
+
+改成 `emitted_id(sym)` + 两张 `{uint32_t id}` 表之后：**914,592,386 → 788,204,173（−13.8%）**，
+`__strcmp_avx2` 从热点榜消失；`make test` 325 / 0、bootstrap **逐字节相同 + 21/21 对象**（IR 文本未变）、
+tcctests 106 / 0。新的热点榜与各自的方向见计划 §R144。
+

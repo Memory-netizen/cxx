@@ -566,8 +566,6 @@ typedef struct Loc {
 // origin chain finds.
 Loc loc_of(Token *tok);
 
-// The file a handle names, for the stages that keep locations but no tokens.
-SrcFile *file_of(uint32_t uid);
 
 struct Token {
     Token *next;
@@ -578,23 +576,28 @@ struct Token {
         Fp128 fpval;  // TK_NUM floating constants
         Int128 ival;  // TK_NUM integer constants and TK_CHARLIT values
     };
-    SrcFile *file;  // Source location
+    uint32_t file_uid;  // SrcFile::uid -- the display-name id is not a file
     uint32_t loc;   // byte offset into file->contents
     uint32_t len;
     uint32_t filename;  // Diagnostic filename
     int32_t line_delta;
-    union {
-        // SUF_NONDEC is 0x800: needs more than 8 bits
-        uint16_t lit_suffix;  // Used if kind == TK_NUM
-        uint8_t enc_prefix;   // Used if kind == TK_CHARLIT or kind == TK_STRLIT
-    };
+    // SUF_NONDEC is 0x800: the suffix needs more than 8 bits.
+    uint16_t lit_suffix;  // Used if kind == TK_NUM
     uint8_t kind;
-    bool is_sol;        // true if is starting of line
-    bool is_leadingws;  // true if is leading space
-    bool noexpand;      // true if this token shall not be macro-expanded
+    // The flags, in the byte that used to hold only the encoding: reading a
+    // bitfield reads like the plain field did, so no caller changes.
+    uint8_t enc_prefix : 4;  // Used if kind == TK_CHARLIT or kind == TK_STRLIT
+    bool is_sol : 1;         // true if is starting of line
+    bool is_leadingws : 1;   // true if is leading space
+    bool noexpand : 1;       // true if this token shall not be macro-expanded
 };
 
-static inline char *tok_text(Token *tok) { return tok->file->contents + tok->loc; }
+// The file table lives in lexer.c, where every file is opened and registered.
+// Inline here so that reading a token's text stays a load.
+extern SrcFile **file_tab;
+extern uint32_t file_tab_cap;
+static inline SrcFile *file_of(uint32_t uid) { return uid && uid < file_tab_cap ? file_tab[uid] : 0; }
+static inline char *tok_text(Token *tok) { return file_of(tok->file_uid)->contents + tok->loc; }
 
 bool match(Token **rest, Token *tok, uint32_t kind);
 Token *skip(Token *tok, uint32_t kind);

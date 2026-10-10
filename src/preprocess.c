@@ -330,7 +330,7 @@ static bool exist_include(Token *tok, char *filename, bool is_dquote) {
     while (orig->origin) orig = orig->origin;
 
     if (filename[0] != '/' && is_dquote) {
-        char *path = format("%s/%s", dirname(strdup(orig->file->name)), filename);
+        char *path = format("%s/%s", dirname(strdup(file_of(orig->file_uid)->name)), filename);
         if (file_exists(path)) return true;
     }
 
@@ -982,7 +982,7 @@ static Token *paste(Token *lhs, Token *rhs) {
     char *buf = format("%.*s%.*s", lhs->len, tok_text(lhs), rhs->len, tok_text(rhs));
 
     // Tokenize the resulting string.
-    SrcFile *file = new_file(lhs->file->name, lhs->file->file_no, buf);
+    SrcFile *file = new_file(file_of(lhs->file_uid)->name, file_of(lhs->file_uid)->file_no, buf);
     Token *tok = tokenize(file);
     if (tok->next->kind != TK_EOF) error(lhs, "pasting forms '%s', an invalid token", buf);
 
@@ -1546,7 +1546,7 @@ static void read_embed_params(Token **rest, Token *arg, Token *eol, int64_t *lim
 static char *resolve_embed_path(Token *tok, char *filename, bool is_dquote) {
     if (filename[0] == '/') return filename;
     if (is_dquote) {
-        char *path = format("%s/%s", dirname(strdup(tok->file->name)), filename);
+        char *path = format("%s/%s", dirname(strdup(file_of(tok->file_uid)->name)), filename);
         if (file_exists(path)) return path;
         if (file_exists(filename)) return filename;
     }
@@ -1642,7 +1642,7 @@ static void detect_include_guard2(void) {
         guard = vnew(16, sizeof(guard[0]));
     else
         guard = vgrow(guard, num_guard + 1);
-    guard[num_guard].path = file_identity(str(guard_macro->file->id));
+    guard[num_guard].path = file_identity(str(file_of(guard_macro->file_uid)->id));
     guard[num_guard++].macro = guard_macro;
 }
 
@@ -1798,7 +1798,7 @@ static void add_pragma(Token *tok) {
         pragma_path = vnew(16, sizeof(pragma_path[0]));
     else
         pragma_path = vgrow(pragma_path, num_pragma + 1);
-    pragma_path[num_pragma++] = file_identity(str(tok->file->id));
+    pragma_path[num_pragma++] = file_identity(str(file_of(tok->file_uid)->id));
 }
 
 static bool find_pragma(uint32_t file_id) {
@@ -1873,12 +1873,12 @@ static Token *include_file(Token **rest, Token *tok, char *path, Token *filename
         filename_tok->filename = display_name;
         error(filename_tok, "%s: cannot open file: %s", path, strerror(errno));
     }
-    push_file(tok, tok2->file);
+    push_file(tok, file_of(tok2->file_uid));
     detect_include_guard1(tok2);
     *rest = tok2;
 
     int line, col;
-    get_location(tok2->file, tok2->loc, &line, &col);
+    get_location(file_of(tok2->file_uid), tok2->loc, &line, &col);
     return new_linemarker(tok2, line, display_name);
 }
 
@@ -1908,7 +1908,7 @@ static Token *read_line_marker(Token **rest, Token *tok) {
     if (*tok_text(num) == '0') error(start, "line marker directive interprets number as decimal, not octal");
 
     int line, col;
-    get_location(start->file, start->loc, &line, &col);
+    get_location(file_of(start->file_uid), start->loc, &line, &col);
     line_delta = line_no - line - 1;
 
     // The expanded chain ends at NULL -- it carries no EOF token of its own --
@@ -2053,7 +2053,7 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
             if (cond_incl->next) error(cond_incl->if_tok, "unterminated conditional directive");
             if (include_depth > 0) {
                 tok = pop_file();
-                get_location(tok->file, tok->loc, &line, &col);
+                get_location(file_of(tok->file_uid), tok->loc, &line, &col);
                 cur = cur->next = new_linemarker(tok, line + line_delta, display_name);
                 continue;
             } else {
@@ -2145,7 +2145,7 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
             char *filename = read_include_filename(&tok, tok->next, &is_dquote);
 
             if (filename[0] != '/' && is_dquote) {
-                char *path = format("%s/%s", dirname(strdup(tk_hash->file->name)), filename);
+                char *path = format("%s/%s", dirname(strdup(file_of(tk_hash->file_uid)->name)), filename);
                 if (file_exists(path)) {
                     next_path = 0;
                     Token *tmp = include_file(&tok, tok, path, tk_hash->next->next);
@@ -2379,7 +2379,7 @@ static Token *line_macro(Token **rest, Token *tmpl) {
     Token *orig = tmpl;
     while (orig->origin) orig = orig->origin;
     int line, col;
-    get_location(orig->file, orig->loc, &line, &col);
+    get_location(file_of(orig->file_uid), orig->loc, &line, &col);
     return ident_to_num(tmpl, line + orig->line_delta);
 }
 
@@ -2402,7 +2402,7 @@ static Token *include_depth_macro(Token **rest, Token *tmpl) {
 static Token *timestamp_macro(Token **rest, Token *tmpl) {
     *rest = tmpl->next;
     struct stat st;
-    if (stat(tmpl->file->name, &st) != 0) return new_str_token("??? ??? ?? ??:??:?? ????", tmpl);
+    if (stat(file_of(tmpl->file_uid)->name, &st) != 0) return new_str_token("??? ??? ?? ??:??:?? ????", tmpl);
 
     char buf[30];
     ctime_r(&st.st_mtime, buf);
@@ -2537,7 +2537,7 @@ static void write_scratch_space(Token *tok, char *str) {
     scratch->contents = vgrow(scratch->contents, space_pos + len + 1);
     scratch->num_lines = 0;  // Rebuild_line_offsets table
     sprintf(scratch->contents + space_pos, "%s\n", str);
-    tok->file = scratch;
+    tok->file_uid = (scratch)->uid;
     tok->filename = scratch->id;
     tok->loc = space_pos;
     tok->len = len;
@@ -2667,7 +2667,7 @@ void join_adjacent_string_literals(Token *tok) {
 Token *preprocess(Token *tok) {
     init_macros();
 
-    SrcFile *file = tok->file;
+    SrcFile *file = file_of(tok->file_uid);
     Token *main;
     Token *tok_cmd = prep_cmdline();
     if (!tok_cmd) {

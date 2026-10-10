@@ -85,7 +85,7 @@ static void emit_diag_loc(char *level, Loc at, const char *msg, va_list ap) {
 Loc loc_of(Token *tok) {
     Token *orig = tok;
     while (orig->origin) orig = orig->origin;
-    Loc at = {orig->filename, orig->file->uid, orig->loc, orig->len, orig->line_delta};
+    Loc at = {orig->filename, file_of(orig->file_uid)->uid, orig->loc, orig->len, orig->line_delta};
     return at;
 }
 
@@ -121,7 +121,7 @@ void error(Token *tok, const char *msg, ...) {
     va_start(ap, msg);
     Token *orig = tok;
     while (orig->origin) orig = orig->origin;
-    emit_diag("error", orig->filename, orig->line_delta, orig->file, orig->loc, msg, ap);
+    emit_diag("error", orig->filename, orig->line_delta, file_of(orig->file_uid), orig->loc, msg, ap);
     va_end(ap);
     exit(1);
 }
@@ -149,7 +149,7 @@ void pedantic(Token *tok, const char *msg, ...) {
     va_start(ap, msg);
     Token *orig = tok;
     while (orig->origin) orig = orig->origin;
-    emit_diag(opt_pedantic_errors ? "error" : "warning", orig->filename, orig->line_delta, orig->file, orig->loc, msg,
+    emit_diag(opt_pedantic_errors ? "error" : "warning", orig->filename, orig->line_delta, file_of(orig->file_uid), orig->loc, msg,
               ap);
     va_end(ap);
     if (opt_pedantic_errors) exit(1);
@@ -192,7 +192,7 @@ void warning(int group, Token *tok, const char *msg, ...) {
     va_start(ap, msg);
     Token *orig = tok;
     while (orig->origin) orig = orig->origin;
-    emit_diag(opt_werror ? "error" : "warning", orig->filename, orig->line_delta, orig->file, orig->loc, msg, ap);
+    emit_diag(opt_werror ? "error" : "warning", orig->filename, orig->line_delta, file_of(orig->file_uid), orig->loc, msg, ap);
     va_end(ap);
     if (opt_werror) exit(1);
 }
