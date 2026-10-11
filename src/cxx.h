@@ -1821,6 +1821,12 @@ void dump_ast(Module *prog);
 void array_bracket_note(Type *ty, Token *l_bracket);
 void dump_raw_tokens(Token *tok);
 void dump_tokens(Token *tok);
+// Set when -dump-raw-tokens or -dump-tokens is given. White space and comments
+// exist as tokens only so those two can print them -- filter_tokens() skips
+// them before anything else reads the stream -- so the lexer builds them only
+// when the answer is yes. On sqlite3.c they are a third of the token arena,
+// and leaving them out also keeps the tokens that survive adjacent in memory.
+extern bool opt_keep_ws_comments;
 
 //
 // opt_ast.c

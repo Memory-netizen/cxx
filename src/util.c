@@ -211,6 +211,8 @@ void error_at(SrcFile *file, uint32_t loc, const char *msg, ...) {
 
 char *arena_pool;
 size_t arena_free;
+
+bool opt_keep_ws_comments;
 static size_t next_chunk = POOL_CHUNK_MIN;  // grows, so a small compile stays small
 
 // One function, not an inline: measured, inlining this into its sixty call sites

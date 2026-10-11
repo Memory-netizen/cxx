@@ -997,9 +997,14 @@ Token *tokenize(SrcFile *file) {
         if (*p == '/' && p[1] == '/') {
             char *q = p + 2;
             while (*q != '\n') q++;
-            tok = new_token(TK_COMMENT, p, q);
+            // A comment is leading white space for the token that follows it,
+            // so that flag is all this has to leave behind when the dump
+            // options are off.
             is_leadingws = true;
-            cur = cur->next = tok;
+            if (opt_keep_ws_comments) {
+                tok = new_token(TK_COMMENT, p, q);
+                cur = cur->next = tok;
+            }
             p = q;
             continue;
         }
@@ -1008,14 +1013,20 @@ Token *tokenize(SrcFile *file) {
         if (*p == '/' && p[1] == '*') {
             char *q = strstr(p + 2, "*/");
             if (!q) error_at(cur_file, (uint32_t)((p)-cur_file->contents), "unterminated /* comment");
-            tok = new_token(TK_COMMENT, p, q + 2);
             is_leadingws = true;
-            cur = cur->next = tok;
+            if (opt_keep_ws_comments) {
+                tok = new_token(TK_COMMENT, p, q + 2);
+                cur = cur->next = tok;
+            }
             p = q + 2;
             continue;
         }
 
-        // Read white space
+        // Read white space. A run of it is one token, so the run has to be
+        // measured either way; what the dump options decide is whether it also
+        // becomes one. The two bits the parser reads off the *next* token --
+        // start of line, leading white space -- are set here as they always
+        // were, so the stream the parser sees does not change.
         if (is_ascii_space((unsigned char)*p)) {
             char *q = p;
             int nl = 0;
@@ -1025,13 +1036,15 @@ Token *tokenize(SrcFile *file) {
                     continue;
                 }
             }
-            tok = new_token(TK_WS, p, q);
-            if (nl) {
-                tok->kind = TK_NL;
-                is_sol = true;
-            }
+            if (nl) is_sol = true;
+            // Blank space before a newline is leading white space; the newline
+            // itself is not. "  \n  x" is both.
             if (*(q - 1) != '\n') is_leadingws = true;
-            cur = cur->next = tok;
+            if (opt_keep_ws_comments) {
+                tok = new_token(TK_WS, p, q);
+                if (nl) tok->kind = TK_NL;
+                cur = cur->next = tok;
+            }
             p = q;
             continue;
         }

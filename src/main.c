@@ -621,11 +621,13 @@ static void parse_args(int argc, char **argv) {
 
         if (!strcmp(argv[i], "-dump-tokens")) {
             opt_dump_tokens = true;
+            opt_keep_ws_comments = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-raw-dump-tokens") || !strcmp(argv[i], "-dump-raw-tokens")) {
             opt_dump_raw_tokens = true;
+            opt_keep_ws_comments = true;
             continue;
         }
 
