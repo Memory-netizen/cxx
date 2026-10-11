@@ -1256,31 +1256,48 @@ SrcFile *new_file(char *name, int file_no, char *contents) {
 // is full of them, in strings and in macros -- does not, so this walks the
 // backslashes only rather than every byte of the file. p[len] is the terminator,
 // so reading p[1] at the last byte is safe.
-static bool needs_newline_fix(char *p, size_t len) {
-    // Any carriage return at all means the pass runs, so by the time the walk
-    // below starts there is no '\r' left in the buffer: a backslash followed by
-    // one has already been answered, and testing for it again would be a
-    // condition that cannot fire.
-    if (memchr(p, '\r', len)) return true;
+// 0: nothing to rewrite. -1: a carriage return, so the pass runs whatever else is
+// there. +1: a spliced line and no carriage return. The pass needs that distinction
+// -- it is what tells the run copy whether to look for '\r' at all -- and this is
+// where it is already known; asking again in the pass meant a second scan of every
+// file, which on a nine-megabyte translation unit is a megabyte of instructions.
+// Where rewriting has to start, or NULL if nowhere. *has_cr reports whether the
+// text holds a carriage return at all, which the run copy needs before it scans for
+// one. Returning the position rather than a yes/no lets the pass begin there: the
+// text before it is already correct and never has to be copied at all.
+static char *newline_fix_start(char *p, size_t len, bool *has_cr) {
+    char *cr = memchr(p, '\r', len);
+    *has_cr = cr != NULL;
+
     char *end = p + len;
-    while ((p = memchr(p, '\\', (size_t)(end - p)))) {
-        if (p[1] == '\n') return true;
-        p++;
+    char *splice = NULL;
+    char *q = p;
+    while ((q = memchr(q, '\\', (size_t)(end - q)))) {
+        // A backslash followed by CR counts too: it comes before the CR, and if the
+        // start were the CR the backslash would be left unprocessed.
+        if (q[1] == '\n' || q[1] == '\r') {
+            splice = q;
+            break;
+        }
+        q++;
     }
-    return false;
+
+    if (cr && splice) return cr < splice ? cr : splice;
+    return cr ? cr : splice;
 }
 
 static void canonicalize_and_splice(char *p) {
-    // Most files need nothing, and the check is what tells them so.
     size_t len = strlen(p);
-    if (!needs_newline_fix(p, len)) return;
+    bool has_cr = false;
+    char *start = newline_fix_start(p, len, &has_cr);
+    if (!start) return;
 
-    // Two pointers: r reads, w writes. They are equal until the first thing that
-    // has to disappear, and afterwards w trails r -- which is why the bulk copy
-    // below is memmove and not memcpy: the regions overlap, and memcpy's contract
-    // forbids that (glibc's may copy backwards for large sizes).
+    // r reads and w writes; they are equal until something has to disappear, and
+    // the bulk copy below is memmove rather than memcpy because after that they
+    // overlap. Both begin where the rewriting begins: everything before it is
+    // already what it should be.
     char *end = p + len;
-    char *r = p, *w = p;
+    char *r = start, *w = start;
     int swallowed = 0;
 
     while (r < end) {
@@ -1316,8 +1333,10 @@ static void canonicalize_and_splice(char *p) {
                 char *c = memchr(r, '\n', (size_t)(end - r));
                 if (c && c < stop) stop = c;
             }
-            char *a = memchr(r, '\r', (size_t)(end - r));
-            if (a && a < stop) stop = a;
+            if (has_cr) {
+                char *a = memchr(r, '\r', (size_t)(end - r));
+                if (a && a < stop) stop = a;
+            }
             char *q = r;
             while ((q = memchr(q, '\\', (size_t)(end - q)))) {
                 if (q[1] == '\n' || q[1] == '\r') {

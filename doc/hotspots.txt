@@ -1,0 +1,54 @@
+cxx front end: current hot spots
+  workload : tinycc/tccgen.c, cxx -cc1 -cc1-input tccgen.c -cc1-output /tmp/x.ll
+  build    : make (DEBUG=1 = -g -O0) -- named symbols and call trees.
+             The release build (-O2 -DNDEBUG) measures 234,559,923 for the
+             same workload; changes are judged by A/B there.
+  generated: 2026-10-10 18:57 UTC
+
+== self cost, top 22
+Ir                   file:function
+--------------------------------------------------------------------------------
+49,161,177 (11.39%)  src/dumpir.c:ofmt [/home/memory/cxx/cxx]
+28,991,340 ( 6.72%)  src/lexer.c:tokenize [/home/memory/cxx/cxx]
+18,005,031 ( 4.17%)  src/dumpir.c:oput [/home/memory/cxx/cxx]
+17,619,174 ( 4.08%)  ./string/../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:__memcpy_avx_unaligned_erms [/usr/lib/x86_64-linux-gnu/libc.so.6]
+16,666,747 ( 3.86%)  src/lexer.c:read_ident [/home/memory/cxx/cxx]
+16,657,775 ( 3.86%)  src/lexer.c:new_token [/home/memory/cxx/cxx]
+12,340,346 ( 2.86%)  src/cxx.h:read_ident
+12,303,861 ( 2.85%)  src/lexer.c:convert_universal_chars [/home/memory/cxx/cxx]
+12,199,978 ( 2.83%)  src/util.c:fnv_hash_32 [/home/memory/cxx/cxx]
+ 8,660,391 ( 2.01%)  src/util.c:emalloc [/home/memory/cxx/cxx]
+ 8,589,446 ( 1.99%)  src/dumpir.c:ou64 [/home/memory/cxx/cxx]
+ 8,132,877 ( 1.88%)  src/cxx.h:copy_token
+ 7,759,712 ( 1.80%)  src/preprocess.c:expand_macro'2 [/home/memory/cxx/cxx]
+ 7,356,053 ( 1.70%)  src/parser.c:enum_decl [/home/memory/cxx/cxx]
+ 6,583,777 ( 1.53%)  src/preprocess.c:copy_token [/home/memory/cxx/cxx]
+ 6,467,024 ( 1.50%)  src/util.c:intern [/home/memory/cxx/cxx]
+ 6,128,145 ( 1.42%)  src/cxx.h:new_token
+ 6,098,186 ( 1.41%)  src/preprocess.c:preprocess2 [/home/memory/cxx/cxx]
+ 5,734,389 ( 1.33%)  src/preprocess.c:subst [/home/memory/cxx/cxx]
+ 5,204,724 ( 1.21%)  src/preprocess.c:filter_tokens [/home/memory/cxx/cxx]
+ 5,163,575 ( 1.20%)  ./string/../sysdeps/x86_64/multiarch/memchr-avx2.S:__memchr_avx2 [/usr/lib/x86_64-linux-gnu/libc.so.6]
+ 5,144,874 ( 1.19%)  src/lexer.c:read_punct [/home/memory/cxx/cxx]
+
+== inclusive cost, top 18
+Ir                    file:function
+--------------------------------------------------------------------------------
+431,576,283 (100.0%)  ???:0x000000000001f540 [/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2]
+431,429,903 (99.97%)  ???:(below main) [/home/memory/cxx/cxx]
+431,429,891 (99.97%)  ./csu/../csu/libc-start.c:__libc_start_main@@GLIBC_2.34 [/usr/lib/x86_64-linux-gnu/libc.so.6]
+431,232,405 (99.92%)  ./csu/../sysdeps/nptl/libc_start_call_main.h:(below main) [/usr/lib/x86_64-linux-gnu/libc.so.6]
+431,201,679 (99.91%)  /home/memory/cxx/src/main.c:main
+431,201,679 (99.91%)  src/main.c:main [/home/memory/cxx/cxx]
+431,094,299 (99.89%)  src/main.c:cc1 [/home/memory/cxx/cxx]
+217,303,796 (50.35%)  /home/memory/cxx/src/preprocess.c:preprocess
+217,303,796 (50.35%)  src/preprocess.c:preprocess [/home/memory/cxx/cxx]
+204,102,202 (47.29%)  src/preprocess.c:preprocess2 [/home/memory/cxx/cxx]
+143,190,686 (33.18%)  src/preprocess.c:expand_macro'2 [/home/memory/cxx/cxx]
+126,188,443 (29.24%)  /home/memory/cxx/src/lexer.c:tokenize_file
+126,188,443 (29.24%)  src/lexer.c:tokenize_file [/home/memory/cxx/cxx]
+123,786,578 (28.68%)  src/lexer.c:tokenize [/home/memory/cxx/cxx]
+107,186,194 (24.84%)  /home/memory/cxx/src/dumpir.c:dump_module
+107,186,194 (24.84%)  src/dumpir.c:dump_module [/home/memory/cxx/cxx]
+103,785,761 (24.05%)  src/dumpir.c:dump_fn [/home/memory/cxx/cxx]
+102,613,212 (23.78%)  src/preprocess.c:include_file [/home/memory/cxx/cxx]

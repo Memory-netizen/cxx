@@ -1,0 +1,97 @@
+cxx front end: current bottleneck
+  build    : make DEBUG=0 CPPFLAGS=-g  (-O2 -DNDEBUG -g)
+  generated: 2026-10-11 00:45 UTC
+
+== tccgen: total
+I   refs:      228,244,311
+
+== tccgen: self cost, top 20
+Ir                   file:function
+--------------------------------------------------------------------------------
+28,028,907 (12.28%)  src/lexer.c:tokenize [/home/memory/prof/cxx.prof]
+24,827,246 (10.88%)  src/dumpir.c:ofmt [/home/memory/prof/cxx.prof]
+10,613,257 ( 4.65%)  src/util.c:intern [/home/memory/prof/cxx.prof]
+ 9,102,622 ( 3.99%)  src/cxx.h:tokenize
+ 8,954,784 ( 3.92%)  src/lexer.c:convert_universal_chars [/home/memory/prof/cxx.prof]
+ 8,708,126 ( 3.82%)  ./string/../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:__memset_avx2_unaligned_erms [/usr/lib/x86_64-linux-gnu/libc.so.6]
+ 7,847,763 ( 3.44%)  src/preprocess.c:expand_macro'2 [/home/memory/prof/cxx.prof]
+ 7,018,333 ( 3.07%)  src/dumpir.c:ou64 [/home/memory/prof/cxx.prof]
+ 6,781,145 ( 2.97%)  src/preprocess.c:subst [/home/memory/prof/cxx.prof]
+ 6,320,888 ( 2.77%)  src/preprocess.c:preprocess2 [/home/memory/prof/cxx.prof]
+ 5,870,554 ( 2.57%)  src/parser.c:declspecs [/home/memory/prof/cxx.prof]
+ 5,375,081 ( 2.35%)  ./string/../sysdeps/x86_64/multiarch/memchr-avx2.S:__memchr_avx2 [/usr/lib/x86_64-linux-gnu/libc.so.6]
+ 4,680,132 ( 2.05%)  src/util.c:emalloc [/home/memory/prof/cxx.prof]
+ 4,133,477 ( 1.81%)  ./string/../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:__memcpy_avx_unaligned_erms [/usr/lib/x86_64-linux-gnu/libc.so.6]
+ 3,905,860 ( 1.71%)  src/dumpir.c:oput [/home/memory/prof/cxx.prof]
+ 3,057,243 ( 1.34%)  src/preprocess.c:expand_macro [/home/memory/prof/cxx.prof]
+ 3,037,474 ( 1.33%)  src/preprocess.c:read_macro_arg_one [/home/memory/prof/cxx.prof]
+ 2,785,733 ( 1.22%)  ./stdio-common/./stdio-common/vfprintf-internal.c:__printf_buffer [/usr/lib/x86_64-linux-gnu/libc.so.6]
+ 2,567,444 ( 1.12%)  ./string/../sysdeps/x86_64/multiarch/strlen-avx2.S:__strlen_avx2 [/usr/lib/x86_64-linux-gnu/libc.so.6]
+ 2,378,596 ( 1.04%)  src/preprocess.c:scan_pragma_op [/home/memory/prof/cxx.prof]
+
+== tccgen: inclusive cost, top 16
+Ir                    file:function
+--------------------------------------------------------------------------------
+228,244,311 (100.0%)  ???:0x000000000001f540 [/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2]
+228,099,518 (99.94%)  ???:(below main) [/home/memory/prof/cxx.prof]
+228,099,506 (99.94%)  ./csu/../csu/libc-start.c:__libc_start_main@@GLIBC_2.34 [/usr/lib/x86_64-linux-gnu/libc.so.6]
+228,038,097 (99.91%)  ./csu/../sysdeps/nptl/libc_start_call_main.h:(below main) [/usr/lib/x86_64-linux-gnu/libc.so.6]
+228,001,650 (99.89%)  /home/memory/cxx/src/main.c:main
+228,001,650 (99.89%)  src/main.c:main [/home/memory/prof/cxx.prof]
+114,718,555 (50.26%)  /home/memory/cxx/src/preprocess.c:preprocess
+114,718,548 (50.26%)  src/preprocess.c:preprocess [/home/memory/prof/cxx.prof]
+108,275,442 (47.44%)  src/preprocess.c:preprocess2 [/home/memory/prof/cxx.prof]
+ 73,790,960 (32.33%)  src/preprocess.c:expand_macro'2 [/home/memory/prof/cxx.prof]
+ 63,941,607 (28.01%)  src/irgen.c:gen_stmt'2 [/home/memory/prof/cxx.prof]
+ 62,508,152 (27.39%)  /home/memory/cxx/src/lexer.c:tokenize_file
+ 62,508,152 (27.39%)  src/lexer.c:tokenize_file [/home/memory/prof/cxx.prof]
+ 60,080,311 (26.32%)  src/lexer.c:tokenize [/home/memory/prof/cxx.prof]
+ 53,255,622 (23.33%)  src/preprocess.c:include_file [/home/memory/prof/cxx.prof]
+ 49,907,717 (21.87%)  src/parser.c:stmt'2 [/home/memory/prof/cxx.prof]
+
+== sqlite3: total
+I   refs:      1,102,281,637
+
+== sqlite3: self cost, top 20
+Ir                    file:function
+--------------------------------------------------------------------------------
+477,133,554 (43.29%)  ./string/../sysdeps/x86_64/multiarch/memchr-avx2.S:__memchr_avx2 [/usr/lib/x86_64-linux-gnu/libc.so.6]
+191,973,738 (17.42%)  src/lexer.c:tokenize [/home/memory/prof/cxx.prof]
+ 52,670,095 ( 4.78%)  src/util.c:intern [/home/memory/prof/cxx.prof]
+ 51,517,746 ( 4.67%)  src/cxx.h:tokenize
+ 49,555,879 ( 4.50%)  src/lexer.c:convert_universal_chars [/home/memory/prof/cxx.prof]
+ 43,073,648 ( 3.91%)  src/preprocess.c:preprocess2 [/home/memory/prof/cxx.prof]
+ 21,308,126 ( 1.93%)  src/preprocess.c:expand_macro [/home/memory/prof/cxx.prof]
+ 15,799,136 ( 1.43%)  src/lexer.c:convert_ppnumber [/home/memory/prof/cxx.prof]
+ 15,736,367 ( 1.43%)  src/preprocess.c:scan_pragma_op [/home/memory/prof/cxx.prof]
+ 15,515,114 ( 1.41%)  src/preprocess.c:preprocess [/home/memory/prof/cxx.prof]
+ 13,332,113 ( 1.21%)  src/util.c:emalloc [/home/memory/prof/cxx.prof]
+ 13,008,759 ( 1.18%)  src/preprocess.c:expand_macro'2 [/home/memory/prof/cxx.prof]
+ 10,973,949 ( 1.00%)  ./string/../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:__memcpy_avx_unaligned_erms [/usr/lib/x86_64-linux-gnu/libc.so.6]
+ 10,634,910 ( 0.96%)  src/preprocess.c:join_adjacent_string_literals [/home/memory/prof/cxx.prof]
+ 10,438,984 ( 0.95%)  src/preprocess.c:subst [/home/memory/prof/cxx.prof]
+  9,783,688 ( 0.89%)  ./string/../sysdeps/x86_64/multiarch/memcmp-avx2-movbe.S:__memcmp_avx2_movbe [/usr/lib/x86_64-linux-gnu/libc.so.6]
+  9,760,588 ( 0.89%)  ./string/../sysdeps/x86_64/multiarch/strlen-avx2.S:__strlen_avx2 [/usr/lib/x86_64-linux-gnu/libc.so.6]
+  7,347,840 ( 0.67%)  ./ctype/../include/ctype.h:__ctype_b_loc [/usr/lib/x86_64-linux-gnu/libc.so.6]
+  6,949,842 ( 0.63%)  src/lexer.c:get_location [/home/memory/prof/cxx.prof]
+  6,278,122 ( 0.57%)  src/lexer.c:convert_keywords [/home/memory/prof/cxx.prof]
+
+== sqlite3: inclusive cost, top 16
+Ir                      file:function
+--------------------------------------------------------------------------------
+1,102,281,637 (100.0%)  ???:0x000000000001f540 [/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2]
+1,102,136,844 (99.99%)  ???:(below main) [/home/memory/prof/cxx.prof]
+1,102,136,832 (99.99%)  ./csu/../csu/libc-start.c:__libc_start_main@@GLIBC_2.34 [/usr/lib/x86_64-linux-gnu/libc.so.6]
+1,102,075,423 (99.98%)  ./csu/../sysdeps/nptl/libc_start_call_main.h:(below main) [/usr/lib/x86_64-linux-gnu/libc.so.6]
+1,102,075,359 (99.98%)  /home/memory/cxx/src/main.c:main
+1,102,075,359 (99.98%)  src/main.c:main [/home/memory/prof/cxx.prof]
+  855,484,217 (77.61%)  /home/memory/cxx/src/lexer.c:tokenize_file
+  855,484,217 (77.61%)  src/lexer.c:tokenize_file [/home/memory/prof/cxx.prof]
+  477,133,554 (43.29%)  ./string/../sysdeps/x86_64/multiarch/memchr-avx2.S:__memchr_avx2 [/usr/lib/x86_64-linux-gnu/libc.so.6]
+  392,559,673 (35.61%)  src/lexer.c:tokenize [/home/memory/prof/cxx.prof]
+  253,634,531 (23.01%)  /home/memory/cxx/src/preprocess.c:preprocess
+  253,634,524 (23.01%)  src/preprocess.c:preprocess [/home/memory/prof/cxx.prof]
+  196,532,286 (17.83%)  src/preprocess.c:preprocess2 [/home/memory/prof/cxx.prof]
+   80,401,185 ( 7.29%)  src/preprocess.c:expand_macro'2 [/home/memory/prof/cxx.prof]
+   72,250,221 ( 6.55%)  src/preprocess.c:expand_macro [/home/memory/prof/cxx.prof]
+   69,274,995 ( 6.28%)  src/lexer.c:convert_universal_chars [/home/memory/prof/cxx.prof]
