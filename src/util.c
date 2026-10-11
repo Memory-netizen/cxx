@@ -365,6 +365,44 @@ static uint32_t fnv_hash_32(const unsigned char *s, int len) {
     return hash;
 }
 
+// Reads 8 bytes at `p` as a word. The union is what makes that defined: an
+// unaligned pointer is fine because the member is not the object being
+// accessed, and char is a character type, so reading characters through it is
+// allowed -- a plain *(uint64_t *)p would be neither, and -fno-strict-aliasing
+// is not something to switch on for the whole compiler to get one load.
+typedef union {
+    uint64_t u64;
+    unsigned char c[8] __attribute__((aligned(1), may_alias));
+} U64Load;
+
+static inline __attribute__((always_inline)) uint64_t in_bytes_fast(const void *p) {
+    U64Load x;
+    __builtin_memcpy(&x, p, 8);
+    return x.u64;
+}
+
+// Compares the first len bytes of two strings. Whole chunks of 8 go through
+// the loop; the tail is one load of the 8 bytes that *contain* the last byte,
+// masked down to the bytes that count. That is the whole trick: for a 5-byte
+// identifier it is a load, a shift, a mask and a compare, in place of a
+// memcmp call and its size dispatch.
+//
+// It reads exactly len bytes from each string, never past the last byte, so
+// neither side needs slack of any kind: the table's copy has len bytes plus
+// the NUL the miss path wrote, and the caller's buffer must have len readable
+// bytes or intern could not have copied it.
+static bool same_str(const char *a, const char *b, uint32_t len) {
+    while (len >= 8) {
+        if (in_bytes_fast(a) != in_bytes_fast(b)) return false;
+        a += 8;
+        b += 8;
+        len -= 8;
+    }
+    if (len == 0) return true;
+    uint64_t mask = (~(uint64_t)0) >> ((8 - len) * 8);
+    return (in_bytes_fast(a) & mask) == (in_bytes_fast(b) & mask);
+}
+
 uint32_t intern(char *s, uint32_t len) {
     Bucket *b;
     uint32_t h;
@@ -375,7 +413,7 @@ uint32_t intern(char *s, uint32_t len) {
     n = b->nstr;
 
     for (i = 0; i < n; i++)
-        if (b->len[i] == len && memcmp(s, b->str[i], len) == 0) return h | (i << IBits);
+        if (b->len[i] == len && same_str(s, b->str[i], len)) return h | (i << IBits);
 
     if (n == 1 << (32 - IBits)) fatal("interning table overflow");
     if (n == 0) {
@@ -392,6 +430,36 @@ uint32_t intern(char *s, uint32_t len) {
     b->str[n][len] = '\0';
     return h | (n << IBits);
 }
+
+// Compared directly rather than through intern(): two strings of the same
+// length are exactly the case the mask could get wrong, and a mask that keeps
+// too many bytes makes different strings compare equal, which would silently
+// merge two identifiers into one. Lengths 0..40 cover the handover from the
+// chunk loop to the masked tail at 8, 16, 24 and 32, and the guard at 40 is
+// the last long one.
+//
+// Not in release builds: this interns a 40-byte name that no other compile
+// interns, it lands in a bucket that already holds three stored names of three
+// different lengths, and the three of them then walk one entry further on
+// every lookup -- measured, 0.6M instructions on tccgen, which is half of what
+// this whole change saves. The debug build is the one every gate and the
+// bootstrap run, and it pays nothing for it.
+#ifndef NDEBUG
+__attribute__((constructor)) static void check_same_str(void) {
+    static char a[41], b[41];
+    for (uint32_t len = 0; len <= 40; len++) {
+        for (uint32_t i = 0; i <= len; i++) a[i] = b[i] = (char)('a' + i % 26);
+        if (!same_str(a, b, len)) fatal("same_str: len %u, identical bytes", len);
+
+        // A byte that differs at every position, including just past len.
+        for (uint32_t i = 0; i <= len; i++) {
+            b[i] = (char)(a[i] ^ 1);
+            if (same_str(a, b, len) != (i >= len)) fatal("same_str: len %u, byte %u", len, i);
+            b[i] = a[i];
+        }
+    }
+}
+#endif
 
 char *str(uint32_t id) {
     assert(id >> IBits < itbl[id & IMask].nstr);
