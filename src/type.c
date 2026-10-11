@@ -1594,7 +1594,7 @@ void add_type(Node *node) {
                 Node *stmt = node->body;
                 while (stmt->next && stmt->next->kind != ND_SP_RESTORE) stmt = stmt->next;
                 // a trailing label wraps the value expression
-                if (stmt->kind == ND_LABEL || stmt->kind == ND_CASE) stmt = stmt->label_body;
+                if (stmt->kind == ND_LABEL || stmt->kind == ND_CASE) stmt = NODE_LABEL(stmt)->label_body;
                 if (stmt->kind == ND_EXPR_STMT && stmt->lhs)
                     node->ty = stmt->lhs->ty;
                 else
@@ -1615,7 +1615,7 @@ void add_type(Node *node) {
             break;
         case ND_LABEL:
         case ND_CASE:
-            add_type(node->label_body);
+            add_type(NODE_LABEL(node)->label_body);
             break;
         case ND_SWITCH:
             add_type(node->cond);
@@ -1628,7 +1628,9 @@ void add_type(Node *node) {
         case ND_WHILE:
         case ND_DO:
         case ND_FOR:
-            add_type(node->init);
+            // Only ND_FOR has a first clause. The others used to read the
+            // loop slot of the union, where a null was sitting.
+            if (node->kind == ND_FOR) add_type(NODE_STMT(node)->init);
             add_type(node->cond);
             if (node->cond && !is_scalar(node->cond->ty)) error(node->cond->tok, "scalar type is required in here");
             add_type(node->then);
@@ -1651,17 +1653,17 @@ void add_type(Node *node) {
         case ND_CAS:
             add_type(node->lhs);
             add_type(node->rhs);
-            add_type(node->desired);
+            add_type(NODE_ATOMIC(node)->desired);
             lvalue_convert(&node->lhs);
             lvalue_convert(&node->rhs);
-            lvalue_convert(&node->desired);
+            lvalue_convert(&NODE_ATOMIC(node)->desired);
             node->ty = T.ty_bool;
             break;
         case ND_ATOMICRMW:
             add_type(node->lhs);
-            add_type(node->desired);
+            add_type(NODE_ATOMIC(node)->desired);
             lvalue_convert(&node->lhs);
-            lvalue_convert(&node->desired);
+            lvalue_convert(&NODE_ATOMIC(node)->desired);
             node->ty = type_unqual(node->lhs->ty->base);
             break;
         // Variadic access. va_start/va_end have no value; va_arg yields the
@@ -1691,7 +1693,7 @@ void add_type(Node *node) {
         // output an object it writes, and an indirect operand of either kind
         // is an address. The operands are the only expressions it has.
         case ND_ASM:
-            for (AsmOperand *op = node->asm_ops; op; op = op->next) {
+            for (AsmOperand *op = (*NODE_ASM_SIDE(node))->ops; op; op = op->next) {
                 add_type(op->expr);
                 // An operand with a memory constraint is the object's
                 // address, and a bit-field has none: gcc and clang both

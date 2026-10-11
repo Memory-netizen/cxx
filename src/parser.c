@@ -105,6 +105,13 @@ Node *new_node(NodeKind kind, Token *tok) {
     Node *node = ALLOC(Node);
     node->kind = kind;
     node->tok = tok;
+    // The kinds whose payload does not fit in Node's three slots carry a block
+    // of their own, sized by the same list the accessors are checked against.
+    // Every block size is a multiple of eight, so the bump pointer stays
+    // aligned; the arena hands out zeroed bytes, which is what leaves `inner`
+    // NULL for the kinds that have no block at all.
+    size_t side = node_side_size(kind);
+    if (side) node->inner = arena_alloc_fixed(side);
     return node;
 }
 
@@ -3578,7 +3585,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             Node *zero_init = new_binary(ND_INIT, new_var_node(zero_sym, start), new_num(0, start), tok);
             Node *target = new_unary(ND_DEREF, object, tok);
             Node *store = new_binary(ND_AS, target, new_var_node(zero_sym, start), tok);
-            store->mem_order = MEM_ORDER_RELEASE + 1;
+            store->order = MEM_ORDER_RELEASE + 1;
             return new_binary(ND_COMMA, zero_init, store, tok);
         }
         case ATOMIC_STORE:
@@ -3603,7 +3610,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             Node *desired_init = new_binary(ND_INIT, new_var_node(desired_sym, start), desired, tok);
             Node *target = new_unary(ND_DEREF, object, tok);
             Node *store = new_binary(ND_AS, target, new_var_node(desired_sym, start), tok);
-            store->mem_order = order + 1;
+            store->order = order + 1;
             return new_binary(ND_COMMA, desired_init, store, tok);
         }
         case ATOMIC_LOAD:
@@ -3630,7 +3637,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
 
             Sym *result_sym = new_lvar(id_anon, type_unqual(object->ty->base));
             Node *src = new_unary(ND_DEREF, object, tok);
-            src->mem_order = order + 1;
+            src->order = order + 1;
             Node *load = new_binary(ND_AS, new_var_node(result_sym, start), src, tok);
             Node *result = new_binary(ND_COMMA, load, new_var_node(result_sym, start), tok);
             if (!ret) return result;
@@ -3693,9 +3700,9 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             Sym *result_sym = new_lvar(id_anon, value_ty);
             Node *rmw = new_node(ND_ATOMICRMW, start);
             rmw->lhs = object;
-            rmw->desired = new_var_node(operand_sym, start);
-            rmw->mem_order = order + 1;
-            rmw->armw_op = aop;
+            NODE_ATOMIC(rmw)->desired = new_var_node(operand_sym, start);
+            rmw->order = order + 1;
+            NODE_ATOMIC(rmw)->op = aop;
             add_type(rmw);
             Node *rmw_assign = temp_assign(result_sym, rmw, tok);
             return atomic_result(operand_init, rmw_assign, result_sym, tok);
@@ -3753,9 +3760,9 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             Node *cas = new_node(ND_CAS, start);
             cas->lhs = object;
             cas->rhs = expected;
-            cas->desired = new_var_node(desired_sym, start);
-            cas->mem_order = success_order + 1;
-            cas->mem_order1 = failure_order + 1;
+            NODE_ATOMIC(cas)->desired = new_var_node(desired_sym, start);
+            cas->order = success_order + 1;
+            cas->order1 = failure_order + 1;
             cas->is_weak = is_weak;
             add_type(cas);
             Node *cas_assign = temp_assign(result_sym, cas, tok);
@@ -3770,7 +3777,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             tok = skip(tok->next, TK_LPAREN);
             int order = atomic_order(&tok, MO_ATOMICRMW);
             *rest = skip(tok, TK_RPAREN);
-            fence->mem_order = order + 1;
+            fence->order = order + 1;
             fence->is_signal = is_signal;
             fence->ty = T.ty_void;
             return fence;
@@ -3915,25 +3922,25 @@ static Node *atomic_compound_assign(Node *lhs, NodeKind op, Node *rhs, bool post
         new_imcast(&desired, t);
         Node *arm = new_node(ND_ATOMICRMW, tok);
         arm->lhs = new_var_node(v_addr, tok);
-        arm->desired = desired;
+        NODE_ATOMIC(arm)->desired = desired;
         if (is_flonum(t)) {
-            arm->armw_op = op == ND_ADDAS ? A_FADD : A_FSUB;
+            NODE_ATOMIC(arm)->op = op == ND_ADDAS ? A_FADD : A_FSUB;
         } else {
             switch (op) {
                 case ND_ADDAS:
-                    arm->armw_op = A_ADD;
+                    NODE_ATOMIC(arm)->op = A_ADD;
                     break;
                 case ND_SUBAS:
-                    arm->armw_op = A_SUB;
+                    NODE_ATOMIC(arm)->op = A_SUB;
                     break;
                 case ND_ANDAS:
-                    arm->armw_op = A_AND;
+                    NODE_ATOMIC(arm)->op = A_AND;
                     break;
                 case ND_ORAS:
-                    arm->armw_op = A_OR;
+                    NODE_ATOMIC(arm)->op = A_OR;
                     break;
                 default:
-                    arm->armw_op = A_XOR;
+                    NODE_ATOMIC(arm)->op = A_XOR;
                     break;
             }
         }
@@ -3974,7 +3981,7 @@ static Node *atomic_compound_assign(Node *lhs, NodeKind op, Node *rhs, bool post
         Node *cas = new_node(ND_CAS, tok);
         cas->lhs = new_var_node(v_addr, tok);
         cas->rhs = new_unary(ND_ADDR, new_var_node(v_old, tok), tok);
-        cas->desired = new_var_node(v_new, tok);
+        NODE_ATOMIC(cas)->desired = new_var_node(v_new, tok);
         add_type(cas);
         Node *cond = new_unary(ND_NOT, cas, tok);
         add_type(cond);
@@ -4733,9 +4740,9 @@ static Node *unary(Token **rest, Token *tok) {
         case TK_AND: {
             pedantic(tok, "ISO C forbids taking the address of a label");
             Node *node = new_node(ND_LABEL_VAL, tok);
-            node->label = label_id_of(get_ident(tok->next));
+            NODE_LABEL(node)->label = label_id_of(get_ident(tok->next));
 
-            node->goto_next = gotos;
+            NODE_LABEL(node)->goto_next = gotos;
             gotos = node;
 
             *rest = tok->next->next;
@@ -5473,7 +5480,7 @@ static int64_t eval2(Node *node, uint32_t *sym) {
             return 0;
         case ND_LABEL_VAL:
             if (!sym || !cur_fn) error(node->tok, "not a compile-time constant");
-            char *lbl = format("%s..%s", str(cur_fn->id), str(node->label));
+            char *lbl = format("%s..%s", str(cur_fn->id), str(NODE_LABEL(node)->label));
             *sym = intern(lbl, strlen(lbl));
             return 0;
         default:
@@ -5897,7 +5904,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             // handed out. An access may keep the lower alignment; this is the
             // one that has to be right.
             alloc->rhs = new_ulong(object_align(var->ty, var->align), tok);
-            alloc->base_ty = base_ty;
+            NODE_CALL(alloc)->base_ty = base_ty;
             add_type(alloc);
             Node *vla_var = new_var_node(var, tok);
             add_type(vla_var);
@@ -6025,8 +6032,8 @@ static LoopScope *loop_scope_of(Node *name, bool is_break) {
         if (!fr->labels) continue;
         Node *t = fr->labels;
         do {
-            if (t->label == name->label) return fr;
-            t = t->label_ring;
+            if (NODE_LABEL(t)->label == NODE_LABEL(name)->label) return fr;
+            t = NODE_LABEL(t)->label_ring;
         } while (t && t != fr->labels);
     }
     return NULL;
@@ -6150,7 +6157,7 @@ static Node *switch_stmt(Token **rest, Token *tok) {
     // default to catch the value -- when a break leaves it, or when the last
     // statement of the body runs off its end. Only a switch with a default
     // whose every label ends in a jump never falls through.
-    falls_through = !node->default_case || fr.seen || falls_through;
+    falls_through = !NODE_STMT(node)->default_case || fr.seen || falls_through;
     cnt_blk(1);  // gen_switch: merge (case labels count in label())
 
     loop_scopes = loop.next;
@@ -6242,7 +6249,7 @@ static Node *for_stmt(Token **rest, Token *tok) {
     if (is_typename(tok, true) || is_attr_start(tok)) {
         if (is_attr_start(tok) && attr_decl_then_semi(tok)) {
             // AttrDecl: a standalone attribute declaration.
-            node->init = new_node(ND_EXPR_STMT, tok);
+            NODE_STMT(node)->init = new_node(ND_EXPR_STMT, tok);
             tok = attr_decl(tok);
         } else {
             SClass sclass = 0;
@@ -6250,10 +6257,10 @@ static Node *for_stmt(Token **rest, Token *tok) {
             int funcspec = 0;
             Attr *attrs = NULL;
             Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec, &attrs);
-            node->init = declaration(&tok, tok, basety, sclass, align, funcspec, attrs);
+            NODE_STMT(node)->init = declaration(&tok, tok, basety, sclass, align, funcspec, attrs);
         }
     } else {
-        node->init = expr_stmt(&tok, tok);
+        NODE_STMT(node)->init = expr_stmt(&tok, tok);
     }
 
     // Cond
@@ -6304,12 +6311,12 @@ static Node *goto_stmt(Token **rest, Token *tok) {
         return node;
     }
     Node *node = new_node(ND_GOTO, tok);
-    node->label = label_id_of(get_ident(tok->next));
+    NODE_LABEL(node)->label = label_id_of(get_ident(tok->next));
     // Which handlers this jump runs is only known once the label is, so the
     // scope it starts from waits next to it (see resolve_goto_labels).
     note_jump_scope(node, scope);
 
-    node->goto_next = gotos;
+    NODE_LABEL(node)->goto_next = gotos;
     gotos = node;
     falls_through = false;
 
@@ -6322,12 +6329,12 @@ static Node *get_named_loop(Token **rest, Token *tok, bool is_break) {
     Node *cur = named_loop;
     bool match = false;
     while (cur) {
-        if (cur->label == label_id) {
-            if (cur->is_loop) match = true;
-            if (cur->is_switch && is_break) match = true;
+        if (NODE_LABEL(cur)->label == label_id) {
+            if (NODE_LABEL(cur)->is_loop) match = true;
+            if (NODE_LABEL(cur)->is_switch && is_break) match = true;
             break;
         }
-        cur = cur->loop_next;
+        cur = NODE_LABEL(cur)->loop_next;
     }
     if (!match) {
         char *kind = is_break ? "break" : "continue";
@@ -6345,13 +6352,13 @@ static Node *continue_stmt(Token **rest, Token *tok) {
     tok = tok->next;
 
     if (tok->kind == TK_IDENT) {
-        node->label = tok->id;
-        node->target = get_named_loop(&tok, tok, false);
+        NODE_LABEL(node)->label = tok->id;
+        NODE_LABEL(node)->target = get_named_loop(&tok, tok, false);
     }
 
     // The handlers of every scope this jump leaves run before it.
-    LoopScope *fr = loop_scope_of(node->target, false);
-    if (fr) node->unwind = cleanup_leaving(scope, fr->scp, node->tok);
+    LoopScope *fr = loop_scope_of(NODE_LABEL(node)->target, false);
+    if (fr) NODE_UNWIND(node)->unwind = cleanup_leaving(scope, fr->scp, node->tok);
 
     falls_through = false;
     *rest = skip(tok, TK_SEMI);
@@ -6365,15 +6372,15 @@ static Node *break_stmt(Token **rest, Token *tok) {
     tok = tok->next;
 
     if (tok->kind == TK_IDENT) {
-        node->label = tok->id;
-        node->target = get_named_loop(&tok, tok, true);
+        NODE_LABEL(node)->label = tok->id;
+        NODE_LABEL(node)->target = get_named_loop(&tok, tok, true);
     }
 
     // The frame on top is the loop or switch this break leaves -- right for
     // the plain form; the GNU named form is attributed to the innermost one.
     if (brk_frame) brk_frame->seen = true;
-    LoopScope *fr = loop_scope_of(node->target, true);
-    if (fr) node->unwind = cleanup_leaving(scope, fr->scp, node->tok);
+    LoopScope *fr = loop_scope_of(NODE_LABEL(node)->target, true);
+    if (fr) NODE_UNWIND(node)->unwind = cleanup_leaving(scope, fr->scp, node->tok);
     falls_through = false;
     *rest = skip(tok, TK_SEMI);
     return node;
@@ -6391,7 +6398,7 @@ static Node *return_stmt(Token **rest, Token *tok) {
         *rest = tok->next->next;
         // A return leaves every scope of the function; the result is read
         // first, which is gen_ret's business.
-        node->unwind = cleanup_leaving(scope, NULL, tok);
+        NODE_UNWIND(node)->unwind = cleanup_leaving(scope, NULL, tok);
         return node;
     }
 
@@ -6402,7 +6409,7 @@ static Node *return_stmt(Token **rest, Token *tok) {
     add_type(node);
     check_asop(ret, node->lhs, CTX_RET);
     new_imcast(&node->lhs, ret);
-    node->unwind = cleanup_leaving(scope, NULL, tok);
+    NODE_UNWIND(node)->unwind = cleanup_leaving(scope, NULL, tok);
 
     return node;
 }
@@ -6410,13 +6417,13 @@ static Node *return_stmt(Token **rest, Token *tok) {
 static void check_label(uint32_t label, Token *tok) {
     Node *cur = labels;
     while (cur) {
-        if (cur->label == label) {
+        if (NODE_LABEL(cur)->label == label) {
             // The token carries the name that was written; the id may be the
             // mangled one a __label__ declaration gave it.
             diag("error", tok, "redefinition of label ‘%s’", str(tok->id));
             diag_exit("note", cur->tok, "previous definition is here");
         }
-        cur = cur->goto_next;
+        cur = NODE_LABEL(cur)->goto_next;
     }
 }
 
@@ -6427,7 +6434,7 @@ static void check_label(uint32_t label, Token *tok) {
 static void check_case(int64_t lo, int64_t hi, bool is_range, Token *tok) {
     for (Node *cur = cur_sw->case_next; cur; cur = cur->case_next) {
         int64_t clo = int128_to_i64(cur->ival);
-        int64_t chi = cur->is_range ? int128_to_i64(cur->ival_end) : clo;
+        int64_t chi = NODE_LABEL(cur)->is_range ? int128_to_i64(NODE_LABEL(cur)->ival_end) : clo;
         if (hi < clo || chi < lo) continue;
         if (chi == clo && hi == lo) {
             diag("error", tok, "duplicate case value ‘%ld’", lo);
@@ -6445,7 +6452,7 @@ static void check_case(int64_t lo, int64_t hi, bool is_range, Token *tok) {
 //     | "default" ":"
 // ConstRangeExp ::= ConstExp "..." ConstExp
 static Node *label(Token **rest, Token *tok) {
-    Node dummy = {}, *cur = &dummy;
+    Node *head = NULL, *cur = NULL;
     int idx = -1;
     // Label ::= AttrSpec* (Ident | "case" ... | "default") ":". If no
     // label follows, leave the attributes for the statement.
@@ -6467,38 +6474,42 @@ static Node *label(Token **rest, Token *tok) {
             // a case label that a normal label leads into as deliberate.
             falls_through = false;
             Node *node = new_node(ND_LABEL, tok);
-            node->label = label_id_of(tok->id);
+            NODE_LABEL(node)->label = label_id_of(tok->id);
             note_jump_scope(node, scope);
-            check_label(node->label, tok);
-            node->goto_next = labels;
+            check_label(NODE_LABEL(node)->label, tok);
+            NODE_LABEL(node)->goto_next = labels;
             labels = node;
             if (idx < 0 && cur_fn) {
                 idx = cur_fn->num_lbl++;
                 cnt_blk(1);
             }
-            node->blk_idx = idx;
+            NODE_LABEL(node)->blk_idx = idx;
 
-            cur = cur->label_ring = node;
+            if (cur) NODE_LABEL(cur)->label_ring = node;
+            else head = node;
+            cur = node;
             tok = tok->next->next;
             continue;
         }
         if (tok->kind == TK_DEFAULT) {
             if (!cur_sw) error(tok, "‘default’ label not within a switch statement");
-            if (cur_sw->default_case) {
+            if (NODE_STMT(cur_sw)->default_case) {
                 diag("error", tok, "multiple default labels in one switch");
-                diag_exit("note", cur_sw->default_case->tok, "this is the first default label");
+                diag_exit("note", NODE_STMT(cur_sw)->default_case->tok, "this is the first default label");
             }
             check_fallthrough(tok);
             Node *node = new_node(ND_CASE, tok);
             note_jump_scope(node, scope);
             tok = skip(tok->next, TK_COLON);
-            cur_sw->default_case = node;
+            NODE_STMT(cur_sw)->default_case = node;
             if (idx < 0 && cur_fn) {
                 idx = cur_fn->num_lbl++;
                 cnt_blk(1);
             }
-            node->blk_idx = idx;
-            cur = cur->label_ring = node;
+            NODE_LABEL(node)->blk_idx = idx;
+            if (cur) NODE_LABEL(cur)->label_ring = node;
+            else head = node;
+            cur = node;
             continue;
         }
         if (tok->kind == TK_CASE) {
@@ -6517,12 +6528,14 @@ static Node *label(Token **rest, Token *tok) {
                     idx = cur_fn->num_lbl++;
                     cnt_blk(1);
                 }
-                node->blk_idx = idx;
+                NODE_LABEL(node)->blk_idx = idx;
 
                 node->case_next = cur_sw->case_next;
                 cur_sw->case_next = node;
 
-                cur = cur->label_ring = node;
+                if (cur) NODE_LABEL(cur)->label_ring = node;
+                else head = node;
+                cur = node;
                 tok = tok->next;
                 continue;
             }
@@ -6542,8 +6555,8 @@ static Node *label(Token **rest, Token *tok) {
             Node *node = new_node(ND_CASE, tk_case);
             note_jump_scope(node, scope);
             node->ival = int128_set_i(val1);
-            node->ival_end = int128_set_i(val2);
-            node->is_range = true;
+            NODE_LABEL(node)->ival_end = int128_set_i(val2);
+            NODE_LABEL(node)->is_range = true;
             if (idx < 0 && cur_fn) {
                 idx = cur_fn->num_lbl++;
                 cnt_blk(1);
@@ -6551,18 +6564,22 @@ static Node *label(Token **rest, Token *tok) {
                 // label, and that comparison needs a block of its own.
                 cnt_blk(1);
             }
-            node->blk_idx = idx;
+            NODE_LABEL(node)->blk_idx = idx;
             node->case_next = cur_sw->case_next;
             cur_sw->case_next = node;
-            cur = cur->label_ring = node;
+            if (cur) NODE_LABEL(cur)->label_ring = node;
+            else head = node;
+            cur = node;
             tok = skip(tok, TK_COLON);
             continue;
         }
         break;
     }
     *rest = tok;
-    cur->label_ring = dummy.label_ring;
-    return dummy.label_ring;
+    // A ring: the last entry points back at the first, which is how
+    // push_named_loop() finds the end of the labels one statement declared.
+    if (cur) NODE_LABEL(cur)->label_ring = head;
+    return head;
 }
 
 static uint32_t push_named_loop(Node *lb, Token *tok) {
@@ -6576,13 +6593,13 @@ static uint32_t push_named_loop(Node *lb, Token *tok) {
     Node *tmp = lb;
     do {
         if (tmp->kind == ND_LABEL) {
-            tmp->is_loop = is_loop;
-            tmp->is_switch = is_switch;
-            tmp->loop_next = named_loop;
+            NODE_LABEL(tmp)->is_loop = is_loop;
+            NODE_LABEL(tmp)->is_switch = is_switch;
+            NODE_LABEL(tmp)->loop_next = named_loop;
             named_loop = tmp;
             i++;
         }
-        tmp = tmp->label_ring;
+        tmp = NODE_LABEL(tmp)->label_ring;
     } while (tmp != lb);
 
     return i;
@@ -6806,7 +6823,7 @@ static char *asm_tmpl_conv(Token *tok, char *src, AsmOperand *ops, Node **labels
             int k = -1;
             if (name) {
                 for (int j = 0; j < nlabels; j++)
-                    if (labels[j]->label == intern(name, nlen)) k = j;
+                    if (NODE_LABEL(labels[j])->label == intern(name, nlen)) k = j;
                 if (k < 0) error(tok, "unknown symbolic operand name in inline assembly string");
             } else {
                 if (num < nops || num >= nops + (long)nlabels) error(tok, "invalid ‘asm’: ‘%%l’ operand isn’t a label");
@@ -6935,18 +6952,18 @@ static Token *asm_clobbers(Token **rest, Token *tok, char **cons) {
 // of kind ND_NOP is one of these rather than a jump.
 static Token *asm_goto_labels(Token **rest, Token *tok, Node *node) {
     while (tok->kind == TK_IDENT) {
-        if (!node->asm_labels)
-            node->asm_labels = vnew(4, sizeof(Node *));
+        if (!(*NODE_ASM_SIDE(node))->labels)
+            (*NODE_ASM_SIDE(node))->labels = vnew(4, sizeof(Node *));
         else
-            node->asm_labels = vgrow(node->asm_labels, node->asm_nlabels + 1);
+            (*NODE_ASM_SIDE(node))->labels = vgrow((*NODE_ASM_SIDE(node))->labels, (*NODE_ASM_SIDE(node))->nlabels + 1);
 
         Token *name = tok;
         Node *ref = new_node(ND_NOP, name);
-        ref->label = get_ident(name);
+        NODE_LABEL(ref)->label = get_ident(name);
         note_jump_scope(ref, scope);
-        ref->goto_next = gotos;
+        NODE_LABEL(ref)->goto_next = gotos;
         gotos = ref;
-        node->asm_labels[node->asm_nlabels++] = ref;
+        (*NODE_ASM_SIDE(node))->labels[(*NODE_ASM_SIDE(node))->nlabels++] = ref;
 
         tok = tok->next;
         if (tok->kind != TK_COMMA) break;
@@ -6967,7 +6984,12 @@ static Token *asm_goto_labels(Token **rest, Token *tok, Node *node) {
 static Node *asm_stmt(Token **rest, Token *tok) {
     Token *start = tok;
     Node *node = new_node(ND_ASM, start);
-    tok = asm_qualifiers(tok->next, &node->asm_flags);
+    // The asm group is one indirection away now, and this is the only place an
+    // ND_ASM is built, so this is where it is allocated. emalloc zeroes, so the
+    // fields the parser does not set read as zero -- which is what they were
+    // when they were members of every node.
+    (*NODE_ASM_SIDE(node)) = emalloc(sizeof(AsmSide));
+    tok = asm_qualifiers(tok->next, &(*NODE_ASM_SIDE(node))->flags);
     tok = skip(tok, TK_LPAREN);
 
     if (tok->kind != TK_STRLIT) error(tok, "expected string literal in ‘asm’");
@@ -7017,7 +7039,7 @@ static Node *asm_stmt(Token **rest, Token *tok) {
             tok = asm_goto_labels(&tok, tok, node);
         sect++;
     }
-    if (node->asm_nlabels && !(node->asm_flags & ASM_GOTO)) error(start, "expected ‘goto’ before asm goto label list");
+    if ((*NODE_ASM_SIDE(node))->nlabels && !((*NODE_ASM_SIDE(node))->flags & ASM_GOTO)) error(start, "expected ‘goto’ before asm goto label list");
 
     // Two operands may not share a name: the template refers to them by it.
     for (AsmOperand *op = ops; op; op = op->next)
@@ -7025,16 +7047,16 @@ static Node *asm_stmt(Token **rest, Token *tok) {
             if (op->name && x->name && !strcmp(op->name, x->name))
                 error(op->tok, "duplicate ‘asm’ operand name ‘%s’", op->name);
 
-    node->asm_ops = ops;
-    node->asm_nops = nouts + nins;
+    (*NODE_ASM_SIDE(node))->ops = ops;
+    (*NODE_ASM_SIDE(node))->nops = nouts + nins;
     // The block control falls through to when the template does not jump to
     // one of its labels: an asm goto is a terminator, so what follows it is
     // not the rest of this one.
-    if (node->asm_nlabels) cnt_blk(1);
+    if ((*NODE_ASM_SIDE(node))->nlabels) cnt_blk(1);
     // A statement with no output is one both references treat as volatile:
     // there is no value whose use could justify keeping it, so the template
     // must not be dropped or moved.
-    if (!nouts) node->asm_flags |= ASM_VOLATILE;
+    if (!nouts) (*NODE_ASM_SIDE(node))->flags |= ASM_VOLATILE;
 
     tok = skip(tok, TK_RPAREN);
     *rest = skip(tok, TK_SEMI);
@@ -7086,20 +7108,20 @@ static Node *asm_stmt(Token **rest, Token *tok) {
     for (AsmOperand *op = ops; op; op = op->next) cons = asm_cons_add(cons, op->conv);
     for (AsmOperand *op = ops; op; op = op->next)
         if (op->is_plus) cons = asm_cons_add(cons, op->conv_in);
-    for (int i = 0; i < node->asm_nlabels; i++) cons = asm_cons_add(cons, "!i");
+    for (int i = 0; i < (*NODE_ASM_SIDE(node))->nlabels; i++) cons = asm_cons_add(cons, "!i");
     if (clob) cons = asm_cons_add(cons, clob);
     // The clobbers every asm of this target implicitly has -- the x86 flags;
     // see the target's asm_clobbers.
     if (T.asm_clobbers) cons = asm_cons_add(cons, T.asm_clobbers);
 
-    node->asm_cons = cons ? cons : "";
-    node->asm_narg = arg;
-    node->asm_nret = nret;
+    (*NODE_ASM_SIDE(node))->cons = cons ? cons : "";
+    (*NODE_ASM_SIDE(node))->narg = arg;
+    (*NODE_ASM_SIDE(node))->nret = nret;
     // A statement with no colon is *basic* asm, and a basic template is not
     // rewritten at all: GCC's dialect alternatives, like its `%` escapes,
     // belong to the extended form. clang keeps `{a|b}` in a basic statement
     // and rewrites it in an extended one, operands or not.
-    node->asm_tmpl = asm_tmpl_conv(start, tmpl, ops, node->asm_labels, node->asm_nlabels, nouts + nins + nplus,
+    (*NODE_ASM_SIDE(node))->tmpl = asm_tmpl_conv(start, tmpl, ops, (*NODE_ASM_SIDE(node))->labels, (*NODE_ASM_SIDE(node))->nlabels, nouts + nins + nplus,
                                    sect > 0 && T.asm_dialect_alt, false);
     return node;
 }
@@ -7223,7 +7245,7 @@ static Node *stmt(Token **rest, Token *tok) {
             break;
     }
     stmt_label = outer_stmt_label;
-    while (i--) named_loop = named_loop->loop_next;
+    while (i--) named_loop = NODE_LABEL(named_loop)->loop_next;
 
     // `[[fallthrough]];` marks the fall into the next label as deliberate,
     // which is the whole point of the attribute.
@@ -7236,7 +7258,7 @@ static Node *stmt(Token **rest, Token *tok) {
     if (has_fallthrough) falls_through = false;
 
     if (lb) {
-        lb->label_body = stmt;
+        NODE_LABEL(lb)->label_body = stmt;
         return lb;
     }
     return stmt;
@@ -7288,9 +7310,9 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
 
             bool no_body = tok->kind == TK_RBRACE || is_typename(tok, true);
             if (no_body)
-                lb->label_body = new_node(ND_EXPR_STMT, start);
+                NODE_LABEL(lb)->label_body = new_node(ND_EXPR_STMT, start);
             else
-                lb->label_body = stmt(&tok, tok);
+                NODE_LABEL(lb)->label_body = stmt(&tok, tok);
             // A label with no statement of its own falls straight out of the
             // block, into the next label if there is one.
             if (no_body) falls_through = true;
@@ -7298,7 +7320,7 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
             cur = cur->next = lb;
             add_type(cur);
 
-            while (i--) named_loop = named_loop->loop_next;
+            while (i--) named_loop = NODE_LABEL(named_loop)->loop_next;
             continue;
         }
 
@@ -9193,12 +9215,12 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, SClass sclass, 
 }
 
 static void resolve_goto_labels(void) {
-    for (Node *x = gotos; x; x = x->goto_next) {
-        for (Node *y = labels; y; y = y->goto_next)
-            if (x->label == y->label) {
-                x->target = y;
-                y->is_ref = true;
-                if (x->kind == ND_LABEL_VAL) y->is_addr = true;
+    for (Node *x = gotos; x; x = NODE_LABEL(x)->goto_next) {
+        for (Node *y = labels; y; y = NODE_LABEL(y)->goto_next)
+            if (NODE_LABEL(x)->label == NODE_LABEL(y)->label) {
+                NODE_LABEL(x)->target = y;
+                NODE_LABEL(y)->is_ref = true;
+                if (x->kind == ND_LABEL_VAL) NODE_LABEL(y)->is_addr = true;
                 // 6.8.6.1p1: the jump may not land inside the scope of an
                 // identifier with a variably modified type. An asm goto's
                 // labels are jumps of the same kind, which clang words
@@ -9213,13 +9235,13 @@ static void resolve_goto_labels(void) {
                 // the label's own scope is still live where it lands. An asm
                 // goto cannot run them -- the jump is inside the template,
                 // and the path that falls out of it still needs them.
-                if (from && x->kind != ND_NOP) x->unwind = cleanup_leaving(from, to, x->tok);
+                if (from && x->kind != ND_NOP) NODE_UNWIND(x)->unwind = cleanup_leaving(from, to, x->tok);
                 break;
             }
 
         // The name is the whole reference for an asm goto, which has no
         // token after it to point at.
-        if (!x->target) error(x->kind == ND_NOP ? x->tok : x->tok->next, "use of undeclared label");
+        if (!NODE_LABEL(x)->target) error(x->kind == ND_NOP ? x->tok : x->tok->next, "use of undeclared label");
     }
 
     gotos = labels = NULL;

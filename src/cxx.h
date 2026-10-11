@@ -904,99 +904,235 @@ typedef enum {
     // so no shift/mask tree has to be synthesized (and typed) by hand.
 } NodeKind;
 
-// AST node type
-struct Node {
-    NodeKind kind;   // Node kind
-    Node *next;      // Next node
-    Type *ty;        // Type
-    Token *tok;      // Representative token
-    bool is_lvalue;  // LValue
+// The asm group of a Node: the template and its operands. Out of line so that
+// the union's width is not set by a kind that the emitter never produces.
+typedef struct AsmSide AsmSide;
 
+struct AsmSide {
+    char *tmpl;          // the template, already in LLVM's spelling
+    AsmOperand *ops;     // outputs first, then inputs, in source order
+    char *cons;          // the LLVM constraint string
+    uint32_t flags;      // ASM_* qualifiers, and whether the label list is there
+    int nops;
+    int nret;            // register outputs: the call's return values
+    int narg;            // operands the call passes
+    Node **labels;       // asm goto: the labels, in the order the template names
+    int nlabels;
+};
+
+// The side blocks. A Node has three payload slots, which is what every kind
+// with a hot payload needs; a kind that needs more carries a block of its own,
+// reached through Node::inner, holding exactly that kind's remainder.
+//
+// Every field below is named in exactly one block, so a call site picks its
+// accessor from the field it touches, and the compiler checks that choice
+// against the block's type. NODE_SIDE also checks -- when assertions are on --
+// that the node's kind really has that block; a kind missing from NODE_SIDES()
+// below has no block at all, and then the first access stops there instead of
+// reading whatever follows the node in the arena.
+
+// The loop and switch state that did not fit in the three slots.
+typedef struct NodeStmt NodeStmt;
+
+struct NodeStmt {
+    Node *init;          // ND_FOR: the first clause
+    Node *default_case;  // ND_SWITCH: its default arm
+    Blk *brk_blk;        // ND_FOR / ND_WHILE / ND_DO / ND_SWITCH
+    Blk *cont_blk;
+};
+
+// The kinds that live in a function's label and goto lists, plus ND_CASE's
+// range: ND_LABEL, ND_LABEL_VAL, ND_CASE, ND_GOTO, ND_GOTO_EXPR, ND_BREAK,
+// ND_CONTINUE, and the ND_NOP the parser builds those lists with.
+typedef struct NodeLabel NodeLabel;
+
+struct NodeLabel {
+    // First, so that a jump can be read through NodeUnwind: that struct is
+    // this one's initial sequence.
+    Node *unwind;
+    uint32_t label;
+    Node *target;
+    Node *goto_next;
+    Node *loop_next;
+    Node *label_ring;  // the next entry in the function's label list
+    Node *label_body;
+    int blk_idx;
+    bool is_loop;
+    bool is_switch;
+    bool is_ref;
+    bool is_addr;
+    Int128 ival_end;  // ND_CASE: the high end of a case range
+    bool is_range;
+};
+
+// ND_RETURN: the cleanups it has to run, and nothing else.
+typedef struct NodeUnwind NodeUnwind;
+
+struct NodeUnwind { Node *unwind; };
+
+// The call's fourth slot: ND_FUNCALL, ND_ALLOCA.
+typedef struct NodeCall NodeCall;
+
+struct NodeCall { Type *base_ty; };
+
+// The atomic kinds' two leftovers: the value CAS and the RMW write, and the RMW
+// operation. Their memory order rides in the header's padding, so reading it
+// costs nothing and every kind has one.
+typedef struct NodeAtomic NodeAtomic;
+
+struct NodeAtomic {
+    Node *desired;
+    int op;
+};
+
+enum {
+    SIDE_NONE = 0,
+    SIDE_STMT = 1 << 0,
+    SIDE_LABEL = 1 << 1,
+    SIDE_UNWIND = 1 << 2,
+    SIDE_CALL = 1 << 3,
+    SIDE_ATOMIC = 1 << 4,
+};
+
+// kind -> side block. One line per kind that has one; node_side_size() and
+// node_side_family() are both generated from this list, so what a kind is
+// allocated and what its accessors expect cannot drift apart.
+#define NODE_SIDES(X)                     \
+    X(ND_FOR, NodeStmt, SIDE_STMT)        \
+    X(ND_WHILE, NodeStmt, SIDE_STMT)      \
+    X(ND_DO, NodeStmt, SIDE_STMT)         \
+    X(ND_SWITCH, NodeStmt, SIDE_STMT)     \
+    X(ND_LABEL, NodeLabel, SIDE_LABEL)    \
+    X(ND_LABEL_VAL, NodeLabel, SIDE_LABEL) \
+    X(ND_CASE, NodeLabel, SIDE_LABEL)     \
+    X(ND_GOTO, NodeLabel, SIDE_LABEL)     \
+    X(ND_GOTO_EXPR, NodeLabel, SIDE_LABEL) \
+    X(ND_BREAK, NodeLabel, SIDE_LABEL)    \
+    X(ND_CONTINUE, NodeLabel, SIDE_LABEL) \
+    X(ND_NOP, NodeLabel, SIDE_LABEL)      \
+    X(ND_RETURN, NodeUnwind, SIDE_UNWIND) \
+    X(ND_FUNCALL, NodeCall, SIDE_CALL)    \
+    X(ND_ALLOCA, NodeCall, SIDE_CALL)     \
+    X(ND_CAS, NodeAtomic, SIDE_ATOMIC)    \
+    X(ND_ATOMICRMW, NodeAtomic, SIDE_ATOMIC)
+
+// Every block is a multiple of eight bytes, so its own fields stay aligned.
+#define NODE_SIDE_ALIGNED(k, ty, fam) _Static_assert(sizeof(ty) % 8 == 0, "side block misaligned: " #ty);
+NODE_SIDES(NODE_SIDE_ALIGNED)
+#undef NODE_SIDE_ALIGNED
+
+// The bytes a kind's side block needs; 0 means the three slots are enough.
+// The block comes out of the same bump pointer as the nodes themselves, which
+// hands out max_align_t-aligned objects, so the size is rounded up to that: an
+// 88-byte label block would otherwise leave every node after it 8-byte aligned.
+static inline size_t node_side_size(NodeKind kind) {
+    switch (kind) {
+#define NODE_SIDE_SIZE(k, ty, fam) \
+    case k: return ALIGN_UP(sizeof(ty), _Alignof(max_align_t));
+    NODE_SIDES(NODE_SIDE_SIZE)
+#undef NODE_SIDE_SIZE
+    default: return 0;
+    }
+}
+
+// Which block a kind has, for the checks below.
+static inline unsigned node_side_family(NodeKind kind) {
+    switch (kind) {
+#define NODE_SIDE_FAM(k, ty, fam) \
+    case k: return fam;
+    NODE_SIDES(NODE_SIDE_FAM)
+#undef NODE_SIDE_FAM
+    default: return SIDE_NONE;
+    }
+}
+
+// The side block of n, which must be one of the kinds in want (a mask of
+// SIDE_*). With NDEBUG this is just the field: the checks are for the asserted
+// builds, where a wrong accessor would otherwise read past the block.
+#ifdef NDEBUG
+#define NODE_SIDE(n, want) ((n)->inner)
+#else
+void *node_side_checked(Node *n, unsigned want, const char *file, int line);
+#define NODE_SIDE(n, want) node_side_checked((n), (want), __FILE__, __LINE__)
+#endif
+
+#define NODE_STMT(n) ((NodeStmt *)NODE_SIDE((n), SIDE_STMT))
+#define NODE_LABEL(n) ((NodeLabel *)NODE_SIDE((n), SIDE_LABEL))
+#define NODE_UNWIND(n) ((NodeUnwind *)NODE_SIDE((n), SIDE_UNWIND | SIDE_LABEL))
+#define NODE_CALL(n) ((NodeCall *)NODE_SIDE((n), SIDE_CALL))
+#define NODE_ATOMIC(n) ((NodeAtomic *)NODE_SIDE((n), SIDE_ATOMIC))
+
+// AST node type: 64 bytes, one cache line, and the arithmetic is the point of
+// the layout, so it is written out slot by slot.
+struct Node {
+    // Slot 0. kind needs four bytes (83 values) and the header had three of
+    // them spare, so is_lvalue and the atomic kinds' memory order ride along:
+    // a memory operation reads its order without touching a side block, and
+    // what used to be an inline AtomicMeta no longer costs four bytes here.
+    NodeKind kind;   // Node kind
+    bool is_lvalue;  // LValue
+    uint8_t order;   // memory order + 1; 0 = unspecified (seq_cst)
+    uint8_t order1;  // the compare-exchange's second order
+    unsigned is_weak : 1;
+    unsigned is_signal : 1;
+
+    Token *tok;   // slot 1: every diagnostic
+    Type *ty;     // slot 2: the most-read field there is
+    Node *next;   // slot 3: the statement chain
+
+    // Slots 4-6: the payload. The union used to be seven slots wide and every
+    // node paid for its widest member; three is what the kinds that occur in
+    // real code need, and the rest is in a side block.
     union {
         struct {
             Node *lhs;  // Left-hand side
             Node *rhs;  // Right-hand side
-            Node *desired;
-            Member *member;       // Struct member access
-            Type *compute_ty;     // Compound assign
-            uint16_t mem_order;   // Atomic access memory order + 1; 0 = unspecified (seq_cst)
-            uint16_t mem_order1;  // Atomic access memory order + 1; 0 = unspecified (seq_cst)
-            int armw_op;          // ND_ATOMICRMW: A_* operation (atomicrmw)
-            bool is_weak;
-            bool is_signal;
-        };
-        struct {
+            // The third slot is shared by every kind that has a use for only
+            // one of these; no kind needs two of them at once.
             union {
-                Node *init;
-                Node *default_case;
+                Node *els;        // ND_IF / ND_COND / ND_DO
+                Node *inc;        // ND_FOR
+                Node *case_next;  // ND_SWITCH / ND_CASE
+                Member *member;   // ND_MEMBER / ND_DEREF / ND_SUBACCESS
+                Type *compute_ty; // compound assignment: the arithmetic's type
+                uint32_t narg;    // ND_FUNCALL
+                AsmSide *asm_side;
             };
-            Node *cond;
-            union {
-                Node *then;
-                Node *body;  // Block or statement expression
-            };
-            union {
-                Node *els;
-                Node *inc;
-                Node *case_next;
-            };
-            Blk *brk_blk;
-            Blk *cont_blk;
-        };
-        struct {
-            // Function call
-            Node *func;
-            Node *args;
-            uint32_t narg;
-            Type *base_ty;
-        };
-        struct {
-            uint32_t label;
-            Node *target;
-            Node *goto_next;
-            Node *loop_next;
-            int blk_idx;  // label block: index into the fn->blks array
-            bool is_loop;
-            bool is_switch;
-            bool is_ref;
-            bool is_addr;
         };
         struct {
             Sym *var;  // Used if kind == ND_VAR
             Node *var_init;
         };
         struct {
-            // ND_ASM: the template, already rewritten in LLVM's spelling --
-            // `%0` became `$0`, `%%` became `%`, a literal `$` became `$$` --
-            // because the index an operand reference carries is settled here
-            // and nothing downstream could work it out again.
-            char *asm_tmpl;
-            AsmOperand *asm_ops;  // outputs first, then inputs, in source order
-            char *asm_cons;       // the LLVM constraint string
-            // ASM_*: the qualifiers, and whether the goto-label list is there.
-            uint32_t asm_flags;
-            int asm_nops;
-            int asm_nret;  // register outputs: the call's return values
-            int asm_narg;  // operands the call passes (inputs + indirect outputs)
-            // asm goto: the labels, in the order the template names them.
-            Node **asm_labels;
-            int asm_nlabels;
+            Node *func;  // ND_FUNCALL
+            Node *args;
+        };
+        struct {
+            // ND_IF / ND_COND / ND_FOR / ND_WHILE / ND_DO / ND_SWITCH
+            Node *cond;
+            union {
+                Node *then;
+                Node *body;  // Block or statement expression
+            };
         };
         Fp128 fpval;  // ND_NUM floating constants
         Int128 ival;  // ND_NUM integer constants
     };
-    // A case range: `ival` is the low end and this the high one. `is_range`
-    // tells them apart, since a range of one value is still a range as far as
-    // the back end is concerned.
-    Int128 ival_end;
-    bool is_range;
-    Node *label_ring;
-    Node *label_body;
-    // The cleanup handlers this jump has to run first, as one expression in
-    // source order. A jump is the only statement that leaves scopes without
-    // reaching the end of their blocks, so it carries the calls itself.
-    Node *unwind;
+
+    // Slot 7: this kind's side block, or NULL when the three slots are enough.
+    void *inner;
 };
+
+// The point of the layout, checked by the build rather than by a comment.
+_Static_assert(sizeof(struct Node) == 64, "Node is not one cache line");
+_Static_assert(offsetof(struct Node, inner) == 56, "Node's side-block pointer moved");
+_Static_assert(offsetof(struct Node, kind) == 0, "Node's kind moved");
+
+// The asm group of a node, allocated by the single place that builds an ND_ASM.
+// Every reader runs only for ND_ASM, so no other kind pays for it.
+static inline __attribute__((always_inline)) AsmSide **NODE_ASM_SIDE(Node *n) {
+    return &n->asm_side;
+}
 
 // Represents a variable initializer
 struct Initializer {

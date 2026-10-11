@@ -20,11 +20,11 @@ static Blk *brk_blk;
 static Blk *cont_blk;
 static int atomic_order;  // Memory order of the next atomic load/store
 
-// node->mem_order is stored +1 so that 0 can mean "unspecified" for
+// node->order is stored +1 so that 0 can mean "unspecified" for
 // nodes that never went through the atomic builtins (seq_cst default).
-static int node_mem_order(Node *node) { return node->mem_order ? node->mem_order - 1 : MEM_ORDER_SEQ_CST; }
+static int node_mem_order(Node *node) { return node->order ? node->order - 1 : MEM_ORDER_SEQ_CST; }
 
-static int node_mem_order1(Node *node) { return node->mem_order1 ? node->mem_order1 - 1 : MEM_ORDER_SEQ_CST; }
+static int node_mem_order1(Node *node) { return node->order1 ? node->order1 - 1 : MEM_ORDER_SEQ_CST; }
 
 static bool is_atomic_ptr(Ref addr) {
     return addr.ty && is_pointer(addr.ty) && addr.ty->base && (addr.ty->base->qual & Q_ATOMIC);
@@ -1642,7 +1642,7 @@ static Ref gen_expr(Node *node) {
             // Labels are function-scoped: the index into fn->blks
             // suffices. Global/static &&label initializers take the
             // Con CAddr path ("fn..label"), not Ref.
-            dst.val = node->target->blk_idx;
+            dst.val = NODE_LABEL(NODE_LABEL(node)->target)->blk_idx;
             return dst;
         case ND_LVTOR: {
             int align = lvalue_align(node->lhs);
@@ -2120,10 +2120,10 @@ static Ref gen_expr(Node *node) {
             if (is_record(t)) {
                 cmp_ty = atomic_agg_bits(t);
                 old_val = load(addr2, cmp_ty, t->align, NULL);
-                new_val = load(gen_expr(node->desired), cmp_ty, t->align, NULL);
+                new_val = load(gen_expr(NODE_ATOMIC(node)->desired), cmp_ty, t->align, NULL);
             } else {
                 old_val = load(addr2, t, t->align, NULL);
-                new_val = gen_expr(node->desired);
+                new_val = gen_expr(NODE_ATOMIC(node)->desired);
                 if (is_flonum(t)) {
                     cmp_ty = bitint[t->size * 8][1];
                     old_val = bitcast(old_val, cmp_ty);
@@ -2176,10 +2176,10 @@ static Ref gen_expr(Node *node) {
             // on a struct answered with the wrong bytes and then faulted.
             if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) {
                 Type *ity = atomic_agg_bits(node->ty);
-                Ref src = gen_expr(node->desired);
+                Ref src = gen_expr(NODE_ATOMIC(node)->desired);
                 Ref old = load(src, ity, node->ty->align, NULL);
                 Ref res = TMP(tmp_id++, ity);
-                Ir *rmw = new_ins(IR_ATOMICRMW, res, (Ref[]){INT(node->armw_op), addr, old}, 3);
+                Ir *rmw = new_ins(IR_ATOMICRMW, res, (Ref[]){INT(NODE_ATOMIC(node)->op), addr, old}, 3);
                 rmw->mem_order = node_mem_order(node);
                 // Hand the pattern back as a record value: a slot holding it.
                 Ref slot = TMP(tmp_id++, pointer_to(node->ty, 0));
@@ -2188,11 +2188,11 @@ static Ref gen_expr(Node *node) {
                 return slot;
             }
 
-            Ref new_val = gen_expr(node->desired);
-            Ref args[] = {INT(node->armw_op), addr, new_val};
+            Ref new_val = gen_expr(NODE_ATOMIC(node)->desired);
+            Ref args[] = {INT(NODE_ATOMIC(node)->op), addr, new_val};
             // LLVM's atomicrmw add/sub on a pointer pointee yields the
             // raw integer result; convert it back to the pointer.
-            bool ptr_addsub = (node->armw_op == A_ADD || node->armw_op == A_SUB) && is_pointer(node->ty);
+            bool ptr_addsub = (NODE_ATOMIC(node)->op == A_ADD || NODE_ATOMIC(node)->op == A_SUB) && is_pointer(node->ty);
             Ref res = TMP(tmp_id++, ptr_addsub ? T.ty_long : node->ty);
             Ir *ins = new_ins(IR_ATOMICRMW, res, args, 3);
             ins->mem_order = node_mem_order(node);
@@ -2202,7 +2202,7 @@ static Ref gen_expr(Node *node) {
             // Emitted at the call site, like clang: the memory lives
             // until the function returns (not scope-bound).
             Ref size = gen_expr(node->lhs);
-            Ref dst = TMP(tmp_id++, pointer_to(node->base_ty ?: T.ty_char, 0));
+            Ref dst = TMP(tmp_id++, pointer_to(NODE_CALL(node)->base_ty ?: T.ty_char, 0));
             new_ins(IR_ALLOCA, dst, (Ref[]){size, INT(int128_to_i64(node->rhs->ival))}, 2);
             return dst;
         }
@@ -2526,11 +2526,11 @@ static void gen_for(Node *node) {
     Blk *brk = brk_blk;
     Blk *cont = cont_blk;
 
-    node->brk_blk = brk_blk = merge_blk;
-    node->cont_blk = cont_blk = incr_blk;
+    NODE_STMT(node)->brk_blk = brk_blk = merge_blk;
+    NODE_STMT(node)->cont_blk = cont_blk = incr_blk;
 
     // init
-    gen_stmt(node->init);
+    gen_stmt(NODE_STMT(node)->init);
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
     add_pred(curb, curb->succ1);
@@ -2587,8 +2587,8 @@ static void gen_while(Node *node) {
 
     Blk *brk = brk_blk;
     Blk *cont = cont_blk;
-    node->brk_blk = brk_blk = merge_blk;
-    node->cont_blk = cont_blk = cond_blk;
+    NODE_STMT(node)->brk_blk = brk_blk = merge_blk;
+    NODE_STMT(node)->cont_blk = cont_blk = cond_blk;
 
     curb->jmp.type = IR_JMP;
     curb->succ1 = cond_blk;
@@ -2632,8 +2632,8 @@ static void gen_do(Node *node) {
 
     Blk *brk = brk_blk;
     Blk *cont = cont_blk;
-    node->brk_blk = brk_blk = merge_blk;
-    node->cont_blk = cont_blk = cond_blk;
+    NODE_STMT(node)->brk_blk = brk_blk = merge_blk;
+    NODE_STMT(node)->cont_blk = cont_blk = cond_blk;
 
     curb->jmp.type = IR_JMP;
     curb->succ1 = body_blk;
@@ -2674,10 +2674,10 @@ static void gen_switch(Node *n) {
     Blk *merge_blk = new_blk();
     int i = 0;
     for (Node *y = n->case_next; y; y = y->case_next)
-        if (!y->is_range) ++i;
+        if (!NODE_LABEL(y)->is_range) ++i;
 
     Blk *brk = brk_blk;
-    n->brk_blk = brk_blk = merge_blk;
+    NODE_STMT(n)->brk_blk = brk_blk = merge_blk;
 
     Ref cond = gen_stmt(n->cond);
 
@@ -2687,9 +2687,9 @@ static void gen_switch(Node *n) {
     // its values. Labels never overlap, so the order among them does not
     // matter.
     for (Node *y = n->case_next; y; y = y->case_next) {
-        if (!y->is_range) continue;
+        if (!NODE_LABEL(y)->is_range) continue;
         Ref lo = cond.ty->size == 8 ? LONG(int128_to_i64(y->ival)) : INT(int128_to_i64(y->ival));
-        Ref hi = cond.ty->size == 8 ? LONG(int128_to_i64(y->ival_end)) : INT(int128_to_i64(y->ival_end));
+        Ref hi = cond.ty->size == 8 ? LONG(int128_to_i64(NODE_LABEL(y)->ival_end)) : INT(int128_to_i64(NODE_LABEL(y)->ival_end));
         lo.ty = cond.ty;
         hi.ty = cond.ty;
         Ref ge_lo = TMP(tmp_id++, bitint[1][1]);
@@ -2702,7 +2702,7 @@ static void gen_switch(Node *n) {
         Blk *next = new_blk();
         curb->jmp.type = IR_JNZ;
         curb->jmp.arg = in_range;
-        curb->succ1 = &curf->blks[y->blk_idx];
+        curb->succ1 = &curf->blks[NODE_LABEL(y)->blk_idx];
         curb->succ2 = next;
         add_pred(curb, curb->succ1);
         add_pred(curb, curb->succ2);
@@ -2718,15 +2718,15 @@ static void gen_switch(Node *n) {
 
     curb->jmp.args = emalloc(i * sizeof(Ref));
     curb->succ = emalloc(i * sizeof(Blk *));
-    if (n->default_case)
-        curb->succ1 = &curf->blks[n->default_case->blk_idx];
+    if (NODE_STMT(n)->default_case)
+        curb->succ1 = &curf->blks[NODE_LABEL(NODE_STMT(n)->default_case)->blk_idx];
     else
         curb->succ1 = merge_blk;
     add_pred(curb, curb->succ1);
 
     Node *y = n->case_next;
     for (int j = 0; j < i;) {
-        if (y->is_range) {
+        if (NODE_LABEL(y)->is_range) {
             y = y->case_next;
             continue;
         }
@@ -2736,7 +2736,7 @@ static void gen_switch(Node *n) {
         Ref c = cond.ty->size == 8 ? LONG(int128_to_i64(y->ival)) : INT(int128_to_i64(y->ival));
         c.ty = cond.ty;
         curb->jmp.args[j] = c;
-        curb->succ[j] = &curf->blks[y->blk_idx];
+        curb->succ[j] = &curf->blks[NODE_LABEL(y)->blk_idx];
         add_pred(curb, curb->succ[j]);
         y = y->case_next;
         j++;
@@ -2754,29 +2754,29 @@ static void gen_switch(Node *n) {
 }
 
 static Ref gen_label(Node *n) {
-    Blk *b = &curf->blks[n->blk_idx];
+    Blk *b = &curf->blks[NODE_LABEL(n)->blk_idx];
     curb->jmp.type = IR_JMP;
     curb->succ1 = b;
     add_pred(curb, b);
     curb = b;
     insert_blk(curb);
-    return gen_stmt(n->label_body);
+    return gen_stmt(NODE_LABEL(n)->label_body);
 }
 
 static Ref gen_case(Node *n) {
-    Blk *b = &curf->blks[n->blk_idx];
+    Blk *b = &curf->blks[NODE_LABEL(n)->blk_idx];
     curb->jmp.type = IR_JMP;
     curb->succ1 = b;
     add_pred(curb, b);
     curb = b;
     insert_blk(curb);
-    return gen_stmt(n->label_body);
+    return gen_stmt(NODE_LABEL(n)->label_body);
 }
 
 static void gen_goto(Node *n) {
-    if (n->unwind) gen_expr(n->unwind);
+    if (NODE_UNWIND(n)->unwind) gen_expr(NODE_UNWIND(n)->unwind);
     curb->jmp.type = IR_JMP;
-    curb->succ1 = &curf->blks[n->target->blk_idx];
+    curb->succ1 = &curf->blks[NODE_LABEL(NODE_LABEL(n)->target)->blk_idx];
     add_pred(curb, curb->succ1);
     curb = unreach;
 }
@@ -2797,22 +2797,22 @@ static void gen_indirectgoto(Node *n) {
 // the loop. label_body is attached to the run's head only, so ring
 // members resolve through label_ring to the head.
 static Node *named_loop_body(Node *target) {
-    while (!target->label_body) target = target->label_ring;
-    return target->label_body;
+    while (!NODE_LABEL(target)->label_body) target = NODE_LABEL(target)->label_ring;
+    return NODE_LABEL(target)->label_body;
 }
 
 static void gen_break(Node *n) {
-    if (n->unwind) gen_expr(n->unwind);
+    if (NODE_UNWIND(n)->unwind) gen_expr(NODE_UNWIND(n)->unwind);
     curb->jmp.type = IR_JMP;
-    curb->succ1 = n->target ? named_loop_body(n->target)->brk_blk : brk_blk;
+    curb->succ1 = NODE_LABEL(n)->target ? NODE_STMT(named_loop_body(NODE_LABEL(n)->target))->brk_blk : brk_blk;
     add_pred(curb, curb->succ1);
     curb = unreach;
 }
 
 static void gen_continue(Node *n) {
-    if (n->unwind) gen_expr(n->unwind);
+    if (NODE_UNWIND(n)->unwind) gen_expr(NODE_UNWIND(n)->unwind);
     curb->jmp.type = IR_JMP;
-    curb->succ1 = n->target ? named_loop_body(n->target)->cont_blk : cont_blk;
+    curb->succ1 = NODE_LABEL(n)->target ? NODE_STMT(named_loop_body(NODE_LABEL(n)->target))->cont_blk : cont_blk;
     add_pred(curb, curb->succ1);
     curb = unreach;
 }
@@ -2910,7 +2910,7 @@ static Ref abi_piece_value(Ref agg, Type *agg_ty, Type *abi_ty, AggClass *c) {
 // what gcc and clang do -- the handler may well modify the object it is
 // handed, and `return x;` still returns what x held.
 static void ret_jump(Node *n) {
-    if (n->unwind) gen_expr(n->unwind);
+    if (NODE_UNWIND(n)->unwind) gen_expr(NODE_UNWIND(n)->unwind);
     curb->jmp.type = IR_JMP;
     curb->succ1 = curf->end;
     add_pred(curb, curb->succ1);
@@ -3068,9 +3068,9 @@ static Type *asm_ret_record(Type **tys, int n) {
 // spell out the type it points at, because LLVM requires an elementtype on
 // every operand of a memory constraint.
 static Ref gen_asm(Node *node) {
-    int nret = node->asm_nret;
-    Ref *args = node->asm_narg ? emalloc(node->asm_narg * sizeof(Ref)) : NULL;
-    uint8_t *ind = node->asm_narg ? emalloc(node->asm_narg) : NULL;
+    int nret = (*NODE_ASM_SIDE(node))->nret;
+    Ref *args = (*NODE_ASM_SIDE(node))->narg ? emalloc((*NODE_ASM_SIDE(node))->narg * sizeof(Ref)) : NULL;
+    uint8_t *ind = (*NODE_ASM_SIDE(node))->narg ? emalloc((*NODE_ASM_SIDE(node))->narg) : NULL;
     Ref *home = nret ? emalloc(nret * sizeof(Ref)) : NULL;
     Type **ty = nret ? emalloc(nret * sizeof(Type *)) : NULL;
     // A register output may name a bit-field, which is written through its
@@ -3078,7 +3078,7 @@ static Ref gen_asm(Node *node) {
     Member **mem = nret ? emalloc(nret * sizeof(Member *)) : NULL;
     int reti = 0;
 
-    for (AsmOperand *op = node->asm_ops; op; op = op->next) {
+    for (AsmOperand *op = (*NODE_ASM_SIDE(node))->ops; op; op = op->next) {
         // The front end refused a register operand the ABI cannot put in one
         // (asm_operand_ir_type, called where the operand is written).
         Type *ir_ty = asm_operand_ir_type(op->expr->ty, op->is_indirect);
@@ -3121,11 +3121,11 @@ static Ref gen_asm(Node *node) {
         dst = TMP(tmp_id++, asm_ret_record(ty, nret));
     }
 
-    Ir *ins = new_ins(IR_ASM, dst, args, node->asm_narg);
-    ins->asm_tmpl = node->asm_tmpl;
-    ins->asm_cons = node->asm_cons;
+    Ir *ins = new_ins(IR_ASM, dst, args, (*NODE_ASM_SIDE(node))->narg);
+    ins->asm_tmpl = (*NODE_ASM_SIDE(node))->tmpl;
+    ins->asm_cons = (*NODE_ASM_SIDE(node))->cons;
     ins->asm_nret = nret;
-    ins->asm_flags = node->asm_flags & (ASM_VOLATILE | ASM_GOTO);
+    ins->asm_flags = (*NODE_ASM_SIDE(node))->flags & (ASM_VOLATILE | ASM_GOTO);
     ins->asm_ind = ind;
 
     // An asm goto is a terminator: the labels its template may jump to are
@@ -3135,13 +3135,13 @@ static Ref gen_asm(Node *node) {
     // stores below go into the block it falls through to -- which is where
     // the value of an output exists at all: on the paths that jump, GCC says
     // the outputs are indeterminate.
-    if ((node->asm_flags & ASM_GOTO) && node->asm_nlabels) {
+    if (((*NODE_ASM_SIDE(node))->flags & ASM_GOTO) && (*NODE_ASM_SIDE(node))->nlabels) {
         Blk *fall = new_blk();
         curb->jmp.type = IR_CALLBR;
-        curb->narg = node->asm_nlabels;
-        curb->succ = emalloc(node->asm_nlabels * sizeof(Blk *));
-        for (int i = 0; i < node->asm_nlabels; i++) {
-            curb->succ[i] = &curf->blks[node->asm_labels[i]->target->blk_idx];
+        curb->narg = (*NODE_ASM_SIDE(node))->nlabels;
+        curb->succ = emalloc((*NODE_ASM_SIDE(node))->nlabels * sizeof(Blk *));
+        for (int i = 0; i < (*NODE_ASM_SIDE(node))->nlabels; i++) {
+            curb->succ[i] = &curf->blks[NODE_LABEL(NODE_LABEL((*NODE_ASM_SIDE(node))->labels[i])->target)->blk_idx];
             add_pred(curb, curb->succ[i]);
         }
         curb->succ1 = fall;
@@ -3279,13 +3279,13 @@ Module *irgen(Module *md) {
         fn->start = new_blk();
         fn->end = new_blk();
         int num_indirectgoto = 0;
-        for (Node *y = fn->labels; y; y = y->goto_next)
-            if (y->is_addr) num_indirectgoto++;
+        for (Node *y = fn->labels; y; y = NODE_LABEL(y)->goto_next)
+            if (NODE_LABEL(y)->is_addr) num_indirectgoto++;
         fn->num_indirectbr = num_indirectgoto;
         fn->indirectbr = emalloc(num_indirectgoto * sizeof(Blk *));
-        for (Node *y = fn->labels; num_indirectgoto && y; y = y->goto_next) {
-            if (!y->is_addr) continue;
-            fn->indirectbr[--num_indirectgoto] = &fn->blks[y->blk_idx];
+        for (Node *y = fn->labels; num_indirectgoto && y; y = NODE_LABEL(y)->goto_next) {
+            if (!NODE_LABEL(y)->is_addr) continue;
+            fn->indirectbr[--num_indirectgoto] = &fn->blks[NODE_LABEL(y)->blk_idx];
         }
         brk_blk = cont_blk = NULL;
 

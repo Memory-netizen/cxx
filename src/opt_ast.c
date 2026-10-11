@@ -738,7 +738,7 @@ Node *fold_node(Node *node) {
         // wants for an immediate constraint. An output is an lvalue, which
         // folding leaves alone.
         case ND_ASM:
-            for (AsmOperand *op = node->asm_ops; op; op = op->next) op->expr = fold_node(op->expr);
+            for (AsmOperand *op = (*NODE_ASM_SIDE(node))->ops; op; op = op->next) op->expr = fold_node(op->expr);
             return node;
 
         // Statements: fold sub-expressions
@@ -790,7 +790,7 @@ Node *fold_node(Node *node) {
             return node;
 
         case ND_FOR:
-            if (node->init) node->init = fold_node(node->init);
+            if (NODE_STMT(node)->init) NODE_STMT(node)->init = fold_node(NODE_STMT(node)->init);
             if (node->cond) node->cond = fold_node(node->cond);
             if (node->inc) node->inc = fold_node(node->inc);
             node->body = fold_node(node->body);
@@ -859,7 +859,7 @@ Node *fold_node(Node *node) {
         }
         case ND_CASE:
         case ND_LABEL:
-            node->label_body = fold_node(node->label_body);
+            NODE_LABEL(node)->label_body = fold_node(NODE_LABEL(node)->label_body);
             return node;
         case ND_GOTO_EXPR:
             break;

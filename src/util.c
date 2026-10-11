@@ -29,6 +29,19 @@ void fatal(char *fmt, ...) {
     exit(1);
 }
 
+#ifndef NDEBUG
+// Every side-block access goes through here when assertions are on: a node
+// whose kind has no block -- or a different one -- would otherwise read past
+// what new_node() allocated. `want` is a mask of SIDE_*, so a jump kind is
+// readable through both NodeUnwind and NodeLabel.
+void *node_side_checked(Node *n, unsigned want, const char *file, int line) {
+    unsigned have = node_side_family(n->kind);
+    if (!n->inner || !(want & have))
+        fatal("internal error: %s:%d: node kind %d has no side block for this access", file, line, (int)n->kind);
+    return n->inner;
+}
+#endif
+
 static void emit_diag(char *level, uint32_t filename, int line_delta, SrcFile *diagfile, uint32_t loc, const char *msg,
                       va_list ap) {
     // Find the line containing `loc`.
@@ -383,26 +396,26 @@ static inline __attribute__((always_inline)) uint64_t in_bytes_fast(const void *
     return x.u64;
 }
 
-// Compares the first len bytes of two strings. Whole chunks of 8 go through
-// the loop; the tail is one load of the 8 bytes that *contain* the last byte,
-// masked down to the bytes that count. That is the whole trick: for a 5-byte
-// identifier it is a load, a shift, a mask and a compare, in place of a
-// memcmp call and its size dispatch.
+// Compares the first len bytes of two strings.
 //
-// It reads exactly len bytes from each string, never past the last byte, so
-// neither side needs slack of any kind: the table's copy has len bytes plus
-// the NUL the miss path wrote, and the caller's buffer must have len readable
-// bytes or intern could not have copied it.
+// The common case is a short identifier, and one eight-byte load is the whole
+// comparison for it: the window ends at the string's last byte, so it covers
+// the last len bytes and starts before the first of them when len >= 8. The
+// mask then clears the bytes below the string's start.
+//
+// len < 8 has no eight-byte window inside the string, so those bytes are
+// compared one at a time -- at most seven loads, still cheaper than the memcmp
+// call this replaces, and it reads nothing the caller did not hand over. The
+// table's own copies have slack (emalloc rounds every allocation up), but a
+// caller's string need not, and that is the case ASan reports.
 static bool same_str(const char *a, const char *b, uint32_t len) {
     while (len >= 8) {
-        if (in_bytes_fast(a) != in_bytes_fast(b)) return false;
-        a += 8;
-        b += 8;
+        if (in_bytes_fast(a + len - 8) != in_bytes_fast(b + len - 8)) return false;
         len -= 8;
     }
-    if (len == 0) return true;
-    uint64_t mask = (~(uint64_t)0) >> ((8 - len) * 8);
-    return (in_bytes_fast(a) & mask) == (in_bytes_fast(b) & mask);
+    for (uint32_t i = 0; i < len; i++)
+        if (a[i] != b[i]) return false;
+    return true;
 }
 
 uint32_t intern(char *s, uint32_t len) {
@@ -448,7 +461,9 @@ uint32_t intern(char *s, uint32_t len) {
 // bootstrap run, and it pays nothing for it.
 #ifndef NDEBUG
 __attribute__((constructor)) static void check_same_str(void) {
-    static char a[41], b[41];
+    // 41 bytes of content plus slack: the tail window of a 41-byte
+    // comparison reads eight bytes ending at the last one.
+    static char a[48], b[48];
     for (uint32_t len = 0; len <= 40; len++) {
         for (uint32_t i = 0; i <= len; i++) a[i] = b[i] = (char)('a' + i % 26);
         if (!same_str(a, b, len)) fatal("same_str: len %u, identical bytes", len);

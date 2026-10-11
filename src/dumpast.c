@@ -576,11 +576,11 @@ static void dump_node(Node *node) {
         case ND_FOR:
             fprintf(stdout, "\n");
             depth++;
-            if (node->init) {
+            if (NODE_STMT(node)->init) {
                 print_indent();
                 fprintf(stdout, "init:\n");
                 depth++;
-                dump_node(node->init);
+                dump_node(NODE_STMT(node)->init);
                 depth--;
             }
             if (node->cond) {
@@ -624,20 +624,20 @@ static void dump_node(Node *node) {
         case ND_ASM: {
             // The template as it will be written out, then one line per operand
             // with the constraint and the place the IR numbers it at.
-            fprintf(stdout, "  tmpl=\"%s\"", node->asm_tmpl);
-            if (node->asm_flags & ASM_VOLATILE) fprintf(stdout, "  volatile");
-            if (node->asm_flags & ASM_INLINE) fprintf(stdout, "  inline");
-            if (node->asm_flags & ASM_GOTO) fprintf(stdout, "  goto");
+            fprintf(stdout, "  tmpl=\"%s\"", (*NODE_ASM_SIDE(node))->tmpl);
+            if ((*NODE_ASM_SIDE(node))->flags & ASM_VOLATILE) fprintf(stdout, "  volatile");
+            if ((*NODE_ASM_SIDE(node))->flags & ASM_INLINE) fprintf(stdout, "  inline");
+            if ((*NODE_ASM_SIDE(node))->flags & ASM_GOTO) fprintf(stdout, "  goto");
             fprintf(stdout, "\n");
             depth++;
-            for (AsmOperand *op = node->asm_ops; op; op = op->next) {
+            for (AsmOperand *op = (*NODE_ASM_SIDE(node))->ops; op; op = op->next) {
                 print_indent();
                 fprintf(stdout, "%s %%%u [%s] %s\n", op->is_output ? "out" : "in", op->index, op->cons, op->conv);
                 dump_node(op->expr);
             }
-            for (int i = 0; i < node->asm_nlabels; i++) {
+            for (int i = 0; i < (*NODE_ASM_SIDE(node))->nlabels; i++) {
                 print_indent();
-                fprintf(stdout, "label %%%u\n", node->asm_nops + i);
+                fprintf(stdout, "label %%%u\n", (*NODE_ASM_SIDE(node))->nops + i);
             }
             depth--;
             break;
@@ -646,22 +646,22 @@ static void dump_node(Node *node) {
         case ND_CASE:
             fprintf(stdout, "  val=%ld\n", (long)int128_to_i64(node->ival));
             depth++;
-            dump_node(node->label_body);
+            dump_node(NODE_LABEL(node)->label_body);
             depth--;
             break;
 
         case ND_LABEL:
-            fprintf(stdout, "  label=‘%s’\n", str(node->label));
+            fprintf(stdout, "  label=‘%s’\n", str(NODE_LABEL(node)->label));
             depth++;
-            dump_node(node->label_body);
+            dump_node(NODE_LABEL(node)->label_body);
             depth--;
             break;
         case ND_LABEL_VAL:
-            fprintf(stdout, "  label=‘%s’\n", str(node->label));
+            fprintf(stdout, "  label=‘%s’\n", str(NODE_LABEL(node)->label));
             break;
 
         case ND_GOTO:
-            fprintf(stdout, "  label=‘%s’\n", str(node->label));
+            fprintf(stdout, "  label=‘%s’\n", str(NODE_LABEL(node)->label));
             break;
         case ND_GOTO_EXPR:
             fprintf(stdout, "\n");
@@ -672,7 +672,7 @@ static void dump_node(Node *node) {
 
         case ND_BREAK:
         case ND_CONTINUE:
-            if (node->label) fprintf(stdout, "  label=‘%s’\n", str(node->label));
+            if (NODE_LABEL(node)->label) fprintf(stdout, "  label=‘%s’\n", str(NODE_LABEL(node)->label));
             break;
         case ND_NOP:
             fprintf(stdout, "\n");
@@ -696,17 +696,17 @@ static void dump_node(Node *node) {
             // mem_order / mem_order1 are stored +1, 0 meaning "unspecified
             // (seq_cst)".
             fprintf(stdout, "  order=%s  fail_order=%s  weak=%d\n",
-                    mem_order_name[node->mem_order ? node->mem_order - 1 : 5],
-                    mem_order_name[node->mem_order1 ? node->mem_order1 - 1 : 5], (int)node->is_weak);
+                    mem_order_name[node->order ? node->order - 1 : 5],
+                    mem_order_name[node->order1 ? node->order1 - 1 : 5], (int)node->is_weak);
             depth++;
             dump_node(node->lhs);
             dump_node(node->rhs);
-            dump_node(node->desired);
+            dump_node(NODE_ATOMIC(node)->desired);
             depth--;
             break;
         case ND_ATOMICRMW:
-            fprintf(stdout, "  op=%s  order=%s\n", armw_op_name[node->armw_op],
-                    mem_order_name[node->mem_order ? node->mem_order - 1 : 5]);
+            fprintf(stdout, "  op=%s  order=%s\n", armw_op_name[NODE_ATOMIC(node)->op],
+                    mem_order_name[node->order ? node->order - 1 : 5]);
             depth++;
             dump_node(node->lhs);
             dump_node(node->rhs);
