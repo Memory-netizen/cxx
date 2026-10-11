@@ -1989,6 +1989,50 @@ void diag_exit(char *level, Token *tok, const char *msg, ...) __attribute__((for
 // "no" all but a handful.
 // Past this, a request gets its own block instead of a pool chunk.
 #define EMALLOC_ALIGN _Alignof(max_align_t)
+
+// ---------------------------------------------------------- ASCII classes ----
+// One byte per ASCII character, one bit per class, so asking is a load and an AND:
+// the ctype functions reach a locale table through a function call, and the lexer
+// asks about nearly every character it sees. past 0x7F the table says nothing --
+// those go to the Unicode predicates in unicode.c.
+//
+// The bits are the standard's own classes, and cxx_check_ascii_classes() below
+// compares all 128 entries against isupper()/islower()/isdigit()/isxdigit()/
+// iscntrl()/isspace()/isgraph()/ispunct() before main runs, so a wrong bit is a
+// refusal to start rather than a mis-lexed file.
+enum {
+    C_UPPER   = 1 << 0,   // A-Z
+    C_LOWER   = 1 << 1,   // a-z
+    C_DIGIT   = 1 << 2,   // 0-9
+    C_XDIGIT  = 1 << 3,   // 0-9A-Fa-f
+    C_CNTRL   = 1 << 4,   // 0x00-0x1F and 0x7F
+    C_SPACE   = 1 << 5,   // space \t \n \v \f \r
+    C_GRAPH   = 1 << 6,   // 0x21-0x7E (printable except space)
+    C_PUNCT   = 1 << 7,   // graph and not alphanumeric
+};
+
+static const uint8_t ascii_class[128] = {
+    0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x30, 0x30, 0x30, 0x30, 0x30, 0x10, 0x10,  // 0x00  ................
+    0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,  // 0x10  ................
+    0x20, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0,  // 0x20   !"#$%&'()*+,-./
+    0x4c, 0x4c, 0x4c, 0x4c, 0x4c, 0x4c, 0x4c, 0x4c, 0x4c, 0x4c, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0,  // 0x30  0123456789:;<=>?
+    0xc0, 0x49, 0x49, 0x49, 0x49, 0x49, 0x49, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,  // 0x40  @ABCDEFGHIJKLMNO
+    0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0,  // 0x50  PQRSTUVWXYZ[\]^_
+    0xc0, 0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0x4a, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,  // 0x60  `abcdefghijklmno
+    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0xc0, 0xc0, 0xc0, 0xc0, 0x10,  // 0x70  pqrstuvwxyz{|}~.
+};
+
+static inline bool is_ascii_upper(unsigned char c) { return c < 0x80 && (ascii_class[c] & C_UPPER); }
+static inline bool is_ascii_lower(unsigned char c) { return c < 0x80 && (ascii_class[c] & C_LOWER); }
+static inline bool is_ascii_digit(unsigned char c) { return c < 0x80 && (ascii_class[c] & C_DIGIT); }
+static inline bool is_ascii_xdigit(unsigned char c) { return c < 0x80 && (ascii_class[c] & C_XDIGIT); }
+static inline bool is_ascii_cntrl(unsigned char c) { return c < 0x80 && (ascii_class[c] & C_CNTRL); }
+static inline bool is_ascii_space(unsigned char c) { return c < 0x80 && (ascii_class[c] & C_SPACE); }
+static inline bool is_ascii_graph(unsigned char c) { return c < 0x80 && (ascii_class[c] & C_GRAPH); }
+static inline bool is_ascii_punct(unsigned char c) { return c < 0x80 && (ascii_class[c] & C_PUNCT); }
+// Printable is graph or space, which is an OR rather than another bit.
+static inline bool is_ascii_print(unsigned char c) { return c < 0x80 && (ascii_class[c] & (C_GRAPH | C_SPACE)); }
+
 #define BIG_THRESHOLD (128 * 1024)
 
 void *emalloc(size_t n);

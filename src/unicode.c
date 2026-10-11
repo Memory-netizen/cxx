@@ -119,6 +119,25 @@ static bool ascii_paths_ok(void) {
     return true;
 }
 
+// Every entry against the standard functions, once, before main.
+static bool ascii_classes_ok(void) {
+    for (int c = 0; c < 128; c++) {
+        if (is_ascii_upper((unsigned char)c) != !!isupper(c)) return false;
+        if (is_ascii_lower((unsigned char)c) != !!islower(c)) return false;
+        if (is_ascii_digit((unsigned char)c) != !!isdigit(c)) return false;
+        if (is_ascii_xdigit((unsigned char)c) != !!isxdigit(c)) return false;
+        if (is_ascii_cntrl((unsigned char)c) != !!iscntrl(c)) return false;
+        if (is_ascii_space((unsigned char)c) != !!isspace(c)) return false;
+        if (is_ascii_graph((unsigned char)c) != !!isgraph(c)) return false;
+        if (is_ascii_punct((unsigned char)c) != !!ispunct(c)) return false;
+    }
+    return true;
+}
+
+__attribute__((constructor)) static void check_ascii_class_table(void) {
+    if (!ascii_classes_ok()) fatal("the ASCII class table disagrees with ctype.h");
+}
+
 __attribute__((constructor)) static void check_ascii_fast_paths(void) {
     if (!ascii_paths_ok()) fatal("unicode tables changed: the ASCII fast paths are stale");
 }

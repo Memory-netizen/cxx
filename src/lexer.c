@@ -166,14 +166,14 @@ uint32_t read_universal_char(char **new_pos, char *p, int ch, SrcFile *file) {
     int len = ch == 'u' ? 4 : 8;
     if (*p == '{') {
         char *q = ++p;
-        while (isxdigit(*q)) q++;
+        while (is_ascii_xdigit((unsigned char)*q)) q++;
         if (*q != '}') error_at(file, (uint32_t)(p - 1 - file->contents), "‘\\%c{’ not terminated with ‘}’", ch);
         len = q - p;
         if (len == 0) error_at(file, (uint32_t)(p - 1 - file->contents), "empty delimited universal character name");
     }
     uint32_t c = 0;
     for (int i = 0; i < len; i++) {
-        if (!isxdigit(p[i]))
+        if (!is_ascii_xdigit((unsigned char)p[i]))
             error_at(file, (uint32_t)(p + i - file->contents), "invalid digit ‘%c’ in universal character name", p[i]);
         c = (c << 4) | from_hex(p[i]);
     }
@@ -182,6 +182,23 @@ uint32_t read_universal_char(char **new_pos, char *p, int ch, SrcFile *file) {
     if (*(p - 1) == '{') len++;
     *new_pos = p + len;
     return c;
+}
+
+// Whether this span actually holds a universal character name. The conversion
+// allocates a buffer and copies the whole token, and it only ever *changes* a \u or
+// \U -- so a span with none is itself the answer, and interning can take it
+// straight (intern copies len bytes and terminates its own copy, so it never needed
+// a C string). The walk has to make the same decisions as the conversion: a
+// backslash followed by anything else is two characters, which is what keeps an
+// escaped backslash from being read as the start of a name.
+static bool has_ucn(char *p, int len) {
+    char *end = p + len;
+    while ((p = memchr(p, '\\', (size_t)(end - p)))) {
+        if (p + 1 >= end) return false;
+        if (p[1] == 'u' || p[1] == 'U') return true;
+        p += 2;
+    }
+    return false;
 }
 
 // Replace \u or \U escape sequences with corresponding UTF-8 bytes.
@@ -338,10 +355,10 @@ static uint64_t read_escaped_char(char **new_pos, char *p, char *end) {
         } else {
             p++;
         }
-        if (!isxdigit(*p)) error_at(cur_file, (uint32_t)((p)-cur_file->contents), "invalid hex escape sequence");
+        if (!is_ascii_xdigit((unsigned char)*p)) error_at(cur_file, (uint32_t)((p)-cur_file->contents), "invalid hex escape sequence");
 
         uint64_t val = 0;
-        for (; p < end && isxdigit(*p); p++) val = (val << 4) + from_hex(*p);
+        for (; p < end && is_ascii_xdigit((unsigned char)*p); p++) val = (val << 4) + from_hex(*p);
         if (has_brace && *p++ != '}') goto miss_error;
         *new_pos = p;
         return val;
@@ -695,7 +712,7 @@ static void convert_pp_num(Token *t) {
                     int suf = 0;
                     if (*text == '0') goto error;
                     while (text < end) {
-                        if (isdigit(*text))
+                        if (is_ascii_digit((unsigned char)*text))
                             suf = suf * 10 + *text++ - '0';
                         else
                             goto error;
@@ -999,10 +1016,10 @@ Token *tokenize(SrcFile *file) {
         }
 
         // Read white space
-        if (isspace(*p)) {
+        if (is_ascii_space((unsigned char)*p)) {
             char *q = p;
             int nl = 0;
-            while (isspace(*q)) {
+            while (is_ascii_space((unsigned char)*q)) {
                 if (*q++ == '\n') {
                     nl++;
                     continue;
@@ -1020,7 +1037,7 @@ Token *tokenize(SrcFile *file) {
         }
 
         // Numeric literal
-        if (isdigit(*p) || (*p == '.' && isdigit(p[1]))) {
+        if (is_ascii_digit((unsigned char)*p) || (*p == '.' && is_ascii_digit((unsigned char)p[1]))) {
             tok = read_int_literal(p);
             cur = cur->next = tok;
             p += tok->len;
@@ -1111,8 +1128,13 @@ Token *tokenize(SrcFile *file) {
         int ident_len = read_ident(p);
         if (ident_len) {
             tok = new_token(TK_IDENT, p, p + ident_len);
-            char *buf = convert_universal_chars(p, ident_len, cur_file);
-            tok->id = intern(buf, strlen(buf));
+            // Only when there is a name to replace: otherwise the token's text is already
+            // what interning wants, and that buffer and its copy are pure overhead --
+            // intern copies len bytes and terminates its own copy, so it never needed a
+            // C string to begin with.
+            bool ucn = has_ucn(p, ident_len);
+            char *buf = ucn ? convert_universal_chars(p, ident_len, cur_file) : p;
+            tok->id = intern(buf, ucn ? (uint32_t)strlen(buf) : (uint32_t)ident_len);
             cur = cur->next = tok;
             p += tok->len;
             continue;
