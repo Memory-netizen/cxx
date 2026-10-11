@@ -18,6 +18,7 @@ static void print_loc(Node *node) {
 
 static const char *node_kind_name[] = {
     [ND_NOP] = "NOP",
+    [ND_ASM_REF] = "ASM_REF",
     [ND_COMMA] = "COMMA",
     [ND_AS] = "AS",
     [ND_ADDAS] = "ADDAS",
@@ -651,17 +652,17 @@ static void dump_node(Node *node) {
             break;
 
         case ND_LABEL:
-            fprintf(stdout, "  label=‘%s’\n", str(NODE_LABEL(node)->label));
+            fprintf(stdout, "  label=‘%s’\n", str(NODE_REF(node)->label));
             depth++;
             dump_node(NODE_LABEL(node)->label_body);
             depth--;
             break;
         case ND_LABEL_VAL:
-            fprintf(stdout, "  label=‘%s’\n", str(NODE_LABEL(node)->label));
+            fprintf(stdout, "  label=‘%s’\n", str(NODE_REF(node)->label));
             break;
 
         case ND_GOTO:
-            fprintf(stdout, "  label=‘%s’\n", str(NODE_LABEL(node)->label));
+            fprintf(stdout, "  label=‘%s’\n", str(NODE_REF(node)->label));
             break;
         case ND_GOTO_EXPR:
             fprintf(stdout, "\n");
@@ -672,9 +673,10 @@ static void dump_node(Node *node) {
 
         case ND_BREAK:
         case ND_CONTINUE:
-            if (NODE_LABEL(node)->label) fprintf(stdout, "  label=‘%s’\n", str(NODE_LABEL(node)->label));
+            if (NODE_REF(node)->label) fprintf(stdout, "  label=‘%s’\n", str(NODE_REF(node)->label));
             break;
         case ND_NOP:
+        case ND_ASM_REF:
             fprintf(stdout, "\n");
             break;
 

@@ -1729,6 +1729,7 @@ void add_type(Node *node) {
 
         // other
         case ND_NOP:
+        case ND_ASM_REF:
         case ND_GOTO:
         case ND_GOTO_EXPR:
         case ND_BREAK:

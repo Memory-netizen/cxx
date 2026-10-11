@@ -899,6 +899,11 @@ typedef enum {
     ND_SUBACCESS,  // E[m] on an array operand (C2y 6.5.3.2)
     ND_SP_SAVE,
     ND_SP_RESTORE,
+    // asm goto's reference to one of its labels: an entry in the goto list,
+    // resolved with the ordinary gotos, never a jump. A kind of its own rather
+    // than ND_NOP, so that the ND_NOP an empty initializer element and a no-op
+    // declaration use needs no side block at all.
+    ND_ASM_REF,
     // Byte swap of the integer in lhs, width taken from rhs->ival (16, 32
     // or 64). Lowered to the llvm.bswap.iN intrinsic; kept as its own node
     // so no shift/mask tree has to be synthesized (and typed) by hand.
@@ -941,29 +946,57 @@ struct NodeStmt {
     Blk *cont_blk;
 };
 
-// The kinds that live in a function's label and goto lists, plus ND_CASE's
-// range: ND_LABEL, ND_LABEL_VAL, ND_CASE, ND_GOTO, ND_GOTO_EXPR, ND_BREAK,
-// ND_CONTINUE, and the ND_NOP the parser builds those lists with.
-typedef struct NodeLabel NodeLabel;
+// What an ND_ASM_REF carries: the name of a label to resolve, the label it
+// resolved to, and the link of the list it is resolved in. This is also the part
+// of a real label that the one pass resolving those names reads, which is why
+// NODE_REF can read either -- see the asserts below.
+typedef struct NodeGotoRef NodeGotoRef;
 
-struct NodeLabel {
-    // First, so that a jump can be read through NodeUnwind: that struct is
-    // this one's initial sequence.
+struct NodeGotoRef {
+    // First in this struct and in NodeLabel, so that a jump can be read through
+    // NodeUnwind as well: NodeUnwind is both structs' initial sequence. An asm
+    // goto never sets it -- the jump is inside the template.
     Node *unwind;
     uint32_t label;
     Node *target;
     Node *goto_next;
+    bool is_ref;
+    bool is_addr;
+};
+
+// The kinds that live in a function's label and goto lists, plus ND_CASE's
+// range: ND_LABEL, ND_LABEL_VAL, ND_CASE, ND_GOTO, ND_GOTO_EXPR, ND_BREAK,
+// ND_CONTINUE.
+typedef struct NodeLabel NodeLabel;
+
+struct NodeLabel {
+    // NodeGotoRef's members, in the same order and at the same offsets.
+    Node *unwind;
+    uint32_t label;
+    Node *target;
+    Node *goto_next;
+    bool is_ref;
+    bool is_addr;
     Node *loop_next;
     Node *label_ring;  // the next entry in the function's label list
     Node *label_body;
     int blk_idx;
     bool is_loop;
     bool is_switch;
-    bool is_ref;
-    bool is_addr;
     Int128 ival_end;  // ND_CASE: the high end of a case range
     bool is_range;
 };
+
+// NODE_REF reads a NodeGotoRef from a node whose block may be either one, so the
+// members it reads have to be at the same offsets in both. The type system does
+// not say that; this does.
+_Static_assert(offsetof(NodeGotoRef, unwind) == offsetof(NodeLabel, unwind) &&
+                   offsetof(NodeGotoRef, label) == offsetof(NodeLabel, label) &&
+                   offsetof(NodeGotoRef, target) == offsetof(NodeLabel, target) &&
+                   offsetof(NodeGotoRef, goto_next) == offsetof(NodeLabel, goto_next) &&
+                   offsetof(NodeGotoRef, is_ref) == offsetof(NodeLabel, is_ref) &&
+                   offsetof(NodeGotoRef, is_addr) == offsetof(NodeLabel, is_addr),
+               "NodeGotoRef is not NodeLabel's initial sequence");
 
 // ND_RETURN: the cleanups it has to run, and nothing else.
 typedef struct NodeUnwind NodeUnwind;
@@ -992,6 +1025,7 @@ enum {
     SIDE_UNWIND = 1 << 2,
     SIDE_CALL = 1 << 3,
     SIDE_ATOMIC = 1 << 4,
+    SIDE_REF = 1 << 5,
 };
 
 // kind -> side block. One line per kind that has one; node_side_size() and
@@ -1009,7 +1043,7 @@ enum {
     X(ND_GOTO_EXPR, NodeLabel, SIDE_LABEL) \
     X(ND_BREAK, NodeLabel, SIDE_LABEL)    \
     X(ND_CONTINUE, NodeLabel, SIDE_LABEL) \
-    X(ND_NOP, NodeLabel, SIDE_LABEL)      \
+    X(ND_ASM_REF, NodeGotoRef, SIDE_REF)  \
     X(ND_RETURN, NodeUnwind, SIDE_UNWIND) \
     X(ND_FUNCALL, NodeCall, SIDE_CALL)    \
     X(ND_ALLOCA, NodeCall, SIDE_CALL)     \
@@ -1057,6 +1091,10 @@ void *node_side_checked(Node *n, unsigned want, const char *file, int line);
 #endif
 
 #define NODE_STMT(n) ((NodeStmt *)NODE_SIDE((n), SIDE_STMT))
+// The shared members of a label or a reference to one, then the rest of a
+// label: two accessors rather than one, so that a reference is not read as a
+// label (which would run off the end of its block).
+#define NODE_REF(n) ((NodeGotoRef *)NODE_SIDE((n), SIDE_REF | SIDE_LABEL))
 #define NODE_LABEL(n) ((NodeLabel *)NODE_SIDE((n), SIDE_LABEL))
 #define NODE_UNWIND(n) ((NodeUnwind *)NODE_SIDE((n), SIDE_UNWIND | SIDE_LABEL))
 #define NODE_CALL(n) ((NodeCall *)NODE_SIDE((n), SIDE_CALL))

@@ -7317,6 +7317,29 @@ else
     n_fail=$((n_fail + 1))
 fi
 
+# --- a declaration that builds no node --------------------------------
+# A typedef is a declaration, and a declaration is typed where it is built. A
+# typedef with no variably modified bound builds no node at all, so the block's
+# statement chain is still its sentinel there -- and an earlier version typed
+# that sentinel, a stack Node nobody had initialized. Which inputs died was up
+# to the layout: `int f(void) { typedef int T; return 0; }` killed the
+# released compiler, and the same shape inside a statement expression killed
+# the 64-byte-node compiler that replaced it.
+cat > "$tmp/typedefsent.c" <<'EOF'
+static int g;
+int f(void) { typedef int T; T x = 3; return x; }
+int h(int x) { return g + ({ typedef long U; U y = x; (int)y; }); }
+int main(void) { return f() == 3 && h(4) == 4 ? 0 : 1; }
+EOF
+if "$compiler" -w -o "$tmp/t" "$tmp/typedefsent.c" > "$tmp/log" 2>&1 && "$tmp/t"; then
+    echo "testing a typedef with no bound builds no node to type ... passed"
+    n_pass=$((n_pass + 1))
+else
+    echo "testing a typedef with no bound builds no node to type ... FAILED"
+    sed 's/^/    /' "$tmp/log" | head -4
+    n_fail=$((n_fail + 1))
+fi
+
 # --- summary ---------------------------------------------------------
 echo
 if [ $n_fail -eq 0 ]; then

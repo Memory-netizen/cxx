@@ -463,8 +463,8 @@ static void print_type(Type *ty) {
 static int get_blkid(uint32_t fn_id, uint32_t lbl_id) {
     for (Sym *fn = curm->fns; fn; fn = fn->next)
         if (fn->id == fn_id) {
-            for (Node *y = fn->labels; y; y = NODE_LABEL(y)->goto_next)
-                if (NODE_LABEL(y)->label == lbl_id) return fn->blks[NODE_LABEL(y)->blk_idx].blk_id;
+            for (Node *y = fn->labels; y; y = NODE_REF(y)->goto_next)
+                if (NODE_REF(y)->label == lbl_id) return fn->blks[NODE_LABEL(y)->blk_idx].blk_id;
         }
     return 0;
 }

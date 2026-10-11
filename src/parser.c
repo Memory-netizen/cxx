@@ -3826,7 +3826,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             // is not a scope lookup, so a user declaration of the same
             // name is unaffected.
             tok = skip(tok->next, TK_LPAREN);
-            Node dummy, *cur = &dummy;
+            Node dummy = {}, *cur = &dummy;
             for (int i = 0; i < 3; i++) {
                 if (i) tok = skip(tok, TK_COMMA);
                 Node *arg = assign(&tok, tok);
@@ -3903,7 +3903,7 @@ static Node *atomic_compound_assign(Node *lhs, NodeKind op, Node *rhs, bool post
     Sym *v_res = new_lvar(id_anon, t);
 
     Node *stmt = new_node(ND_STMT_EXPR, tok);
-    Node dummy, *cur = &dummy;
+    Node dummy = {}, *cur = &dummy;
 
     // addr = &A: the address expression is evaluated once.
     Node *as = new_binary(ND_AS, new_var_node(v_addr, tok), new_unary(ND_ADDR, lhs, tok), tok);
@@ -4386,7 +4386,7 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
         return node;
     }
 
-    Node dummy, *cur = &dummy;
+    Node dummy = {}, *cur = &dummy;
     uint32_t i = 0;
 
     do {
@@ -4740,9 +4740,9 @@ static Node *unary(Token **rest, Token *tok) {
         case TK_AND: {
             pedantic(tok, "ISO C forbids taking the address of a label");
             Node *node = new_node(ND_LABEL_VAL, tok);
-            NODE_LABEL(node)->label = label_id_of(get_ident(tok->next));
+            NODE_REF(node)->label = label_id_of(get_ident(tok->next));
 
-            NODE_LABEL(node)->goto_next = gotos;
+            NODE_REF(node)->goto_next = gotos;
             gotos = node;
 
             *rest = tok->next->next;
@@ -5480,7 +5480,7 @@ static int64_t eval2(Node *node, uint32_t *sym) {
             return 0;
         case ND_LABEL_VAL:
             if (!sym || !cur_fn) error(node->tok, "not a compile-time constant");
-            char *lbl = format("%s..%s", str(cur_fn->id), str(NODE_LABEL(node)->label));
+            char *lbl = format("%s..%s", str(cur_fn->id), str(NODE_REF(node)->label));
             *sym = intern(lbl, strlen(lbl));
             return 0;
         default:
@@ -5599,7 +5599,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
     bool is_constexpr = sclass & SC_CONSTEXPR;
     bool is_typedef = sclass & SC_TYPEDEF;
 
-    Node dummy, *cur = &dummy;
+    Node dummy = {}, *cur = &dummy;
     do {
         Token *start = tok;
         // GNU puts attributes at the beginning of a declarator as well as
@@ -6032,7 +6032,7 @@ static LoopScope *loop_scope_of(Node *name, bool is_break) {
         if (!fr->labels) continue;
         Node *t = fr->labels;
         do {
-            if (NODE_LABEL(t)->label == NODE_LABEL(name)->label) return fr;
+            if (NODE_REF(t)->label == NODE_REF(name)->label) return fr;
             t = NODE_LABEL(t)->label_ring;
         } while (t && t != fr->labels);
     }
@@ -6311,12 +6311,12 @@ static Node *goto_stmt(Token **rest, Token *tok) {
         return node;
     }
     Node *node = new_node(ND_GOTO, tok);
-    NODE_LABEL(node)->label = label_id_of(get_ident(tok->next));
+    NODE_REF(node)->label = label_id_of(get_ident(tok->next));
     // Which handlers this jump runs is only known once the label is, so the
     // scope it starts from waits next to it (see resolve_goto_labels).
     note_jump_scope(node, scope);
 
-    NODE_LABEL(node)->goto_next = gotos;
+    NODE_REF(node)->goto_next = gotos;
     gotos = node;
     falls_through = false;
 
@@ -6329,7 +6329,7 @@ static Node *get_named_loop(Token **rest, Token *tok, bool is_break) {
     Node *cur = named_loop;
     bool match = false;
     while (cur) {
-        if (NODE_LABEL(cur)->label == label_id) {
+        if (NODE_REF(cur)->label == label_id) {
             if (NODE_LABEL(cur)->is_loop) match = true;
             if (NODE_LABEL(cur)->is_switch && is_break) match = true;
             break;
@@ -6352,12 +6352,12 @@ static Node *continue_stmt(Token **rest, Token *tok) {
     tok = tok->next;
 
     if (tok->kind == TK_IDENT) {
-        NODE_LABEL(node)->label = tok->id;
-        NODE_LABEL(node)->target = get_named_loop(&tok, tok, false);
+        NODE_REF(node)->label = tok->id;
+        NODE_REF(node)->target = get_named_loop(&tok, tok, false);
     }
 
     // The handlers of every scope this jump leaves run before it.
-    LoopScope *fr = loop_scope_of(NODE_LABEL(node)->target, false);
+    LoopScope *fr = loop_scope_of(NODE_REF(node)->target, false);
     if (fr) NODE_UNWIND(node)->unwind = cleanup_leaving(scope, fr->scp, node->tok);
 
     falls_through = false;
@@ -6372,14 +6372,14 @@ static Node *break_stmt(Token **rest, Token *tok) {
     tok = tok->next;
 
     if (tok->kind == TK_IDENT) {
-        NODE_LABEL(node)->label = tok->id;
-        NODE_LABEL(node)->target = get_named_loop(&tok, tok, true);
+        NODE_REF(node)->label = tok->id;
+        NODE_REF(node)->target = get_named_loop(&tok, tok, true);
     }
 
     // The frame on top is the loop or switch this break leaves -- right for
     // the plain form; the GNU named form is attributed to the innermost one.
     if (brk_frame) brk_frame->seen = true;
-    LoopScope *fr = loop_scope_of(NODE_LABEL(node)->target, true);
+    LoopScope *fr = loop_scope_of(NODE_REF(node)->target, true);
     if (fr) NODE_UNWIND(node)->unwind = cleanup_leaving(scope, fr->scp, node->tok);
     falls_through = false;
     *rest = skip(tok, TK_SEMI);
@@ -6417,13 +6417,13 @@ static Node *return_stmt(Token **rest, Token *tok) {
 static void check_label(uint32_t label, Token *tok) {
     Node *cur = labels;
     while (cur) {
-        if (NODE_LABEL(cur)->label == label) {
+        if (NODE_REF(cur)->label == label) {
             // The token carries the name that was written; the id may be the
             // mangled one a __label__ declaration gave it.
             diag("error", tok, "redefinition of label ‘%s’", str(tok->id));
             diag_exit("note", cur->tok, "previous definition is here");
         }
-        cur = NODE_LABEL(cur)->goto_next;
+        cur = NODE_REF(cur)->goto_next;
     }
 }
 
@@ -6474,10 +6474,10 @@ static Node *label(Token **rest, Token *tok) {
             // a case label that a normal label leads into as deliberate.
             falls_through = false;
             Node *node = new_node(ND_LABEL, tok);
-            NODE_LABEL(node)->label = label_id_of(tok->id);
+            NODE_REF(node)->label = label_id_of(tok->id);
             note_jump_scope(node, scope);
-            check_label(NODE_LABEL(node)->label, tok);
-            NODE_LABEL(node)->goto_next = labels;
+            check_label(NODE_REF(node)->label, tok);
+            NODE_REF(node)->goto_next = labels;
             labels = node;
             if (idx < 0 && cur_fn) {
                 idx = cur_fn->num_lbl++;
@@ -6823,7 +6823,7 @@ static char *asm_tmpl_conv(Token *tok, char *src, AsmOperand *ops, Node **labels
             int k = -1;
             if (name) {
                 for (int j = 0; j < nlabels; j++)
-                    if (NODE_LABEL(labels[j])->label == intern(name, nlen)) k = j;
+                    if (NODE_REF(labels[j])->label == intern(name, nlen)) k = j;
                 if (k < 0) error(tok, "unknown symbolic operand name in inline assembly string");
             } else {
                 if (num < nops || num >= nops + (long)nlabels) error(tok, "invalid ‘asm’: ‘%%l’ operand isn’t a label");
@@ -6947,9 +6947,11 @@ static Token *asm_clobbers(Token **rest, Token *tok, char **cons) {
 // asm-goto-labels ::= identifier ("," identifier)*
 // The labels are resolved with the ordinary gotos, at the end of the
 // function: an asm goto may land anywhere a goto may, and the same checks
-// apply to it. Each gets a node of the shape a goto uses, so the one pass
-// that knows how a label is found does not have to know about asm -- a node
-// of kind ND_NOP is one of these rather than a jump.
+// apply to it. Each gets a node of the shape a goto uses -- ND_ASM_REF, whose
+// block starts like a label's -- so the one pass that knows how a label is
+// found does not have to know about asm. It is not a jump, and not an ND_NOP
+// either: an ND_NOP is an empty initializer element or a no-op declaration,
+// and it carries no block at all.
 static Token *asm_goto_labels(Token **rest, Token *tok, Node *node) {
     while (tok->kind == TK_IDENT) {
         if (!(*NODE_ASM_SIDE(node))->labels)
@@ -6958,10 +6960,10 @@ static Token *asm_goto_labels(Token **rest, Token *tok, Node *node) {
             (*NODE_ASM_SIDE(node))->labels = vgrow((*NODE_ASM_SIDE(node))->labels, (*NODE_ASM_SIDE(node))->nlabels + 1);
 
         Token *name = tok;
-        Node *ref = new_node(ND_NOP, name);
-        NODE_LABEL(ref)->label = get_ident(name);
+        Node *ref = new_node(ND_ASM_REF, name);
+        NODE_REF(ref)->label = get_ident(name);
         note_jump_scope(ref, scope);
-        NODE_LABEL(ref)->goto_next = gotos;
+        NODE_REF(ref)->goto_next = gotos;
         gotos = ref;
         (*NODE_ASM_SIDE(node))->labels[(*NODE_ASM_SIDE(node))->nlabels++] = ref;
 
@@ -7281,7 +7283,7 @@ static bool consume_pragma(Token **rest, Token *tok) {
 }
 
 static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
-    Node dummy, *cur = &dummy;
+    Node dummy = {}, *cur = &dummy;
     Node *node = new_node(ND_COMP_STMT, tok);
 
     if (!is_func_body) {
@@ -7370,12 +7372,16 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
                 }
             } else {
                 cur = cur->next = declaration(&tok, tok, basety, sclass, align, funcspec, attrs);
+                // Type it here rather than below: on the typedef path above
+                // there is no node unless a variably modified bound had to be
+                // evaluated, and `cur` is then still this block's sentinel --
+                // a stack Node that add_type() would read as one.
+                add_type(cur);
             }
 
             // A declaration is not a jump: control reaches the statement that
             // follows it, whatever its initializer does.
             falls_through = true;
-            add_type(cur);
             continue;
         }
 
@@ -9215,17 +9221,17 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, SClass sclass, 
 }
 
 static void resolve_goto_labels(void) {
-    for (Node *x = gotos; x; x = NODE_LABEL(x)->goto_next) {
-        for (Node *y = labels; y; y = NODE_LABEL(y)->goto_next)
-            if (NODE_LABEL(x)->label == NODE_LABEL(y)->label) {
-                NODE_LABEL(x)->target = y;
-                NODE_LABEL(y)->is_ref = true;
-                if (x->kind == ND_LABEL_VAL) NODE_LABEL(y)->is_addr = true;
+    for (Node *x = gotos; x; x = NODE_REF(x)->goto_next) {
+        for (Node *y = labels; y; y = NODE_REF(y)->goto_next)
+            if (NODE_REF(x)->label == NODE_REF(y)->label) {
+                NODE_REF(x)->target = y;
+                NODE_REF(y)->is_ref = true;
+                if (x->kind == ND_LABEL_VAL) NODE_REF(y)->is_addr = true;
                 // 6.8.6.1p1: the jump may not land inside the scope of an
                 // identifier with a variably modified type. An asm goto's
                 // labels are jumps of the same kind, which clang words
                 // differently.
-                char *what = x->kind == ND_NOP
+                char *what = x->kind == ND_ASM_REF
                                  ? "cannot jump from this asm goto statement to one of its possible targets"
                                  : "cannot jump from this goto statement to its label";
                 Scope *from = jump_scope_of(x);
@@ -9235,13 +9241,13 @@ static void resolve_goto_labels(void) {
                 // the label's own scope is still live where it lands. An asm
                 // goto cannot run them -- the jump is inside the template,
                 // and the path that falls out of it still needs them.
-                if (from && x->kind != ND_NOP) NODE_UNWIND(x)->unwind = cleanup_leaving(from, to, x->tok);
+                if (from && x->kind != ND_ASM_REF) NODE_UNWIND(x)->unwind = cleanup_leaving(from, to, x->tok);
                 break;
             }
 
         // The name is the whole reference for an asm goto, which has no
         // token after it to point at.
-        if (!NODE_LABEL(x)->target) error(x->kind == ND_NOP ? x->tok : x->tok->next, "use of undeclared label");
+        if (!NODE_REF(x)->target) error(x->kind == ND_ASM_REF ? x->tok : x->tok->next, "use of undeclared label");
     }
 
     gotos = labels = NULL;

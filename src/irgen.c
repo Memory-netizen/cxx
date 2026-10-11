@@ -1642,7 +1642,7 @@ static Ref gen_expr(Node *node) {
             // Labels are function-scoped: the index into fn->blks
             // suffices. Global/static &&label initializers take the
             // Con CAddr path ("fn..label"), not Ref.
-            dst.val = NODE_LABEL(NODE_LABEL(node)->target)->blk_idx;
+            dst.val = NODE_LABEL(NODE_REF(node)->target)->blk_idx;
             return dst;
         case ND_LVTOR: {
             int align = lvalue_align(node->lhs);
@@ -2776,7 +2776,7 @@ static Ref gen_case(Node *n) {
 static void gen_goto(Node *n) {
     if (NODE_UNWIND(n)->unwind) gen_expr(NODE_UNWIND(n)->unwind);
     curb->jmp.type = IR_JMP;
-    curb->succ1 = &curf->blks[NODE_LABEL(NODE_LABEL(n)->target)->blk_idx];
+    curb->succ1 = &curf->blks[NODE_LABEL(NODE_REF(n)->target)->blk_idx];
     add_pred(curb, curb->succ1);
     curb = unreach;
 }
@@ -2804,7 +2804,7 @@ static Node *named_loop_body(Node *target) {
 static void gen_break(Node *n) {
     if (NODE_UNWIND(n)->unwind) gen_expr(NODE_UNWIND(n)->unwind);
     curb->jmp.type = IR_JMP;
-    curb->succ1 = NODE_LABEL(n)->target ? NODE_STMT(named_loop_body(NODE_LABEL(n)->target))->brk_blk : brk_blk;
+    curb->succ1 = NODE_REF(n)->target ? NODE_STMT(named_loop_body(NODE_REF(n)->target))->brk_blk : brk_blk;
     add_pred(curb, curb->succ1);
     curb = unreach;
 }
@@ -2812,7 +2812,7 @@ static void gen_break(Node *n) {
 static void gen_continue(Node *n) {
     if (NODE_UNWIND(n)->unwind) gen_expr(NODE_UNWIND(n)->unwind);
     curb->jmp.type = IR_JMP;
-    curb->succ1 = NODE_LABEL(n)->target ? NODE_STMT(named_loop_body(NODE_LABEL(n)->target))->cont_blk : cont_blk;
+    curb->succ1 = NODE_REF(n)->target ? NODE_STMT(named_loop_body(NODE_REF(n)->target))->cont_blk : cont_blk;
     add_pred(curb, curb->succ1);
     curb = unreach;
 }
@@ -3141,7 +3141,7 @@ static Ref gen_asm(Node *node) {
         curb->narg = (*NODE_ASM_SIDE(node))->nlabels;
         curb->succ = emalloc((*NODE_ASM_SIDE(node))->nlabels * sizeof(Blk *));
         for (int i = 0; i < (*NODE_ASM_SIDE(node))->nlabels; i++) {
-            curb->succ[i] = &curf->blks[NODE_LABEL(NODE_LABEL((*NODE_ASM_SIDE(node))->labels[i])->target)->blk_idx];
+            curb->succ[i] = &curf->blks[NODE_LABEL(NODE_REF((*NODE_ASM_SIDE(node))->labels[i])->target)->blk_idx];
             add_pred(curb, curb->succ[i]);
         }
         curb->succ1 = fall;
@@ -3279,12 +3279,12 @@ Module *irgen(Module *md) {
         fn->start = new_blk();
         fn->end = new_blk();
         int num_indirectgoto = 0;
-        for (Node *y = fn->labels; y; y = NODE_LABEL(y)->goto_next)
-            if (NODE_LABEL(y)->is_addr) num_indirectgoto++;
+        for (Node *y = fn->labels; y; y = NODE_REF(y)->goto_next)
+            if (NODE_REF(y)->is_addr) num_indirectgoto++;
         fn->num_indirectbr = num_indirectgoto;
         fn->indirectbr = emalloc(num_indirectgoto * sizeof(Blk *));
-        for (Node *y = fn->labels; num_indirectgoto && y; y = NODE_LABEL(y)->goto_next) {
-            if (!NODE_LABEL(y)->is_addr) continue;
+        for (Node *y = fn->labels; num_indirectgoto && y; y = NODE_REF(y)->goto_next) {
+            if (!NODE_REF(y)->is_addr) continue;
             fn->indirectbr[--num_indirectgoto] = &fn->blks[NODE_LABEL(y)->blk_idx];
         }
         brk_blk = cont_blk = NULL;

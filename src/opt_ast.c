@@ -874,6 +874,7 @@ Node *fold_node(Node *node) {
         case ND_SUBACCESS:
             break;
         case ND_NOP:
+        case ND_ASM_REF:
         case ND_MEMZERO:
         case ND_GOTO:
         case ND_BREAK:
