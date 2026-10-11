@@ -224,6 +224,48 @@ void *emalloc_big(size_t n) {
     return p;
 }
 
+#define TOK_CHUNK_MIN (256 * 1024)
+#define TOK_CHUNK_MAX (8 * 1024 * 1024)
+
+char *tok_pool;
+size_t tok_free;
+static size_t tok_next_chunk = TOK_CHUNK_MIN;
+static char **tok_chunks;  // every chunk handed out, so they can be given back
+static size_t tok_num_chunks, tok_chunk_cap;
+
+void *talloc_slow(size_t n) {
+    n = ALIGN_UP(n, ALIGNMENT);
+    size_t chunk = tok_next_chunk;
+    while (chunk < n) chunk *= 2;
+    if (tok_next_chunk < TOK_CHUNK_MAX) tok_next_chunk *= 2;
+
+    char *p = calloc(1, chunk);
+    if (!p) fatal("talloc, out of memory");
+
+    if (tok_num_chunks == tok_chunk_cap) {
+        // The list itself lives in the arena that is never freed.
+        size_t cap = tok_chunk_cap ? tok_chunk_cap * 2 : 64;
+        char **grown = emalloc(cap * sizeof(char *));
+        for (size_t i = 0; i < tok_num_chunks; i++) grown[i] = tok_chunks[i];
+        tok_chunks = grown;
+        tok_chunk_cap = cap;
+    }
+    tok_chunks[tok_num_chunks++] = p;
+
+    tok_pool = p + n;
+    tok_free = chunk - n;
+    return p;
+}
+
+// Called once the AST is folded: nothing reads a token after that.
+void tfree_all(void) {
+    for (size_t i = 0; i < tok_num_chunks; i++) free(tok_chunks[i]);
+    tok_num_chunks = 0;
+    tok_pool = NULL;
+    tok_free = 0;
+    tok_next_chunk = TOK_CHUNK_MIN;
+}
+
 void *emalloc(size_t n) {
     if (n == 0) return NULL;
     n = ALIGN_UP(n, ALIGNMENT);

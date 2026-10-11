@@ -2014,6 +2014,26 @@ static inline __attribute__((always_inline)) void *arena_alloc_fixed(size_t n) {
 }
 
 // n is a compile-time constant, so the round-up is too: no arithmetic at run time.
+// Tokens are the one large group of allocations that nothing reads after the AST
+// is folded: irgen and the IR printer read no tokens at all. So they come from an
+// arena of their own, which can then be handed back to the system instead of
+// sitting in the peak -- the token stage was two thirds of it.
+extern char *tok_pool;
+extern size_t tok_free;
+void *talloc_slow(size_t n);
+void tfree_all(void);
+
+static inline __attribute__((always_inline)) void *talloc_fixed(size_t n) {
+    if (n > tok_free) return talloc_slow(n);
+    char *p = tok_pool;
+    tok_pool += n;
+    tok_free -= n;
+    return p;
+}
+
+#define ALLOC_TOK(type) \
+    ((type *)talloc_fixed((sizeof(type) + (EMALLOC_ALIGN - 1)) & ~(size_t)(EMALLOC_ALIGN - 1)))
+
 #define ALLOC(type) \
     ((type *)arena_alloc_fixed((sizeof(type) + (EMALLOC_ALIGN - 1)) & ~(size_t)(EMALLOC_ALIGN - 1)))
 void *vnew(size_t len, size_t esz);

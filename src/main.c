@@ -1042,6 +1042,13 @@ static void cc1(void) {
 
     fold_ast(prog);
 
+    // Past this point nothing reads a token again: irgen and the IR printer take
+    // the AST, and every diagnostic after here is a fatal error without a
+    // location. Handing the token arena back is what lowers the peak -- the token
+    // stage was two thirds of it. dump_ast above runs before fold_ast on purpose:
+    // it prints token text, so it has to.
+    tfree_all();
+
     // -fsyntax-only: the translation unit has been read and checked, and
     // that is all. The return sits after the folding pass -- where the
     // conversions and shift counts a program is warned about are seen -- and
