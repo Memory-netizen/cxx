@@ -85,7 +85,7 @@ static uint32_t has_extension_id;
 static uint32_t building_module_id;
 static uint32_t pragma_op_id;
 
-static Token *expand_macro(Token *dst, Token *list);
+static Token *expand_macro(Token *dst, Token *list, bool owned);
 static char *join_tokens(Token *tok);
 static char *search_include_paths(char *filename);
 static char *read_filename(Token **rest, Token *tok, bool *is_dquote, bool to_eol);
@@ -230,6 +230,18 @@ static Token *new_eof(Token *tok) {
     t->len = 0;
     t->is_sol = true;
     return t;
+}
+
+// Append TOK to the output list whose tail is DST, and return the new tail.
+//
+// This is the whole of the decision: an `owned` token is one the caller has
+// taken out of the input stream, or that was built for this one expansion, and
+// that nothing else can reach, so it goes into the output as it stands.
+// Anything else is shared -- a macro body is used by every expansion of that
+// macro -- and has to be copied.
+static Token *append_token(Token *dst, Token *tok, bool owned) {
+    dst->next = owned ? tok : copy_token(tok);
+    return dst->next;
 }
 
 // Double-quote a given string and returns it.
@@ -540,7 +552,7 @@ static Token *eval_zero_operator(Token *tok, uint32_t id) {
 // (used by #if and by the #embed limit parameter).
 static int64_t eval_const_tokens(Token *expr) {
     Token dummy = {}, *cur = &dummy;
-    cur = expand_macro(cur, expr);
+    cur = expand_macro(cur, expr, false);
     cur->next = new_eof(cur);
     expr = dummy.next;
     expr = eval_has_include(expr);
@@ -1106,7 +1118,7 @@ static Token *subst(Token *tok, MacroArg *args) {
             bool saved = collecting;
             collecting = true;
             Token dummy2 = {};
-            expand_macro(&dummy2, arg->tok);
+            expand_macro(&dummy2, arg->tok, false);
             collecting = saved;
 
             bool first = true;
@@ -1187,7 +1199,7 @@ static Token *rescan_call(Token *dst, Token *prev, Token **input) {
         Token *sub = subst(m->body, args);
         for (Token *t = sub; t && t->kind != TK_EOF; t = t->next) t->origin = name;
         push_disabled(m->id);
-        dst = expand_macro(before, sub);
+        dst = expand_macro(before, sub, true);
         pop_disabled();
         // The expansion stands where the name token was, so its first token
         // carries the name's leading white space -- the rule the two callers
@@ -1203,16 +1215,21 @@ static Token *rescan_call(Token *dst, Token *prev, Token **input) {
 // Recursively expand the input linked‑list macro,
 // link it to the pointer specified by the argument,
 // and terminate the returned linked list with a NULL tail.
-static Token *expand_macro(Token *dst, Token *list) {
+// `owned` says the list is the caller's to give away, and that is what
+// decides, token by token, whether the output is handed the token itself or a
+// copy of it (append_token()). Almost everything an expansion walks is only
+// carried along, and sorting the list into runs of those first would cost a
+// second walk to save one copy on each of them.
+static Token *expand_macro(Token *dst, Token *list, bool owned) {
     Token *cur = list;
     while (cur && cur->kind != TK_EOF) {
         if (cur->kind != TK_IDENT) {
-            dst = dst->next = copy_token(cur);
+            dst = append_token(dst, cur, owned);
             cur = cur->next;
             continue;
         }
         if (is_disabled(cur->id) || cur->noexpand) {
-            dst = dst->next = copy_token(cur);
+            dst = append_token(dst, cur, owned);
             // 6.10.4.1p2: a name that is not replaced because it is the name
             // of a macro whose replacement list is being scanned is "no
             // longer available for further replacement", and that lasts
@@ -1228,7 +1245,7 @@ static Token *expand_macro(Token *dst, Token *list) {
 
         Macro *m = find_macro(cur);
         if (!m) {
-            dst = dst->next = copy_token(cur);
+            dst = append_token(dst, cur, owned);
             cur = cur->next;
             continue;
         }
@@ -1273,7 +1290,7 @@ static Token *expand_macro(Token *dst, Token *list) {
                 for (Token *t = sub; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
 
                 Token *alias_prev = dst;
-                dst = expand_macro(dst, sub);
+                dst = expand_macro(dst, sub, true);
                 pop_disabled();
                 while (aliases-- > 0) pop_disabled();
                 if (alias_prev->next) {
@@ -1291,10 +1308,11 @@ static Token *expand_macro(Token *dst, Token *list) {
             // afterwards answered with the line of the definition
             // (C/0054/0054_0102.c). The copy also keeps the expansion from
             // writing on the body, which every later use of the macro shares.
+            // Being a copy is what lets it be handed over as owned below.
             Token *body = copy_body(m->body, macro_name);
             Token *prev = dst;
             push_disabled(cur->id);
-            dst = expand_macro(dst, body);
+            dst = expand_macro(dst, body, true);
             pop_disabled();
             if (prev->next) {
                 prev->next->is_leadingws = macro_name->is_leadingws;
@@ -1308,19 +1326,21 @@ static Token *expand_macro(Token *dst, Token *list) {
         // If a funclike macro token is not followed by an argument list,
         // treat it as a normal identifier.
         if (!cur->next || cur->next->kind != TK_LPAREN) {
-            dst = dst->next = copy_token(cur);
+            dst = append_token(dst, cur, owned);
             cur = cur->next;
             continue;
         }
 
-        // Function-like macro application
+        // Function-like macro application. Every token subst() returns was
+        // built for this invocation -- it copies the body's tokens and both
+        // argument lists are copies -- so the expansion can take them over.
         MacroArg *args = read_macro_args(&cur, cur, m->params, m->is_variadic, m->va_args_id);
         Token *sub = subst(m->body, args);
         for (Token *t = sub; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
 
         Token *prev = dst;
         push_disabled(m->id);
-        dst = expand_macro(dst, sub);
+        dst = expand_macro(dst, sub, true);
         pop_disabled();
         dst = rescan_call(dst, prev, &cur);
         if (prev->next) {
@@ -1439,7 +1459,7 @@ static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
     // token or a sequence of "<" ... ">".
     if (tok->kind == TK_IDENT) {
         Token dummy = {}, *cur = &dummy;
-        cur = expand_macro(cur, read_line(rest, tok));
+        cur = expand_macro(cur, read_line(rest, tok), false);
         cur->next = new_eof(cur);
         return read_include_filename(&cur, dummy.next, is_dquote);
     }
@@ -1480,7 +1500,7 @@ static char *read_embed_resource(Token **rest, Token *tok, bool *is_dquote, Toke
         Token *line = read_line(&tok, tok);
         *eol = tok;
         Token dummy0 = {}, *c0 = &dummy0;
-        c0 = expand_macro(c0, line);
+        c0 = expand_macro(c0, line, false);
         tok = dummy0.next;
     }
     return read_embed_filename(rest, tok, is_dquote);
@@ -1583,9 +1603,9 @@ static void emit_embed(Token **cur, Token *embed_tok, unsigned char *data, long 
     if (fsize == 0) {
         // An empty resource yields only if_empty (clang/gcc emit
         // nothing at all without it; prefix/suffix do not apply).
-        if (if_empty) out = expand_macro(out, if_empty);
+        if (if_empty) out = expand_macro(out, if_empty, false);
     } else {
-        if (prefix) out = expand_macro(out, prefix);
+        if (prefix) out = expand_macro(out, prefix, false);
         int64_t n = limit < 0 || limit > fsize ? fsize : limit;
         for (int64_t i = 0; i < n; i++) {
             // The replacement is a comma-separated list.
@@ -1599,7 +1619,7 @@ static void emit_embed(Token **cur, Token *embed_tok, unsigned char *data, long 
             }
             out = out->next = ident_to_num(embed_tok, data[i]);
         }
-        if (suffix) out = expand_macro(out, suffix);
+        if (suffix) out = expand_macro(out, suffix, false);
     }
     // Mark the first emitted token as start-of-line so the -E printer
     // separates it from the preceding line marker.
@@ -1892,7 +1912,7 @@ static Token *read_line_marker(Token **rest, Token *tok) {
     // already stored in *rest.
     Token *args = read_line(rest, tok->next);
     Token dummy2 = {};
-    expand_macro(&dummy2, args);
+    expand_macro(&dummy2, args, false);
     Token *num = dummy2.next;
     if (!num || num->kind != TK_PPNUM) error(start, "#line directive requires a positive integer argument");
 
@@ -2112,7 +2132,11 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
             }
             buf->next = new_eof(tok);
             Token *seg = cur;
-            cur = expand_macro(cur, dummy2.next);
+            // The segment was taken out of the input stream above and nothing
+            // else refers to it, so every token of it that names no macro is
+            // linked into the output as it stands. This is the whole of a file
+            // that uses no macros, and most of the tokens of one that does.
+            cur = expand_macro(cur, dummy2.next, true);
             if (seg->next) {
                 seg->next = scan_pragma_op(seg->next);
                 cur = seg;
