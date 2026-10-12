@@ -640,7 +640,6 @@ struct MacroArg {
 typedef Token *macro_handler_fn(Token **, Token *);
 struct Macro {
     Macro *next;
-    Macro *hnext;  // hash chain link
     uint32_t id;
     bool deleted;
     bool is_builtin;
@@ -700,11 +699,15 @@ static void push_disabled(uint32_t id) {
 
 static void pop_disabled() { hideset = hideset->next; }
 
-// Hash over macros (chain addressing): lookup stays O(1) even for
-// headers that define thousands of macros.
-static Macro **macro_ht;
-static int macro_cap;
-static int macro_n;
+// The macro in force for a name is that name's own slot, so a lookup is the
+// id's two loads and never a hash probe or a chain walk -- identifiers are
+// most of the tokens in real source, and every one of them asks this question.
+// `deleted` means the name is currently undefined; a definition after an
+// #undef installs a new Macro object, so the slot always holds the newest.
+static Macro *macro_of(uint32_t id) {
+    Macro *m = *(Macro **)intern_aux(id);
+    return m && !m->deleted ? m : NULL;
+}
 
 static Macro *find_macro(Token *tok) {
     if (tok->kind != TK_IDENT) {
@@ -712,13 +715,15 @@ static Macro *find_macro(Token *tok) {
         tok->filename = display_name;
         error(tok, "macro name must be an identifier");
     }
-    if (macro_ht)
-        for (Macro *m = macro_ht[tok->id & (macro_cap - 1)]; m; m = m->hnext)
-            if (m->id == tok->id) return m->deleted ? NULL : m;
-    return NULL;
+    return macro_of(tok->id);
 }
 
 static Macro *add_macro(uint32_t id, bool is_objlike, Token *body) {
+    // Read the slot once: the pointer stays valid for the whole function, and
+    // nothing in here interns anything.
+    Macro **slot = (Macro **)intern_aux(id);
+    if (*slot) (*slot)->deleted = true;  // the definition being replaced
+
     Macro *m = emalloc(sizeof(Macro));
     m->id = id;
     m->is_objlike = is_objlike;
@@ -726,36 +731,7 @@ static Macro *add_macro(uint32_t id, bool is_objlike, Token *body) {
 
     m->next = macros;
     macros = m;
-
-    if (!macro_ht) {
-        macro_cap = 256;
-        macro_ht = vnew(macro_cap, sizeof(Macro *));
-    } else if (macro_n >= macro_cap * 2) {
-        int cap = macro_cap * 2;
-        Macro **ht = vnew(cap, sizeof(Macro *));
-        Macro **tail = vnew(cap, sizeof(Macro *));
-        for (int i = 0; i < cap; i++) ht[i] = tail[i] = NULL;
-        for (int i = 0; i < macro_cap; i++)
-            for (Macro *x = macro_ht[i]; x;) {
-                Macro *next = x->hnext;  // saved before the link is rewired
-                int h = x->id & (cap - 1);
-                // tail-insert keeps the chain order: redefinitions must
-                // keep winning over their predecessors
-                x->hnext = NULL;
-                if (tail[h])
-                    tail[h]->hnext = x;
-                else
-                    ht[h] = x;
-                tail[h] = x;
-                x = next;
-            }
-        macro_ht = ht;
-        macro_cap = cap;
-    }
-    int h = id & (macro_cap - 1);
-    m->hnext = macro_ht[h];
-    macro_ht[h] = m;
-    macro_n++;
+    *slot = m;
     return m;
 }
 
@@ -1749,15 +1725,6 @@ typedef struct {
 static SavedMacro *saved_macros;
 static int num_saved;
 
-// The macro a name currently resolves to, or NULL when it is undefined: the
-// newest entry for the name wins, and a deleted one means "undefined".
-static Macro *macro_entry(uint32_t id) {
-    if (macro_ht)
-        for (Macro *m = macro_ht[id & (macro_cap - 1)]; m; m = m->hnext)
-            if (m->id == id) return m->deleted ? NULL : m;
-    return NULL;
-}
-
 // The name `#pragma push_macro("x")` gives: a string literal, whose text is
 // not NUL-terminated -- only its len bytes belong to it.
 static bool read_macro_name(Token *tok, uint32_t *id) {
@@ -1776,7 +1743,7 @@ static bool read_macro_name(Token *tok, uint32_t *id) {
 }
 
 static void push_macro(uint32_t id) {
-    Macro *m = macro_entry(id);
+    Macro *m = macro_of(id);
     if (!saved_macros)
         saved_macros = vnew(8, sizeof(SavedMacro));
     else
@@ -1789,22 +1756,12 @@ static void pop_macro(uint32_t id) {
     for (int i = num_saved - 1; i >= 0; i--) {
         if (saved_macros[i].id != id) continue;
         Macro *want = saved_macros[i].saved;
-        // What the name resolved to at the push has to become what it
-        // resolves to now. The lookup stops at the newest entry for a name,
-        // so a fresh entry is added on top -- the saved one itself may be
-        // shadowed by anything defined in between, and `#undef` works the
-        // same way, by adding a deleted marker.
-        if (want) {
-            Macro *m = add_macro(id, want->is_objlike, want->body);
-            m->is_variadic = want->is_variadic;
-            m->va_args_id = want->va_args_id;
-            m->params = want->params;
-            m->handler = want->handler;
-            m->is_builtin = want->is_builtin;
-        } else {
-            Macro *m = add_macro(id, true, NULL);
-            m->deleted = true;
-        }
+        // What the name resolved to at the push has to become what it resolves
+        // to now, and now that is simply the slot: put the saved macro back,
+        // clearing the `deleted` a later #undef may have set on it. Anything
+        // defined in between stops being visible, which is the point.
+        if (want) want->deleted = false;
+        *(Macro **)intern_aux(id) = want;
         for (int k = i; k < num_saved - 1; k++) saved_macros[k] = saved_macros[k + 1];
         num_saved--;
         return;

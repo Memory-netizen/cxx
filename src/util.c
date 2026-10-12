@@ -368,6 +368,10 @@ struct Bucket {
     uint32_t nstr;
     uint32_t *len;
     char **str;
+    // One pointer of auxiliary data per interned string: the identifier pool's
+    // first field lives here (see intern_aux). Kept parallel to str/len, so a
+    // lookup is two loads and never a walk.
+    void **aux;
 };
 static Bucket itbl[IMask + 1];
 
@@ -434,9 +438,13 @@ uint32_t intern(char *s, uint32_t len) {
     if (n == 0) {
         b->str = vnew(1, sizeof b->str[0]);
         b->len = vnew(1, sizeof b->len[0]);
+        b->aux = vnew(1, sizeof b->aux[0]);
+        b->aux[0] = NULL;
     } else if ((n & (n - 1)) == 0) {
         b->str = vgrow(b->str, n + n);
         b->len = vgrow(b->len, n + n);
+        b->aux = vgrow(b->aux, n + n);
+        memset(b->aux + n, 0, (size_t)n * sizeof b->aux[0]);
     }
     b->len[n] = len;
     b->str[n] = emalloc(len + 1);
@@ -444,6 +452,14 @@ uint32_t intern(char *s, uint32_t len) {
     memcpy(b->str[n], s, len);
     b->str[n][len] = '\0';
     return h | (n << IBits);
+}
+
+// The auxiliary slot of an interned string. It belongs to the string, so it is
+// the same slot however the caller got hold of the id. The pointer is only
+// valid until the next intern(): growing a bucket moves the array.
+void **intern_aux(uint32_t id) {
+    Bucket *b = &itbl[id & IMask];
+    return &b->aux[id >> IBits];
 }
 
 // Compared directly rather than through intern(): two strings of the same

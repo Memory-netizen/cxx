@@ -2272,6 +2272,7 @@ void *vgrow(void *data, size_t len);
 
 char *format(char *s, ...) __attribute__((format(printf, 1, 2)));
 uint32_t intern(char *s, uint32_t len);
+void **intern_aux(uint32_t id);
 char *str(uint32_t id);
 uint32_t str_len(uint32_t id);
 char *escape_char_to_string(char c);
