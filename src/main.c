@@ -1013,12 +1013,17 @@ static void cc1(void) {
     machine_flag_macros();
     char_sign_macro();
 
-    Token *tok = tokenize_file(base_file);
-    if (!tok) fatal("%s: %s", base_file, strerror(errno));
-
-    if (opt_dump_raw_tokens) dump_raw_tokens(tok);
-
-    tok = preprocess(tok);
+    Token *tok;
+    if (opt_dump_raw_tokens) {
+        // The raw-token dump wants the whitespace and comment tokens, which
+        // only the whole-file path makes.
+        tok = tokenize_file(base_file);
+        if (!tok) fatal("%s: %s", base_file, strerror(errno));
+        dump_raw_tokens(tok);
+        tok = preprocess(tok);
+    } else {
+        tok = preprocess_file(base_file);
+    }
 
     if (opt_dump_tokens) dump_tokens(tok);
 

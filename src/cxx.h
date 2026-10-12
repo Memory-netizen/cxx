@@ -602,6 +602,13 @@ static inline char *tok_text(Token *tok) { return file_of(tok->file_uid)->conten
 bool match(Token **rest, Token *tok, uint32_t kind);
 Token *skip(Token *tok, uint32_t kind);
 Token *tokenize_file(char *filename);
+SrcFile *open_source_file(char *filename);
+void lex_start(SrcFile *file);
+void lex_push_file(SrcFile *file);
+void lex_pop_file(void);
+Token *lex_chunk(bool live);
+Token *preprocess_file(char *filename);
+extern bool lex_lazy;
 SrcFile *new_file(char *name, int file_no, char *contents);
 Token *tokenize(SrcFile *file);
 void convert_ppnumber(Token *tok);

@@ -199,6 +199,7 @@ static Token *pop_file(void) {
     guard_ifndef = file->guard_ifndef;
     line_delta = file->line_delta;
     display_name = file->display_name;
+    lex_pop_file();
 
     return file->rest;
 }
@@ -1886,14 +1887,27 @@ static Token *include_file(Token **rest, Token *tok, char *path, Token *filename
 
     if (find_pragma(file_id)) return NULL;
 
-    Token *tok2 = tokenize_file(path);
-    tok2 = filter_tokens(tok2);
+    Token *tok2 = NULL;
+    if (lex_lazy) {
+        // The included file is read the way the main file is: a frame of its
+        // own, pulled a chunk at a time, with its dead regions skipped. The
+        // parent's position, chain and flags come back from pop_file().
+        SrcFile *inc = open_source_file(path);
+        if (inc) {
+            push_file(tok, inc);
+            lex_push_file(inc);
+            tok2 = lex_chunk(true);
+        }
+    } else {
+        tok2 = tokenize_file(path);
+        tok2 = filter_tokens(tok2);
+    }
     if (!tok2) {
         filename_tok->line_delta = line_delta;
         filename_tok->filename = display_name;
         error(filename_tok, "%s: cannot open file: %s", path, strerror(errno));
     }
-    push_file(tok, file_of(tok2->file_uid));
+    if (!lex_lazy) push_file(tok, file_of(tok2->file_uid));
     detect_include_guard1(tok2);
     *rest = tok2;
 
@@ -2093,6 +2107,10 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
             Token dummy2 = {}, *buf = &dummy2;
             int level = 0;
             while (tok->kind != TK_EOF) {
+                // Prototype: the main file is produced on demand. A live chunk
+                // is a segment plus the directive line after it; a dead one is
+                // scanned without making tokens at all.
+                if (lex_lazy && !tok->next) lex_chunk(concat);
                 if (is_hash(tok)) {
                     if (level == 0) break;
                     Token *cont = cond_directive(tok->next, tok, cond_incl->state);
@@ -2685,6 +2703,38 @@ void join_adjacent_string_literals(Token *tok) {
         tok1->next = after;
         tok1 = after;
     }
+}
+
+// The same work as preprocess(), for the main file: the file is opened but not
+// tokenized, and the preprocessor pulls chunks as it walks.
+Token *preprocess_file(char *path) {
+    // Same order as before: the main file is registered first, then the
+    // predefined macros and the command line's own stream. print_dependencies()
+    // prints the file table in this order.
+    SrcFile *file = open_source_file(path);
+    if (!file) {
+        fprintf(stderr, "cxx: %s: %s\n", path, strerror(errno));
+        exit(1);
+    }
+
+    init_macros();
+
+    Token *tok_cmd = prep_cmdline();
+    lex_start(file);
+    Token *first = lex_chunk(true);
+    Token *main = first;
+    if (tok_cmd) {
+        Token *end = tok_cmd;
+        while (end->next->kind != TK_EOF) end = end->next;
+        end->next = first;
+        main = tok_cmd;
+    }
+
+    Token *tok = preprocess2(main, file);
+    tok = scan_pragma_op(tok);
+    convert_keywords(tok);
+    convert_ppnumber(tok);
+    return tok;
 }
 
 // Entry point function of the preprocessor.

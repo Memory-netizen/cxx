@@ -8,9 +8,23 @@ static SrcFile **input_files;
 static bool is_sol;
 static bool is_leadingws;
 
+// Prototype: scanning a region that produces nothing. The same scanner runs,
+// but no arena slot is taken and no identifier is interned -- the token that
+// comes back is one reused scratch object, so `len` still says how far to
+// advance. See lex_scan().
+static bool lex_skip;
+bool lex_lazy;
+static Token lex_scratch;
+
 // Create a new token.
 static Token *new_token(uint32_t kind, char *start, char *end) {
-    Token *tok = ALLOC_TOK(Token);
+    Token *tok;
+    if (lex_skip) {
+        tok = &lex_scratch;
+        memset(tok, 0, sizeof(*tok));
+    } else {
+        tok = ALLOC_TOK(Token);
+    }
     tok->kind = kind;
     tok->loc = (uint32_t)(start - cur_file->contents);
     tok->len = end - start;
@@ -981,18 +995,54 @@ void convert_keywords(Token *tok) {
     }
 }
 
-// Tokenize a given string and returns new tokens.
-Token *tokenize(SrcFile *file) {
-    cur_file = file;
-    char *p = file->contents;
+// One chunk of scanning. The scanner is the same one that always ran here;
+// what is new is that it can stop and be resumed.
+//
+// A chunk ends after the directive line that follows a segment, plus one more
+// token: skip_line()/read_line() walk to the first token of the next line and
+// cond_directive() returns it as `after`, so both have to exist. One token is
+// also what a dead region costs in the worst case.
+typedef struct LexChunk LexChunk;
+struct LexChunk {
+    SrcFile *file;
+    char *p;
+    bool stop_pending;  // a directive's '#' has been produced in this chunk
+    bool after;         // one token has been produced since
+    bool done;
+    bool eof_done;
+    // An included file gets a frame of its own, chained to the one it
+    // interrupts; the two flags belong to a scan position, so the parent's are
+    // kept here while the child runs.
+    LexChunk *parent;
+    bool f_sol, f_ws;
+    Token dummy;
+    Token *cur;
+};
 
-    is_sol = true;
-    is_leadingws = false;
+static LexChunk *LC;
 
-    Token dummy = {}, *cur = &dummy;
+#define LINK(t)                        \
+    do {                               \
+        LC->cur = LC->cur->next = (t); \
+        /* The chunk ends one token into the line after the directive -- but a
+           '#' cannot be that token: the preprocessor reads its next token (the
+           directive's name) straight away, so the whole line has to be here. */ \
+        if (LC->stop_pending && (t)->is_sol && (t)->kind != TK_HASH) LC->after = true; \
+    } while (0)
+
+static void lex_scan(void) {
+    char *p = LC->p;
     Token *tok;
 
-    while (*p) {
+    LC->stop_pending = false;
+    LC->after = false;
+
+    for (;;) {
+        if (!*p) {
+            LC->done = true;
+            break;
+        }
+        if (LC->stop_pending && LC->after) break;
         // Read line comments.
         if (*p == '/' && p[1] == '/') {
             char *q = p + 2;
@@ -1001,9 +1051,9 @@ Token *tokenize(SrcFile *file) {
             // so that flag is all this has to leave behind when the dump
             // options are off.
             is_leadingws = true;
-            if (opt_keep_ws_comments) {
+            if (opt_keep_ws_comments && !lex_lazy) {
                 tok = new_token(TK_COMMENT, p, q);
-                cur = cur->next = tok;
+                LINK(tok);
             }
             p = q;
             continue;
@@ -1014,9 +1064,9 @@ Token *tokenize(SrcFile *file) {
             char *q = strstr(p + 2, "*/");
             if (!q) error_at(cur_file, (uint32_t)((p)-cur_file->contents), "unterminated /* comment");
             is_leadingws = true;
-            if (opt_keep_ws_comments) {
+            if (opt_keep_ws_comments && !lex_lazy) {
                 tok = new_token(TK_COMMENT, p, q + 2);
-                cur = cur->next = tok;
+                LINK(tok);
             }
             p = q + 2;
             continue;
@@ -1040,10 +1090,10 @@ Token *tokenize(SrcFile *file) {
             // Blank space before a newline is leading white space; the newline
             // itself is not. "  \n  x" is both.
             if (*(q - 1) != '\n') is_leadingws = true;
-            if (opt_keep_ws_comments) {
+            if (opt_keep_ws_comments && !lex_lazy) {
                 tok = new_token(TK_WS, p, q);
                 if (nl) tok->kind = TK_NL;
-                cur = cur->next = tok;
+                LINK(tok);
             }
             p = q;
             continue;
@@ -1052,7 +1102,7 @@ Token *tokenize(SrcFile *file) {
         // Numeric literal
         if (is_ascii_digit((unsigned char)*p) || (*p == '.' && is_ascii_digit((unsigned char)p[1]))) {
             tok = read_int_literal(p);
-            cur = cur->next = tok;
+            LINK(tok);
             p += tok->len;
             continue;
         }
@@ -1060,7 +1110,7 @@ Token *tokenize(SrcFile *file) {
         // String literal
         if (*p == '"') {
             tok = read_string_literal(p, p, PREFIX_NONE);
-            cur = cur->next = tok;
+            LINK(tok);
             p += tok->len;
             continue;
         }
@@ -1068,7 +1118,7 @@ Token *tokenize(SrcFile *file) {
         // Character literal
         if (*p == 'u' && p[1] == '8' && p[2] == '"') {
             tok = read_string_literal(p, p + 2, PREFIX_u8);
-            cur = cur->next = tok;
+            LINK(tok);
             p += tok->len;
             continue;
         }
@@ -1076,7 +1126,7 @@ Token *tokenize(SrcFile *file) {
         // UTF-16 string literal
         if (*p == 'u' && p[1] == '"') {
             tok = read_string_literal(p, p + 1, PREFIX_u);
-            cur = cur->next = tok;
+            LINK(tok);
             p += tok->len;
             continue;
         }
@@ -1084,7 +1134,7 @@ Token *tokenize(SrcFile *file) {
         // UTF-32 string literal
         if (*p == 'U' && p[1] == '"') {
             tok = read_string_literal(p, p + 1, PREFIX_U);
-            cur = cur->next = tok;
+            LINK(tok);
             p += tok->len;
             continue;
         }
@@ -1092,7 +1142,7 @@ Token *tokenize(SrcFile *file) {
         // Wide string literal
         if (*p == 'L' && p[1] == '"') {
             tok = read_string_literal(p, p + 1, PREFIX_L);
-            cur = cur->next = tok;
+            LINK(tok);
             p += tok->len;
             continue;
         }
@@ -1100,7 +1150,7 @@ Token *tokenize(SrcFile *file) {
         // Character literal
         if (*p == '\'') {
             tok = read_char_literal(p, p, PREFIX_NONE);
-            cur = cur->next = tok;
+            LINK(tok);
             p += tok->len;
             continue;
         }
@@ -1108,7 +1158,7 @@ Token *tokenize(SrcFile *file) {
         // UTF-8 character literal
         if (*p == 'u' && p[1] == '8' && p[2] == '\'') {
             tok = read_char_literal(p, p + 2, PREFIX_u8);
-            cur = cur->next = tok;
+            LINK(tok);
             p += tok->len;
             continue;
         }
@@ -1116,7 +1166,7 @@ Token *tokenize(SrcFile *file) {
         // UTF-16 character literal
         if (*p == 'u' && p[1] == '\'') {
             tok = read_char_literal(p, p + 1, PREFIX_u);
-            cur = cur->next = tok;
+            LINK(tok);
             p += tok->len;
             continue;
         }
@@ -1124,7 +1174,7 @@ Token *tokenize(SrcFile *file) {
         // UTF-32 character literal
         if (*p == 'U' && p[1] == '\'') {
             tok = read_char_literal(p, p + 1, PREFIX_U);
-            cur = cur->next = tok;
+            LINK(tok);
             p += tok->len;
             continue;
         }
@@ -1132,7 +1182,7 @@ Token *tokenize(SrcFile *file) {
         // Wide character literal
         if (*p == 'L' && p[1] == '\'') {
             tok = read_char_literal(p, p + 1, PREFIX_L);
-            cur = cur->next = tok;
+            LINK(tok);
             p += tok->len;
             continue;
         }
@@ -1147,8 +1197,10 @@ Token *tokenize(SrcFile *file) {
             // C string to begin with.
             bool ucn = has_ucn(p, ident_len);
             char *buf = ucn ? convert_universal_chars(p, ident_len, cur_file) : p;
-            tok->id = intern(buf, ucn ? (uint32_t)strlen(buf) : (uint32_t)ident_len);
-            cur = cur->next = tok;
+            // Interning copies the text and hashes it: the one piece of work a
+            // skipped region must not pay for.
+            if (!lex_skip) tok->id = intern(buf, ucn ? (uint32_t)strlen(buf) : (uint32_t)ident_len);
+            LINK(tok);
             p += tok->len;
             continue;
         }
@@ -1159,7 +1211,11 @@ Token *tokenize(SrcFile *file) {
             int len = read_punct(p, &kind);
             if (len) {
                 tok = new_token(kind, p, p + len);
-                cur = cur->next = tok;
+                LINK(tok);
+                // The line this '#' introduces belongs to the chunk as well:
+                // read_line()/skip_line() walk it, and cond_directive() returns
+                // its first token as `after`.
+                if (kind == TK_HASH && tok->is_sol) LC->stop_pending = true;
                 p += len;
                 continue;
             }
@@ -1167,14 +1223,177 @@ Token *tokenize(SrcFile *file) {
 
         // Other char
         tok = new_token(TK_OTHER, p, p + 1);
-        cur = cur->next = tok;
+        LINK(tok);
         p += tok->len;
         continue;
     }
 
-    Token *eof = new_token(TK_EOF, p, p);
-    cur->next = eof;
-    return dummy.next;
+    LC->p = p;
+}
+
+// The EOF token, once, when the file has run out. The guard is a flag and not
+// `cur->kind == TK_EOF`: TK_EOF is 0, which is exactly what an empty chunk's
+// dummy head holds, so an all-whitespace file would look finished already.
+static void lex_scan_eof(void) {
+    if (!LC->done || LC->eof_done) return;
+    LC->eof_done = true;
+    LC->cur = LC->cur->next = new_token(TK_EOF, LC->p, LC->p);
+}
+
+// The whole file in one go: what includes, paste() and -dump-raw-tokens use.
+// The scanner's own state is saved and put back, so a nested file cannot
+// disturb the lazily lexed one.
+Token *tokenize(SrcFile *file) {
+    LexChunk local = {.file = file, .p = file->contents};
+    local.cur = &local.dummy;
+    LexChunk *saved = LC;
+    SrcFile *sfile = cur_file;
+    bool s1 = is_sol, s2 = is_leadingws, s3 = lex_skip, s4 = lex_lazy;
+
+    cur_file = file;
+    is_sol = true;
+    is_leadingws = false;
+    lex_skip = false;
+    lex_lazy = false;
+    LC = &local;
+
+    while (!local.done) lex_scan();
+    lex_scan_eof();
+
+    LC = saved;
+    cur_file = sfile;
+    is_sol = s1;
+    is_leadingws = s2;
+    lex_skip = s3;
+    lex_lazy = s4;
+    return local.dummy.next;
+}
+
+// ---- the lazy path: files are produced as the preprocessor asks ----
+
+// A file (the main one, or an included one) gets a frame of its own, chained to
+// the frame it interrupts.
+void lex_push_file(SrcFile *file) {
+    LexChunk *st = emalloc(sizeof(LexChunk));
+    *st = (LexChunk){.file = file, .p = file->contents, .parent = LC};
+    st->cur = &st->dummy;
+    if (LC) {
+        LC->f_sol = is_sol;
+        LC->f_ws = is_leadingws;
+    }
+    LC = st;
+    cur_file = file;
+    is_sol = true;
+    is_leadingws = false;
+    lex_skip = false;
+    lex_lazy = true;
+}
+
+void lex_start(SrcFile *file) { lex_push_file(file); }
+
+// Back to the file that was being read when this one was included. Its scan
+// position, its chain and its two flags are where they were left.
+void lex_pop_file(void) {
+    if (!LC || !LC->parent) return;
+    LC = LC->parent;
+    cur_file = LC->file;
+    is_sol = LC->f_sol;
+    is_leadingws = LC->f_ws;
+}
+
+// Walk to the '#' that begins the next directive without making a single
+// token. White space and comments are scanned the way the tokenizer scans them
+// -- a '#' inside either is not a directive -- and the two flags are left
+// exactly as the tokenizer would have left them, so the '#' that ends the walk
+// gets the right ones. Literals go through the tokenizer's own readers (in the
+// no-allocation mode new_token() has): where a literal ends is not something to
+// re-derive, cxx's reader is the definition.
+static void lex_skip_to_directive(void) {
+    char *p = LC->p;
+    Token *tok = NULL;
+    lex_skip = true;
+
+    for (;;) {
+        if (!*p) {
+            LC->done = true;
+            break;
+        }
+        if (is_sol && *p == '#') break;
+
+        // Line comment.
+        if (*p == '/' && p[1] == '/') {
+            char *q = p + 2;
+            while (*q != '\n') q++;
+            is_leadingws = true;
+            p = q;
+            continue;
+        }
+        // Block comment.
+        if (*p == '/' && p[1] == '*') {
+            char *q = strstr(p + 2, "*/");
+            if (!q) error_at(cur_file, (uint32_t)(p - cur_file->contents), "unterminated /* comment");
+            is_leadingws = true;
+            p = q + 2;
+            continue;
+        }
+        // White space, and the two bits the tokenizer sets here.
+        if (is_ascii_space((unsigned char)*p)) {
+            char *q = p;
+            int nl = 0;
+            while (is_ascii_space((unsigned char)*q)) {
+                if (*q++ == '\n') {
+                    nl++;
+                    continue;
+                }
+            }
+            if (nl) is_sol = true;
+            if (*(q - 1) != '\n') is_leadingws = true;
+            p = q;
+            continue;
+        }
+        // A literal, with or without an encoding prefix.
+        if (*p == '"' || *p == '\'') {
+            tok = *p == '"' ? read_string_literal(p, p, PREFIX_NONE)
+                            : read_char_literal(p, p, PREFIX_NONE);
+        } else if (*p == 'u' && p[1] == '8' && (p[2] == '"' || p[2] == '\'')) {
+            tok = p[2] == '"' ? read_string_literal(p, p + 2, PREFIX_u8)
+                              : read_char_literal(p, p + 2, PREFIX_u8);
+        } else if ((*p == 'u' || *p == 'U' || *p == 'L') && (p[1] == '"' || p[1] == '\'')) {
+            uint32_t pre = *p == 'u' ? PREFIX_u : *p == 'U' ? PREFIX_U : PREFIX_L;
+            tok = p[1] == '"' ? read_string_literal(p, p + 1, pre)
+                              : read_char_literal(p, p + 1, pre);
+        } else {
+            // One byte of something that cannot start a directive.
+            is_sol = is_leadingws = false;
+            p++;
+            continue;
+        }
+        is_sol = is_leadingws = false;
+        p += tok->len;
+    }
+
+    lex_skip = false;
+    LC->p = p;
+}
+
+Token *lex_chunk(bool live) {
+    // The tail as it stands: whatever this call produces hangs off it.
+    Token *before = LC->cur;
+
+    if (LC->done) {
+        lex_scan_eof();
+        return before->next;
+    }
+    if (!live) {
+        lex_skip_to_directive();
+        if (LC->done) {
+            lex_scan_eof();
+            return before->next;
+        }
+    }
+    lex_scan();
+    lex_scan_eof();
+    return before->next;
 }
 
 // Returns the contents of a given file.
@@ -1446,7 +1665,8 @@ void get_location(SrcFile *f, uint32_t offset, int *out_line, int *out_col) {
     *out_col = (int)(offset - f->line_offsets[idx]) + 1;
 }
 
-Token *tokenize_file(char *path) {
+// Read a file and register it, without tokenizing it.
+SrcFile *open_source_file(char *path) {
     char *p = read_file(path);
     if (!p) return NULL;
 
@@ -1459,12 +1679,19 @@ Token *tokenize_file(char *path) {
     static int file_no = 0;
     SrcFile *file = new_file(path, file_no + 1, p);
 
+    // One slot past the last file is the terminator print_dependencies()
+    // stops at; it used to be whatever the arena happened to have there.
     if (!input_files)
-        input_files = vnew(2, sizeof(SrcFile *));
+        input_files = vnew(4, sizeof(SrcFile *));
     else
-        input_files = vgrow(input_files, file_no + 1);
+        input_files = vgrow(input_files, file_no + 2);
 
     input_files[file_no++] = file;
+    input_files[file_no] = NULL;
+    return file;
+}
 
-    return tokenize(file);
+Token *tokenize_file(char *path) {
+    SrcFile *file = open_source_file(path);
+    return file ? tokenize(file) : NULL;
 }
