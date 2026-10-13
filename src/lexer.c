@@ -29,7 +29,6 @@ static Token *new_token(uint32_t kind, char *start, char *end) {
     tok->loc = (uint32_t)(start - cur_file->contents);
     tok->len = end - start;
     tok->file_uid = (cur_file)->uid;
-    tok->filename = cur_file->id;
     if (kind == TK_NL || kind == TK_WS || kind == TK_COMMENT) return tok;
     tok->is_sol = is_sol;
     tok->is_leadingws = is_leadingws;

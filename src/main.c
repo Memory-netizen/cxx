@@ -26,7 +26,7 @@ typedef enum {
 } FileType;
 
 static FileType opt_x;
-static bool opt_E;
+bool opt_E;  // read by preprocess.c: only -E wants line markers
 static bool opt_M;
 static bool opt_MM;
 static bool opt_MD;
@@ -892,37 +892,79 @@ static bool needs_space(Token *prev, Token *cur) {
 }
 
 // Print tokens to stdout. Used for -E.
-static void print_tokens(Token *tok) {
-    FILE *out = open_outfile(opt_o ? opt_o : "-");
+// The state of a `-E` run, so the output can be produced as the preprocessor
+// goes instead of after the whole file has been read.
+static FILE *e_out;
+static int e_cur_line;
+static Token *e_prev;
+static Token *e_last;  // the last token printed
 
-    int cur_line = 0;
-    Token *prev = NULL;
-    for (; tok->kind != TK_EOF; tok = tok->next) {
-        if (cur_line > 0 && tok->is_sol) {
-            int line, col;
-            Token *orig = tok;
-            while (orig->origin) orig = orig->origin;
-            get_location(file_of(orig->file_uid), orig->loc, &line, &col);
-            if (!opt_P)
-                while (cur_line < line + orig->line_delta) {
-                    fprintf(out, "\n");
-                    cur_line++;
-                }
-            fprintf(out, "\n");
-            if (col > 2) fprintf(out, "%*s", col - 2, "");
-            cur_line++;
-        }
-        if (tok->kind == TK_LINE) {
-            cur_line = tok->id;
-            if (opt_P) continue;
-            fprintf(out, "# %lu \"%s\"", (unsigned long)tok->id, str(tok->filename));
-            continue;
-        }
-        if (tok->is_leadingws || needs_space(prev, tok)) fprintf(out, " ");
-        fprintf(out, "%.*s", (int)tok->len, tok_text(tok));
-        prev = tok;
+void print_stream_begin(void) {
+    e_out = open_outfile(opt_o ? opt_o : "-");
+    e_cur_line = 0;
+    e_prev = NULL;
+    e_last = NULL;
+}
+
+static void e_emit(Token *tok) {
+    // Before any early return: a line marker takes one, and a cursor that stops
+    // at the last non-marker token reprints everything after it next time.
+    e_last = tok;
+    if (e_cur_line > 0 && tok->is_sol) {
+        int line, col;
+        Token *orig = tok;
+        while (orig->origin) orig = orig->origin;
+        get_location(file_of(orig->file_uid), orig->loc, &line, &col);
+        if (!opt_P)
+            while (e_cur_line < line + line_delta_of(orig)) {
+                fprintf(e_out, "\n");
+                e_cur_line++;
+            }
+        fprintf(e_out, "\n");
+        if (col > 2) fprintf(e_out, "%*s", col - 2, "");
+        e_cur_line++;
     }
-    fprintf(out, "\n");
+    if (tok->kind == TK_LINE) {
+        e_cur_line = tok->id;
+        if (opt_P) return;
+        fprintf(e_out, "# %lu \"%s\"", (unsigned long)tok->id, str(line_name(tok)));
+        return;
+    }
+    // e_prev is NULL until the first token that is not a marker: a whole stream
+    // starts with one, so the old loop never asked needs_space() with it unset,
+    // but a range can start with real tokens.
+    if (tok->is_leadingws || (e_prev && needs_space(e_prev, tok))) fprintf(e_out, " ");
+    fprintf(e_out, "%.*s", (int)tok->len, tok_text(tok));
+    e_prev = tok;
+    e_last = tok;
+}
+
+// Print the output between what has been printed and `end`. The output layer is
+// applied here, one token at a time: each conversion loops until a TK_EOF
+// token, so the token's own link is replaced by a sentinel for the call rather
+// than cleared.
+void print_stream_upto(Token *head, Token *end) {
+    if (!e_out || !end) return;
+    Token *tok = e_last ? e_last->next : head;
+    for (; tok && tok->kind != TK_EOF; tok = tok->next) {
+        Token *save = tok->next;
+        Token eof = {};
+        tok->next = &eof;
+        convert_keywords(tok);
+        convert_ppnumber(tok);
+        tok->next = save;
+        e_emit(tok);
+        if (tok == end) break;
+    }
+}
+
+void print_stream_end(void) { if (e_out) fprintf(e_out, "\n"); }
+
+static void print_tokens(Token *tok) {
+    print_stream_begin();
+    print_stream_upto(tok, NULL);  // no end: the whole chain
+    for (; tok->kind != TK_EOF; tok = tok->next) e_emit(tok);
+    print_stream_end();
 }
 
 static Token *filter_tokens(Token *tok) {
@@ -1035,11 +1077,15 @@ static void cc1(void) {
 
     // If -E is given, print out preprocessed C code as a result.
     if (opt_E) {
-        print_tokens(tok);
+        // A lazy run has already streamed the output from inside the
+        // preprocessor; only the batch path prints here.
+        if (opt_dump_raw_tokens) print_tokens(tok);
         return;
     }
 
-    tok = filter_tokens(tok);
+    // Nothing to strip when no marker was produced and whitespace tokens are
+    // not being kept: this pass used to walk every token of every compile.
+    if (preproc_linemarkers || opt_keep_ws_comments) tok = filter_tokens(tok);
 
     join_adjacent_string_literals(tok);
 

@@ -909,7 +909,7 @@ static void note_inline_decl(Sym *fn, int fspec, SClass sclass) {
 // A symbol the source declared, as opposed to the ones the parser makes up
 // for itself -- string literals and compound literals. Only the first kind
 // has a token, and only the first kind can be diagnosed or left out.
-static bool is_user_global(Sym *sym) { return sym->tok && !sym->is_str; }
+static bool is_user_global(Sym *sym) { return sym->loc.file_uid && !sym->is_str; }
 
 // gcc and clang report an unused const object under a group of its own; an
 // array of const is a const object too.
@@ -5706,7 +5706,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
                 took_over = true;
             } else {
                 var = new_lvar(id, ty);
-                var->tok = var_name;
+                var->loc = loc_of(var_name);
             }
         } else if (is_extern) {
             var = new_gvar(id, ty);
@@ -5718,7 +5718,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             // belongs to this function, which is what the unused-object
             // walk and the emitter both need to know.
             var->is_block_static = true;
-            var->tok = var_name;
+            var->loc = loc_of(var_name);
             // 6.7.5p3: an inline definition may not define a modifiable
             // object with static storage duration. Whether this function's
             // definition is an inline definition is only known once the unit
@@ -5726,7 +5726,7 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             if (!is_const_object(ty)) cur_fn->static_local_tok = var_name;
         } else {
             var = new_lvar(id, ty);
-            var->tok = var_name;
+            var->loc = loc_of(var_name);
         }
         NameSpace *new_ns = push_namespace(scope, id, symkind, ty, var_name);
         new_ns->var = var;
@@ -6887,7 +6887,7 @@ static Token *asm_operand(Token **rest, Token *tok, bool is_output, AsmOperand *
 
     if (tok->kind != TK_STRLIT) error(tok, "expected string literal in ‘asm’");
     if (tok->enc_prefix != PREFIX_NONE) error(tok, "expected a plain string literal in ‘asm’");
-    op->tok = tok;
+    op->loc = loc_of(tok);
     op->cons = str(tok->id);
     tok = skip(tok->next, TK_LPAREN);
     op->expr = assign(&tok, tok);
@@ -6896,8 +6896,8 @@ static Token *asm_operand(Token **rest, Token *tok, bool is_output, AsmOperand *
     // GCC's two rules about the constraint itself: an output has to say it
     // writes ('='), or reads and writes ('+'), and an input may say neither.
     bool writes = op->cons[0] == '=' || op->cons[0] == '+';
-    if (is_output && !writes) error(op->tok, "output operand constraint lacks ‘=’");
-    if (!is_output && writes) error(op->tok, "input operand constraint contains ‘=’");
+    if (is_output && !writes) error_loc(op->loc, "output operand constraint lacks ‘=’");
+    if (!is_output && writes) error_loc(op->loc, "input operand constraint contains ‘=’");
     op->is_plus = op->cons[0] == '+';
     // The output half: the modifiers with `+` turned into `=`, and the letters
     // converted. The input half of a `+` is added later, as a constraint of
@@ -7047,7 +7047,7 @@ static Node *asm_stmt(Token **rest, Token *tok) {
     for (AsmOperand *op = ops; op; op = op->next)
         for (AsmOperand *x = op->next; x; x = x->next)
             if (op->name && x->name && !strcmp(op->name, x->name))
-                error(op->tok, "duplicate ‘asm’ operand name ‘%s’", op->name);
+                error_loc(op->loc, "duplicate ‘asm’ operand name ‘%s’", op->name);
 
     (*NODE_ASM_SIDE(node))->ops = ops;
     (*NODE_ASM_SIDE(node))->nops = nouts + nins;
@@ -9398,7 +9398,7 @@ static Token *external_declaration(Token *tok) {
 
             // Where a diagnostic about the symbol points: the definition
             // when there is one, else the declaration that created it.
-            var->tok = var_name;
+            var->loc = loc_of(var_name);
             var->is_defined = true;
             var->funcspec |= fspec;
             note_inline_decl(var, fspec, sclass);
@@ -9506,9 +9506,9 @@ static Token *external_declaration(Token *tok) {
             // so it is skipped -- that warning is gcc's -Wunused-parameter,
             // which is not in -Wall.
             for (Sym *v = var->locals; v; v = v->next) {
-                if (!v->tok || v->is_referenced || v->is_unused || v->is_maybe_unused) continue;
+                if (!v->loc.file_uid || v->is_referenced || v->is_unused || v->is_maybe_unused) continue;
                 if (v->sclass & (SC_STATIC | SC_EXTERN)) continue;
-                warning(WG_UNUSED_VARIABLE, v->tok, "unused variable \u2018%s\u2019", str(v->id));
+                warning_loc(WG_UNUSED_VARIABLE, v->loc, "unused variable \u2018%s\u2019", str(v->id));
             }
             var->labels = labels;
             resolve_goto_labels();
@@ -9582,7 +9582,7 @@ static Token *external_declaration(Token *tok) {
                 ns->lnk = sclass & (SC_STATIC | SC_CONSTEXPR) ? LK_INTERN : LK_EXTERN;
             }
 
-            var->tok = var_name;
+            var->loc = loc_of(var_name);
 
             // The symbol's storage class is the first declaration's, so a
             // name first seen as `extern Target T;` carried SC_EXTERN even
@@ -9681,7 +9681,7 @@ static void complete_tentative_arrays(void) {
         if (sym->ty->kind != TY_ARRAY || sym->ty->len >= 0) continue;
 
         sym->ty = array_of(sym->ty->base, 1);
-        warning(WG_TENTATIVE_DEFINITION_ARRAY, sym->tok, "tentative array definition assumed to have one element");
+        warning_loc(WG_TENTATIVE_DEFINITION_ARRAY, sym->loc, "tentative array definition assumed to have one element");
     }
 }
 
@@ -9702,8 +9702,8 @@ static void check_inline_definitions(void) {
         if (!sym->body) {
             // p5: declared inline, never defined in this unit.
             if (sym->funcspec & Q_INLINE)
-                warning(WG_DEFAULT, sym->tok, "inline function \u2018%s\u2019 declared but never defined",
-                        str(sym->tok->id));
+                warning_loc(WG_DEFAULT, sym->loc, "inline function \u2018%s\u2019 declared but never defined",
+                        str(sym->id));
             continue;
         }
         if (!sym->all_decls_inline) continue;
@@ -9798,7 +9798,7 @@ static void check_unused_statics(void) {
             // not. cxx follows gcc, whose answer survives the header case.
             if (sym->funcspec & Q_INLINE) continue;
             if (sym->is_unused || sym->is_maybe_unused) continue;
-            warning(WG_UNUSED_FUNCTION, sym->tok, "unused function ‘%s’", str(sym->tok->id));
+            warning_loc(WG_UNUSED_FUNCTION, sym->loc, "unused function ‘%s’", str(sym->id));
             continue;
         }
 
@@ -9809,8 +9809,8 @@ static void check_unused_statics(void) {
         if (sym->is_unused || sym->is_maybe_unused) continue;
         // str(tok->id) rather than str(sym->id): a block-scope static is
         // emitted as `f.q`, and gcc and clang name it `q`.
-        warning(is_const_object(sym->ty) ? WG_UNUSED_CONST_VARIABLE : WG_UNUSED_VARIABLE, sym->tok,
-                "unused variable ‘%s’", str(sym->tok->id));
+        warning_loc(is_const_object(sym->ty) ? WG_UNUSED_CONST_VARIABLE : WG_UNUSED_VARIABLE, sym->loc,
+                "unused variable ‘%s’", str(sym->id));
     }
 }
 

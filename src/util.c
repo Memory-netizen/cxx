@@ -101,7 +101,7 @@ static void emit_diag_loc(char *level, Loc at, const char *msg, va_list ap) {
 Loc loc_of(Token *tok) {
     Token *orig = tok;
     while (orig->origin) orig = orig->origin;
-    Loc at = {orig->filename, file_of(orig->file_uid)->uid, orig->loc, orig->len, orig->line_delta};
+    Loc at = {line_name(orig), file_of(orig->file_uid)->uid, orig->loc, orig->len, line_delta_of(orig)};
     return at;
 }
 
@@ -137,7 +137,7 @@ void error(Token *tok, const char *msg, ...) {
     va_start(ap, msg);
     Token *orig = tok;
     while (orig->origin) orig = orig->origin;
-    emit_diag("error", orig->filename, orig->line_delta, file_of(orig->file_uid), orig->loc, msg, ap);
+    emit_diag("error", line_name(orig), line_delta_of(orig), file_of(orig->file_uid), orig->loc, msg, ap);
     va_end(ap);
     exit(1);
 }
@@ -165,7 +165,7 @@ void pedantic(Token *tok, const char *msg, ...) {
     va_start(ap, msg);
     Token *orig = tok;
     while (orig->origin) orig = orig->origin;
-    emit_diag(opt_pedantic_errors ? "error" : "warning", orig->filename, orig->line_delta, file_of(orig->file_uid), orig->loc, msg,
+    emit_diag(opt_pedantic_errors ? "error" : "warning", line_name(orig), line_delta_of(orig), file_of(orig->file_uid), orig->loc, msg,
               ap);
     va_end(ap);
     if (opt_pedantic_errors) exit(1);
@@ -208,9 +208,27 @@ void warning(int group, Token *tok, const char *msg, ...) {
     va_start(ap, msg);
     Token *orig = tok;
     while (orig->origin) orig = orig->origin;
-    emit_diag(opt_werror ? "error" : "warning", orig->filename, orig->line_delta, file_of(orig->file_uid), orig->loc, msg, ap);
+    emit_diag(opt_werror ? "error" : "warning", line_name(orig), line_delta_of(orig), file_of(orig->file_uid), orig->loc, msg, ap);
     va_end(ap);
     if (opt_werror) exit(1);
+}
+
+// The diagnostic a stored Loc wants: no token needed, so nothing that keeps a
+// location has to keep a token alive (doc/perf.md 8er).
+void warning_loc(int group, Loc at, const char *msg, ...) {
+    if (!wg_enabled(group)) return;
+    va_list ap;
+    va_start(ap, msg);
+    emit_diag_loc(opt_werror ? "error" : "warning", at, msg, ap);
+    va_end(ap);
+    if (opt_werror) exit(1);
+}
+
+void error_loc(Loc at, const char *msg, ...) {
+    va_list ap;
+    va_start(ap, msg);
+    emit_diag_loc("error", at, msg, ap);
+    va_end(ap);
 }
 
 void error_at(SrcFile *file, uint32_t loc, const char *msg, ...) {
@@ -457,6 +475,56 @@ uint32_t intern(char *s, uint32_t len) {
 // The auxiliary slot of an interned string. It belongs to the string, so it is
 // the same slot however the caller got hold of the id. The pointer is only
 // valid until the next intern(): growing a bucket moves the array.
+// The #line events of a file, in offset order: a lookup is the last event at or
+// before the offset. Most files have none.
+void line_note(SrcFile *file, uint32_t loc, uint32_t name, int delta) {
+    if (file->nmarks && file->marks[file->nmarks - 1].name == name &&
+        file->marks[file->nmarks - 1].delta == delta)
+        return;  // nothing changed
+    if (file->nmarks == file->capmarks) {
+        file->capmarks = file->capmarks ? file->capmarks * 2 : 4;
+        file->marks = file->marks
+                          ? vgrow(file->marks, file->capmarks)
+                          : vnew(file->capmarks, sizeof(LineMark));
+    }
+    file->marks[file->nmarks].loc = loc;
+    file->marks[file->nmarks].name = name;
+    file->marks[file->nmarks].delta = delta;
+    file->nmarks++;
+}
+
+void line_info(Token *tok, uint32_t *name, int *delta) {
+    SrcFile *f = file_of(tok->file_uid);
+    *name = f->id;
+    *delta = 0;
+    int lo = 0, hi = f->nmarks;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (f->marks[mid].loc <= tok->loc)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo > 0) {
+        *name = f->marks[lo - 1].name;
+        *delta = f->marks[lo - 1].delta;
+    }
+}
+
+uint32_t line_name(Token *tok) {
+    uint32_t n;
+    int d;
+    line_info(tok, &n, &d);
+    return n;
+}
+
+int line_delta_of(Token *tok) {
+    uint32_t n;
+    int d;
+    line_info(tok, &n, &d);
+    return d;
+}
+
 void **intern_aux(uint32_t id) {
     Bucket *b = &itbl[id & IMask];
     return &b->aux[id >> IBits];

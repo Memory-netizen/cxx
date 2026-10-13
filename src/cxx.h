@@ -336,6 +336,16 @@ void bitint_align_wide(int align);
 bool is_bitint128(Type *ty);
 int64_t norm_bits(int64_t v, int width, bool is_unsigned);
 
+// The file and #line state a diagnostic reports for an offset: a file is named
+// after itself, and a `#line` directive in it changes the name and/or the offset
+// of everything after it. Recorded per file, since it is a function of the file
+// and the offset alone. (doc/perf.md 8ds.)
+typedef struct LineMark {
+    uint32_t loc;
+    uint32_t name;
+    int delta;
+} LineMark;
+
 struct SrcFile {
     char *name;
     uint32_t id;   // interned display name; #line can point it at another file
@@ -345,6 +355,12 @@ struct SrcFile {
     size_t size;
     uint32_t *line_offsets;
     int num_lines;
+    // The file's own `#line` events, in offset order: what a diagnostic reports
+    // for an offset is this file's name plus the last event at or before it.
+    // Most files have none. (doc/perf.md 8ds.)
+    LineMark *marks;
+    int nmarks;
+    int capmarks;
 };
 
 //
@@ -579,8 +595,6 @@ struct Token {
     uint32_t file_uid;  // SrcFile::uid -- the display-name id is not a file
     uint32_t loc;   // byte offset into file->contents
     uint32_t len;
-    uint32_t filename;  // Diagnostic filename
-    int32_t line_delta;
     // SUF_NONDEC is 0x800: the suffix needs more than 8 bits.
     uint16_t lit_suffix;  // Used if kind == TK_NUM
     uint8_t kind;
@@ -686,10 +700,12 @@ struct Sym {
     // NULL when the declaration has no asm label.
     char *asm_name;
 
-    // Token that declared this symbol, for diagnostics that fire long after
-    // the declaration (the unused-variable warning is reported at the end of
-    // the function). NULL when the symbol is the compiler's own.
-    Token *tok;
+    // Where this symbol was declared, for diagnostics that fire long after the
+    // declaration (the unused-variable warning is reported at the end of the
+    // function). A Loc, not a token, so nothing has to stay alive for it; all
+    // zero when the symbol is the compiler's own, which is what the NULL test
+    // used to say.
+    Loc loc;  // where it was declared; all zero for the compiler's own
     // Set when an identifier resolves to this symbol. -Wunused-variable is
     // the absence of it.
     bool is_referenced;
@@ -775,7 +791,9 @@ struct Sym {
 typedef struct AsmOperand AsmOperand;
 struct AsmOperand {
     AsmOperand *next;
-    Token *tok;  // the string or ‘(’ that introduced it
+    // Where the operand was, for the diagnostics below: a Loc, not a token, so
+    // nothing has to stay alive for it (doc/perf.md 8er).
+    Loc loc;
     char *name;  // [name], or NULL
     char *cons;  // the constraint as written
     char *conv;  // the same constraint in LLVM's spelling ("=*m", "={ax}")
@@ -2002,6 +2020,30 @@ void dump_ast(Module *prog);
 void array_bracket_note(Type *ty, Token *l_bracket);
 void dump_raw_tokens(Token *tok);
 void dump_tokens(Token *tok);
+
+// -E, streamed: print_stream_upto() is called at each segment boundary with the
+// output tail (pp_out); everything up to it is final by then.
+// The yield hook of the preprocessor's loop: called at a segment boundary, and
+// when it returns true the preprocessor returns to its caller with the output
+// produced so far, to be called again for the next segment. A parser that pulls
+// installs one; with none installed nothing changes.
+extern bool (*pp_yield)(void);
+void pp_set_yield(bool (*fn)(void));
+Token *pp_resume(void);  // carry on after a yield
+
+void print_stream_begin(void);
+void print_stream_upto(Token *head, Token *end);
+void print_stream_end(void);
+
+// -E is the only reader of a line marker, so the preprocessor asks before
+// making one (see want_linemarker in preprocess.c).
+extern bool opt_E;
+// Set as soon as any line marker is produced; the pass that used to strip them
+// from every compile now only runs when there is one.
+extern bool preproc_linemarkers;
+// Set when a _Pragma operator is collected: the whole-stream scan at the end of
+// preprocessing only runs when there is one to find.
+extern bool preproc_pragma_op;
 // Set when -dump-raw-tokens or -dump-tokens is given. White space and comments
 // exist as tokens only so those two can print them -- filter_tokens() skips
 // them before anything else reads the stream -- so the lexer builds them only
@@ -2048,6 +2090,8 @@ int display_width(char *p, int len);
 //
 
 void fatal(char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void warning_loc(int group, Loc at, const char *msg, ...) __attribute__((format(printf, 3, 4)));
+void error_loc(Loc at, const char *msg, ...) __attribute__((format(printf, 2, 3)));
 void error_at(SrcFile *file, uint32_t loc, const char *msg, ...) __attribute__((format(printf, 3, 4)));
 void error(Token *tok, const char *msg, ...) __attribute__((format(printf, 2, 3)));
 // Warning groups. Bit flags so that -w, -Wall and -Wno-<group> compose,
@@ -2272,6 +2316,11 @@ void *vgrow(void *data, size_t len);
 
 char *format(char *s, ...) __attribute__((format(printf, 1, 2)));
 uint32_t intern(char *s, uint32_t len);
+
+void line_note(SrcFile *file, uint32_t loc, uint32_t name, int delta);
+void line_info(Token *tok, uint32_t *name, int *delta);
+uint32_t line_name(Token *tok);
+int line_delta_of(Token *tok);
 void **intern_aux(uint32_t id);
 char *str(uint32_t id);
 uint32_t str_len(uint32_t id);

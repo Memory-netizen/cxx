@@ -77,13 +77,13 @@ void dump_raw_tokens(Token *tok) {
 
         fprintf(stdout, "%-18s ‘%-.*s’", token_kind_name(tok->kind), (int)tok->len, tok_text(tok));
         if (tok->is_sol) fprintf(stdout, " [StartOfLine]");
-        fprintf(stdout, "  Loc=<%s:%d:%d>\n", str(tok->filename), line, col);
+        fprintf(stdout, "  Loc=<%s:%d:%d>\n", str(line_name(tok)), line, col);
 
         tok = tok->next;
     }
     int line, col;
     get_location(file_of(tok->file_uid), tok->loc, &line, &col);
-    fprintf(stdout, "%-18s ‘’   Loc=<%s:%d:%d>\n", "eof", str(tok->filename), line, col);
+    fprintf(stdout, "%-18s ‘’   Loc=<%s:%d:%d>\n", "eof", str(line_name(tok)), line, col);
 }
 
 void dump_tokens(Token *tok) {
@@ -101,16 +101,16 @@ void dump_tokens(Token *tok) {
         if (tok->is_sol) fprintf(stdout, " [StartOfLine]");
         if (tok->is_leadingws) fprintf(stdout, " [LeadingSpace]");
 
-        fprintf(stdout, "  Loc=<%s:%d:%d", str(orig->filename), line + orig->line_delta, col);
+        fprintf(stdout, "  Loc=<%s:%d:%d", str(line_name(orig)), line + line_delta_of(orig), col);
 
         if (tok->origin) {
             get_location(file_of(tok->file_uid), tok->loc, &line, &col);
-            fprintf(stdout, " <Spelling=%s:%d:%d>>\n", str(tok->filename), line + tok->line_delta, col);
+            fprintf(stdout, " <Spelling=%s:%d:%d>>\n", str(line_name(tok)), line + line_delta_of(tok), col);
         } else {
             fprintf(stdout, ">\n");
         }
     }
 
     get_location(file_of(tok->file_uid), tok->loc, &line, &col);
-    fprintf(stdout, "%-18s ‘’   Loc=<%s:%d:%d>\n", "eof", str(tok->filename), line + tok->line_delta, col);
+    fprintf(stdout, "%-18s ‘’   Loc=<%s:%d:%d>\n", "eof", str(line_name(tok)), line + line_delta_of(tok), col);
 }

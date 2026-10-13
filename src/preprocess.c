@@ -211,8 +211,6 @@ static bool is_hash(Token *tok) { return tok->is_sol && tok->kind == TK_HASH; }
 static Token *skip_line(Token *tok) {
     if (tok->is_sol) return tok;
 
-    tok->line_delta = line_delta;
-    tok->filename = display_name;
     warning(WG_EXTRA_TOKENS, tok, "extra token");
     while (!tok->is_sol) tok = tok->next;
     return tok;
@@ -295,13 +293,9 @@ static Token *read_line(Token **rest, Token *tok) {
     Token *cur = &dummy;
 
     for (; !tok->is_sol; tok = tok->next) {
-        tok->line_delta = line_delta;
-        tok->filename = display_name;
         cur = cur->next = tok;
     }
 
-    tok->line_delta = line_delta;
-    tok->filename = display_name;
 
     cur->next = new_eof(tok);
     *rest = tok;
@@ -711,8 +705,6 @@ static Macro *macro_of(uint32_t id) {
 
 static Macro *find_macro(Token *tok) {
     if (tok->kind != TK_IDENT) {
-        tok->line_delta = line_delta;
-        tok->filename = display_name;
         error(tok, "macro name must be an identifier");
     }
     return macro_of(tok->id);
@@ -1287,15 +1279,20 @@ static Token *expand_macro(Token *dst, Token *list, bool owned) {
             // writing on the body, which every later use of the macro shares.
             // Being a copy is what lets it be handed over as owned below.
             Token *body = copy_body(m->body, macro_name);
-            Token *prev = dst;
+            // Expand into a chain of its own first: anything rescan_call()
+            // takes back off is then taken off the scratch, never off the
+            // output, so the output tail only moves forward.
+            Token dummy = {}, *tail = &dummy;
             push_disabled(cur->id);
-            dst = expand_macro(dst, body, true);
+            tail = expand_macro(tail, body, true);
             pop_disabled();
-            if (prev->next) {
-                prev->next->is_leadingws = macro_name->is_leadingws;
-                prev->next->is_sol = macro_name->is_sol;
+            tail = rescan_call(tail, &dummy, &cur->next);
+            if (dummy.next) {
+                dummy.next->is_leadingws = macro_name->is_leadingws;
+                dummy.next->is_sol = macro_name->is_sol;
+                dst->next = dummy.next;
+                dst = tail;
             }
-            dst = rescan_call(dst, prev, &cur->next);
             cur = cur->next;
             continue;
         }
@@ -1315,14 +1312,20 @@ static Token *expand_macro(Token *dst, Token *list, bool owned) {
         Token *sub = subst(m->body, args);
         for (Token *t = sub; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
 
-        Token *prev = dst;
+        // Same scratch as the object-like case above: the retraction that
+        // rescan_call() may do (the expansion ended in a function-like macro
+        // whose argument list is still in the input) then never reaches the
+        // output chain.
+        Token dummy = {}, *tail = &dummy;
         push_disabled(m->id);
-        dst = expand_macro(dst, sub, true);
+        tail = expand_macro(tail, sub, true);
         pop_disabled();
-        dst = rescan_call(dst, prev, &cur);
-        if (prev->next) {
-            prev->next->is_leadingws = macro_name->is_leadingws;
-            prev->next->is_sol = macro_name->is_sol;
+        tail = rescan_call(tail, &dummy, &cur);
+        if (dummy.next) {
+            dummy.next->is_leadingws = macro_name->is_leadingws;
+            dummy.next->is_sol = macro_name->is_sol;
+            dst->next = dummy.next;
+            dst = tail;
         }
 
         continue;
@@ -1413,8 +1416,6 @@ static char *read_filename(Token **rest, Token *tok, bool *is_dquote, bool to_eo
         Token *start = tok;
         for (; tok->kind != TK_GT; tok = tok->next)
             if (tok->is_sol || tok->kind == TK_EOF) {
-                start->line_delta = line_delta;
-                start->filename = display_name;
                 error(start, "expected '>' to match this '<'");
             }
         *is_dquote = false;
@@ -1425,8 +1426,6 @@ static char *read_filename(Token **rest, Token *tok, bool *is_dquote, bool to_eo
         return join_tokens(start->next);
     }
 
-    tok->line_delta = line_delta;
-    tok->filename = display_name;
     error(tok, "expected \"FILENAME\" or <FILENAME>");
     return NULL;
 }
@@ -1828,11 +1827,22 @@ static Token *scan_pragma_op(Token *tok) {
     return dummy.next;
 }
 
+bool preproc_linemarkers;
+bool preproc_pragma_op;
+
+// A marker is state that only -E prints: what a diagnostic reports comes from
+// display_name/line_delta and the token's own location. Every other reader of
+// the stream drops the marker, so the frequent sites ask first.
+static bool want_linemarker(void) { return opt_E; }
+
 static Token *new_linemarker(Token *tmpl, int line, uint32_t filename) {
+    // The name a marker reports now comes from the file's #line table, so the
+    // parameter is only kept for the call sites; drop it when they are touched.
+    (void)filename;
+    preproc_linemarkers = true;
     Token *linemarker = copy_token(tmpl);
     linemarker->kind = TK_LINE;
     linemarker->id = line;
-    linemarker->filename = filename;
     linemarker->is_sol = true;
     return linemarker;
 }
@@ -1860,8 +1870,6 @@ static Token *include_file(Token **rest, Token *tok, char *path, Token *filename
         tok2 = filter_tokens(tok2);
     }
     if (!tok2) {
-        filename_tok->line_delta = line_delta;
-        filename_tok->filename = display_name;
         error(filename_tok, "%s: cannot open file: %s", path, strerror(errno));
     }
     if (!lex_lazy) push_file(tok, file_of(tok2->file_uid));
@@ -1870,6 +1878,10 @@ static Token *include_file(Token **rest, Token *tok, char *path, Token *filename
 
     int line, col;
     get_location(file_of(tok2->file_uid), tok2->loc, &line, &col);
+    // The callers of include_file() link the marker only if it is there, so
+    // leaving it out is what keeps the stream free of markers when -E is not
+    // asking for them.
+    if (!want_linemarker()) return NULL;
     return new_linemarker(tok2, line, display_name);
 }
 
@@ -1914,6 +1926,7 @@ static Token *read_line_marker(Token **rest, Token *tok) {
         display_name = name->id;
     }
 
+    line_note(file_of(start->file_uid), start->loc, display_name, line_delta);
     return new_linemarker(start, line_no, display_name);
 }
 
@@ -2028,24 +2041,69 @@ static Token *cond_directive(Token *tok, Token *tk_hash, BlockState cur_state) {
 // -D/-U/-include the stream starts with the command line's own directives, so
 // the first token is not necessarily the file's, and naming the file after it
 // would label every diagnostic in the file `<command line>`.
+// The output tail, and the one place a token is linked into the output. A
+// consumer that has to know how far the output has come has exactly one place
+// to look, instead of inferring it from a local cursor that walks, is handed to
+// helpers, and is re-walked. (Phase 0 of doc/streaming-frontend.md.)
+static Token *pp_out;
+
+// The input cursor and the base of the output chain. At a segment boundary these
+// two plus the module-level macro/include/conditional state are everything the
+// preprocessor needs to carry on, which is what a re-entrant entry point (the
+// parser asking for one more segment) would have to resume from. (Phase 0 of
+// doc/streaming-frontend.md.)
+static Token *pp_in;
+static Token pp_dummy;
+
+// Set between a yield and the call that resumes: the prologue has already run,
+// and the loop picks up from pp_in where it left off.
+static bool pp_resumed;
+bool (*pp_yield)(void);
+
+void pp_set_yield(bool (*fn)(void)) { pp_yield = fn; }
+
+static Token *pp_emit(Token *tok) {
+    pp_out = pp_out->next = tok;
+    return pp_out;
+}
+
+// -E streams: at each segment boundary everything up to pp_out is final (the
+// segment's _Pragma scan has run and the line marker's arguments are consumed),
+// so that is where the printer is called.
+bool e_stream_on;
+
 static Token *preprocess2(Token *tok, SrcFile *file) {
     int line, col;
-    Token dummy = {};
-    Token *cur = &dummy;
-    push_cond_incl(tok, BLOCK_ACTIVE);
+    // The prologue runs once; a resumed call goes straight to the loop.
+    if (!pp_resumed) {
+    pp_in = tok;
+    pp_out = &pp_dummy;
+    push_cond_incl(pp_in, BLOCK_ACTIVE);
     cur_path = 0;
     line_delta = 0;
     display_name = file->id;
 
-    cur = cur->next = new_linemarker(tok, 1, display_name);
+    if (want_linemarker()) {
+        // The prelude says which file is about to be read. Its template is the
+        // first token, which with -D/-include is the command line's own stream,
+        // so the marker is pointed at the file itself: the name then comes from
+        // that file's table, as every other marker's does.
+        Token *m = new_linemarker(pp_in, 1, display_name);
+        m->file_uid = file->uid;
+        m->loc = 0;
+        pp_emit(m);
+    }
+    if (e_stream_on) print_stream_upto(pp_dummy.next, pp_out);
 
+    }
+    pp_resumed = true;
     while (1) {
-        if (tok->kind == TK_EOF) {
+        if (pp_in->kind == TK_EOF) {
             if (cond_incl->next) error(cond_incl->if_tok, "unterminated conditional directive");
             if (include_depth > 0) {
-                tok = pop_file();
-                get_location(file_of(tok->file_uid), tok->loc, &line, &col);
-                cur = cur->next = new_linemarker(tok, line + line_delta, display_name);
+                pp_in = pop_file();
+                get_location(file_of(pp_in->file_uid), pp_in->loc, &line, &col);
+                if (want_linemarker()) pp_emit(new_linemarker(pp_in, line + line_delta, display_name));
                 continue;
             } else {
                 break;
@@ -2059,18 +2117,22 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
         // a macro invocation and not the end of this segment. It is evaluated
         // here (see cond_directive), and the branch it discards is not part
         // of the argument, parentheses and commas included.
-        if (!is_hash(tok)) {
+        if (!is_hash(pp_in)) {
             bool concat = (cur_state == BLOCK_ACTIVE);
             Token dummy2 = {}, *buf = &dummy2;
             int level = 0;
-            while (tok->kind != TK_EOF) {
+            while (pp_in->kind != TK_EOF) {
                 // Prototype: the main file is produced on demand. A live chunk
                 // is a segment plus the directive line after it; a dead one is
                 // scanned without making tokens at all.
-                if (lex_lazy && !tok->next) lex_chunk(concat);
-                if (is_hash(tok)) {
+                if (lex_lazy && !pp_in->next) lex_chunk(concat);
+                if (e_stream_on) print_stream_upto(pp_dummy.next, pp_out);
+                // A segment is finished and everything on the output chain is
+                // final: the point a pulling parser takes over at.
+                if (pp_yield && pp_yield()) return pp_dummy.next;
+                if (is_hash(pp_in)) {
                     if (level == 0) break;
-                    Token *cont = cond_directive(tok->next, tok, cond_incl->state);
+                    Token *cont = cond_directive(pp_in->next, pp_in, cond_incl->state);
                     if (!cont) {
                         // Not a conditional. In a region that is not taken
                         // it is skipped along with the rest of that region --
@@ -2080,208 +2142,207 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
                         // between two arguments, and the segment ends here
                         // as it did before.
                         if (cond_incl->state != BLOCK_ACTIVE) {
-                            tok = tok->next;
+                            pp_in = pp_in->next;
                             continue;
                         }
                         break;
                     }
-                    tok = cont;
+                    pp_in = cont;
                     concat = (cond_incl->state == BLOCK_ACTIVE);
                     continue;
                 }
                 if (!concat) {
-                    tok = tok->next;
+                    pp_in = pp_in->next;
                     continue;
                 }
-                tok->line_delta = line_delta;
-                tok->filename = display_name;
-                if (tok->kind == TK_ERR) error(tok, "%s", tok->msg);
-                if (tok->kind == TK_WARN) warning(WG_CPP, tok, "%s", tok->msg);
-                check_invalid_ident(tok);
-                if (tok->kind == TK_LPAREN)
+                if (pp_in->kind == TK_ERR) error(pp_in, "%s", pp_in->msg);
+                if (pp_in->kind == TK_WARN) warning(WG_CPP, pp_in, "%s", pp_in->msg);
+                check_invalid_ident(pp_in);
+                // One comparison per collected token buys the whole-stream
+                // _Pragma scan when the unit has none (which is most of them).
+                if (pp_in->kind == TK_IDENT && pp_in->id == pragma_op_id) preproc_pragma_op = true;
+                if (pp_in->kind == TK_LPAREN)
                     level++;
-                else if (tok->kind == TK_RPAREN && level > 0)
+                else if (pp_in->kind == TK_RPAREN && level > 0)
                     level--;
-                buf = buf->next = tok;
-                tok = tok->next;
+                buf = buf->next = pp_in;
+                pp_in = pp_in->next;
             }
-            buf->next = new_eof(tok);
-            Token *seg = cur;
+            buf->next = new_eof(pp_in);
+            Token *seg = pp_out;
             // The segment was taken out of the input stream above and nothing
             // else refers to it, so every token of it that names no macro is
             // linked into the output as it stands. This is the whole of a file
             // that uses no macros, and most of the tokens of one that does.
-            cur = expand_macro(cur, dummy2.next, true);
+            pp_out = expand_macro(pp_out, dummy2.next, true);
             if (seg->next) {
                 seg->next = scan_pragma_op(seg->next);
-                cur = seg;
-                while (cur->next) cur = cur->next;
+                pp_out = seg;
+                while (pp_out->next) pp_out = pp_out->next;
             }
-            if (tok->kind == TK_EOF) continue;
+            if (pp_in->kind == TK_EOF) continue;
         }
 
-        tok->line_delta = line_delta;
-        tok->filename = display_name;
 
-        Token *tk_hash = tok;
-        tok = tok->next;
+        Token *tk_hash = pp_in;
+        pp_in = pp_in->next;
 
-        tok->line_delta = line_delta;
-        tok->filename = display_name;
 
         // Preprocessing directives that may alter conditional‑frame state
-        Token *after = cond_directive(tok, tk_hash, cur_state);
+        Token *after = cond_directive(pp_in, tk_hash, cur_state);
         if (after) {
-            tok = after;
+            pp_in = after;
             continue;
         }
 
         // these directives are only meaningful when the block is active
         if (cur_state != BLOCK_ACTIVE) continue;
 
-        if (tok->id == dt[P_INCLUDE].id) {
+        if (pp_in->id == dt[P_INCLUDE].id) {
             bool is_dquote;
-            char *filename = read_include_filename(&tok, tok->next, &is_dquote);
+            char *filename = read_include_filename(&pp_in, pp_in->next, &is_dquote);
 
             if (filename[0] != '/' && is_dquote) {
                 char *path = format("%s/%s", dirname(strdup(file_of(tk_hash->file_uid)->name)), filename);
                 if (file_exists(path)) {
                     next_path = 0;
-                    Token *tmp = include_file(&tok, tok, path, tk_hash->next->next);
-                    if (tmp) cur = cur->next = tmp;
+                    Token *tmp = include_file(&pp_in, pp_in, path, tk_hash->next->next);
+                    if (tmp) pp_emit(tmp);
                     continue;
                 }
             }
 
             char *path = search_include_paths(filename);
-            Token *tmp = include_file(&tok, tok, path ? path : filename, tk_hash->next->next);
-            if (tmp) cur = cur->next = tmp;
+            Token *tmp = include_file(&pp_in, pp_in, path ? path : filename, tk_hash->next->next);
+            if (tmp) pp_emit(tmp);
             continue;
         }
 
-        if (tok->id == dt[P_INCLUDE_NEXT].id) {
+        if (pp_in->id == dt[P_INCLUDE_NEXT].id) {
             bool ignore;
-            char *filename = read_include_filename(&tok, tok->next, &ignore);
+            char *filename = read_include_filename(&pp_in, pp_in->next, &ignore);
             int hit = -1;
             char *path = search_include_next(filename, &hit);
             // Advance the cursor past the directory we are about to take
             // the file from, so a nested `#include_next <same-name>` keeps
             // moving forward instead of re-entering this same file.
             next_path = hit >= 0 ? hit + 1 : num_include_paths;
-            Token *tmp = include_file(&tok, tok, path ? path : filename, tk_hash->next->next);
-            if (tmp) cur = cur->next = tmp;
+            Token *tmp = include_file(&pp_in, pp_in, path ? path : filename, tk_hash->next->next);
+            if (tmp) pp_emit(tmp);
             continue;
         }
 
-        if (tok->id == dt[P_EMBED].id) {
+        if (pp_in->id == dt[P_EMBED].id) {
             // #embed resource params-opt: the directive is replaced by a
             // comma-separated list of the resource bytes (C23 6.10.4).
-            Token *embed_tok = tok;
-            tok = tok->next;
+            Token *embed_tok = pp_in;
+            pp_in = pp_in->next;
             Token *eol = NULL;
             bool is_dquote = false;
-            char *filename = read_embed_resource(&tok, tok, &is_dquote, &eol);
+            char *filename = read_embed_resource(&pp_in, pp_in, &is_dquote, &eol);
             int64_t limit;
             Token *prefix, *suffix, *if_empty;
-            read_embed_params(&tok, tok, eol, &limit, &prefix, &suffix, &if_empty);
+            read_embed_params(&pp_in, pp_in, eol, &limit, &prefix, &suffix, &if_empty);
             long fsize;
             unsigned char *data = read_embed_bytes(tk_hash, filename, is_dquote, &fsize);
-            emit_embed(&cur, embed_tok, data, fsize, limit, prefix, suffix, if_empty);
+            emit_embed(&pp_out, embed_tok, data, fsize, limit, prefix, suffix, if_empty);
             continue;
         }
 
-        if (tok->id == dt[P_DEFINE].id) {
-            read_macro_definition(&tok, tok->next);
+        if (pp_in->id == dt[P_DEFINE].id) {
+            read_macro_definition(&pp_in, pp_in->next);
             continue;
         }
 
-        if (tok->id == dt[P_UNDEF].id) {
-            tok = tok->next;
-            Macro *m = find_macro(tok);
+        if (pp_in->id == dt[P_UNDEF].id) {
+            pp_in = pp_in->next;
+            Macro *m = find_macro(pp_in);
             if (m && m->is_builtin) {
-                tok->line_delta = line_delta;
-                tok->filename = display_name;
-                warning(WG_BUILTIN_MACRO_REDEFINED, tok, "undefining builtin macro");
+                warning(WG_BUILTIN_MACRO_REDEFINED, pp_in, "undefining builtin macro");
             }
-            m = add_macro(tok->id, true, NULL);
+            m = add_macro(pp_in->id, true, NULL);
             m->deleted = true;
 
-            tok = skip_line(tok->next);
+            pp_in = skip_line(pp_in->next);
             continue;
         }
 
-        if (tok->id == dt[P_ERROR].id) {
-            Token *err = tok;
-            Token *msg = read_line(&tok, tok);
+        if (pp_in->id == dt[P_ERROR].id) {
+            Token *err = pp_in;
+            Token *msg = read_line(&pp_in, pp_in);
             error(err, "#%s", join_tokens(msg));
         }
 
-        if (tok->id == dt[P_WARNING].id) {
-            Token *warn = tok;
-            Token *msg = read_line(&tok, tok);
+        if (pp_in->id == dt[P_WARNING].id) {
+            Token *warn = pp_in;
+            Token *msg = read_line(&pp_in, pp_in);
             warning(WG_CPP, warn, "#%s", join_tokens(msg));
             continue;
         }
 
-        if (tok->id == dt[P_LINE].id) {
-            cur = cur->next = read_line_marker(&tok, tok);
+        if (pp_in->id == dt[P_LINE].id) {
+            pp_emit(read_line_marker(&pp_in, pp_in));
             continue;
         }
 
-        if (tok->kind == TK_PPNUM) {
-            cur = cur->next = read_line_marker(&tok, tk_hash);
+        if (pp_in->kind == TK_PPNUM) {
+            pp_emit(read_line_marker(&pp_in, tk_hash));
             continue;
         }
 
-        if (tok->id == dt[P_PRAGMA].id && tok->next->id == once_id) {
-            add_pragma(tok);
-            tok = skip_line(tok->next->next);
+        if (pp_in->id == dt[P_PRAGMA].id && pp_in->next->id == once_id) {
+            add_pragma(pp_in);
+            pp_in = skip_line(pp_in->next->next);
             continue;
         }
 
-        if (tok->id == dt[P_PRAGMA].id && (tok->next->id == push_macro_id || tok->next->id == pop_macro_id)) {
-            bool push = tok->next->id == push_macro_id;
+        if (pp_in->id == dt[P_PRAGMA].id && (pp_in->next->id == push_macro_id || pp_in->next->id == pop_macro_id)) {
+            bool push = pp_in->next->id == push_macro_id;
             uint32_t name;
-            if (!read_macro_name(tok->next->next, &name)) error(tok, "a macro name in quotes is required");
+            if (!read_macro_name(pp_in->next->next, &name)) error(pp_in, "a macro name in quotes is required");
             if (push)
                 push_macro(name);
             else
                 pop_macro(name);
             do {
-                tok = tok->next;
-            } while (!tok->is_sol && tok->kind != TK_EOF);
+                pp_in = pp_in->next;
+            } while (!pp_in->is_sol && pp_in->kind != TK_EOF);
             continue;
         }
 
-        if (tok->id == dt[P_PRAGMA].id && tok->next->id == pack_id) {
-            Token *marker = copy_token(tok);
-            int value = read_pack_pragma(&tok, tok->next);
+        if (pp_in->id == dt[P_PRAGMA].id && pp_in->next->id == pack_id) {
+            Token *marker = copy_token(pp_in);
+            int value = read_pack_pragma(&pp_in, pp_in->next);
             marker->kind = TK_PRAGMA;
             marker->ival = int128_set_i(value);
             marker->is_sol = true;
-            cur = cur->next = marker;
+            pp_emit(marker);
             continue;
         }
 
-        if (tok->id == dt[P_PRAGMA].id) {
+        if (pp_in->id == dt[P_PRAGMA].id) {
             do {
-                tok = tok->next;
-            } while (!tok->is_sol);
+                pp_in = pp_in->next;
+            } while (!pp_in->is_sol);
             continue;
         }
 
         // `#`-only line is legal. It's called a null directive.
-        if (tok->is_sol) continue;
-        error(tok, "invalid preprocessor directive");
+        if (pp_in->is_sol) continue;
+        error(pp_in, "invalid preprocessor directive");
     }
 
-    tok->line_delta = line_delta;
-    tok->filename = display_name;
 
-    cur->next = tok;
+    // Whatever is left of the input joins the output as it stands.
+    pp_out->next = pp_in;
     cond_incl = NULL;
-    return dummy.next;
+    pp_resumed = false;
+    return pp_dummy.next;
 }
+
+// Carry on after a yield: the state is already in place, so this is just
+// another turn of the loop.
+Token *pp_resume(void) { return preprocess2(NULL, NULL); }
 
 static char *cmd_buf;
 static int cmd_len;
@@ -2370,7 +2431,7 @@ static Token *file_macro(Token **rest, Token *tmpl) {
     *rest = tmpl->next;
     Token *orig = tmpl;
     while (orig->origin) orig = orig->origin;
-    return new_str_token(str(orig->filename), tmpl);
+    return new_str_token(str(line_name(orig)), tmpl);
 }
 
 static Token *line_macro(Token **rest, Token *tmpl) {
@@ -2379,7 +2440,7 @@ static Token *line_macro(Token **rest, Token *tmpl) {
     while (orig->origin) orig = orig->origin;
     int line, col;
     get_location(file_of(orig->file_uid), orig->loc, &line, &col);
-    return ident_to_num(tmpl, line + orig->line_delta);
+    return ident_to_num(tmpl, line + line_delta_of(orig));
 }
 
 // __COUNTER__ is expanded to serial values starting from 0.
@@ -2458,8 +2519,6 @@ static Token *builtin_fn_macro(Token **rest, Token *tmpl) {
     if (tmpl->next->kind != TK_LPAREN) error(tmpl->next, "missing ‘(’ after ‘%s’", str(tmpl->id));
     Token *tok = skip(tmpl->next, TK_LPAREN);
     if (tok->kind != TK_IDENT) {
-        tok->line_delta = line_delta;
-        tok->filename = display_name;
         error(tok, "macro __has_builtin requires an identifier");
     }
     *rest = skip(tok->next, TK_RPAREN);
@@ -2515,8 +2574,6 @@ static Token *feature_macro(Token **rest, Token *tmpl) {
     if (tmpl->next->kind != TK_LPAREN) error(tmpl->next, "missing ‘(’ after ‘%s’", str(tmpl->id));
     Token *tok = skip(tmpl->next, TK_LPAREN);
     if (tok->kind != TK_IDENT) {
-        tok->line_delta = line_delta;
-        tok->filename = display_name;
         error(tok, "macro %s requires an identifier", with_extensions ? "__has_extension" : "__has_feature");
     }
     *rest = skip(tok->next, TK_RPAREN);
@@ -2537,7 +2594,6 @@ static void write_scratch_space(Token *tok, char *str) {
     scratch->num_lines = 0;  // Rebuild_line_offsets table
     sprintf(scratch->contents + space_pos, "%s\n", str);
     tok->file_uid = (scratch)->uid;
-    tok->filename = scratch->id;
     tok->loc = space_pos;
     tok->len = len;
     space_pos += len + 1;
@@ -2687,8 +2743,18 @@ Token *preprocess_file(char *path) {
         main = tok_cmd;
     }
 
+    if (opt_E) {
+        print_stream_begin();
+        e_stream_on = true;
+    }
     Token *tok = preprocess2(main, file);
-    tok = scan_pragma_op(tok);
+    if (e_stream_on) {
+        e_stream_on = false;
+        print_stream_upto(tok, pp_out);
+        print_stream_end();
+        return tok;
+    }
+    if (preproc_pragma_op) tok = scan_pragma_op(tok);
     convert_keywords(tok);
     convert_ppnumber(tok);
     return tok;

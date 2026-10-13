@@ -13,7 +13,7 @@ static void print_loc(Node *node) {
     if (!node->tok) return;
     int line, col;
     get_location(file_of(node->tok->file_uid), node->tok->loc, &line, &col);
-    fprintf(stdout, "  Loc=<%s:%d:%d>", str(node->tok->filename), line + node->tok->line_delta, col);
+    fprintf(stdout, "  Loc=<%s:%d:%d>", str(line_name(node->tok)), line + line_delta_of(node->tok), col);
 }
 
 static const char *node_kind_name[] = {
