@@ -2152,16 +2152,64 @@ void pp_cursor_set(size_t at) { pp_cursor = at; }
 
 size_t pp_loc_count(void) { return pp_loc_num; }
 
-// The whole remaining chain joins the output at once in the pull front end, so the one
-// line in pp_emit never sees a real token. Push them here instead, once per chain.
-static Token *pp_loc_pushed;
+// A consumer that pulls reads tokens while the chain is still growing, so the table
+// is filled in the same steps the chain grows in: each call registers what has been
+// appended since the last one, in the parser's own order.
+static Token *pp_loc_last;
 
 static void pp_loc_push_chain(Token *head) {
     size_t was = pp_loc_num;
-    if (!head || pp_loc_pushed == head) return;
-    for (Token *t = head; t; t = tok_next(t)) pp_loc_push(t);
-    pp_loc_pushed = head;
-    pp_selfcheck_segment(head, was);
+    if (!head) return;
+    // Continuing from the last registered token and not from the head is what makes a
+    // second call useful: the chain only grows at its tail, so the continuation is
+    // the link that was NULL when the last call stopped and has since been filled in.
+    Token *from = pp_loc_last ? pp_loc_last->next : head;
+    for (Token *t = from; t; t = tok_next(t)) {
+        pp_loc_push(t);
+        pp_loc_last = t;
+    }
+    if (pp_loc_num > was) pp_selfcheck_segment(from, was);
+}
+
+// Everything a token needs before anything outside the preprocessor may look at it:
+// its kind (keyword, pp-number, character literal), the string it spells out, the run
+// it belongs to, and its position in the table. The boundary a token is handed over
+// at is the only place this can be done, because until the segment it is in has been
+// expanded and _Pragma-scanned its links may still change.
+static Token *pp_pub_last;
+
+// Where the part that may be joined really ends: the last token before a run of string
+// literals whose end is the end of what has been produced. Such a run is not joinable
+// yet -- the next segment may add to it -- and the join rewrites a token from its source
+// spelling, so it must see the whole run exactly once.
+static Token *pp_clean_end(Token *from, Token *before) {
+    Token *prev = before, *run = NULL, *run_prev = NULL;
+    for (Token *t = from; t; t = tok_next(t)) {
+        if (t->kind == TK_STRLIT) {
+            if (!run) {
+                run = t;
+                run_prev = prev;
+            }
+        } else {
+            run = NULL;
+        }
+        prev = t;
+    }
+    return run ? run_prev : prev;
+}
+
+// Finalising a segment: the two conversions, which are per token and idempotent, and the
+// join, whose cursor stops where the run it is looking at is still open. The position
+// table is not filled here -- it is filled once, when the chain is final, because a
+// token a later merge unlinks must not have an entry (perf.md 8ok).
+static void pp_publish(void) {
+    Token *from = pp_pub_last ? pp_pub_last->next : pp_dummy.next;
+    if (!from || from->kind == TK_EOF) return;
+    convert_keywords(from);
+    convert_ppnumber(from);
+    join_adjacent_string_literals(from);
+    Token *clean = pp_clean_end(from, pp_pub_last);
+    if (clean) pp_pub_last = clean;
 }
 
 
@@ -2170,8 +2218,42 @@ static void pp_loc_push_chain(Token *head) {
 // so that is where the printer is called.
 bool e_stream_on;
 
+// Pull. `pp_pull_on` is armed by the driver once the parser is the one walking the
+// chain; `pp_running` is true while the preprocessor itself is inside its loop, and
+// there the pull must stay off -- it walks its own input with tok_next, and a NULL
+// link there means "lex another chunk", not "ask for the rest of the stream".
+static bool pp_pull_on;
+static bool pp_running;
+unsigned long pp_pull_count;
+
+void pp_set_pull(bool on) { pp_pull_on = on; }
+bool pp_pull_armed(void) { return pp_pull_on; }
+// A pull happens only for a walker outside the preprocessor. The preprocessor's own
+// walks run to the end of the published prefix on purpose (that is where the segment
+// ends), so they are not a caller this applies to.
+bool pp_pull_active(void) { return pp_pull_on && !pp_running; }
+
+void pp_pull_more(Token *tok) {
+    if (!pp_pull_on || pp_running) return;
+    // One pull is not always enough, and a pull may add nothing at all: a segment can
+    // be a directive line and no tokens (#define, #undef, #pragma, a conditional that
+    // takes the other branch), and the walk still has to be given either a successor
+    // or the end of the stream. Asking once and returning left the walker holding
+    // NULL, which is what the parser then dereferenced.
+    unsigned long rounds = 0;
+    while (!tok->next && pp_more()) {
+        if (++rounds > 1000) {
+            fprintf(stderr, "cxx: internal error: %lu pulls left the chain where it was\n", rounds);
+            abort();
+        }
+        pp_pull_count++;
+        pp_resume();
+    }
+}
+
 static Token *preprocess2(Token *tok, SrcFile *file) {
     int line, col;
+    pp_running = true;
     // The prologue runs once; a resumed call goes straight to the loop.
     if (!pp_resumed) {
     pp_in = tok;
@@ -2225,9 +2307,6 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
                 // scanned without making tokens at all.
                 if (lex_lazy && !tok_next(pp_in)) lex_chunk(concat);
                 if (e_stream_on) print_stream_upto(pp_dummy.next, pp_out);
-                // A segment is finished and everything on the output chain is
-                // final: the point a pulling parser takes over at.
-                if (pp_yield && pp_yield()) return pp_dummy.next;
                 if (is_hash(pp_in)) {
                     if (level == 0) break;
                     Token *cont = cond_directive(tok_next(pp_in), pp_in, cond_incl->state);
@@ -2277,6 +2356,34 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
                 seg->next = scan_pragma_op(seg->next);
                 pp_out = seg;
                 while (tok_next(pp_out)) pp_out = pp_out->next;
+            }
+            // A segment is finished here -- expanded, _Pragma-scanned, appended --
+            // so everything on the output chain up to pp_out is final and nothing
+            // is left in a local chain. That is the boundary a pulling consumer takes
+            // over at. Checking for a yield inside the collection loop above lost the
+            // tokens collected so far: they sit behind pp_in, were never linked into
+            // the output, and the next call resumes past them.
+            if (pp_pull_on) {
+                // The prefix has an end of its own: past it lies the input chain,
+                // which is not part of the output. A walker that runs off the end
+                // asks for more instead of reading on.
+                //
+                // -E never arms the pull (its consumer is the printer, which is
+                // driven by the stream itself), so publishing -- translation phase 6
+                // and 7 work for the parser -- cannot reach that path and change what
+                // -E prints.
+                pp_out->next = NULL;
+                pp_publish();
+            }
+            // A string literal run may still be open at a boundary: another literal
+            // could follow in the next segment, and joining happens on the published
+            // prefix, so do not hand over while the run could continue. An empty
+            // prefix is not handed over either -- a file that starts with a directive
+            // line has no tokens before the first boundary, and returning NULL there
+            // is a stream that begins with nothing (the parser dereferenced it).
+            if (pp_dummy.next && pp_out->kind != TK_STRLIT && pp_yield && pp_yield()) {
+                pp_running = false;
+                return pp_dummy.next;
             }
             if (pp_in->kind == TK_EOF) continue;
         }
@@ -2435,12 +2542,20 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
     pp_out->next = pp_in;
     cond_incl = NULL;
     pp_resumed = false;
+    pp_running = false;
     return pp_dummy.next;
 }
 
 // Carry on after a yield: the state is already in place, so this is just
 // another turn of the loop.
-Token *pp_resume(void) { return preprocess2(NULL, NULL); }
+static Token *pp_finish(Token *tok);
+
+Token *pp_resume(void) {
+    Token *tok = preprocess2(NULL, NULL);
+    return pp_resumed ? tok : pp_finish(tok);
+}
+
+bool pp_more(void) { return pp_resumed; }
 
 static char *cmd_buf;
 static int cmd_len;
@@ -2757,21 +2872,29 @@ void join_adjacent_string_literals(Token *tok) {
     // First pass: If regular string literals are adjacent to wide
     // string literals, regular string literals are converted to a wide
     // type before concatenation. In this pass, we do the conversion
-    for (Token *tok1 = tok; tok1->kind != TK_EOF;) {
+    for (Token *tok1 = tok; tok1 && tok1->kind != TK_EOF;) {
         if (tok1->kind != TK_STRLIT) {
             tok1 = tok_next(tok1);
             continue;
         }
+        // Already decoded, and the run behind it already joined: decoding again would
+        // recompute the value from this token's spelling, which for a merged head is
+        // only its first literal.
+        if (tok1->is_final) {
+            tok1 = tok_next(tok1);
+            continue;
+        }
 
-        if (tok_next(tok1)->kind != TK_STRLIT) {
+        if (!tok_next(tok1) || tok_next(tok1)->kind != TK_STRLIT) {
             convert_str_literal(tok1);
+            tok1->is_final = true;
             tok1 = tok_next(tok1);
             continue;
         }
 
         uint32_t kind = tok1->enc_prefix;
 
-        for (Token *t = tok_next(tok1); t->kind == TK_STRLIT; t = t->next) {
+        for (Token *t = tok_next(tok1); t && t->kind == TK_STRLIT; t = t->next) {
             uint32_t k = t->enc_prefix;
             if (k == PREFIX_NONE)
                 continue;
@@ -2783,34 +2906,42 @@ void join_adjacent_string_literals(Token *tok) {
 
         for (Token *t = tok1; t->kind == TK_STRLIT; t = tok_next(t)) {
             t->enc_prefix = kind;
-            convert_str_literal(t);
+            if (!t->is_final) {
+                convert_str_literal(t);
+                t->is_final = true;
+            }
         }
 
-        while (tok1->kind == TK_STRLIT) tok1 = tok_next(tok1);
+        while (tok1 && tok1->kind == TK_STRLIT) tok1 = tok_next(tok1);
     }
 
     // Second pass: concatenate adjacent string literals.
-    for (Token *tok1 = tok; tok1->kind != TK_EOF;) {
-        if (tok1->kind != TK_STRLIT || tok_next(tok1)->kind != TK_STRLIT) {
+    for (Token *tok1 = tok; tok1 && tok1->kind != TK_EOF;) {
+        if (tok1->kind != TK_STRLIT || !tok_next(tok1) || tok_next(tok1)->kind != TK_STRLIT) {
             tok1 = tok_next(tok1);
             continue;
         }
 
         Token *after = tok_next(tok1);
-        while (after->kind == TK_STRLIT) after = tok_next(after);
+        while (after && after->kind == TK_STRLIT) after = tok_next(after);
+        // No end in sight: this run reaches the end of what is published, and the
+        // next segment may still add to it. Leave it alone; the boundary does not
+        // hand over while a literal is the last token, so it is closed later.
+        if (!after) break;
 
         int len = str_len(tok1->id);
-        for (Token *t = tok_next(tok1); t != after; t = t->next) len += str_len(t->id);
+        for (Token *t = tok_next(tok1); t && t != after; t = t->next) len += str_len(t->id);
 
         char *buf = emalloc(len);
         int i = 0;
-        for (Token *t = tok1; t != after; t = tok_next(t)) {
+        for (Token *t = tok1; t && t != after; t = tok_next(t)) {
             int valid_size = str_len(t->id);
             memcpy(buf + i, str(t->id), valid_size);
             i += valid_size;
         }
 
         tok1->id = intern(buf, len);
+        tok1->is_final = true;
         tok1->next = after;
         tok1 = after;
     }
@@ -2846,6 +2977,17 @@ Token *preprocess_file(char *path) {
         e_stream_on = true;
     }
     Token *tok = preprocess2(main, file);
+    // A yield is not the end: the caller will ask for the rest of the stream, and
+    // the work that closes it has to happen exactly once, at the real end.
+    if (pp_resumed) return tok;
+    return pp_finish(tok);
+}
+
+// Everything that happens once the stream is complete: what -E still has to print,
+// the _Pragma sweep, the two conversions, and the position of every token of the
+// chain the parser will walk. The one-shot driver and a `pp_resume()` that ran the
+// loop out end here, so there is one ending and not two.
+static Token *pp_finish(Token *tok) {
     if (e_stream_on) {
         e_stream_on = false;
         print_stream_upto(tok, pp_out);

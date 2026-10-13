@@ -52,7 +52,16 @@ void parse_rollback(void) {}
 // rather than reading the field, so only this function has to change. (It is called
 // tok_next because `next` is already a name here, and ->next belongs to 17 structs:
 // Scope, Sym, Member and others -- so the rewrite names the receiver, tok.)
-Token *tok_next(Token *tok) { return tok ? tok->next : 0; }
+// The one way to the next token -- the parser looks ahead with it everywhere -- and
+// therefore the one place a pulled stream has to be extended. Running off the end of
+// what has been produced (a NULL link) means "there is more": the stream really ends
+// at the EOF token the lexer left in the input. With no consumer armed this is the
+// same load it always was.
+Token *tok_next(Token *tok) {
+    if (!tok) return NULL;
+    if (!tok->next) pp_pull_more(tok);
+    return tok->next;
+}
 bool match(Token **rest, Token *tok, uint32_t kind) {
     if (tok->kind == kind) {
         parse_commit(rest, tok_next(tok));
@@ -871,7 +880,9 @@ error:
 }
 
 void convert_ppnumber(Token *tok) {
-    while (tok->kind != TK_EOF) {
+    // NULL as well as TK_EOF: in a pulled stream the pass is run on the part that
+    // has just become final, and that part ends at NULL.
+    while (tok && tok->kind != TK_EOF) {
         if (tok->kind == TK_ERR) error(tok, "%s", tok->msg);
         if (tok->kind == TK_PPNUM) convert_pp_num(tok);
         if (tok->kind == TK_CHARLIT) convert_char_literal(tok);
@@ -996,7 +1007,7 @@ void convert_keywords(Token *tok) {
             kw_tab[h].used = true;
         }
     }
-    while (tok->kind != TK_EOF) {
+    while (tok && tok->kind != TK_EOF) {
         if (tok->kind == TK_IDENT) {
             for (uint32_t h = tok->id & (KW_SLOTS - 1); kw_tab[h].used; h = (h + 1) & (KW_SLOTS - 1))
                 if (kw_tab[h].id == tok->id) {

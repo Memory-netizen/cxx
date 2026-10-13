@@ -653,6 +653,10 @@ struct Token {
     bool is_sol : 1;         // true if is starting of line
     bool is_leadingws : 1;   // true if is leading space
     bool noexpand : 1;       // true if this token shall not be macro-expanded
+    // Its string value has been decoded, and any run it starts has been joined: the
+    // decode reads the source spelling, so doing it twice would replace a joined run
+    // with the spelling of its first literal (perf.md 8on).
+    bool is_final : 1;
 };
 
 // The file table lives in lexer.c, where every file is opened and registered.
@@ -2099,6 +2103,17 @@ void dump_tokens(Token *tok);
 extern bool (*pp_yield)(void);
 void pp_set_yield(bool (*fn)(void));
 Token *pp_resume(void);  // carry on after a yield
+bool pp_more(void);      // true while the last return was a yield
+
+// Pull: a consumer drives the stream, so running off what has been produced has to
+// ask for more. Armed by the driver once the parser starts walking; a no-op while
+// the preprocessor is running (it walks its own input with tok_next too), and a
+// no-op once the stream really has ended.
+void pp_set_pull(bool on);
+bool pp_pull_armed(void);     // the driver's own question: is a consumer driving?
+bool pp_pull_active(void);    // true while a walker outside the preprocessor drives it
+void pp_pull_more(Token *tok);   // pull until tok has a successor, or the stream ends
+extern unsigned long pp_pull_count;   // how many times a walker asked for more
 
 void print_stream_begin(void);
 void print_stream_upto(Token *head, Token *end);
