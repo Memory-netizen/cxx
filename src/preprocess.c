@@ -99,7 +99,7 @@ static Macro *find_macro(Token *tok);
 
 static Token *filter_tokens(Token *tok) {
     Token dummy = {}, *cur = &dummy;
-    for (; tok; tok = tok->next) {
+    for (; tok; tok = tok_next(tok)) {
         if (tok->kind == TK_WS) continue;
         if (tok->kind == TK_NL) continue;
         if (tok->kind == TK_COMMENT) continue;
@@ -212,7 +212,7 @@ static Token *skip_line(Token *tok) {
     if (tok->is_sol) return tok;
 
     warning(WG_EXTRA_TOKENS, tok, "extra token");
-    while (!tok->is_sol) tok = tok->next;
+    while (!tok->is_sol) tok = tok_next(tok);
     return tok;
 }
 
@@ -240,7 +240,7 @@ static Token *new_eof(Token *tok) {
 // macro -- and has to be copied.
 static Token *append_token(Token *dst, Token *tok, bool owned) {
     dst->next = owned ? tok : copy_token(tok);
-    return dst->next;
+    return tok_next(dst);
 }
 
 // Double-quote a given string and returns it.
@@ -292,7 +292,7 @@ static Token *read_line(Token **rest, Token *tok) {
     Token dummy = {};
     Token *cur = &dummy;
 
-    for (; !tok->is_sol; tok = tok->next) {
+    for (; !tok->is_sol; tok = tok_next(tok)) {
         cur = cur->next = tok;
     }
 
@@ -313,11 +313,11 @@ static Token *read_const_expr(Token **rest, Token *tok) {
         // is defined. Otherwise "0".
         if (tok->kind == TK_IDENT && tok->id == defined_id) {
             Token *start = tok;
-            bool has_paren = match(&tok, tok->next, TK_LPAREN);
+            bool has_paren = match(&tok, tok_next(tok), TK_LPAREN);
 
             if (tok->kind != TK_IDENT) error(start, "operator \"defined\" requires an identifier");
             Macro *m = find_macro(tok);
-            tok = tok->next;
+            tok = tok_next(tok);
 
             if (has_paren) tok = skip(tok, TK_RPAREN);
 
@@ -326,7 +326,7 @@ static Token *read_const_expr(Token **rest, Token *tok) {
         }
 
         cur = cur->next = tok;
-        tok = tok->next;
+        tok = tok_next(tok);
     }
 
     return dummy.next;
@@ -358,7 +358,7 @@ static Token *eval_has_include(Token *tok) {
         if (tok->kind == TK_IDENT && (tok->id == has_include_id || tok->id == has_include_next_id)) {
             Token *start = tok;
             bool is_next = tok->id == has_include_next_id;
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
 
             bool is_dquote = false;
             char *path = read_filename(&tok, tok, &is_dquote, false);
@@ -368,7 +368,7 @@ static Token *eval_has_include(Token *tok) {
             continue;
         }
         cur = cur->next = tok;
-        tok = tok->next;
+        tok = tok_next(tok);
     }
 
     return dummy.next;
@@ -381,7 +381,7 @@ static Token *eval_has_include(Token *tok) {
 // `tok` must point at the opening '('.
 static int64_t has_embed_result(Token **rest, Token *tok) {
     Token *lp = tok;
-    tok = tok->next;
+    tok = tok_next(tok);
     bool is_dquote = false;
     char *filename = read_embed_filename(&tok, tok, &is_dquote);
 
@@ -391,7 +391,7 @@ static int64_t has_embed_result(Token **rest, Token *tok) {
     while (ok) {
         if (tok->kind == TK_RPAREN) break;
         if (tok->kind == TK_COMMA) {
-            tok = tok->next;
+            tok = tok_next(tok);
             continue;
         }
         if (tok->kind != TK_IDENT) {
@@ -405,13 +405,13 @@ static int64_t has_embed_result(Token **rest, Token *tok) {
             break;
         }
         seen |= bit;
-        Token *plp = tok->next;
+        Token *plp = tok_next(tok);
         if (!plp || plp->kind != TK_LPAREN) {
             ok = false;
             break;
         }
         Token *content = read_embed_param(&tok, plp);
-        tok = tok->next;
+        tok = tok_next(tok);
         if (bit == EMBED_LIMIT) {
             limit = eval_const_tokens(content);
             if (limit < 0) error(ptok, "invalid value '%ld'; must be positive", limit);
@@ -420,16 +420,16 @@ static int64_t has_embed_result(Token **rest, Token *tok) {
     if (!ok) {
         // Skip the rest of the call, honoring nested parentheses.
         int depth = 1;
-        for (; tok; tok = tok->next) {
+        for (; tok; tok = tok_next(tok)) {
             if (tok->kind == TK_LPAREN) depth++;
             if (tok->kind == TK_RPAREN && --depth == 0) break;
             if (tok->kind == TK_EOF || tok->is_sol) break;
         }
-        if (tok && tok->kind == TK_RPAREN) tok = tok->next;
+        if (tok && tok->kind == TK_RPAREN) tok = tok_next(tok);
         *rest = tok;
         return 0;
     }
-    tok = tok->next;  // the closing ')'
+    tok = tok_next(tok);  // the closing ')'
     *rest = tok;
 
     char *path = resolve_embed_path(lp, filename, is_dquote);
@@ -445,13 +445,13 @@ static Token *eval_has_embed(Token *tok) {
     while (tok) {
         if (tok->kind == TK_IDENT && tok->id == has_embed_id) {
             Token *start = tok;
-            if (!tok->next || tok->next->kind != TK_LPAREN) error(tok, "missing '(' after '__has_embed'");
-            int64_t result = has_embed_result(&tok, tok->next);
+            if (!tok_next(tok) || tok_next(tok)->kind != TK_LPAREN) error(tok, "missing '(' after '__has_embed'");
+            int64_t result = has_embed_result(&tok, tok_next(tok));
             cur = cur->next = ident_to_num(start, result);
             continue;
         }
         cur = cur->next = tok;
-        tok = tok->next;
+        tok = tok_next(tok);
     }
 
     return dummy.next;
@@ -462,20 +462,20 @@ static Token *eval_has_embed(Token *tok) {
 // (as in clang). tok must point at the operator token; on return *rest
 // is past the closing ')'.
 static int64_t eval_attr_query(Token **rest, Token *tok, bool c23_form, char *op) {
-    tok = tok->next->next;
+    tok = tok_next(tok)->next;
     if (tok->kind != TK_IDENT) error(tok, "expected attribute name in '%s'", op);
     char *ns = NULL;
     char *name = str(tok->id);
-    tok = tok->next;
+    tok = tok_next(tok);
     if (tok->kind == TK_COLONCOLON) {
         ns = name;
-        tok = tok->next;
+        tok = tok_next(tok);
         if (tok->kind != TK_IDENT) error(tok, "expected attribute name in '%s'", op);
         name = str(tok->id);
-        tok = tok->next;
+        tok = tok_next(tok);
     }
     if (tok->kind != TK_RPAREN) error(tok, "missing ')' after '%s'", op);
-    *rest = tok->next;
+    *rest = tok_next(tok);
 
     // Unqualified names are looked up in the standard namespace only
     // (as in clang); the GNU form checks the gnu namespace.
@@ -494,13 +494,13 @@ static Token *eval_has_attr(Token *tok, uint32_t id, bool c23_form, char *op) {
     while (tok) {
         if (tok->kind == TK_IDENT && tok->id == id) {
             Token *start = tok;
-            if (!tok->next || tok->next->kind != TK_LPAREN) error(tok, "missing '(' after '%s'", op);
+            if (!tok_next(tok) || tok_next(tok)->kind != TK_LPAREN) error(tok, "missing '(' after '%s'", op);
             int64_t val = eval_attr_query(&tok, tok, c23_form, op);
             cur = cur->next = ident_to_num(start, val);
             continue;
         }
         cur = cur->next = tok;
-        tok = tok->next;
+        tok = tok_next(tok);
     }
 
     return dummy.next;
@@ -523,14 +523,14 @@ static Token *eval_zero_operator(Token *tok, uint32_t id) {
     Token dummy = {};
     Token *cur = &dummy;
     while (tok) {
-        if (tok->kind == TK_IDENT && tok->id == id && tok->next && tok->next->kind == TK_LPAREN) {
+        if (tok->kind == TK_IDENT && tok->id == id && tok_next(tok) && tok_next(tok)->kind == TK_LPAREN) {
             Token *start = tok;
             int depth = 0;
-            for (tok = tok->next; tok && tok->kind != TK_EOF; tok = tok->next) {
+            for (tok = tok_next(tok); tok && tok->kind != TK_EOF; tok = tok_next(tok)) {
                 if (tok->kind == TK_LPAREN)
                     depth++;
                 else if (tok->kind == TK_RPAREN && --depth == 0) {
-                    tok = tok->next;
+                    tok = tok_next(tok);
                     break;
                 }
             }
@@ -538,7 +538,7 @@ static Token *eval_zero_operator(Token *tok, uint32_t id) {
             continue;
         }
         cur = cur->next = tok;
-        tok = tok->next;
+        tok = tok_next(tok);
     }
     return dummy.next;
 }
@@ -559,7 +559,7 @@ static int64_t eval_const_tokens(Token *expr) {
     // we replace remaining non-macro identifiers with "0"
     Token dummy2 = {};
     cur = &dummy2;
-    for (Token *t = expr; t; t = t->next) {
+    for (Token *t = expr; t; t = tok_next(t)) {
         if (t->kind == TK_IDENT)
             cur = cur->next = ident_to_num(t, t->id == true_id ? 1 : 0);
         else
@@ -579,7 +579,7 @@ static int64_t eval_const_tokens(Token *expr) {
     // int, so the comparison went signed and cxx answered 1 where the draft,
     // gcc and clang all answer 0 (C/0125/0125_0028.c test 03-04 and
     // C/0125/0125_0026.c test 01-11, both `#if` on a mixed-signedness pair).
-    for (Token *t = expr; t->kind != TK_EOF; t = t->next) {
+    for (Token *t = expr; t->kind != TK_EOF; t = tok_next(t)) {
         if (t->kind != TK_NUM) continue;
         bool uns = (t->lit_suffix & SUF_BITINT) ? (t->lit_suffix & SUF_UNSIGNED) != 0 : infer_numtype(t)->is_unsigned;
         // A _BitInt value is truncated as if converted to (u)intmax_t.
@@ -589,7 +589,7 @@ static int64_t eval_const_tokens(Token *expr) {
     // No floating constant of any kind is allowed in #if (gcc/clang
     // reject them all: float/double/long double and the interchange
     // _Float16/32/64/128).
-    for (Token *t = expr; t->kind != TK_EOF; t = t->next)
+    for (Token *t = expr; t->kind != TK_EOF; t = tok_next(t))
         if (t->kind == TK_NUM &&
             t->lit_suffix & (SUF_FLOAT | SUF_DOUBLE | SUF_LDOUBLE | SUF_F16 | SUF_F32 | SUF_F64 | SUF_F128))
             error(t, "floating point literal in preprocessor expression");
@@ -603,7 +603,7 @@ static int64_t eval_const_tokens(Token *expr) {
 
 static int64_t eval_const_expr(Token **rest, Token *tok) {
     Token *start = tok;
-    Token *expr = read_const_expr(rest, tok->next);
+    Token *expr = read_const_expr(rest, tok_next(tok));
     if (expr->kind == TK_EOF) error(start, "no expression in #%s", str(start->id));
     return eval_const_tokens(expr);
 }
@@ -736,26 +736,26 @@ static MacroParam *read_macro_params(Token **rest, Token *tok, bool *is_variadic
         if (tok->kind == TK_ELLIPSIS) {
             *is_variadic = true;
             *va_args_id = vaarg_id;
-            *rest = skip(tok->next, TK_RPAREN);
+            *rest = skip(tok_next(tok), TK_RPAREN);
             return dummy.next;
         }
         if (tok->kind != TK_IDENT) error(tok, " expected parameter name");
         for (MacroParam *p = dummy.next; p; p = p->next)
             if (p->id == tok->id) error(tok, "duplicate macro parameter \"%s\"", str(tok->id));
 
-        if (tok->next->kind == TK_ELLIPSIS) {
+        if (tok_next(tok)->kind == TK_ELLIPSIS) {
             *is_variadic = true;
             *va_args_id = tok->id;
-            *rest = skip(tok->next->next, TK_RPAREN);
+            *rest = skip(tok_next(tok)->next, TK_RPAREN);
             return dummy.next;
         }
 
         MacroParam *m = emalloc(sizeof(MacroParam));
         m->id = tok->id;
         cur = cur->next = m;
-        tok = tok->next;
+        tok = tok_next(tok);
     }
-    *rest = tok->next;
+    *rest = tok_next(tok);
     return dummy.next;
 }
 
@@ -768,13 +768,13 @@ static void read_macro_definition(Token **rest, Token *tok) {
     if (exist && exist->is_builtin) warning(WG_BUILTIN_MACRO_REDEFINED, tok, "redefining builtin macro");
 
     Token *name = tok;
-    tok = tok->next;
+    tok = tok_next(tok);
 
     if (tok->kind == TK_LPAREN && !tok->is_leadingws) {
         // Function-like macro
         bool is_variadic = false;
         uint32_t va_args_id = 0;
-        MacroParam *params = read_macro_params(&tok, tok->next, &is_variadic, &va_args_id);
+        MacroParam *params = read_macro_params(&tok, tok_next(tok), &is_variadic, &va_args_id);
         if (!tok->is_sol && !tok->is_leadingws)
             warning(WG_CPP, tok, "ISO C99 requires whitespace after the macro name");
         Macro *m = add_macro(name->id, false, tok);
@@ -805,7 +805,7 @@ static MacroArg *read_macro_arg_one(Token **rest, Token *tok, bool read_rest) {
         else if (tok->kind == TK_RPAREN)
             level--;
         cur = cur->next = copy_token(tok);
-        tok = tok->next;
+        tok = tok_next(tok);
     }
 
     cur->next = new_eof(tok);
@@ -817,7 +817,7 @@ static MacroArg *read_macro_arg_one(Token **rest, Token *tok, bool read_rest) {
 }
 
 static MacroArg *read_macro_args(Token **rest, Token *tok, MacroParam *params, bool is_variadic, uint32_t va_args_id) {
-    tok = tok->next->next;
+    tok = tok_next(tok)->next;
 
     MacroArg dummy = {};
     MacroArg *cur = &dummy;
@@ -861,7 +861,7 @@ static MacroArg *find_arg(MacroArg *args, Token *tok) {
 // expansion rather than after it.
 static Token *copy_body(Token *body, Token *invocation) {
     Token dummy = {}, *cur = &dummy;
-    for (Token *t = body; t && t->kind != TK_EOF; t = t->next) {
+    for (Token *t = body; t && t->kind != TK_EOF; t = tok_next(t)) {
         cur = cur->next = copy_token(t);
         cur->origin = invocation;
     }
@@ -878,7 +878,7 @@ static char *join_tokens(Token *tok) {
     // both flags are read here. `x(f( 123\n456 ))` stringizes as "123 456"
     // in gcc, clang and the Fujitsu suite (C/0125/0125_0020.c test 45-03).
     int len = 1;
-    for (Token *t = tok; t && t->kind != TK_EOF; t = t->next) {
+    for (Token *t = tok; t && t->kind != TK_EOF; t = tok_next(t)) {
         if (t != tok && (t->is_leadingws || t->is_sol)) len++;
         len += t->len;
     }
@@ -887,7 +887,7 @@ static char *join_tokens(Token *tok) {
 
     // Copy token texts.
     int pos = 0;
-    for (Token *t = tok; t && t->kind != TK_EOF; t = t->next) {
+    for (Token *t = tok; t && t->kind != TK_EOF; t = tok_next(t)) {
         if (t != tok && (t->is_leadingws || t->is_sol)) buf[pos++] = ' ';
         strncpy(buf + pos, tok_text(t), t->len);
         pos += t->len;
@@ -907,7 +907,7 @@ static char *join_tokens(Token *tok) {
 // newline, not to a backslash and an `n` (C/0125/0125_0008.c test 27-07).
 static char *join_spelling(Token *tok) {
     int len = 1;
-    for (Token *t = tok; t && t->kind != TK_EOF; t = t->next) {
+    for (Token *t = tok; t && t->kind != TK_EOF; t = tok_next(t)) {
         if (t != tok && (t->is_leadingws || t->is_sol)) len++;
         len += t->len;
         if (t->kind == TK_STRLIT || t->kind == TK_CHARLIT) {
@@ -919,7 +919,7 @@ static char *join_spelling(Token *tok) {
 
     char *buf = emalloc(len);
     int pos = 0;
-    for (Token *t = tok; t && t->kind != TK_EOF; t = t->next) {
+    for (Token *t = tok; t && t->kind != TK_EOF; t = tok_next(t)) {
         if (t != tok && (t->is_leadingws || t->is_sol)) buf[pos++] = ' ';
         char *text = tok_text(t);
         for (uint32_t i = 0; i < t->len; i++) {
@@ -965,7 +965,7 @@ static Token *paste(Token *lhs, Token *rhs) {
     // Tokenize the resulting string.
     SrcFile *file = new_file(file_of(lhs->file_uid)->name, file_of(lhs->file_uid)->file_no, buf);
     Token *tok = tokenize(file);
-    if (tok->next->kind != TK_EOF) error(lhs, "pasting forms '%s', an invalid token", buf);
+    if (tok_next(tok)->kind != TK_EOF) error(lhs, "pasting forms '%s', an invalid token", buf);
 
     // Inherit source location and whitespace flag from lhs.
     tok->is_sol = false;
@@ -992,24 +992,24 @@ static Token *subst(Token *tok, MacroArg *args) {
     while (tok->kind != TK_EOF) {
         // "#" followed by a parameter is replaced with stringized actuals.
         if (tok->kind == TK_HASH) {
-            MacroArg *arg = find_arg(args, tok->next);
-            if (!arg) error(tok->next, "'#' is not followed by a macro parameter");
+            MacroArg *arg = find_arg(args, tok_next(tok));
+            if (!arg) error(tok_next(tok), "'#' is not followed by a macro parameter");
             cur = cur->next = stringize(arg->tok);
-            tok = tok->next->next;
+            tok = tok_next(tok)->next;
             continue;
         }
 
         // [GNU] If __VA_ARG__ is empty, `,##__VA_ARGS__` is expanded
         // to the empty token list. Otherwise, its expaned to `,` and
         // __VA_ARGS__.
-        if (tok->kind == TK_COMMA && tok->next->kind == TK_HASHHASH) {
-            MacroArg *arg = find_arg(args, tok->next->next);
+        if (tok->kind == TK_COMMA && tok_next(tok)->kind == TK_HASHHASH) {
+            MacroArg *arg = find_arg(args, tok_next(tok)->next);
             if (arg && arg->is_va_args) {
                 if (arg->tok->kind == TK_EOF) {
-                    tok = tok->next->next->next;
+                    tok = tok_next(tok_next(tok));
                 } else {
                     cur = cur->next = copy_token(tok);
-                    tok = tok->next->next;
+                    tok = tok_next(tok)->next;
                 }
                 continue;
             }
@@ -1021,31 +1021,31 @@ static Token *subst(Token *tok, MacroArg *args) {
                 // two placemarkers together contribute nothing. Only a list
                 // that really begins with `##` is the constraint violation.
                 if (tok == head) error(tok, "'##' cannot appear at start of macro expansion");
-                tok = tok->next;
+                tok = tok_next(tok);
                 continue;
             }
 
-            if (tok->next->kind == TK_EOF) error(tok, "'##' cannot appear at end of macro expansion");
+            if (tok_next(tok)->kind == TK_EOF) error(tok, "'##' cannot appear at end of macro expansion");
 
-            MacroArg *arg = find_arg(args, tok->next);
+            MacroArg *arg = find_arg(args, tok_next(tok));
             if (arg) {
                 if (arg->tok->kind != TK_EOF) {
                     *cur = *paste(cur, arg->tok);
                     for (Token *t = arg->tok->next; t->kind != TK_EOF; t = t->next) cur = cur->next = copy_token(t);
                 }
-                tok = tok->next->next;
+                tok = tok_next(tok)->next;
                 continue;
             }
 
-            *cur = *paste(cur, tok->next);
-            tok = tok->next->next;
+            *cur = *paste(cur, tok_next(tok));
+            tok = tok_next(tok)->next;
             continue;
         }
 
         MacroArg *arg = find_arg(args, tok);
 
-        if (arg && tok->next->kind == TK_HASHHASH) {
-            Token *rhs = tok->next->next;
+        if (arg && tok_next(tok)->kind == TK_HASHHASH) {
+            Token *rhs = tok_next(tok)->next;
 
             if (arg->tok->kind == TK_EOF) {
                 MacroArg *arg2 = find_arg(args, rhs);
@@ -1054,19 +1054,19 @@ static Token *subst(Token *tok, MacroArg *args) {
                 } else {
                     cur = cur->next = copy_token(rhs);
                 }
-                tok = rhs->next;
+                tok = tok_next(rhs);
                 continue;
             }
 
             for (Token *t = arg->tok; t->kind != TK_EOF; t = t->next) cur = cur->next = copy_token(t);
-            tok = tok->next;
+            tok = tok_next(tok);
             continue;
         }
 
         // If __VA_ARG__ is empty, __VA_OPT__(x) is expanded to the
         // empty token list. Otherwise, __VA_OPT__(x) is expanded to x.
-        if (tok->id == vaopt_id && tok->next->kind == TK_LPAREN) {
-            MacroArg *arg = read_macro_arg_one(&tok, tok->next->next, true);
+        if (tok->id == vaopt_id && tok_next(tok)->kind == TK_LPAREN) {
+            MacroArg *arg = read_macro_arg_one(&tok, tok_next(tok)->next, true);
             if (has_varargs(args))
                 for (Token *t = arg->tok; t->kind != TK_EOF; t = t->next) cur = cur->next = t;
             tok = skip(tok, TK_RPAREN);
@@ -1091,7 +1091,7 @@ static Token *subst(Token *tok, MacroArg *args) {
             collecting = saved;
 
             bool first = true;
-            for (Token *t = dummy2.next; t; t = t->next) {
+            for (Token *t = dummy2.next; t; t = tok_next(t)) {
                 cur = cur->next = copy_token(t);
                 if (t->kind == TK_IDENT && is_painted(snap, t->id)) cur->noexpand = true;
                 if (first) {
@@ -1110,13 +1110,13 @@ static Token *subst(Token *tok, MacroArg *args) {
             // collecting; the outermost one is done with it.
             if (!saved) paint = NULL;
 
-            tok = tok->next;
+            tok = tok_next(tok);
             continue;
         }
 
         // Handle a non-macro token.
         cur = cur->next = copy_token(tok);
-        tok = tok->next;
+        tok = tok_next(tok);
         continue;
     }
 
@@ -1154,7 +1154,7 @@ static Token *rescan_call(Token *dst, Token *prev, Token **input) {
 
         // Take the name back off the output; its expansion replaces it.
         Token *before = prev;
-        while (before->next != dst) before = before->next;
+        while (tok_next(before) != dst) before = before->next;
         Token *name = copy_token(dst);
         before->next = NULL;
 
@@ -1166,7 +1166,7 @@ static Token *rescan_call(Token *dst, Token *prev, Token **input) {
         *input = next;
 
         Token *sub = subst(m->body, args);
-        for (Token *t = sub; t && t->kind != TK_EOF; t = t->next) t->origin = name;
+        for (Token *t = sub; t && t->kind != TK_EOF; t = tok_next(t)) t->origin = name;
         push_disabled(m->id);
         dst = expand_macro(before, sub, true);
         pop_disabled();
@@ -1177,7 +1177,7 @@ static Token *rescan_call(Token *dst, Token *prev, Token **input) {
         // is placed in f2's body (after a blank, so it would take a space)
         // but the call it comes from is g2's, and g2's name is written
         // against the `*`: gcc and clang both stringize `2*9*g2`.
-        if (before->next) before->next->is_leadingws = name->is_leadingws;
+        if (tok_next(before)) before->next->is_leadingws = name->is_leadingws;
     }
 }
 
@@ -1194,7 +1194,7 @@ static Token *expand_macro(Token *dst, Token *list, bool owned) {
     while (cur && cur->kind != TK_EOF) {
         if (cur->kind != TK_IDENT) {
             dst = append_token(dst, cur, owned);
-            cur = cur->next;
+            cur = tok_next(cur);
             continue;
         }
         if (is_disabled(cur->id) || cur->noexpand) {
@@ -1208,14 +1208,14 @@ static Token *expand_macro(Token *dst, Token *list, bool owned) {
             // / `#define g1 f1` / `f1(2)(9)` would expand the inner `f1`
             // instead of leaving `2*f1(9)` (C/0048/0048_0087.c test 01).
             if (is_disabled(cur->id)) dst->noexpand = true;
-            cur = cur->next;
+            cur = tok_next(cur);
             continue;
         }
 
         Macro *m = find_macro(cur);
         if (!m) {
             dst = append_token(dst, cur, owned);
-            cur = cur->next;
+            cur = tok_next(cur);
             continue;
         }
 
@@ -1243,7 +1243,7 @@ static Token *expand_macro(Token *dst, Token *list, bool owned) {
             while (target->is_objlike && aliases < 16) {
                 Token *body = target->body;
                 if (!body || body->kind != TK_IDENT) break;
-                if (body->next && body->next->kind != TK_EOF) break;
+                if (tok_next(body) && body->next->kind != TK_EOF) break;
                 if (is_disabled(body->id)) break;
                 Macro *next = find_macro(body);
                 if (!next || next == target) break;
@@ -1251,20 +1251,20 @@ static Token *expand_macro(Token *dst, Token *list, bool owned) {
                 aliases++;
                 target = next;
             }
-            if (aliases > 0 && !target->is_objlike && cur->next && cur->next->kind == TK_LPAREN &&
+            if (aliases > 0 && !target->is_objlike && tok_next(cur) && cur->next->kind == TK_LPAREN &&
                 !is_disabled(target->id)) {
                 push_disabled(target->id);
                 MacroArg *args = read_macro_args(&cur, cur, target->params, target->is_variadic, target->va_args_id);
                 Token *sub = subst(target->body, args);
-                for (Token *t = sub; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
+                for (Token *t = sub; t && t->kind != TK_EOF; t = tok_next(t)) t->origin = macro_name;
 
                 Token *alias_prev = dst;
                 dst = expand_macro(dst, sub, true);
                 pop_disabled();
                 while (aliases-- > 0) pop_disabled();
-                if (alias_prev->next) {
-                    alias_prev->next->is_leadingws = macro_name->is_leadingws;
-                    alias_prev->next->is_sol = macro_name->is_sol;
+                if (tok_next(alias_prev)) {
+                    tok_next(alias_prev)->is_leadingws = macro_name->is_leadingws;
+                    tok_next(alias_prev)->is_sol = macro_name->is_sol;
                 }
                 continue;
             }
@@ -1293,15 +1293,15 @@ static Token *expand_macro(Token *dst, Token *list, bool owned) {
                 dst->next = dummy.next;
                 dst = tail;
             }
-            cur = cur->next;
+            cur = tok_next(cur);
             continue;
         }
 
         // If a funclike macro token is not followed by an argument list,
         // treat it as a normal identifier.
-        if (!cur->next || cur->next->kind != TK_LPAREN) {
+        if (!tok_next(cur) || cur->next->kind != TK_LPAREN) {
             dst = append_token(dst, cur, owned);
-            cur = cur->next;
+            cur = tok_next(cur);
             continue;
         }
 
@@ -1310,7 +1310,7 @@ static Token *expand_macro(Token *dst, Token *list, bool owned) {
         // argument lists are copies -- so the expansion can take them over.
         MacroArg *args = read_macro_args(&cur, cur, m->params, m->is_variadic, m->va_args_id);
         Token *sub = subst(m->body, args);
-        for (Token *t = sub; t && t->kind != TK_EOF; t = t->next) t->origin = macro_name;
+        for (Token *t = sub; t && t->kind != TK_EOF; t = tok_next(t)) t->origin = macro_name;
 
         // Same scratch as the object-like case above: the retraction that
         // rescan_call() may do (the expansion ended in a function-like macro
@@ -1407,14 +1407,14 @@ static bool exist_include_next(char *filename) {
 static char *read_filename(Token **rest, Token *tok, bool *is_dquote, bool to_eol) {
     if (tok->kind == TK_STRLIT && tok->enc_prefix == PREFIX_NONE) {
         *is_dquote = true;
-        *rest = to_eol ? skip_line(tok->next) : tok->next;
+        *rest = to_eol ? skip_line(tok_next(tok)) : tok_next(tok);
         return strndup(tok_text(tok) + 1, tok->len - 2);
     }
 
     if (tok->kind == TK_LT) {
         // Reconstruct a filename from the tokens between "<" and ">".
         Token *start = tok;
-        for (; tok->kind != TK_GT; tok = tok->next)
+        for (; tok->kind != TK_GT; tok = tok_next(tok))
             if (tok->is_sol || tok->kind == TK_EOF) {
                 error(start, "expected '>' to match this '<'");
             }
@@ -1422,8 +1422,8 @@ static char *read_filename(Token **rest, Token *tok, bool *is_dquote, bool to_eo
         // In place, so that the token list stays intact for the caller
         // to continue parsing after the filename.
         tok->kind = TK_EOF;
-        *rest = to_eol ? skip_line(tok->next) : tok->next;
-        return join_tokens(start->next);
+        *rest = to_eol ? skip_line(tok_next(tok)) : tok_next(tok);
+        return join_tokens(tok_next(start));
     }
 
     error(tok, "expected \"FILENAME\" or <FILENAME>");
@@ -1454,13 +1454,13 @@ static Token *read_embed_param(Token **tok, Token *lp) {
     int depth = 1;
     Token dummy = {};
     Token *cur = &dummy;
-    Token *t = lp->next;
+    Token *t = tok_next(lp);
     for (;;) {
         if (!t || t->kind == TK_EOF || t->is_sol) error(lp, "expected ')'");
         if (t->kind == TK_LPAREN) depth++;
         if (t->kind == TK_RPAREN && --depth == 0) break;
         cur = cur->next = t;
-        t = t->next;
+        t = tok_next(t);
     }
     cur->next = NULL;
     *tok = t;
@@ -1515,11 +1515,11 @@ static void read_embed_params(Token **rest, Token *arg, Token *eol, int64_t *lim
         if (arg->kind != TK_IDENT) error(arg, "unknown embed preprocessor parameter");
         uint32_t bit = check_embed_param(arg, seen, true);
         seen |= bit;
-        Token *lp = arg->next;
+        Token *lp = tok_next(arg);
         if (!lp || lp->kind != TK_LPAREN)
             error(arg, "embed parameter '%s' requires a parenthesized list", str(arg->id));
         Token *content = read_embed_param(&arg, lp);
-        arg = arg->next;
+        arg = tok_next(arg);
         if (bit == EMBED_LIMIT) {
             *limit = eval_const_tokens(content);
             if (*limit < 0) error(lp, "invalid value '%ld'; must be positive", *limit);
@@ -1599,7 +1599,7 @@ static void emit_embed(Token **cur, Token *embed_tok, unsigned char *data, long 
     }
     // Mark the first emitted token as start-of-line so the -E printer
     // separates it from the preceding line marker.
-    if (start->next) start->next->is_sol = true;
+    if (tok_next(start)) start->next->is_sol = true;
     *cur = out;
 }
 
@@ -1612,19 +1612,19 @@ int num_guard;
 static void detect_include_guard1(Token *tok) {
     if (!is_hash(tok)) return;
     Token *ifndef = tok;
-    tok = tok->next;
+    tok = tok_next(tok);
 
     if (tok->kind != TK_IDENT || tok->id != dt[P_IFNDEF].id) return;
-    tok = tok->next;
+    tok = tok_next(tok);
 
     if (tok->kind != TK_IDENT) return;
     Token *macro = tok;
-    while (!tok->is_sol) tok = tok->next;
+    while (!tok->is_sol) tok = tok_next(tok);
     if (!is_hash(tok)) return;
-    tok = tok->next;
+    tok = tok_next(tok);
 
     if (tok->kind != TK_IDENT || tok->id != dt[P_DEFINE].id) return;
-    tok = tok->next;
+    tok = tok_next(tok);
     if (tok->kind != TK_IDENT) return;
     if (tok->id != macro->id) return;
 
@@ -1662,7 +1662,7 @@ static uint32_t file_identity(char *path) {
 // past the end of the directive's line.
 static int read_pack_pragma(Token **rest, Token *tok) {
     // tok is the `pack` identifier.
-    tok = tok->next;
+    tok = tok_next(tok);
     if (tok->kind != TK_LPAREN) return pack_value;
     bool push = false, pop = false;
     int value = pack_value;
@@ -1671,7 +1671,7 @@ static int read_pack_pragma(Token **rest, Token *tok) {
     // stops at the closing parenthesis and is bounded besides: a malformed
     // `#pragma pack` must not swallow the rest of the file.
     int guard = 0;
-    for (tok = tok->next; tok && tok->kind != TK_RPAREN && guard++ < 12; tok = tok->next) {
+    for (tok = tok_next(tok); tok && tok->kind != TK_RPAREN && guard++ < 12; tok = tok_next(tok)) {
         if (tok->kind == TK_IDENT && tok->id == intern("push", 4))
             push = true;
         else if (tok->kind == TK_IDENT && tok->id == intern("pop", 4))
@@ -1709,8 +1709,8 @@ static int read_pack_pragma(Token **rest, Token *tok) {
     } else {
         pack_value = saw_value ? value : 0;
     }
-    if (tok && tok->kind == TK_RPAREN) tok = tok->next;
-    while (tok && !tok->is_sol && tok->kind != TK_EOF) tok = tok->next;
+    if (tok && tok->kind == TK_RPAREN) tok = tok_next(tok);
+    while (tok && !tok->is_sol && tok->kind != TK_EOF) tok = tok_next(tok);
     *rest = tok;
     return pack_value;
 }
@@ -1728,7 +1728,7 @@ static int num_saved;
 // not NUL-terminated -- only its len bytes belong to it.
 static bool read_macro_name(Token *tok, uint32_t *id) {
     if (!tok || tok->kind != TK_LPAREN) return false;
-    tok = tok->next;
+    tok = tok_next(tok);
     if (!tok || tok->kind != TK_STRLIT) return false;
     char *p = tok_text(tok);
     uint32_t len = tok->len;
@@ -1788,12 +1788,12 @@ static bool find_pragma(uint32_t file_id) {
 // a #pragma directive (C99 6.10.9). The only pragma with an effect is
 // "once"; anything else is ignored, like the #pragma directive.
 static Token *process_pragma_op(Token *tok) {
-    Token *lp = tok->next;
+    Token *lp = tok_next(tok);
     if (!lp || lp->kind != TK_LPAREN) error(tok, "_Pragma takes a parenthesized string literal");
-    Token *str = lp->next;
+    Token *str = tok_next(lp);
     if (!str || str->kind != TK_STRLIT || str->enc_prefix != PREFIX_NONE)
         error(tok, "_Pragma takes a parenthesized string literal");
-    Token *rp = str->next;
+    Token *rp = tok_next(str);
     if (!rp || rp->kind != TK_RPAREN) error(tok, "_Pragma takes a parenthesized string literal");
 
     // Destringize: the content between the quotes, unescaping \\ and \".
@@ -1808,7 +1808,7 @@ static Token *process_pragma_op(Token *tok) {
     buf[n] = '\0';
 
     if (!strcmp(buf, "once")) add_pragma(str);
-    return rp->next;
+    return tok_next(rp);
 }
 
 // Process and remove _Pragma operators from a NULL-terminated token
@@ -1822,7 +1822,7 @@ static Token *scan_pragma_op(Token *tok) {
             continue;
         }
         cur = cur->next = tok;
-        tok = tok->next;
+        tok = tok_next(tok);
     }
     return dummy.next;
 }
@@ -1893,7 +1893,7 @@ static Token *read_line_marker(Token **rest, Token *tok) {
     // so and clang accepts it, where cxx asked for a pp-number. The caller's
     // continuation still comes from the original line, which read_line() has
     // already stored in *rest.
-    Token *args = read_line(rest, tok->next);
+    Token *args = read_line(rest, tok_next(tok));
     Token dummy2 = {};
     expand_macro(&dummy2, args, false);
     Token *num = dummy2.next;
@@ -1916,7 +1916,7 @@ static Token *read_line_marker(Token **rest, Token *tok) {
 
     // The expanded chain ends at NULL -- it carries no EOF token of its own --
     // so the file name is the token after the number, if there is one.
-    Token *name = num->next;
+    Token *name = tok_next(num);
 
     if (name && name->kind != TK_EOF && (name->kind != TK_STRLIT || name->enc_prefix != PREFIX_NONE))
         error(name, "filename expected");
@@ -1956,22 +1956,22 @@ static Token *cond_directive(Token *tok, Token *tk_hash, BlockState cur_state) {
     if (tok->id == dt[P_IFDEF].id) {
         BlockState state = BLOCK_DEAD;
         if (cur_state == BLOCK_ACTIVE) {
-            bool defined = find_macro(tok->next);
+            bool defined = find_macro(tok_next(tok));
             state = defined ? BLOCK_ACTIVE : BLOCK_PENDING;
         }
         push_cond_incl(tk_hash, state);
-        tok = skip_line(tok->next->next);
+        tok = skip_line(tok_next(tok)->next);
         return tok;
     }
 
     if (tok->id == dt[P_IFNDEF].id) {
         BlockState state = BLOCK_DEAD;
         if (cur_state == BLOCK_ACTIVE) {
-            bool defined = find_macro(tok->next);
+            bool defined = find_macro(tok_next(tok));
             state = defined ? BLOCK_PENDING : BLOCK_ACTIVE;
         }
         push_cond_incl(tk_hash, state);
-        tok = skip_line(tok->next->next);
+        tok = skip_line(tok_next(tok)->next);
         return tok;
     }
 
@@ -1991,10 +1991,10 @@ static Token *cond_directive(Token *tok, Token *tk_hash, BlockState cur_state) {
         if (cur_state != BLOCK_PENDING) {
             cond_incl->state = BLOCK_DEAD;
         } else {
-            bool defined = find_macro(tok->next);
+            bool defined = find_macro(tok_next(tok));
             cond_incl->state = defined ? BLOCK_ACTIVE : BLOCK_PENDING;
         }
-        tok = skip_line(tok->next->next);
+        tok = skip_line(tok_next(tok)->next);
         return tok;
     }
 
@@ -2003,10 +2003,10 @@ static Token *cond_directive(Token *tok, Token *tk_hash, BlockState cur_state) {
         if (cur_state != BLOCK_PENDING) {
             cond_incl->state = BLOCK_DEAD;
         } else {
-            bool defined = find_macro(tok->next);
+            bool defined = find_macro(tok_next(tok));
             cond_incl->state = defined ? BLOCK_PENDING : BLOCK_ACTIVE;
         }
-        tok = skip_line(tok->next->next);
+        tok = skip_line(tok_next(tok)->next);
         return tok;
     }
 
@@ -2014,7 +2014,7 @@ static Token *cond_directive(Token *tok, Token *tk_hash, BlockState cur_state) {
         check_elif_else_valid(tok);
         cond_incl->else_seen = 1;
         cond_incl->state = (cur_state == BLOCK_PENDING) ? BLOCK_ACTIVE : BLOCK_DEAD;
-        if (cond_incl->next->state == BLOCK_ACTIVE) tok = skip_line(tok->next);
+        if (cond_incl->next->state == BLOCK_ACTIVE) tok = skip_line(tok_next(tok));
         return tok;
     }
 
@@ -2028,7 +2028,7 @@ static Token *cond_directive(Token *tok, Token *tk_hash, BlockState cur_state) {
         // read, its tail never re-evaluated.
         bool closes_guard = guard_ifndef && cond_incl->if_tok == guard_ifndef;
         cond_incl = cond_incl->next;
-        if (cond_incl->state == BLOCK_ACTIVE) tok = skip_line(tok->next);
+        if (cond_incl->state == BLOCK_ACTIVE) tok = skip_line(tok_next(tok));
         if (closes_guard && tok->kind == TK_EOF) detect_include_guard2();
         return tok;
     }
@@ -2062,10 +2062,108 @@ bool (*pp_yield)(void);
 
 void pp_set_yield(bool (*fn)(void)) { pp_yield = fn; }
 
+// Where the preprocessor would continue from, as a diagnostic location.
+// One position per produced token, indexed like the tokens themselves. A token and
+// its position are two entries with the same index, which is what a Token used to
+// carry in one piece; rolling the token pointer back rolls this back with it.
+static uint32_t *pp_locs;
+static size_t pp_loc_num, pp_loc_cap;
+static uint32_t pp_last_real;   // the last entry that had a file of its own
+static TokPos *pp_pos;            // one entry per produced token: its own
+                                 // position and its expansion origin's
+static Token **pp_ord_tok;        // the tokens, in the same order as pp_locs:
+                                 // the parser walks them in that order too
+static size_t pp_cursor;         // how far that walk has got
+
+static void pp_loc_push(Token *tok) {
+    if (pp_loc_num == pp_loc_cap) {
+        pp_loc_cap = pp_loc_cap ? pp_loc_cap * 2 : 4096;
+        pp_locs = realloc(pp_locs, pp_loc_cap * sizeof(uint32_t));
+        pp_ord_tok = realloc(pp_ord_tok, pp_loc_cap * sizeof(Token *));
+        pp_pos = realloc(pp_pos, pp_loc_cap * sizeof(TokPos));
+    }
+    // A token with no file of its own (a synthetic one) stands where the last real
+    // token stood. This has to be decided here rather than by a reader later: by
+    // then the whole table exists, and "the last real entry" means the end of
+    // the file, which is where these nodes ended up being reported.
+    Loc at = loc_of(tok);
+    pp_locs[pp_loc_num++] = at.file_uid ? loc_name(at) : pp_last_real;
+    if (at.file_uid) pp_last_real = pp_locs[pp_loc_num - 1];
+    pp_ord_tok[pp_loc_num - 1] = tok;   // read back in this same order
+    {
+        Token *orig = tok;
+        while (orig->origin) orig = orig->origin;
+        pp_pos[pp_loc_num - 1].at = at;
+        pp_pos[pp_loc_num - 1].via = loc_of(orig);   // == at when native
+    }
+    (void)tok_index;
+}
+
+// The position of the index-th produced token.
 static Token *pp_emit(Token *tok) {
     pp_out = pp_out->next = tok;
+    // Registered with the rest of the chain below, so the array and the chain
+    // stay in step; pushing here as well made the two orders interleave.
     return pp_out;
 }
+
+// The entry for a token: the array was filled in the order the parser walks, so a
+// cursor that only moves forward finds it. Nothing is sorted and nothing is searched.
+uint32_t loc_of_token(Token *t) {
+    // The cursor remembers how far the reader has got. A token that is not in the array
+    // -- a copy made while parsing, say -- must NOT move it: scanning to the end and
+    // leaving the cursor there made every later question fail, which is why positions
+    // froze at the third entry of the whole translation unit.
+    size_t i = pp_cursor;
+    while (i < pp_loc_num && pp_ord_tok[i] != t) i++;
+    if (i < pp_loc_num) {
+        pp_cursor = i;
+        return pp_locs[i];
+    }
+    return 0;
+}
+
+// A speculative parse may walk backwards, so the cursor is part of what is rolled back.
+size_t pp_cursor_get(void) { return pp_cursor; }
+
+// Reading by index: the array and the chain are isomorphic, so a reader can
+// walk either one.
+size_t pp_count(void) { return pp_loc_num; }
+Token *pp_tok_at(size_t i) { return i < pp_loc_num ? pp_ord_tok[i] : 0; }
+TokPos pp_pos_at(size_t i) {
+    if (i >= pp_loc_num) return (TokPos){0};
+    return pp_pos[i];
+}
+size_t pp_next(size_t i) { return i + 1; }
+
+// The array and the chain have to agree, entry for entry: a reader may use either. This
+// is the assumption the transition rests on, so it is checked once per translation unit
+// rather than assumed.
+// Each segment is checked as it is registered: the entries just added must be exactly
+// that segment, in order. A whole-chain check cannot work here, because the array lasts
+// for the translation unit while the output chain is rebuilt per file.
+static void pp_selfcheck_segment(Token *head, size_t first) {
+    size_t i = first;
+    for (Token *t = head; t; t = tok_next(t), i++)
+        if (i >= pp_loc_num || pp_ord_tok[i] != t)
+            fatal("position array leaves the segment at entry %zu", i);
+}
+void pp_cursor_set(size_t at) { pp_cursor = at; }
+
+size_t pp_loc_count(void) { return pp_loc_num; }
+
+// The whole remaining chain joins the output at once in the pull front end, so the one
+// line in pp_emit never sees a real token. Push them here instead, once per chain.
+static Token *pp_loc_pushed;
+
+static void pp_loc_push_chain(Token *head) {
+    size_t was = pp_loc_num;
+    if (!head || pp_loc_pushed == head) return;
+    for (Token *t = head; t; t = tok_next(t)) pp_loc_push(t);
+    pp_loc_pushed = head;
+    pp_selfcheck_segment(head, was);
+}
+
 
 // -E streams: at each segment boundary everything up to pp_out is final (the
 // segment's _Pragma scan has run and the line marker's arguments are consumed),
@@ -2125,14 +2223,14 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
                 // Prototype: the main file is produced on demand. A live chunk
                 // is a segment plus the directive line after it; a dead one is
                 // scanned without making tokens at all.
-                if (lex_lazy && !pp_in->next) lex_chunk(concat);
+                if (lex_lazy && !tok_next(pp_in)) lex_chunk(concat);
                 if (e_stream_on) print_stream_upto(pp_dummy.next, pp_out);
                 // A segment is finished and everything on the output chain is
                 // final: the point a pulling parser takes over at.
                 if (pp_yield && pp_yield()) return pp_dummy.next;
                 if (is_hash(pp_in)) {
                     if (level == 0) break;
-                    Token *cont = cond_directive(pp_in->next, pp_in, cond_incl->state);
+                    Token *cont = cond_directive(tok_next(pp_in), pp_in, cond_incl->state);
                     if (!cont) {
                         // Not a conditional. In a region that is not taken
                         // it is skipped along with the rest of that region --
@@ -2142,7 +2240,7 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
                         // between two arguments, and the segment ends here
                         // as it did before.
                         if (cond_incl->state != BLOCK_ACTIVE) {
-                            pp_in = pp_in->next;
+                            pp_in = tok_next(pp_in);
                             continue;
                         }
                         break;
@@ -2152,7 +2250,7 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
                     continue;
                 }
                 if (!concat) {
-                    pp_in = pp_in->next;
+                    pp_in = tok_next(pp_in);
                     continue;
                 }
                 if (pp_in->kind == TK_ERR) error(pp_in, "%s", pp_in->msg);
@@ -2166,7 +2264,7 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
                 else if (pp_in->kind == TK_RPAREN && level > 0)
                     level--;
                 buf = buf->next = pp_in;
-                pp_in = pp_in->next;
+                pp_in = tok_next(pp_in);
             }
             buf->next = new_eof(pp_in);
             Token *seg = pp_out;
@@ -2175,17 +2273,17 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
             // linked into the output as it stands. This is the whole of a file
             // that uses no macros, and most of the tokens of one that does.
             pp_out = expand_macro(pp_out, dummy2.next, true);
-            if (seg->next) {
+            if (tok_next(seg)) {
                 seg->next = scan_pragma_op(seg->next);
                 pp_out = seg;
-                while (pp_out->next) pp_out = pp_out->next;
+                while (tok_next(pp_out)) pp_out = pp_out->next;
             }
             if (pp_in->kind == TK_EOF) continue;
         }
 
 
         Token *tk_hash = pp_in;
-        pp_in = pp_in->next;
+        pp_in = tok_next(pp_in);
 
 
         // Preprocessing directives that may alter conditional‑frame state
@@ -2200,34 +2298,34 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
 
         if (pp_in->id == dt[P_INCLUDE].id) {
             bool is_dquote;
-            char *filename = read_include_filename(&pp_in, pp_in->next, &is_dquote);
+            char *filename = read_include_filename(&pp_in, tok_next(pp_in), &is_dquote);
 
             if (filename[0] != '/' && is_dquote) {
                 char *path = format("%s/%s", dirname(strdup(file_of(tk_hash->file_uid)->name)), filename);
                 if (file_exists(path)) {
                     next_path = 0;
-                    Token *tmp = include_file(&pp_in, pp_in, path, tk_hash->next->next);
+                    Token *tmp = include_file(&pp_in, pp_in, path, tok_next(tk_hash->next));
                     if (tmp) pp_emit(tmp);
                     continue;
                 }
             }
 
             char *path = search_include_paths(filename);
-            Token *tmp = include_file(&pp_in, pp_in, path ? path : filename, tk_hash->next->next);
+            Token *tmp = include_file(&pp_in, pp_in, path ? path : filename, tok_next(tk_hash->next));
             if (tmp) pp_emit(tmp);
             continue;
         }
 
         if (pp_in->id == dt[P_INCLUDE_NEXT].id) {
             bool ignore;
-            char *filename = read_include_filename(&pp_in, pp_in->next, &ignore);
+            char *filename = read_include_filename(&pp_in, tok_next(pp_in), &ignore);
             int hit = -1;
             char *path = search_include_next(filename, &hit);
             // Advance the cursor past the directory we are about to take
             // the file from, so a nested `#include_next <same-name>` keeps
             // moving forward instead of re-entering this same file.
             next_path = hit >= 0 ? hit + 1 : num_include_paths;
-            Token *tmp = include_file(&pp_in, pp_in, path ? path : filename, tk_hash->next->next);
+            Token *tmp = include_file(&pp_in, pp_in, path ? path : filename, tok_next(tk_hash->next));
             if (tmp) pp_emit(tmp);
             continue;
         }
@@ -2236,7 +2334,7 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
             // #embed resource params-opt: the directive is replaced by a
             // comma-separated list of the resource bytes (C23 6.10.4).
             Token *embed_tok = pp_in;
-            pp_in = pp_in->next;
+            pp_in = tok_next(pp_in);
             Token *eol = NULL;
             bool is_dquote = false;
             char *filename = read_embed_resource(&pp_in, pp_in, &is_dquote, &eol);
@@ -2250,12 +2348,12 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
         }
 
         if (pp_in->id == dt[P_DEFINE].id) {
-            read_macro_definition(&pp_in, pp_in->next);
+            read_macro_definition(&pp_in, tok_next(pp_in));
             continue;
         }
 
         if (pp_in->id == dt[P_UNDEF].id) {
-            pp_in = pp_in->next;
+            pp_in = tok_next(pp_in);
             Macro *m = find_macro(pp_in);
             if (m && m->is_builtin) {
                 warning(WG_BUILTIN_MACRO_REDEFINED, pp_in, "undefining builtin macro");
@@ -2263,7 +2361,7 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
             m = add_macro(pp_in->id, true, NULL);
             m->deleted = true;
 
-            pp_in = skip_line(pp_in->next);
+            pp_in = skip_line(tok_next(pp_in));
             continue;
         }
 
@@ -2290,29 +2388,29 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
             continue;
         }
 
-        if (pp_in->id == dt[P_PRAGMA].id && pp_in->next->id == once_id) {
+        if (pp_in->id == dt[P_PRAGMA].id && tok_next(pp_in)->id == once_id) {
             add_pragma(pp_in);
-            pp_in = skip_line(pp_in->next->next);
+            pp_in = skip_line(tok_next(pp_in->next));
             continue;
         }
 
-        if (pp_in->id == dt[P_PRAGMA].id && (pp_in->next->id == push_macro_id || pp_in->next->id == pop_macro_id)) {
-            bool push = pp_in->next->id == push_macro_id;
+        if (pp_in->id == dt[P_PRAGMA].id && (tok_next(pp_in)->id == push_macro_id || pp_in->next->id == pop_macro_id)) {
+            bool push = tok_next(pp_in)->id == push_macro_id;
             uint32_t name;
-            if (!read_macro_name(pp_in->next->next, &name)) error(pp_in, "a macro name in quotes is required");
+            if (!read_macro_name(tok_next(pp_in->next), &name)) error(pp_in, "a macro name in quotes is required");
             if (push)
                 push_macro(name);
             else
                 pop_macro(name);
             do {
-                pp_in = pp_in->next;
+                pp_in = tok_next(pp_in);
             } while (!pp_in->is_sol && pp_in->kind != TK_EOF);
             continue;
         }
 
-        if (pp_in->id == dt[P_PRAGMA].id && pp_in->next->id == pack_id) {
+        if (pp_in->id == dt[P_PRAGMA].id && tok_next(pp_in)->id == pack_id) {
             Token *marker = copy_token(pp_in);
-            int value = read_pack_pragma(&pp_in, pp_in->next);
+            int value = read_pack_pragma(&pp_in, tok_next(pp_in));
             marker->kind = TK_PRAGMA;
             marker->ival = int128_set_i(value);
             marker->is_sol = true;
@@ -2322,7 +2420,7 @@ static Token *preprocess2(Token *tok, SrcFile *file) {
 
         if (pp_in->id == dt[P_PRAGMA].id) {
             do {
-                pp_in = pp_in->next;
+                pp_in = tok_next(pp_in);
             } while (!pp_in->is_sol);
             continue;
         }
@@ -2428,14 +2526,14 @@ static Macro *add_builtin(char *name, macro_handler_fn *fn) {
 }
 
 static Token *file_macro(Token **rest, Token *tmpl) {
-    *rest = tmpl->next;
+    *rest = tok_next(tmpl);
     Token *orig = tmpl;
     while (orig->origin) orig = orig->origin;
     return new_str_token(str(line_name(orig)), tmpl);
 }
 
 static Token *line_macro(Token **rest, Token *tmpl) {
-    *rest = tmpl->next;
+    *rest = tok_next(tmpl);
     Token *orig = tmpl;
     while (orig->origin) orig = orig->origin;
     int line, col;
@@ -2445,14 +2543,14 @@ static Token *line_macro(Token **rest, Token *tmpl) {
 
 // __COUNTER__ is expanded to serial values starting from 0.
 static Token *counter_macro(Token **rest, Token *tmpl) {
-    *rest = tmpl->next;
+    *rest = tok_next(tmpl);
     static int i = 0;
     return ident_to_num(tmpl, i++);
 }
 
 // __INCLUDE_LEVEL__ is expanded to serial values include depth.
 static Token *include_depth_macro(Token **rest, Token *tmpl) {
-    *rest = tmpl->next;
+    *rest = tok_next(tmpl);
     return ident_to_num(tmpl, include_depth);
 }
 
@@ -2460,7 +2558,7 @@ static Token *include_depth_macro(Token **rest, Token *tmpl) {
 // modification time of the current file. E.g.
 // "Fri Jul 24 01:32:50 2020"
 static Token *timestamp_macro(Token **rest, Token *tmpl) {
-    *rest = tmpl->next;
+    *rest = tok_next(tmpl);
     struct stat st;
     if (stat(file_of(tmpl->file_uid)->name, &st) != 0) return new_str_token("??? ??? ?? ??:??:?? ????", tmpl);
 
@@ -2471,7 +2569,7 @@ static Token *timestamp_macro(Token **rest, Token *tmpl) {
 }
 
 static Token *base_file_macro(Token **rest, Token *tmpl) {
-    *rest = tmpl->next;
+    *rest = tok_next(tmpl);
     static Token *exist;
     if (exist) {
         Token *new = copy_token(exist);
@@ -2484,7 +2582,7 @@ static Token *base_file_macro(Token **rest, Token *tmpl) {
 
 // __DATE__ is expanded to the current date, e.g. "May 17 2020".
 static Token *date_macro(Token **rest, Token *tmpl) {
-    *rest = tmpl->next;
+    *rest = tok_next(tmpl);
     static char mon[][4] = {
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     };
@@ -2502,7 +2600,7 @@ static Token *date_macro(Token **rest, Token *tmpl) {
 
 // __TIME__ is expanded to the current time, e.g. "13:34:03".
 static Token *time_macro(Token **rest, Token *tmpl) {
-    *rest = tmpl->next;
+    *rest = tok_next(tmpl);
     static Token *exist;
     if (exist) {
         Token *new = copy_token(exist);
@@ -2516,12 +2614,12 @@ static Token *time_macro(Token **rest, Token *tmpl) {
 }
 
 static Token *builtin_fn_macro(Token **rest, Token *tmpl) {
-    if (tmpl->next->kind != TK_LPAREN) error(tmpl->next, "missing ‘(’ after ‘%s’", str(tmpl->id));
-    Token *tok = skip(tmpl->next, TK_LPAREN);
+    if (tok_next(tmpl)->kind != TK_LPAREN) error(tmpl->next, "missing ‘(’ after ‘%s’", str(tmpl->id));
+    Token *tok = skip(tok_next(tmpl), TK_LPAREN);
     if (tok->kind != TK_IDENT) {
         error(tok, "macro __has_builtin requires an identifier");
     }
-    *rest = skip(tok->next, TK_RPAREN);
+    *rest = skip(tok_next(tok), TK_RPAREN);
     return ident_to_num(tmpl, is_builtin_fn(tok->id));
 }
 
@@ -2571,12 +2669,12 @@ static bool feature_available(uint32_t id, bool with_extensions) {
 
 static Token *feature_macro(Token **rest, Token *tmpl) {
     bool with_extensions = tmpl->id == has_extension_id;
-    if (tmpl->next->kind != TK_LPAREN) error(tmpl->next, "missing ‘(’ after ‘%s’", str(tmpl->id));
-    Token *tok = skip(tmpl->next, TK_LPAREN);
+    if (tok_next(tmpl)->kind != TK_LPAREN) error(tmpl->next, "missing ‘(’ after ‘%s’", str(tmpl->id));
+    Token *tok = skip(tok_next(tmpl), TK_LPAREN);
     if (tok->kind != TK_IDENT) {
         error(tok, "macro %s requires an identifier", with_extensions ? "__has_extension" : "__has_feature");
     }
-    *rest = skip(tok->next, TK_RPAREN);
+    *rest = skip(tok_next(tok), TK_RPAREN);
     return ident_to_num(tmpl, feature_available(tok->id, with_extensions));
 }
 
@@ -2661,19 +2759,19 @@ void join_adjacent_string_literals(Token *tok) {
     // type before concatenation. In this pass, we do the conversion
     for (Token *tok1 = tok; tok1->kind != TK_EOF;) {
         if (tok1->kind != TK_STRLIT) {
-            tok1 = tok1->next;
+            tok1 = tok_next(tok1);
             continue;
         }
 
-        if (tok1->next->kind != TK_STRLIT) {
+        if (tok_next(tok1)->kind != TK_STRLIT) {
             convert_str_literal(tok1);
-            tok1 = tok1->next;
+            tok1 = tok_next(tok1);
             continue;
         }
 
         uint32_t kind = tok1->enc_prefix;
 
-        for (Token *t = tok1->next; t->kind == TK_STRLIT; t = t->next) {
+        for (Token *t = tok_next(tok1); t->kind == TK_STRLIT; t = t->next) {
             uint32_t k = t->enc_prefix;
             if (k == PREFIX_NONE)
                 continue;
@@ -2683,30 +2781,30 @@ void join_adjacent_string_literals(Token *tok) {
                 error(t, "unsupported non-standard concatenation of string literals");
         }
 
-        for (Token *t = tok1; t->kind == TK_STRLIT; t = t->next) {
+        for (Token *t = tok1; t->kind == TK_STRLIT; t = tok_next(t)) {
             t->enc_prefix = kind;
             convert_str_literal(t);
         }
 
-        while (tok1->kind == TK_STRLIT) tok1 = tok1->next;
+        while (tok1->kind == TK_STRLIT) tok1 = tok_next(tok1);
     }
 
     // Second pass: concatenate adjacent string literals.
     for (Token *tok1 = tok; tok1->kind != TK_EOF;) {
-        if (tok1->kind != TK_STRLIT || tok1->next->kind != TK_STRLIT) {
-            tok1 = tok1->next;
+        if (tok1->kind != TK_STRLIT || tok_next(tok1)->kind != TK_STRLIT) {
+            tok1 = tok_next(tok1);
             continue;
         }
 
-        Token *after = tok1->next;
-        while (after->kind == TK_STRLIT) after = after->next;
+        Token *after = tok_next(tok1);
+        while (after->kind == TK_STRLIT) after = tok_next(after);
 
         int len = str_len(tok1->id);
-        for (Token *t = tok1->next; t != after; t = t->next) len += str_len(t->id);
+        for (Token *t = tok_next(tok1); t != after; t = t->next) len += str_len(t->id);
 
         char *buf = emalloc(len);
         int i = 0;
-        for (Token *t = tok1; t != after; t = t->next) {
+        for (Token *t = tok1; t != after; t = tok_next(t)) {
             int valid_size = str_len(t->id);
             memcpy(buf + i, str(t->id), valid_size);
             i += valid_size;
@@ -2738,7 +2836,7 @@ Token *preprocess_file(char *path) {
     Token *main = first;
     if (tok_cmd) {
         Token *end = tok_cmd;
-        while (end->next->kind != TK_EOF) end = end->next;
+        while (tok_next(end)->kind != TK_EOF) end = end->next;
         end->next = first;
         main = tok_cmd;
     }
@@ -2757,6 +2855,11 @@ Token *preprocess_file(char *path) {
     if (preproc_pragma_op) tok = scan_pragma_op(tok);
     convert_keywords(tok);
     convert_ppnumber(tok);
+
+    // This is the chain the parser will walk, so this is where a position is recorded for
+    // each token: same order, one entry each. Registering anywhere else records a chain
+    // the parser never sees, and every lookup then misses.
+    pp_loc_push_chain(tok);
     return tok;
 }
 
@@ -2771,7 +2874,7 @@ Token *preprocess(Token *tok) {
         main = tok;
     } else {
         Token *end = tok_cmd;
-        while (end->next->kind != TK_EOF) end = end->next;
+        while (tok_next(end)->kind != TK_EOF) end = end->next;
         end->next = tok;
         main = tok_cmd;
     }

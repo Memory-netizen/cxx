@@ -39,9 +39,23 @@ static Token *new_token(uint32_t kind, char *start, char *end) {
 // Attempt to match the given token type
 // If matched, consume the token and return true;
 // otherwise, leave the token unconsumed and return false.
+// A speculative parse accepts by moving the caller's position and rejects by leaving
+// it. Those two acts, named -- the call sites stop spelling out the mechanism, and when
+// the reader becomes an index into the parallel arrays only these two change.
+void parse_commit(Token **rest, Token *next) { *rest = next; }
+void parse_rollback(void) {}
+// The next token after this one. Today that is the chain link; when the reader is an
+// index into the parallel arrays it will be the next index. Callers ask the question
+// rather than reading the field, so only this function has to change.
+// The next token after this one. Today that is the chain link; when the reader is an
+// index into the parallel arrays it will be the next index. Callers ask the question
+// rather than reading the field, so only this function has to change. (It is called
+// tok_next because `next` is already a name here, and ->next belongs to 17 structs:
+// Scope, Sym, Member and others -- so the rewrite names the receiver, tok.)
+Token *tok_next(Token *tok) { return tok ? tok->next : 0; }
 bool match(Token **rest, Token *tok, uint32_t kind) {
     if (tok->kind == kind) {
-        *rest = tok->next;
+        parse_commit(rest, tok_next(tok));
         return true;
     }
     *rest = tok;
@@ -69,7 +83,7 @@ static char *kind_str(uint32_t kind) {
 // Ensure that the current token is `kind`.
 Token *skip(Token *tok, uint32_t kind) {
     if (tok->kind != kind) error(tok, "expected ‘%s’ before ‘%.*s’", kind_str(kind), tok->len, tok_text(tok));
-    return tok->next;
+    return tok_next(tok);
 }
 
 // Compare if the pending matching string matches the target string
@@ -861,7 +875,7 @@ void convert_ppnumber(Token *tok) {
         if (tok->kind == TK_ERR) error(tok, "%s", tok->msg);
         if (tok->kind == TK_PPNUM) convert_pp_num(tok);
         if (tok->kind == TK_CHARLIT) convert_char_literal(tok);
-        tok = tok->next;
+        tok = tok_next(tok);
     }
 }
 
@@ -990,7 +1004,7 @@ void convert_keywords(Token *tok) {
                     break;
                 }
         }
-        tok = tok->next;
+        tok = tok_next(tok);
     }
 }
 
@@ -1381,18 +1395,18 @@ Token *lex_chunk(bool live) {
 
     if (LC->done) {
         lex_scan_eof();
-        return before->next;
+        return tok_next(before);
     }
     if (!live) {
         lex_skip_to_directive();
         if (LC->done) {
             lex_scan_eof();
-            return before->next;
+            return tok_next(before);
         }
     }
     lex_scan();
     lex_scan_eof();
-    return before->next;
+    return tok_next(before);
 }
 
 // Returns the contents of a given file.

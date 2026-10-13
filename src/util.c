@@ -264,6 +264,12 @@ char *tok_pool;
 size_t tok_free;
 static size_t tok_next_chunk = TOK_CHUNK_MIN;
 static char **tok_chunks;  // every chunk handed out, so they can be given back
+// Where each chunk starts in the arena's cumulative offset space, and how big it is:
+// a token's 32-bit name is the start plus its place in the chunk.
+static uint64_t *tok_off;       // one per chunk
+static size_t *tok_size;        // one per chunk
+static size_t tok_off_cap;
+static uint64_t tok_off_next;
 static size_t tok_num_chunks, tok_chunk_cap;
 
 void *talloc_slow(size_t n) {
@@ -283,6 +289,17 @@ void *talloc_slow(size_t n) {
         tok_chunks = grown;
         tok_chunk_cap = cap;
     }
+    if (tok_num_chunks + 1 > tok_off_cap) {
+        size_t cap = tok_off_cap ? tok_off_cap * 2 : 64;
+        uint64_t *off = calloc(cap, sizeof(uint64_t));
+        size_t *sz = calloc(cap, sizeof(size_t));
+        for (size_t i = 0; i < tok_num_chunks; i++) { off[i] = tok_off[i]; sz[i] = tok_size[i]; }
+        free(tok_off); free(tok_size);
+        tok_off = off; tok_size = sz; tok_off_cap = cap;
+    }
+    tok_off[tok_num_chunks] = tok_off_next;
+    tok_size[tok_num_chunks] = chunk;
+    tok_off_next += chunk;
     tok_chunks[tok_num_chunks++] = p;
 
     tok_pool = p + n;
@@ -291,6 +308,95 @@ void *talloc_slow(size_t n) {
 }
 
 // Called once the AST is folded: nothing reads a token after that.
+// The location table: names for positions. A node stores one of these names, so it
+// keeps no token alive -- which is what lets consumed tokens be reclaimed.
+static Loc *loc_tab;
+static size_t loc_num, loc_cap;
+
+uint32_t loc_name(Loc at) {
+    if (loc_num == loc_cap) {
+        loc_cap = loc_cap ? loc_cap * 2 : 4096;
+        loc_tab = realloc(loc_tab, loc_cap * sizeof(Loc));
+    }
+    // The same position, named twice, is one entry: nodes in a run share it.
+    if (loc_num && loc_tab[loc_num - 1].file_uid == at.file_uid
+        && loc_tab[loc_num - 1].loc == at.loc && loc_tab[loc_num - 1].len == at.len
+        && loc_tab[loc_num - 1].filename == at.filename
+        && loc_tab[loc_num - 1].line_delta == at.line_delta)
+        return (uint32_t)loc_num;
+    loc_tab[loc_num] = at;
+    return (uint32_t)++loc_num;
+}
+
+// Name 0 means "no position", so names start at 1 and the table holds one spare.
+Loc loc_get(uint32_t name) {
+    if (!name || name > loc_num) return (Loc){0};
+    return loc_tab[name - 1];
+}
+
+// The spelling, read back from the file's own contents.
+char *loc_str(Loc at) {
+    return file_of(at.file_uid)->contents + at.loc;
+}
+
+// Every token's position, named and read back: the same file, offset, length and
+// spelling. The two things checked are separate: the table's own round trip, and
+// that the spelling can be read from the position -- both against the *same* token,
+// since loc_of walks the origin chain and an expanded token's text is not there.
+size_t loc_table_selftest(Token *head) {
+    size_t n = 0, bad_round = 0, bad_text = 0;
+    for (Token *t = head; t; t = tok_next(t)) {
+        Loc at = loc_of(t);
+        Loc back = loc_get(loc_name(at));
+        if (back.file_uid != at.file_uid || back.loc != at.loc || back.len != at.len
+            || back.filename != at.filename || back.line_delta != at.line_delta)
+            bad_round++;
+        // The token the location actually describes: the end of the origin chain.
+        Token *orig = t;
+        while (orig->origin) orig = orig->origin;
+        if (memcmp(loc_str(at), tok_text(orig), at.len))
+            bad_text++;
+        n++;
+    }
+    fprintf(stderr, "loc table selftest: %zu positions, %zu names, %zu bad round trip, %zu bad text\n",
+            n, loc_num, bad_round, bad_text);
+    if (bad_round || bad_text) exit(1);
+    return n;
+}
+
+// A token's name in 32 bits: its cumulative offset in the arena. Unique and
+// monotonic while the arena lives, and still an *identifier* after its chunk is
+// given back -- which is what makes chunk reclamation possible later.
+uint32_t tok_index(Token *tok) {
+    for (size_t i = tok_num_chunks; i-- > 0;)
+        if ((char *)tok >= tok_chunks[i] && (char *)tok < tok_chunks[i] + tok_size[i])
+            return (uint32_t)(tok_off[i] + (uint64_t)((char *)tok - tok_chunks[i]));
+    assert(!"token outside the token arena");
+    return 0;
+}
+
+Token *tok_of_index(uint32_t idx) {
+    for (size_t i = tok_num_chunks; i-- > 0;)
+        if ((uint64_t)idx >= tok_off[i] && (uint64_t)idx < tok_off[i] + tok_size[i])
+            return (Token *)(tok_chunks[i] + (idx - tok_off[i]));
+    return NULL;
+}
+
+// Walks every token in the chain and checks the round trip: the encoding is proven
+// before anything depends on it.
+size_t tok_index_selftest(Token *head) {
+    size_t n = 0;
+    for (Token *t = head; t; t = tok_next(t)) {
+        uint32_t i = tok_index(t);
+        if (tok_of_index(i) != t) {
+            fprintf(stderr, "tok_index round trip failed at %zu: %u\n", n, i);
+            exit(1);
+        }
+        n++;
+    }
+    return n;
+}
+
 void tfree_all(void) {
     for (size_t i = 0; i < tok_num_chunks; i++) free(tok_chunks[i]);
     tok_num_chunks = 0;

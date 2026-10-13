@@ -200,7 +200,7 @@ static void print_array_len(Type *ty) {
     Token *lb = bracket_of(ty);
     if (lb) {
         int level = 0;
-        for (Token *t = lb; t && t->kind != TK_EOF; t = t->next) {
+        for (Token *t = lb; t && t->kind != TK_EOF; t = tok_next(t)) {
             if (t->kind == TK_LBRACKET) {
                 level++;
                 continue;

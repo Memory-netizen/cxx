@@ -564,7 +564,22 @@ static Node *fold_cast(Node *node) {
 // Fold a conditional (?:) node where the condition is a constant.
 static Node *fold_cond(Node *node) {
     if (!is_int_const(node->cond)) return NULL;
-    return !int128_is_zero(node->cond->ival) ? node->then : node->els;
+    // Types first: add_type computes the conditional's own type through the usual
+    // arithmetic conversions, and the result is the chosen operand converted to that
+    // type -- converting, not retyping. Returning the operand as it stood gave the whole
+    // expression the operand's type, so `1 ? (short)2 : (char)3` came out as short and
+    // sizeof said 2 where the language says 4.
+    bool zero = int128_is_zero(node->cond->ival);
+    Node *chosen = zero ? node->els : node->then;
+    // The arm that goes away may hold a label, and the goto naming it may stand
+    // outside the arm. The block a label was numbered for is emitted only where
+    // the label is, so dropping it leaves the branch to it undefined -- which is
+    // what 87_dead_code's `i = ({ ... if (0) while (..) L: .. })` asks for.
+    // An arm without a label goes, whether or not the function has labels.
+    Node *dropped = zero ? node->then : node->els;
+    if (dropped && dropped->has_label) return NULL;
+    new_imcast(&chosen, node->ty);
+    return chosen;
 }
 
 // Fold a logical AND/OR where one side is a constant.
@@ -586,6 +601,11 @@ static Node *fold_logical(Node *node) {
         else
             return folded_int(int128_set_i(lv || rv), T.ty_int, node);
     }
+
+    // An operand that goes away may hold a label the function still names, so
+    // the constant decides whether it may go, not the fold's own convenience.
+    bool keep_rhs = node->kind == ND_LOGAND ? const_truthy(lhs) : !const_truthy(lhs);
+    if (!keep_rhs && rhs->has_label) return NULL;
 
     // The surviving operand is not the result: && and || yield an int that
     // is 0 or 1, so x must be replaced by its truth value.
@@ -620,6 +640,8 @@ static Node *fold_ptradd(Node *node) {
 // folding is visible -- `x << (2 + 1)` -- and the left operand need not be a
 // constant for 6.5.7 to be violated, so only the count is inspected.
 static void check_shift_count(Node *node) {
+    if (node->shift_checked) return;
+    node->shift_checked = true;
     Node *cnt = node->rhs;
     if (!is_integer(node->lhs->ty) || !cnt || cnt->kind != ND_NUM || !is_integer(cnt->ty)) return;
     int width = node->lhs->ty->size * 8;
@@ -632,12 +654,6 @@ static void check_shift_count(Node *node) {
     else if (n >= width || n < 0)
         warning(WG_SHIFT_COUNT_OVERFLOW, node->tok, "shift count >= width of type");
 }
-
-// Whether the function being folded defines any label. A goto -- an asm goto
-// included -- names its target by label, so a branch may only be dropped when
-// there is no label in the function for it to name. The parser keeps the ring
-// on the function's Sym.
-static bool fn_has_labels;
 
 Node *fold_node(Node *node) {
     if (!node) return NULL;
@@ -713,6 +729,7 @@ Node *fold_node(Node *node) {
 
         // Comma: fold both sides, discard lhs if it has no side effects
         case ND_COMMA:
+            fold_seen_comma = true;
             node->lhs = fold_node(node->lhs);
             node->rhs = fold_node(node->rhs);
             // In a static initializer the comma has to survive the folding:
@@ -723,13 +740,17 @@ Node *fold_node(Node *node) {
             // Everywhere else the fold is what turns cpython's
             // `((void)sizeof(int), 4)` into the constant it means.
             if (in_static_init) return node;
-            if (is_int_const(node->lhs) || is_fp_const(node->lhs)) return node->rhs;
+            if ((is_int_const(node->lhs) || is_fp_const(node->lhs)) &&
+                (is_int_const(node->rhs) || is_fp_const(node->rhs))) {
+                return node->rhs;
+            }
             // A cast to void throws the value away, and a constant under it
             // has nothing else to lose. `((void)sizeof(int), 4)` is the shape
             // cpython's Py_ARRAY_LENGTH() writes around its static assertion,
             // and clang reads it as the constant 4.
-            if (node->lhs && (node->lhs->kind == ND_IMCAST || node->lhs->kind == ND_EXCAST) &&
-                node->lhs->ty->kind == TY_VOID && is_int_const(node->lhs->lhs))
+            if ((node->lhs && (node->lhs->kind == ND_IMCAST || node->lhs->kind == ND_EXCAST) &&
+                 node->lhs->ty->kind == TY_VOID && is_int_const(node->lhs->lhs)) &&
+                (is_int_const(node->rhs) || is_fp_const(node->rhs)))
                 return node->rhs;
             return node;
 
@@ -761,11 +782,17 @@ Node *fold_node(Node *node) {
             // the whole module even though nothing can reach it. That is 176
             // objects of ffmpeg's build, reported without a file name.
             //
-            // A branch that defines a label stays, however: a goto, including
-            // one from an asm goto, can still name it.
-            if (!fn_has_labels && node->cond && node->cond->kind == ND_NUM && node->cond->ty &&
+            // A branch that holds a label stays, however: the goto naming it
+            // may be outside the branch, and the block the label was numbered
+            // for is emitted only where the label is. What is asked is the
+            // branch being dropped, not the function: `label: if (0) { .. }`
+            // goes, `if (0) { .. label: .. }` stays.
+            if (node->cond && node->cond->kind == ND_NUM && node->cond->ty &&
                 is_integer(node->cond->ty)) {
-                Node *taken = int128_is_zero(node->cond->ival) ? node->els : node->then;
+                bool zero = int128_is_zero(node->cond->ival);
+                Node *taken = zero ? node->els : node->then;
+                Node *dropped = zero ? node->then : node->els;
+                if (dropped && dropped->has_label) return node;
                 if (!taken) {
                     // No else: the dead arm is the whole statement, and what
                     // is left of it is an empty one.
@@ -906,7 +933,6 @@ Node *fold_node(Node *node) {
 void fold_ast(Module *prog) {
     for (Sym *fn = prog->fns; fn; fn = fn->next) {
         if (!fn->is_defined) continue;
-        fn_has_labels = fn->labels != NULL;
         fold_node(fn->body);
     }
 }

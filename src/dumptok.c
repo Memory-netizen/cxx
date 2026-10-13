@@ -79,7 +79,7 @@ void dump_raw_tokens(Token *tok) {
         if (tok->is_sol) fprintf(stdout, " [StartOfLine]");
         fprintf(stdout, "  Loc=<%s:%d:%d>\n", str(line_name(tok)), line, col);
 
-        tok = tok->next;
+        tok = tok_next(tok);
     }
     int line, col;
     get_location(file_of(tok->file_uid), tok->loc, &line, &col);
@@ -88,7 +88,7 @@ void dump_raw_tokens(Token *tok) {
 
 void dump_tokens(Token *tok) {
     int line, col;
-    for (; tok && tok->kind != TK_EOF; tok = tok->next) {
+    for (; tok && tok->kind != TK_EOF; tok = tok_next(tok)) {
         if (tok->kind == TK_LINE || tok->kind == TK_NL) continue;
 
         if (tok->kind == TK_WS || tok->kind == TK_COMMENT) continue;

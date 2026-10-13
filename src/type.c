@@ -1005,7 +1005,7 @@ void modifiable_lvalue(Node *node) {
         } else {
             uint32_t start = lhs->tok->loc;
             Token *cur = lhs->tok;
-            while (cur->next != node->tok) cur = cur->next;
+            while (tok_next(cur) != node->tok) cur = cur->next;
             error(node->tok, "assignment of read-only location ‘%.*s’", (int)(cur->loc - start + cur->len),
                   tok_text(lhs->tok));
         }

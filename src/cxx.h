@@ -582,6 +582,55 @@ typedef struct Loc {
 // origin chain finds.
 Loc loc_of(Token *tok);
 
+// A token's 32-bit name in the arena, and the way back. The name survives the
+// chunk being given back; the pointer does not.
+uint32_t tok_index(Token *tok);
+Token *tok_of_index(uint32_t idx);
+
+// The same index, for the position: one loc per produced token, in step with the
+// tokens themselves (see streaming-frontend.md section 11.5).
+uint32_t loc_of_index(uint32_t idx);
+
+// The parser's view of the current token: the preprocessor fills these when the
+// parser asks for one, and p_loc is the current position's name in the table.
+extern uint32_t tok;    // the current token's kind
+extern Int128 tokc;     // the current token's value (integers; floats use the token)
+extern uint32_t p_loc;  // name of the current position (called loc in the final shape)
+
+Token *next(void);      // take the next token and fill the three above
+void lookahead(void);   // mark "do not consume": nothing changes
+void commit(void);      // the speculative parse worked; keep the position
+void parse_rollback(void);    // it did not; put the position back
+void parse_begin(Token *head);
+size_t pp_loc_count(void);
+uint32_t loc_of_token(Token *t);
+
+// Two parallel arrays, in production order: the tokens, and one position entry each.
+// An entry carries the token's own position and the position its expansion origin
+// points at -- for a native token those are the same, and its origin chain is empty.
+typedef struct {
+    Loc at;      // where this token is
+    Loc via;     // where the macro that produced it was invoked (== at if native)
+} TokPos;
+
+size_t pp_count(void);
+Token *pp_tok_at(size_t i);
+TokPos pp_pos_at(size_t i);
+size_t pp_cursor_get(void);
+void pp_cursor_set(size_t at);
+size_t tok_index_selftest(Token *head);
+
+// Names for positions: what a node keeps instead of a token. The name survives the
+// token, and the file's contents outlive both, so a spelling can always be read back.
+uint32_t loc_name(Loc at);
+Loc loc_get(uint32_t name);
+char *loc_str(Loc at);
+size_t loc_table_selftest(Token *head);
+
+// The position the preprocessor is at right now: the cursor it would continue
+// from. A node can take its location from here instead of from a token.
+Loc pp_cur_loc(void);
+
 
 struct Token {
     Token *next;
@@ -613,7 +662,16 @@ extern uint32_t file_tab_cap;
 static inline SrcFile *file_of(uint32_t uid) { return uid && uid < file_tab_cap ? file_tab[uid] : 0; }
 static inline char *tok_text(Token *tok) { return file_of(tok->file_uid)->contents + tok->loc; }
 
+// A speculative parse says "accepted" by moving the caller's position and "rejected"
+// by leaving it. Those are the two acts, named: commit writes the position back through
+// `rest`, rollback does not. With the token chain in hand this is just the pointer; when
+// the reader is an index into the parallel arrays, only these two functions change.
+void parse_commit(Token **rest, Token *next);
+void parse_rollback(void);
+
 bool match(Token **rest, Token *tok, uint32_t kind);
+
+Token *tok_next(Token *tok);
 Token *skip(Token *tok, uint32_t kind);
 Token *tokenize_file(char *filename);
 SrcFile *open_source_file(char *filename);
@@ -1138,6 +1196,17 @@ struct Node {
     uint8_t order1;  // the compare-exchange's second order
     unsigned is_weak : 1;
     unsigned is_signal : 1;
+    // A bad shift count is warned about where the shift is folded, and the fold
+    // leaves the shift in place, so the walk over the finished tree meets it again.
+    // The node remembers, and the warning is printed once.
+    unsigned shift_checked : 1;
+    // A region that holds a label is an entry point of its own: a goto -- an asm
+    // goto and a computed goto included -- anywhere in the function may name it,
+    // so the fold keeps such a region and may drop one without a label. The
+    // parser sets this as the label is registered, which is before the region is
+    // handed to the fold: on the label statement, on every block it is nested
+    // in, and on the braced group a statement expression wraps (parser.c).
+    unsigned has_label : 1;
 
     Token *tok;   // slot 1: every diagnostic
     Type *ty;     // slot 2: the most-read field there is
@@ -2195,6 +2264,7 @@ const char *diag_ty_name(Type *ty);
 // True while a static initializer's expression is being folded, where an
 // out-of-range conversion is an error rather than a warning (parser.c).
 extern bool in_static_init;
+extern bool fold_seen_comma;
 
 bool fits_target(Int128 v, Type *ty);
 

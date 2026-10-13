@@ -101,6 +101,69 @@ static void array_initializer2(Token **rest, Token *tok, Initializer *init, int 
 static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Member *mem, bool comma);
 static Member *get_struct_member(Member *mem, Token *tok);
 
+uint32_t tok;    // the current token's kind
+Int128 tokc;     // its value
+uint32_t p_loc;  // the current position's name
+
+static Token *p_cur, *p_save;
+static uint32_t loc_save, tok_save;
+static size_t cursor_save;
+static Int128 tokc_save;
+
+// The position of a token: by index into the preprocessor's parallel cache, so a
+// token and its position are the same entry of two arrays.
+extern bool opt_ast_dump;  // set by the driver: that mode prints the tree as parsed
+
+static void pos_of(Token *t) {
+    // A token the preprocessor produced has an entry in the position table; a token
+    // made after it finished (a copy, an end marker, something the fold pass needed)
+    // does not. In that case keep the last real position rather than clearing it --
+    // an earlier guard tested file_uid instead, skipped every token the parser sees,
+    // and left the whole mechanism doing nothing while looking installed.
+    // A macro-expanded token is reported where it was *used*, which is what the
+    // origin chain records -- warning() has always walked it.
+    while (t && t->origin) t = t->origin;
+    uint32_t n = t ? loc_of_token(t) : 0;
+    if (n) p_loc = n;
+}
+
+static void fill_from(Token *t) {
+    tok = t ? (uint32_t)t->kind : 0;
+    if (t && t->kind == TK_NUM) tokc = t->ival;
+    pos_of(t);
+}
+
+Token *next(void) {
+    if (!p_cur) return NULL;
+    p_save = p_cur;
+    loc_save = p_loc;
+    cursor_save = pp_cursor_get();
+    tok_save = tok;
+    tokc_save = tokc;
+    p_cur = tok_next(p_cur);
+    fill_from(p_cur);
+    return p_cur;
+}
+
+void lookahead(void) {}
+
+void commit(void) { p_save = NULL; }
+
+void rollback(void) {
+    if (!p_save) return;
+    p_cur = p_save;
+    p_loc = loc_save;
+    pp_cursor_set(cursor_save);
+    tok = tok_save;
+    tokc = tokc_save;
+    p_save = NULL;
+}
+
+void parse_begin(Token *head) {
+    p_cur = head;
+    fill_from(head);
+}
+
 Node *new_node(NodeKind kind, Token *tok) {
     Node *node = ALLOC(Node);
     node->kind = kind;
@@ -279,6 +342,26 @@ struct Scope {
     int cleanup_num;
 };
 
+// The blocks the parser is inside, outermost first, and how deep that is. A
+// label is an entry point into every one of them, so each is marked as the
+// label is registered; a construct that is handed to the fold before that (or
+// without a label in it) is free to be dropped.
+static Node *blk_stack[64];
+static int blk_depth;
+
+// Every kind of label -- a named one, a case, a default -- is an entry point
+// into the regions it stands in: a goto, an asm goto, a computed goto or the
+// switch's own dispatch may name it from outside them, so the fold may not drop
+// one of those regions. Marking them here, as the label is met, is what makes
+// the question answerable while the region is parsed -- which is when the fold
+// meets it, and what the finished function can no longer say for a region that
+// was already folded. The label statement counts as a region of its own, so a
+// label that is itself the statement being dropped keeps it too.
+static void mark_label_region(Node *node) {
+    node->has_label = true;
+    for (int d = 0; d < blk_depth; d++) blk_stack[d]->has_label = true;
+}
+
 // Represents currently scope.
 static Scope *scope;
 static Scope *file_scope;
@@ -345,7 +428,7 @@ static uint32_t label_id_of(uint32_t name) {
 
 // __label__ Ident ("," Ident)* ";"
 static void label_decl(Token **rest, Token *tok) {
-    tok = tok->next;
+    (tok = tok_next(tok), pos_of(tok));
     for (;;) {
         if (tok->kind != TK_IDENT) error(tok, "expected an identifier in ‘__label__’");
         if (!local_labels)
@@ -360,9 +443,9 @@ static void label_decl(Token **rest, Token *tok) {
         char *mangled = format("%s.%d", str(tok->id), local_label_seq++);
         local_labels[local_label_num].id = intern(mangled, strlen(mangled));
         local_label_num++;
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
         if (tok->kind != TK_COMMA) break;
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
     }
     *rest = skip(tok, TK_SEMI);
 }
@@ -770,7 +853,7 @@ static Sym *new_var(uint32_t id, Type *ty) {
 static void apply_alias_attr(Sym *var, Attr *attrs) {
     for (Attr *a = attrs; a; a = a->next) {
         if (!a->info || a->info->ns != ATTR_NS_GNU || strcmp(a->info->name, "alias")) continue;
-        Token *arg = a->args ? a->args->next : NULL;
+        Token *arg = a->args ? tok_next(a->args) : NULL;
         if (!arg || arg->kind != TK_STRLIT) error(a->tok, "‘alias’ attribute requires a string literal");
         if (arg->enc_prefix != PREFIX_NONE) error(arg, "expected a plain string literal in ‘alias’");
         if (!str(arg->id)[0]) error(arg, "expected non-empty string in ‘alias’");
@@ -786,9 +869,9 @@ static void parse_asm_name(Token **rest, Token *tok, char **name_out) {
         return;
     }
 
-    tok = tok->next;
+    (tok = tok_next(tok), pos_of(tok));
     if (tok->kind != TK_LPAREN) error(tok, "expected ‘(’ after ‘asm’");
-    tok = tok->next;
+    (tok = tok_next(tok), pos_of(tok));
 
     if (tok->kind != TK_STRLIT) error(tok, "expected string literal in ‘asm’ name");
     if (tok->enc_prefix != PREFIX_NONE) error(tok, "expected a plain string literal in ‘asm’ name");
@@ -796,7 +879,7 @@ static void parse_asm_name(Token **rest, Token *tok, char **name_out) {
     char *name = str(tok->id);
     if (!name[0]) error(tok, "expected non-empty string in ‘asm’ name");
 
-    *rest = skip(tok->next, TK_RPAREN);
+    *rest = skip(tok_next(tok), TK_RPAREN);
     *name_out = name;
 }
 
@@ -1140,7 +1223,7 @@ static uint32_t typequal(Token **rest, Token *tok) {
             qual |= Q_ATOMIC;
         else
             break;
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
     }
     *rest = tok;
     return qual;
@@ -1182,13 +1265,13 @@ static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool is_par
     ty = pointers(&tok, tok, ty);
 
     if (tok->kind == TK_LPAREN &&
-        (tok->next->kind != TK_RPAREN && tok->next->kind != TK_ELLIPSIS && !is_typename(tok->next, true))) {
+        (tok_next(tok)->kind != TK_RPAREN && tok_next(tok)->kind != TK_ELLIPSIS && !is_typename(tok_next(tok), true))) {
         Token *start = tok;
         Type dummy = {};
         bool saved_nested = in_nested_declr;
         bool saved_outermost = param_outermost;
         in_nested_declr = true;
-        abstract_declarator(&tok, start->next, &dummy, is_param);
+        abstract_declarator(&tok, tok_next(start), &dummy, is_param);
         tok = skip(tok, TK_RPAREN);
         ty = decl_suffix(rest, tok, ty, is_param);
         in_nested_declr = saved_nested;
@@ -1199,13 +1282,13 @@ static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, bool is_par
         // twice.
         param_outermost = saved_outermost;
         ty = decl_attrs(rest, *rest, ty);
-        return abstract_declarator(&tok, start->next, ty, is_param);
+        return abstract_declarator(&tok, tok_next(start), ty, is_param);
     }
 
     Token *name = NULL;
     if (is_param && tok->kind == TK_IDENT) {
         name = tok;
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
     }
     ty = decl_suffix(rest, tok, ty, is_param);
     ty->name = name;
@@ -1221,17 +1304,17 @@ static Type *typename(Token **rest, Token *tok) {
 }
 
 static bool is_end(Token *tok) {
-    return tok->kind == TK_RBRACE || (tok->kind == TK_COMMA && tok->next->kind == TK_RBRACE);
+    return tok->kind == TK_RBRACE || (tok->kind == TK_COMMA && tok_next(tok)->kind == TK_RBRACE);
 }
 
 static bool consume_end(Token **rest, Token *tok) {
     if (tok->kind == TK_RBRACE) {
-        *rest = tok->next;
+        parse_commit(rest, tok_next(tok)), pos_of(tok);
         return true;
     }
 
-    if (tok->kind == TK_COMMA && tok->next->kind == TK_RBRACE) {
-        *rest = tok->next->next;
+    if (tok->kind == TK_COMMA && tok_next(tok)->kind == TK_RBRACE) {
+        parse_commit(rest, tok_next(tok)->next), pos_of(tok);
         return true;
     }
 
@@ -1240,7 +1323,7 @@ static bool consume_end(Token **rest, Token *tok) {
 
 static Token *skip_excess_element(Token *tok) {
     if (tok->kind == TK_LBRACE) {
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
         while (tok->kind != TK_RBRACE) {
             tok = skip_excess_element(tok);
             match(&tok, tok, TK_COMMA);
@@ -1341,7 +1424,7 @@ static void string_initializer(Token **rest, Token *tok, Initializer *init) {
         int n = MIN(deep->len, arrlen);
         int i = 0;
         fill_char_leaves(init, leaf->size, string, &i, n, tok);
-        *rest = tok->next;
+        parse_commit(rest, tok_next(tok)), pos_of(tok);
         return;
     }
 
@@ -1365,15 +1448,15 @@ static void string_initializer(Token **rest, Token *tok, Initializer *init) {
             break;
     }
 
-    *rest = tok->next;
+    parse_commit(rest, tok_next(tok)), pos_of(tok);
 }
 
 static void array_designator(Token **rest, Token *tok, Type *ty, int *begin, int *end) {
-    *begin = const_expr(&tok, tok->next);
+    *begin = const_expr(&tok, tok_next(tok));
     if (*begin >= ty->len) error(tok, "array designator index exceeds array bounds");
 
     if (tok->kind == TK_ELLIPSIS) {
-        *end = const_expr(&tok, tok->next);
+        *end = const_expr(&tok, tok_next(tok));
         if (*end >= ty->len) error(tok, "array designator index exceeds array bounds");
         if (*end < *begin) error(tok, "array designator range [%d, %d] is empty", *begin, *end);
     } else {
@@ -1416,7 +1499,7 @@ static Member *struct_designator(Token **rest, Token *tok, Type *ty) {
         if (mem->name->id == tok->id) {
             // The colon is left in place: designation() tells the obsolete
             // spelling from the modern one by it, and the modern one has `=`.
-            *rest = tok->next;
+            parse_commit(rest, tok_next(tok)), pos_of(tok);
             return mem;
         }
     }
@@ -1733,7 +1816,7 @@ static Node *init_rvalue(Node *expr) {
 // Desig ::= "[" (ConstExp | ConstRangeExp) "]" | "." Ident
 // The obsolete GNU field designator `a: 1`, which the initializer parsers
 // have to recognize before calling designation().
-static bool is_old_designator(Token *tok) { return tok->kind == TK_IDENT && tok->next->kind == TK_COLON; }
+static bool is_old_designator(Token *tok) { return tok->kind == TK_IDENT && tok_next(tok)->kind == TK_COLON; }
 
 static void designation(Token **rest, Token *tok, Initializer *init) {
     if (tok->kind == TK_LBRACKET) {
@@ -1782,8 +1865,8 @@ static int count_array_init_elements(Token *tok, Type *ty) {
         if (!first) tok = skip(tok, TK_COMMA);
         first = false;
         if (tok->kind == TK_LBRACKET) {
-            i = const_expr(&tok, tok->next);
-            if (tok->kind == TK_ELLIPSIS) i = const_expr(&tok, tok->next);
+            i = const_expr(&tok, tok_next(tok));
+            if (tok->kind == TK_ELLIPSIS) i = const_expr(&tok, tok_next(tok));
             tok = skip(tok, TK_RBRACKET);
             designation(&tok, tok, dummy);
         } else {
@@ -1962,17 +2045,18 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
         int paren = 0;
         Token *str = tok;
         while (str->kind == TK_LPAREN) {
-            str = str->next;
+            str = tok_next(str);
             paren++;
         }
         if (paren) {
-            Token *t = str->kind == TK_STRLIT ? str->next : NULL;
-            for (int i = 0; t && i < paren; i++) t = t->kind == TK_RPAREN ? t->next : NULL;
+            Token *t = str->kind == TK_STRLIT ? tok_next(str) : NULL;
+            for (int i = 0; t && i < paren; i++) t = t->kind == TK_RPAREN ? tok_next(t) : NULL;
             if (!t) paren = 0;
         }
         Token *lit = paren ? str : tok;
-        bool braced_str = lit->kind == TK_LBRACE && lit->next->kind == TK_STRLIT && lit->next->next->kind == TK_RBRACE;
-        if (braced_str && !is_compatible(type_unqual(infer_strtype(lit->next)->base), type_unqual(init->ty->base)))
+        bool braced_str =
+            lit->kind == TK_LBRACE && tok_next(lit)->kind == TK_STRLIT && tok_next(tok_next(lit))->kind == TK_RBRACE;
+        if (braced_str && !is_compatible(type_unqual(infer_strtype(tok_next(lit))->base), type_unqual(init->ty->base)))
             braced_str = false;
         // A string initializes an array only when it belongs to it. For an
         // array of pointers the literal initializes the *element* -- `char
@@ -1983,7 +2067,7 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
         if (lit->kind == TK_STRLIT)
             lit_ty = infer_strtype(lit);
         else if (braced_str)
-            lit_ty = infer_strtype(lit->next);
+            lit_ty = infer_strtype(tok_next(lit));
         if (lit_ty && !(is_char(array_leaf_type(init->ty)) && is_char(lit_ty->base)) &&
             !is_compatible(type_unqual(lit_ty->base), type_unqual(init->ty->base)))
             lit = NULL, braced_str = false;
@@ -2009,9 +2093,9 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
             // comma belongs to the member after it.
             else if (is_array(init->ty->base)) {
                 for (int i = 1; i < init->ty->len && tok->kind == TK_COMMA; i++) {
-                    if (tok->next->kind != TK_STRLIT) break;
+                    if (tok_next(tok)->kind != TK_STRLIT) break;
                     Token *after = NULL;
-                    string_initializer(&after, tok->next, init->child[i]);
+                    string_initializer(&after, tok_next(tok), init->child[i]);
                     tok = after;
                 }
             }
@@ -2068,7 +2152,7 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
     }
 
     if (tok->kind == TK_LBRACE) {
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
         for (int i = 0; !consume_end(rest, tok); i++) {
             if (i > 0) {
                 tok = skip(tok, TK_COMMA);
@@ -2080,13 +2164,14 @@ static void initializer2(Token **rest, Token *tok, Initializer *init, bool need_
         return;
     }
     init->expr = assign(rest, tok);
-    add_type(init->expr);
+    // add_type(init->expr);
     // Convert a numeric initializer expression to the target type (a
     // double initializing an int member, ...).
     if ((is_integer(init->ty) || is_flonum(init->ty)) && (is_integer(init->expr->ty) || is_flonum(init->expr->ty)) &&
         !is_compatible(init->expr->ty, init->ty)) {
         check_asop(init->ty, init->expr, CTX_INIT);
         new_imcast(&init->expr, init->ty);
+        init->expr = fold_node(init->expr);
     }
 }
 
@@ -2310,6 +2395,12 @@ static void mount_gvar_data(Initializer *dst, Initializer *src) {
 // conversion is a warning, which is why the decision lives in fold_cast().
 bool in_static_init;
 
+// A comma may not appear in a strict constant expression (6.6p3), but folding is
+// also what turns `((void)sizeof(int), 4)` into the 4 it means. So the fold does
+// its work and leaves this behind, and the contexts that require such an
+// expression set it aside before and ask afterwards, as with errno.
+bool fold_seen_comma;
+
 static void eval_gvar_data(Initializer *init, Type *ty) {
     // A whole-aggregate copy from a constexpr source -- or from the object a
     // compound literal names, which is a static object of its own -- mounts
@@ -2355,12 +2446,12 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
     // expression is what makes `char c = 300;` at file scope as loud as the
     // same conversion inside a function; the bytes the data section prints
     // come from the Con built below either way.
-    if (init->expr && ty->kind != TY_ARRAY && ty->kind != TY_STRUCT && ty->kind != TY_UNION) {
-        in_static_init = true;
-        Node *folded = fold_node(init->expr);
-        in_static_init = false;
-        if (folded) init->expr = folded;
-    }
+    // if (init->expr && ty->kind != TY_ARRAY && ty->kind != TY_STRUCT && ty->kind != TY_UNION) {
+    //     in_static_init = true;
+    //     Node *folded = fold_node(init->expr);
+    //     in_static_init = false;
+    //     if (folded) init->expr = folded;
+    // }
 
     if (init->expr) {
         uint32_t sym = 0;
@@ -2436,7 +2527,11 @@ static void eval_gvar_data(Initializer *init, Type *ty) {
 static void gvar_initializer(Token **rest, Token *tok, Sym *var) {
     bool outer_static = static_init_ctx;
     static_init_ctx = true;
+    in_static_init = true;
+    fold_seen_comma = false;
     Initializer *init = initializer(rest, tok, var->ty, &var->ty);
+    if (fold_seen_comma) error(init->expr->tok, "expression is not a constant expression");
+    in_static_init = false;
     static_init_ctx = outer_static;
 
     eval_gvar_data(init, var->ty);
@@ -3210,10 +3305,10 @@ static Node *parse_math_const(Token **rest, Token *tok, int kind) {
             break;  // HUGE_VAL and INF
     }
 
-    tok = skip(tok->next, TK_LPAREN);
+    tok = skip(tok_next(tok), TK_LPAREN);
     if (is_nan) {
         if (tok->kind != TK_STRLIT) error(start, "\u2018%s\u2019 requires a string literal", str(start->id));
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
     }
     *rest = skip(tok, TK_RPAREN);
 
@@ -3247,7 +3342,7 @@ static Node *parse_math_const(Token **rest, Token *tok, int kind) {
 // `one` and `uno` predicates do the job with one evaluation each.
 static Node *parse_math_cmp(Token **rest, Token *tok, int kind) {
     Token *start = tok;
-    tok = skip(tok->next, TK_LPAREN);
+    tok = skip(tok_next(tok), TK_LPAREN);
     Node *x = assign(&tok, tok);
     tok = skip(tok, TK_COMMA);
     Node *y = assign(&tok, tok);
@@ -3322,7 +3417,7 @@ static Node *parse_classify(Token **rest, Token *tok, int kind) {
     Token *start = tok;
     bool is_fpclassify = kind == BUILTIN_FPCLASSIFY;
 
-    tok = skip(tok->next, TK_LPAREN);
+    tok = skip(tok_next(tok), TK_LPAREN);
     Node dummy = {0};
     Node *cur = &dummy;
     int narg = 0;
@@ -3338,7 +3433,7 @@ static Node *parse_classify(Token **rest, Token *tok, int kind) {
         cur = cur->next = arg;
         narg++;
         if (tok->kind != TK_COMMA) break;
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
     }
     *rest = skip(tok, TK_RPAREN);
 
@@ -3378,7 +3473,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
     if (sync_order >= 0 || kind == BUILTIN_SYNC_LOCK_RELEASE) gcc_atomic_args = true;
     switch (kind) {
         case BUILTIN_TYPES_COMPATIBLE_P: {
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             Type *type1 = typename(&tok, tok);
             tok = skip(tok, TK_COMMA);
             Type *type2 = typename(&tok, tok);
@@ -3392,14 +3487,14 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             // sizes arrays with it -- so the offset is computed here rather
             // than left as the address constant cxx's own <stddef.h> used to
             // spell it as.
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             Type *ty = typename(&tok, tok);
             tok = skip(tok, TK_COMMA);
             int64_t off = 0;
             bool first = true;
             for (;;) {
                 if (first || tok->kind == TK_DOT) {
-                    Token *name = first ? tok : tok->next;
+                    Token *name = first ? tok : tok_next(tok);
                     first = false;
                     if (ty->kind != TY_STRUCT && ty->kind != TY_UNION)
                         error(name, "request for member ‘%s’ in something not a structure or union", str(name->id));
@@ -3407,13 +3502,13 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
                     if (!mem) error(name, "no member named ‘%s’ in ‘%s’", str(name->id), record_diag_name(ty));
                     off += mem->offset;
                     ty = mem->ty;
-                    tok = name->next;
+                    tok = tok_next(name);
                     continue;
                 }
                 if (tok->kind == TK_LBRACKET) {
                     Token *br = tok;
                     if (ty->kind != TY_ARRAY) error(br, "subscripted value is neither array nor pointer");
-                    int64_t idx = const_expr(&tok, tok->next);
+                    int64_t idx = const_expr(&tok, tok_next(tok));
                     off += idx * ty->base->size;
                     ty = ty->base;
                     tok = skip(tok, TK_RBRACKET);
@@ -3425,7 +3520,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             return new_num(off, start);
         }
         case BUILTIN_CONSTANT_P: {
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             Node *operand = assign(&tok, tok);
             *rest = skip(tok, TK_RPAREN);
             return new_num(is_const_expr(operand), start);
@@ -3472,7 +3567,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             // initialised by va_start or va_copy, and the function that
             // forwards one -- vprintf's whole shape -- has no parameter list
             // of its own to be variadic. gcc and clang accept it there.
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             // Same operand handling as the other variadic builtins: the
             // address of the va_list object, which is what the expansion
             // walks. gen_expr() of that address is a pointer to the
@@ -3499,7 +3594,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             // __builtin_va_copy(dst, src). LLVM has a real intrinsic for
             // this, so the copy itself is left to the backend. Like va_arg,
             // this needs two va_lists, not a variadic function.
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             Node *dst_ap = va_list_addr(&tok, tok);
             tok = skip(tok, TK_COMMA);
             Node *src_ap = va_list_addr(&tok, tok);
@@ -3524,7 +3619,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             // all use, and which gcc and clang both accept.
             if (kind == BUILTIN_VA_START && (!cur_fn || !cur_fn->ty->is_variadic))
                 error(tok, "‘__builtin_va_start’ used in a function that is not variadic");
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             Node *addr = va_list_addr(&tok, tok);
             if (kind == BUILTIN_VA_START && tok->kind == TK_COMMA) {
                 // The second operand names the last parameter. C23 also
@@ -3532,7 +3627,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
                 // parameter list is a bare "...": there is no named
                 // parameter to pass, and the operand is only documentation
                 // -- the register save area already covers the named ones.
-                tok = tok->next;
+                (tok = tok_next(tok), pos_of(tok));
                 assign(&tok, tok);
             }
             *rest = skip(tok, TK_RPAREN);
@@ -3543,8 +3638,8 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
         }
         case BUILTIN_FN_ALLOCA:
         case BUILTIN_ALLOCA_WITH_ALIGN: {
-            if (tok->next->kind != TK_LPAREN) error(tok, "builtin functions must be directly called");
-            tok = skip(tok->next, TK_LPAREN);
+            if (tok_next(tok)->kind != TK_LPAREN) error(tok, "builtin functions must be directly called");
+            tok = skip(tok_next(tok), TK_LPAREN);
             Node *size = assign(&tok, tok);
             lvalue_convert(&size);
             new_imcast(&size, T.ty_ulong);
@@ -3574,11 +3669,11 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             // __sync_lock_release(object): gcc defines it as storing zero with
             // release semantics -- the other half of the lock that
             // __sync_lock_test_and_set takes. One argument, no order.
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             Node *object = atomic_object(&tok, start);
             // gcc and clang both tolerate further arguments here as well as on
             // __sync_lock_test_and_set (the Fujitsu suite passes one to each).
-            while (tok->kind == TK_COMMA) assign(&tok, tok->next);
+            while (tok->kind == TK_COMMA) assign(&tok, tok_next(tok));
             *rest = skip(tok, TK_RPAREN);
 
             Sym *zero_sym = new_lvar(id_anon, type_unqual(object->ty->base));
@@ -3591,7 +3686,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
         case ATOMIC_STORE:
         case ATOMIC_STORE_GENERIC: {
             // temp = desired; *object = temp with the given order.
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             Node *object = atomic_object(&tok, start);
             tok = skip(tok, TK_COMMA);
             Node *desired = assign(&tok, tok);
@@ -3616,7 +3711,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
         case ATOMIC_LOAD:
         case ATOMIC_LOAD_GENERIC: {
             // temp = *object with the given order; yield temp.
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             Node *object = atomic_object(&tok, start);
             tok = skip(tok, TK_COMMA);
             // __atomic_load addresses the result: `*ret`, not `ret`. gcc's
@@ -3652,7 +3747,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
         case ATOMIC_FETCH_XOR: {
             // operand = temp (converted); result = temp;
             // result = atomicrmw(object, operand).
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             Node *object = atomic_object(&tok, start);
             Type *value_ty = type_unqual(object->ty->base);
             bool is_addsub = kind == ATOMIC_FETCH_ADD || kind == ATOMIC_FETCH_SUB;
@@ -3683,7 +3778,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
                 // passes a third -- and both refuse them on the fetch family,
                 // which is the rule here.
                 if (kind == ATOMIC_EXCHANGE)
-                    while (tok->kind == TK_COMMA) assign(&tok, tok->next);
+                    while (tok->kind == TK_COMMA) assign(&tok, tok_next(tok));
                 *rest = skip(tok, TK_RPAREN);
             } else {
                 tok = skip(tok, TK_COMMA);
@@ -3715,7 +3810,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
         case ATOMIC_COMPARE_EXCHANGE_STRONG: {
             // desired = temp; result = temp (bool);
             // result = cas(object, &expected, desired).
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             Node *object = atomic_object(&tok, start);
             tok = skip(tok, TK_COMMA);
             Node *expected = assign(&tok, tok);
@@ -3774,7 +3869,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
         // fall through
         case ATOMIC_THREAD_FENCE: {
             Node *fence = new_node(ND_FENCE, tok);
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             int order = atomic_order(&tok, MO_ATOMICRMW);
             *rest = skip(tok, TK_RPAREN);
             fence->order = order + 1;
@@ -3785,7 +3880,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
         case ATOMIC_IS_LOCK_FREE: {
             // Every target provides native atomics up to the pointer
             // size (riscv32's 8-byte atomics use libcalls).
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             int64_t size = const_expr(&tok, tok);
             *rest = skip(tok, TK_RPAREN);
             return new_num(size <= T.ty_nullptr->size, start);
@@ -3798,7 +3893,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             // value is -- and the other two arguments are read and checked
             // the way gcc reads them: both must be constants, and the
             // alignment a power of two. cpython's bundled mimalloc calls it.
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             Node *ptr = assign(&tok, tok);
             add_type(ptr);
             lvalue_convert(&ptr);
@@ -3825,7 +3920,7 @@ static Node *parse_builtin_fn(Token **rest, Token *tok, int kind) {
             // builtin, which is how the call is recognised downstream; it
             // is not a scope lookup, so a user declaration of the same
             // name is unaffected.
-            tok = skip(tok->next, TK_LPAREN);
+            tok = skip(tok_next(tok), TK_LPAREN);
             Node dummy = {}, *cur = &dummy;
             for (int i = 0; i < 3; i++) {
                 if (i) tok = skip(tok, TK_COMMA);
@@ -4022,7 +4117,7 @@ static void push_generic(Type *ty, Token *tok, Generic_s *gen) {
 // GenSel   ::= "_Generic" "(" (AsExp | TypeName) "," GenAssoc ("," GenAssoc)* ")"
 // GenAssoc ::= TypeName ":" AsExp | "default" ":" AsExp
 static Node *generic_selection(Token **rest, Token *tok) {
-    Token *start = tok = skip(tok->next, TK_LPAREN);
+    Token *start = tok = skip(tok_next(tok), TK_LPAREN);
 
     // 6.5.2.1p3: neither the controlling operand of a generic selection nor
     // the expression of an association it does not select is evaluated, so a
@@ -4096,7 +4191,7 @@ static Node *generic_selection(Token **rest, Token *tok) {
                 diag_exit("note", default_tok, "original ‘default’ is here");
             }
             default_tok = tok;
-            tok = skip(tok->next, TK_COLON);
+            tok = skip(tok_next(tok), TK_COLON);
             def_blk = cur_fn ? cur_fn->num_blk : 0;
             def_lbl = cur_fn ? cur_fn->num_lbl : 0;
             def_labels = labels;
@@ -4177,52 +4272,56 @@ static Node *generic_selection(Token **rest, Token *tok) {
 // | GenSel
 static Node *primary(Token **rest, Token *tok) {
     Node *node;
-    if (tok->kind == TK_LPAREN && tok->next->kind == TK_LBRACE) {
+    if (tok->kind == TK_LPAREN && tok_next(tok)->kind == TK_LBRACE) {
         // [GNU] A braced group used as an expression.
         pedantic(tok, "ISO C forbids braced-groups within expressions");
         node = new_node(ND_STMT_EXPR, tok);
-        node->body = compound_stmt(&tok, tok->next)->body;
+        Node *blk = compound_stmt(&tok, tok_next(tok));
+        node->body = blk->body;
+        // The label inside the group was nested in the block, which is dropped
+        // here: what the fold meets is this node, so the mark comes along.
+        node->has_label = blk->has_label;
         *rest = skip(tok, TK_RPAREN);
         return node;
     }
     if (tok->kind == TK_LPAREN) {
-        node = expr(&tok, tok->next);
+        node = expr(&tok, tok_next(tok));
         *rest = skip(tok, TK_RPAREN);
         return node;
     }
     if (tok->kind == TK_TRUE) {
         node = new_num(1, tok);
         node->ty = T.ty_bool;
-        *rest = tok->next;
+        parse_commit(rest, tok_next(tok)), pos_of(tok);
         return node;
     }
     if (tok->kind == TK_FALSE) {
         node = new_num(0, tok);
         node->ty = T.ty_bool;
-        *rest = tok->next;
+        parse_commit(rest, tok_next(tok)), pos_of(tok);
         return node;
     }
     if (tok->kind == TK_NULLPTR) {
         node = new_node(ND_NULLPTR, tok);
         node->ty = T.ty_nullptr;
-        *rest = tok->next;
+        parse_commit(rest, tok_next(tok)), pos_of(tok);
         return node;
     }
     if (tok->kind == TK_NUM) {
         node = new_num_node(tok);
-        *rest = tok->next;
+        parse_commit(rest, tok_next(tok)), pos_of(tok);
         return node;
     }
     if (tok->kind == TK_CHARLIT) {
         Type *ty = infer_chartype(tok);
         node = new_num(int128_to_i64(tok->ival), tok);
         node->ty = ty;
-        *rest = tok->next;
+        parse_commit(rest, tok_next(tok)), pos_of(tok);
         return node;
     }
     if (tok->kind == TK_STRLIT) {
         Sym *var = new_string_literal(tok->id, infer_strtype(tok));
-        *rest = tok->next;
+        parse_commit(rest, tok_next(tok)), pos_of(tok);
         return new_var_node(var, tok);
     }
     if (tok->kind == TK_GENERIC) {
@@ -4242,7 +4341,7 @@ static Node *primary(Token **rest, Token *tok) {
         // Variable, function or enum constant
         NameSpace *sc = find_ident(tok, true, false);
         if (!sc) {
-            if (tok->next->kind == TK_LPAREN)
+            if (tok_next(tok)->kind == TK_LPAREN)
                 error(tok, "implicit declaration of function ‘%s’", str(tok->id));
             else
                 error(tok, "use of undeclared identifier ‘%s’", str(tok->id));
@@ -4280,7 +4379,7 @@ static Node *primary(Token **rest, Token *tok) {
             // is only usable where it is called, and a module that referred to
             // the symbol itself would name something that does not exist. gcc
             // and clang answer with this same sentence.
-            if (sc->var->is_builtin && tok->next->kind != TK_LPAREN)
+            if (sc->var->is_builtin && tok_next(tok)->kind != TK_LPAREN)
                 error(tok, "builtin functions must be directly called");
             // [GNU] "__FUNCTION__" and "__PRETTY_FUNCTION__" are further
             // names of the standard "__func__"; the name space entry is the
@@ -4318,7 +4417,7 @@ static Node *primary(Token **rest, Token *tok) {
                 sc->var->is_reachable = true;
             node = new_var_node(sc->var, tok);
         }
-        *rest = tok->next;
+        parse_commit(rest, tok_next(tok)), pos_of(tok);
         return node;
     }
     error(tok, "expected expression before ‘%.*s’", tok->len, tok_text(tok));
@@ -4378,11 +4477,11 @@ static Node *fncall(Token **rest, Token *tok, Node *fn) {
     Type *param_ty = ty->params;
     node->ty = ty->ret;
 
-    tok = tok->next;
+    (tok = tok_next(tok), pos_of(tok));
 
     if (tok->kind == TK_RPAREN) {
         if (param_ty) error_call_args(tok, ty, false);
-        *rest = tok->next;
+        parse_commit(rest, tok_next(tok)), pos_of(tok);
         return node;
     }
 
@@ -4461,13 +4560,13 @@ static Member *get_struct_member(Member *mem, Token *tok) {
 static Node *postfix(Token **rest, Token *tok) {
     Node *node, *init = NULL;
     Token *start = tok;
-    if (tok->kind == TK_LPAREN && is_typename(tok->next, true)) {
-        tok = tok->next;
+    if (tok->kind == TK_LPAREN && is_typename(tok_next(tok), true)) {
+        (tok = tok_next(tok), pos_of(tok));
         // Compound literal
         SClass sclass = 0;
         while (TK_CONSTEXPR <= tok->kind && tok->kind <= TK_TYPEDEF) {
             sclass |= sc_table[tok->kind];
-            tok = tok->next;
+            (tok = tok_next(tok), pos_of(tok));
         }
         Type *ty = typename(&tok, tok);
         tok = skip(tok, TK_RPAREN);
@@ -4519,7 +4618,7 @@ static Node *postfix(Token **rest, Token *tok) {
                 // x[y] is short for *(x+y)
             case TK_LBRACKET: {
                 Token *start = tok;
-                Node *idx = expr(&tok, tok->next);
+                Node *idx = expr(&tok, tok_next(tok));
                 if (!is_pointer(node->ty) && is_pointer(idx->ty)) swap(&node, &idx);
                 if (!is_integer(idx->ty)) error(start, "array subscript is not an integer");
                 if (!is_pointer(node->ty) && node->ty->kind != TY_ARRAY)
@@ -4542,7 +4641,7 @@ static Node *postfix(Token **rest, Token *tok) {
             }
             case TK_ARROW:
                 // x->y is short for (*x).y
-                get_ident(tok->next);
+                get_ident(tok_next(tok));
                 if (!is_pointer(node->ty)) error(tok, "invalid type argument of ‘->’");
                 node = new_unary(ND_DEREF, node, tok);
                 add_type(node);
@@ -4550,7 +4649,7 @@ static Node *postfix(Token **rest, Token *tok) {
             case TK_DOT: {
                 Type *ty = node->ty;
                 Token *dot = tok;
-                tok = tok->next;
+                (tok = tok_next(tok), pos_of(tok));
                 uint32_t mem_id = get_ident(tok);
 
                 if (ty->kind != TY_STRUCT && ty->kind != TY_UNION)
@@ -4568,7 +4667,7 @@ static Node *postfix(Token **rest, Token *tok) {
 
                 node = new_unary(ND_MEMBER, node, dot);
                 node->member = mem;
-                tok = tok->next;
+                (tok = tok_next(tok), pos_of(tok));
                 continue;
             }
             case TK_INC:
@@ -4576,14 +4675,14 @@ static Node *postfix(Token **rest, Token *tok) {
                     node = atomic_compound_assign(node, ND_ADDAS, new_num(1, tok), true, tok);
                 else
                     node = new_unary(ND_POSTINC, node, tok);
-                tok = tok->next;
+                (tok = tok_next(tok), pos_of(tok));
                 continue;
             case TK_DEC:
                 if (node->ty->qual & Q_ATOMIC)
                     node = atomic_compound_assign(node, ND_SUBAS, new_num(1, tok), true, tok);
                 else
                     node = new_unary(ND_POSTDEC, node, tok);
-                tok = tok->next;
+                (tok = tok_next(tok), pos_of(tok));
                 continue;
             default:
                 break;
@@ -4610,21 +4709,21 @@ static Node *unary(Token **rest, Token *tok) {
     // a cast at all, and the initialisation it feeds was rejected as
     // incompatible.
     if (tok->kind == TK_EXTENSION) {
-        *rest = tok->next;
-        return cast(rest, tok->next);
+        parse_commit(rest, tok_next(tok)), pos_of(tok);
+        return cast(rest, tok_next(tok));
     }
 
     switch (tok->kind) {
         case TK_PLUS:
-            return new_unary(ND_PLUS, cast(rest, tok->next), tok);
+            return new_unary(ND_PLUS, cast(rest, tok_next(tok)), tok);
         case TK_MINUS:
-            return new_unary(ND_NEG, cast(rest, tok->next), tok);
+            return new_unary(ND_NEG, cast(rest, tok_next(tok)), tok);
         case TK_INVERT:
-            return new_unary(ND_INVERT, cast(rest, tok->next), tok);
+            return new_unary(ND_INVERT, cast(rest, tok_next(tok)), tok);
         case TK_NOT:
-            return new_unary(ND_NOT, cast(rest, tok->next), tok);
+            return new_unary(ND_NOT, cast(rest, tok_next(tok)), tok);
         case TK_BAND: {
-            Node *node = cast(rest, tok->next);
+            Node *node = cast(rest, tok_next(tok));
             add_type(node);
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY) node = node->lhs;
             if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_VLA) node = node->lhs;
@@ -4632,7 +4731,7 @@ static Node *unary(Token **rest, Token *tok) {
             return new_unary(ND_ADDR, node, tok);
         }
         case TK_STAR: {
-            Node *node = new_unary(ND_DEREF, cast(rest, tok->next), tok);
+            Node *node = new_unary(ND_DEREF, cast(rest, tok_next(tok)), tok);
             add_type(node);
             if (node->ty->kind == TY_ARRAY) new_imcast(&node, pointer_to(node->ty->base, 0));
             if (node->ty->kind == TY_VLA) new_imcast(&node, pointer_to(node->ty->base, 0));
@@ -4640,13 +4739,13 @@ static Node *unary(Token **rest, Token *tok) {
             return node;
         }
         case TK_INC: {
-            Node *operand = unary(rest, tok->next);
+            Node *operand = unary(rest, tok_next(tok));
             if (operand->ty->qual & Q_ATOMIC)
                 return atomic_compound_assign(operand, ND_ADDAS, new_num(1, tok), false, tok);
             return new_unary(ND_PREINC, operand, tok);
         }
         case TK_DEC: {
-            Node *operand = unary(rest, tok->next);
+            Node *operand = unary(rest, tok_next(tok));
             if (operand->ty->qual & Q_ATOMIC)
                 return atomic_compound_assign(operand, ND_SUBAS, new_num(1, tok), false, tok);
             return new_unary(ND_PREDEC, operand, tok);
@@ -4666,13 +4765,13 @@ static Node *unary(Token **rest, Token *tok) {
             uint32_t park_mark = num_parked;
             bool outer_uneval = uneval_operand;
             uneval_operand = true;
-            if (tok->next->kind == TK_LPAREN && is_typename(tok->next->next, true)) {
+            if (tok_next(tok)->kind == TK_LPAREN && is_typename(tok_next(tok)->next, true)) {
                 scope->vla_num = 0;
-                ty = typename(&tok, tok->next->next);
+                ty = typename(&tok, tok_next(tok)->next);
                 *rest = skip(tok, TK_RPAREN);
                 tyname = true;
             } else {
-                Node *node = unary(rest, tok->next);
+                Node *node = unary(rest, tok_next(tok));
                 add_type(node);
                 if (node->kind == ND_IMCAST && node->lhs->ty->kind == TY_ARRAY)
                     node = node->lhs;
@@ -4740,12 +4839,12 @@ static Node *unary(Token **rest, Token *tok) {
         case TK_AND: {
             pedantic(tok, "ISO C forbids taking the address of a label");
             Node *node = new_node(ND_LABEL_VAL, tok);
-            NODE_REF(node)->label = label_id_of(get_ident(tok->next));
+            NODE_REF(node)->label = label_id_of(get_ident(tok_next(tok)));
 
             NODE_REF(node)->goto_next = gotos;
             gotos = node;
 
-            *rest = tok->next->next;
+            parse_commit(rest, tok_next(tok)->next), pos_of(tok);
             return node;
         }
         default:
@@ -4804,13 +4903,13 @@ static Node *new_excast(Node *expr, Type *ty, Token *tok) {
 
 // CastExp ::= UnaryExp | "(" TypeName ")" CastExp
 static Node *cast(Token **rest, Token *tok) {
-    if (tok->kind == TK_LPAREN && is_typename(tok->next, true)) {
+    if (tok->kind == TK_LPAREN && is_typename(tok_next(tok), true)) {
         Token *start = tok;
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
         SClass sclass = 0;
         while (TK_CONSTEXPR <= tok->kind && tok->kind <= TK_TYPEDEF) {
             sclass |= sc_table[tok->kind];
-            tok = tok->next;
+            (tok = tok_next(tok), pos_of(tok));
         }
         Type *ty = typename(&tok, tok);
         tok = skip(tok, TK_RPAREN);
@@ -4855,7 +4954,7 @@ static Node *binexpr(Token **rest, Token *tok, int min_prec) {
         int cur_prec = op_table[op_tok->kind][0];
         NodeKind expr_op = op_table[op_tok->kind][1];
 
-        Node *rhs = binexpr(&tok, tok->next, cur_prec);
+        Node *rhs = binexpr(&tok, tok_next(tok), cur_prec);
         add_type(rhs);
         add_type(lhs);
 
@@ -4879,11 +4978,20 @@ static Node *conditional(Token **rest, Token *tok) {
 
     if (tok->kind != TK_QUESTION) {
         *rest = tok;
-        return cond;
+        // The expression module hands its result over here and at the two returns below,
+        // and every caller outside the module comes through this function -- so this is
+        // the one place the fold belongs, rather than at each construction site. The fold
+        // adds the types it needs and converts rather than retypes, so the result keeps
+        // the type the expression had; running the final pass as well changes nothing.
+        add_type(cond);
+        // A conditional is left to the pass over the finished tree: dropping an arm
+        // here would do it while the arm's blocks are already numbered, and the
+        // branch to them survives as `use of undefined value`.
+        return (opt_ast_dump || cond->kind == ND_COND) ? cond : fold_node(cond);
     }
 
-    if (tok->next->kind == TK_COLON) {
-        pedantic(tok->next, "ISO C forbids omitting the middle term of a ‘?:’ expression");
+    if (tok_next(tok)->kind == TK_COLON) {
+        pedantic(tok_next(tok), "ISO C forbids omitting the middle term of a ‘?:’ expression");
         // [GNU] Compile `a ?: b` as `tmp = a, tmp ? tmp : b`.
         // Omitting the middle operand uses the value already computed
         // without the undesirable effects of recomputing it
@@ -4892,18 +5000,21 @@ static Node *conditional(Token **rest, Token *tok) {
         Node *rhs = new_node(ND_COND, tok);
         rhs->cond = new_var_node(var, tok);
         rhs->then = new_var_node(var, tok);
-        rhs->els = conditional(rest, tok->next->next);
+        rhs->els = conditional(rest, tok_next(tok)->next);
+        Node *res = new_binary(ND_COMMA, lhs, rhs, tok);
         cnt_blk(3);  // gen_cond: then / else / merge
-        return new_binary(ND_COMMA, lhs, rhs, tok);
+        add_type(res);
+        return opt_ast_dump ? res : fold_node(res);
     }
 
     Node *node = new_node(ND_COND, tok);
     node->cond = cond;
-    node->then = expr(&tok, tok->next);
+    node->then = expr(&tok, tok_next(tok));
     tok = skip(tok, TK_COLON);
     node->els = conditional(rest, tok);
+    add_type(node);
     cnt_blk(3);  // gen_cond: then / else / merge
-    return node;
+    return (opt_ast_dump || node->kind == ND_COND) ? node : fold_node(node);
 }
 
 // Evaluate a given node as a constant expression.
@@ -5531,7 +5642,17 @@ static int64_t eval_ice(Node *node) {
     return eval(node);
 }
 
+static int64_t const_expr_raw(Token **rest, Token *tok);
+
 int64_t const_expr(Token **rest, Token *tok) {
+    // The contexts that need a strict constant expression come through here.
+    fold_seen_comma = false;
+    int64_t v = const_expr_raw(rest, tok);
+    if (fold_seen_comma) error(tok, "expression is not a constant expression");
+    return v;
+}
+
+static int64_t const_expr_raw(Token **rest, Token *tok) {
     Node *node = conditional(rest, tok);
     return eval_ice(node);
 }
@@ -5541,7 +5662,16 @@ int64_t const_expr(Token **rest, Token *tok) {
 // from the enumerators, so a value that does not fit 64 bits is an answer
 // here -- unlike an array size or a case value, which have to fit size_t or
 // the switch type.
+static Int128 const_expr128_raw(Token **rest, Token *tok);
+
 static Int128 const_expr128(Token **rest, Token *tok) {
+    fold_seen_comma = false;
+    Int128 v = const_expr128_raw(rest, tok);
+    if (fold_seen_comma) error(tok, "expression is not a constant expression");
+    return v;
+}
+
+static Int128 const_expr128_raw(Token **rest, Token *tok) {
     Node *node = conditional(rest, tok);
     add_type(node);
     if (!is_integer(node->ty)) error(node->tok, "expression is not an integer constant expression");
@@ -5564,7 +5694,7 @@ static Node *assign(Token **rest, Token *tok) {
     Node *node = conditional(&tok, tok);
     while (is_assignop(tok)) {
         Token *as = tok;
-        Node *rhs = assign(&tok, tok->next);
+        Node *rhs = assign(&tok, tok_next(tok));
         NodeKind op = as_op[as->kind];
         if (op != ND_AS && (node->ty->qual & Q_ATOMIC))
             node = atomic_compound_assign(node, op, rhs, false, as);
@@ -5584,7 +5714,7 @@ static Node *expr(Token **rest, Token *tok) {
     Node *node = assign(&tok, tok);
     while (tok->kind == TK_COMMA) {
         Token *comma = tok;
-        node = new_binary(ND_COMMA, node, assign(&tok, tok->next), comma);
+        node = new_binary(ND_COMMA, node, assign(&tok, tok_next(tok)), comma);
     }
     *rest = tok;
     add_type(node);
@@ -5797,17 +5927,17 @@ static Node *init_decl_list(Token **rest, Token *tok, Type *basety, SClass sclas
             // Like clang: atomic aggregates cannot be brace-initialized
             // (copy-initialization from another object stays legal).
             if ((ty->qual & Q_ATOMIC) && (ty->kind == TY_STRUCT || ty->kind == TY_UNION) &&
-                tok->next->kind == TK_LBRACE)
+                tok_next(tok)->kind == TK_LBRACE)
                 error(var_name, "illegal initializer type '_Atomic(%s)'", record_diag_name(ty));
             if (is_static) {
                 // A block-scope static is emitted, and its initializer runs,
                 // whether or not anything reaches the function around it.
                 bool outer_live = live_init;
                 live_init = true;
-                gvar_initializer(&tok, tok->next, var);
+                gvar_initializer(&tok, tok_next(tok), var);
                 live_init = outer_live;
             } else {
-                Node *expr = lvar_initializer(&tok, tok->next, var);
+                Node *expr = lvar_initializer(&tok, tok_next(tok), var);
                 cur = cur->next = new_unary(ND_EXPR_STMT, expr, tok);
             }
         }
@@ -5975,7 +6105,7 @@ static Node *expr_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_EXPR_STMT, tok);
 
     if (tok->kind == TK_SEMI) {
-        *rest = tok->next;
+        parse_commit(rest, tok_next(tok)), pos_of(tok);
         falls_through = true;
         return node;
     }
@@ -6088,7 +6218,7 @@ static Node *select_head(Token **rest, Token *tok) {
         if (tok->kind == TK_SEMI) {
             Node *stmt = node->body;
             while (stmt->next) stmt = stmt->next;
-            stmt->next = expr(&tok, tok->next);
+            stmt->next = expr(&tok, tok_next(tok));
             lvalue_convert(&stmt->next);
         }
     } else {
@@ -6104,7 +6234,7 @@ static Node *select_head(Token **rest, Token *tok) {
 static Node *if_stmt(Token **rest, Token *tok) {
     enter_scope();
     Node *node = new_node(ND_IF, tok);
-    tok = skip(tok->next, TK_LPAREN);
+    tok = skip(tok_next(tok), TK_LPAREN);
     // Cond
     node->cond = select_head(&tok, tok);
     tok = skip(tok, TK_RPAREN);
@@ -6112,7 +6242,7 @@ static Node *if_stmt(Token **rest, Token *tok) {
     node->then = stmt(&tok, tok);
     bool then_falls = falls_through;
     // Else
-    if (tok->kind == TK_ELSE) node->els = stmt(&tok, tok->next);
+    if (tok->kind == TK_ELSE) node->els = stmt(&tok, tok_next(tok));
     // Without an else, the condition being false is itself a way past the
     // if; with one, either branch may carry control to what follows.
     falls_through = node->els ? (then_falls || falls_through) : true;
@@ -6135,7 +6265,7 @@ static Node *switch_stmt(Token **rest, Token *tok) {
     cur_sw = node;
 
     // cond
-    tok = skip(tok->next, TK_LPAREN);
+    tok = skip(tok_next(tok), TK_LPAREN);
     node->cond = select_head(&tok, tok);
     add_type(node);
     tok = skip(tok, TK_RPAREN);
@@ -6185,7 +6315,7 @@ static Node *while_stmt(Token **rest, Token *tok) {
     loop_scopes = &loop;
     Node *node = new_node(ND_WHILE, tok);
 
-    tok = skip(tok->next, TK_LPAREN);
+    tok = skip(tok_next(tok), TK_LPAREN);
     // Cond
     node->cond = expr(&tok, tok);
     tok = skip(tok, TK_RPAREN);
@@ -6217,7 +6347,7 @@ static Node *do_stmt(Token **rest, Token *tok) {
     // Body
     BrkFrame fr = {brk_frame, false};
     brk_frame = &fr;
-    node->body = stmt(&tok, tok->next);
+    node->body = stmt(&tok, tok_next(tok));
     brk_frame = fr.next;
     // Cond
     tok = skip(tok, TK_WHILE);
@@ -6243,7 +6373,7 @@ static Node *for_stmt(Token **rest, Token *tok) {
     LoopScope loop = {loop_scopes, scope, stmt_label, true};
     loop_scopes = &loop;
     Node *node = new_node(ND_FOR, tok);
-    tok = skip(tok->next, TK_LPAREN);
+    tok = skip(tok_next(tok), TK_LPAREN);
 
     // Init
     if (is_typename(tok, true) || is_attr_start(tok)) {
@@ -6299,11 +6429,11 @@ static Node *for_stmt(Token **rest, Token *tok) {
 //          | "return" Exp? ";"
 // GotoStmt ::= "goto" Ident ";"
 static Node *goto_stmt(Token **rest, Token *tok) {
-    if (tok->next->kind == TK_STAR) {
+    if (tok_next(tok)->kind == TK_STAR) {
         pedantic(tok, "ISO C forbids ‘goto *expr;’");
         // [GNU] `goto *ptr` jumps to the address specified by `ptr`.
         Node *node = new_node(ND_GOTO_EXPR, tok);
-        node->lhs = expr(&tok, tok->next->next);
+        node->lhs = expr(&tok, tok_next(tok)->next);
         lvalue_convert(&node->lhs);
         if (!is_pointer(node->lhs->ty)) error(node->lhs->tok, "computed goto must be pointer type");
         *rest = skip(tok, TK_SEMI);
@@ -6311,7 +6441,7 @@ static Node *goto_stmt(Token **rest, Token *tok) {
         return node;
     }
     Node *node = new_node(ND_GOTO, tok);
-    NODE_REF(node)->label = label_id_of(get_ident(tok->next));
+    NODE_REF(node)->label = label_id_of(get_ident(tok_next(tok)));
     // Which handlers this jump runs is only known once the label is, so the
     // scope it starts from waits next to it (see resolve_goto_labels).
     note_jump_scope(node, scope);
@@ -6320,7 +6450,7 @@ static Node *goto_stmt(Token **rest, Token *tok) {
     gotos = node;
     falls_through = false;
 
-    *rest = skip(tok->next->next, TK_SEMI);
+    *rest = skip(tok_next(tok)->next, TK_SEMI);
     return node;
 }
 
@@ -6341,7 +6471,7 @@ static Node *get_named_loop(Token **rest, Token *tok, bool is_break) {
         char *suf = is_break ? " or ‘switch’" : "";
         error(tok, "‘%s’ statement operand ‘%s’ does not refer to a named loop%s", kind, str(label_id), suf);
     }
-    *rest = tok->next;
+    parse_commit(rest, tok_next(tok)), pos_of(tok);
     return cur;
 }
 
@@ -6349,7 +6479,7 @@ static Node *get_named_loop(Token **rest, Token *tok, bool is_break) {
 static Node *continue_stmt(Token **rest, Token *tok) {
     if (!cont_depth) error(tok, "continue statement not within a loop");
     Node *node = new_node(ND_CONTINUE, tok);
-    tok = tok->next;
+    (tok = tok_next(tok), pos_of(tok));
 
     if (tok->kind == TK_IDENT) {
         NODE_REF(node)->label = tok->id;
@@ -6369,7 +6499,7 @@ static Node *continue_stmt(Token **rest, Token *tok) {
 static Node *break_stmt(Token **rest, Token *tok) {
     if (!brk_depth) error(tok, "break statement not within loop or switch");
     Node *node = new_node(ND_BREAK, tok);
-    tok = tok->next;
+    (tok = tok_next(tok), pos_of(tok));
 
     if (tok->kind == TK_IDENT) {
         NODE_REF(node)->label = tok->id;
@@ -6393,16 +6523,16 @@ static Node *return_stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_RETURN, tok);
     falls_through = false;
     Type *ret = cur_fn->ty->ret;
-    if (tok->next->kind == TK_SEMI) {
+    if (tok_next(tok)->kind == TK_SEMI) {
         if (ret->kind != TY_VOID) error(tok, "non-void function ‘%s’ should return a value", str(cur_fn->id));
-        *rest = tok->next->next;
+        parse_commit(rest, tok_next(tok)->next), pos_of(tok);
         // A return leaves every scope of the function; the result is read
         // first, which is gen_ret's business.
         NODE_UNWIND(node)->unwind = cleanup_leaving(scope, NULL, tok);
         return node;
     }
 
-    node->lhs = expr(&tok, tok->next);
+    node->lhs = expr(&tok, tok_next(tok));
     if (ret->kind == TY_VOID) error(node->tok, "void function ‘%s’ should not return a value", str(cur_fn->id));
     *rest = skip(tok, TK_SEMI);
 
@@ -6459,7 +6589,7 @@ static Node *label(Token **rest, Token *tok) {
     if (is_attr_start(tok)) {
         Token *t = skip_leading_attrs(tok);
         bool is_label =
-            (t->kind == TK_IDENT && t->next->kind == TK_COLON) || t->kind == TK_CASE || t->kind == TK_DEFAULT;
+            (t->kind == TK_IDENT && tok_next(t)->kind == TK_COLON) || t->kind == TK_CASE || t->kind == TK_DEFAULT;
         if (!is_label) return NULL;
         while (is_attr_start(tok)) {
             Attr *list = tok->kind == TK_ATTR ? attr_list_gnu(&tok, tok) : attr_list_c23(&tok, tok);
@@ -6469,7 +6599,7 @@ static Node *label(Token **rest, Token *tok) {
         }
     }
     while (1) {
-        if (tok->kind == TK_IDENT && tok->next->kind == TK_COLON) {
+        if (tok->kind == TK_IDENT && tok_next(tok)->kind == TK_COLON) {
             // A label is an entry point of its own, and clang's check treats
             // a case label that a normal label leads into as deliberate.
             falls_through = false;
@@ -6479,16 +6609,19 @@ static Node *label(Token **rest, Token *tok) {
             check_label(NODE_REF(node)->label, tok);
             NODE_REF(node)->goto_next = labels;
             labels = node;
+            mark_label_region(node);
             if (idx < 0 && cur_fn) {
                 idx = cur_fn->num_lbl++;
                 cnt_blk(1);
             }
             NODE_LABEL(node)->blk_idx = idx;
 
-            if (cur) NODE_LABEL(cur)->label_ring = node;
-            else head = node;
+            if (cur)
+                NODE_LABEL(cur)->label_ring = node;
+            else
+                head = node;
             cur = node;
-            tok = tok->next->next;
+            (tok = tok_next(tok)->next, pos_of(tok));
             continue;
         }
         if (tok->kind == TK_DEFAULT) {
@@ -6500,15 +6633,18 @@ static Node *label(Token **rest, Token *tok) {
             check_fallthrough(tok);
             Node *node = new_node(ND_CASE, tok);
             note_jump_scope(node, scope);
-            tok = skip(tok->next, TK_COLON);
+            tok = skip(tok_next(tok), TK_COLON);
             NODE_STMT(cur_sw)->default_case = node;
             if (idx < 0 && cur_fn) {
                 idx = cur_fn->num_lbl++;
                 cnt_blk(1);
             }
             NODE_LABEL(node)->blk_idx = idx;
-            if (cur) NODE_LABEL(cur)->label_ring = node;
-            else head = node;
+            mark_label_region(node);
+            if (cur)
+                NODE_LABEL(cur)->label_ring = node;
+            else
+                head = node;
             cur = node;
             continue;
         }
@@ -6516,7 +6652,7 @@ static Node *label(Token **rest, Token *tok) {
             if (!cur_sw) error(tok, "case label not within a switch statement");
             Token *tk_case = tok;
             int64_t val1, val2;
-            val1 = const_expr(&tok, tok->next);
+            val1 = const_expr(&tok, tok_next(tok));
             val1 = eval_ty(val1, cur_sw->cond->ty);
             check_fallthrough(tk_case);
             if (tok->kind == TK_COLON) {
@@ -6529,14 +6665,17 @@ static Node *label(Token **rest, Token *tok) {
                     cnt_blk(1);
                 }
                 NODE_LABEL(node)->blk_idx = idx;
+                mark_label_region(node);
 
                 node->case_next = cur_sw->case_next;
                 cur_sw->case_next = node;
 
-                if (cur) NODE_LABEL(cur)->label_ring = node;
-                else head = node;
+                if (cur)
+                    NODE_LABEL(cur)->label_ring = node;
+                else
+                    head = node;
                 cur = node;
-                tok = tok->next;
+                (tok = tok_next(tok), pos_of(tok));
                 continue;
             }
 
@@ -6565,10 +6704,13 @@ static Node *label(Token **rest, Token *tok) {
                 cnt_blk(1);
             }
             NODE_LABEL(node)->blk_idx = idx;
+            mark_label_region(node);
             node->case_next = cur_sw->case_next;
             cur_sw->case_next = node;
-            if (cur) NODE_LABEL(cur)->label_ring = node;
-            else head = node;
+            if (cur)
+                NODE_LABEL(cur)->label_ring = node;
+            else
+                head = node;
             cur = node;
             tok = skip(tok, TK_COLON);
             continue;
@@ -6610,13 +6752,13 @@ static uint32_t push_named_loop(Node *lb, Token *tok) {
 // carrying the message text.
 static Node *static_assert_decl(Token **rest, Token *tok) {
     Token *start = tok;
-    tok = skip(tok->next, TK_LPAREN);
+    tok = skip(tok_next(tok), TK_LPAREN);
     int64_t v = const_expr(&tok, tok);
     if (tok->kind == TK_COMMA) {
-        Token *msg = tok->next;
+        Token *msg = tok_next(tok);
         if (msg->kind != TK_STRLIT) error(msg, "static assertion message must be a string literal");
         if (!v) error(start, "static assertion failed: %s", str(msg->id));
-        tok = msg->next;
+        tok = tok_next(msg);
     } else if (!v) {
         error(start, "static assertion failed");
     }
@@ -6653,7 +6795,7 @@ static Node *static_assert_decl(Token **rest, Token *tok) {
 // template jumps to labels. All three are also spelled with underscores on
 // both sides, which the preprocessor has already folded into the keywords.
 static Token *asm_qualifiers(Token *tok, uint32_t *flags) {
-    for (;; tok = tok->next) {
+    for (;; tok = tok_next(tok)) {
         if (tok->kind == TK_VOLATILE) {
             *flags |= ASM_VOLATILE;
         } else if (tok->kind == TK_INLINE) {
@@ -6879,17 +7021,17 @@ static Token *asm_operand(Token **rest, Token *tok, bool is_output, AsmOperand *
     op->plus_arg_pos = -1;
 
     if (tok->kind == TK_LBRACKET) {
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
         if (tok->kind != TK_IDENT) error(tok, "expected identifier in ‘asm’ operand name");
         op->name = str(tok->id);
-        tok = skip(tok->next, TK_RBRACKET);
+        tok = skip(tok_next(tok), TK_RBRACKET);
     }
 
     if (tok->kind != TK_STRLIT) error(tok, "expected string literal in ‘asm’");
     if (tok->enc_prefix != PREFIX_NONE) error(tok, "expected a plain string literal in ‘asm’");
     op->loc = loc_of(tok);
     op->cons = str(tok->id);
-    tok = skip(tok->next, TK_LPAREN);
+    tok = skip(tok_next(tok), TK_LPAREN);
     op->expr = assign(&tok, tok);
     tok = skip(tok, TK_RPAREN);
 
@@ -6936,9 +7078,9 @@ static Token *asm_clobbers(Token **rest, Token *tok, char **cons) {
         char *name = str(tok->id);
         if (!name[0]) error(tok, "expected non-empty string in ‘asm’ clobber list");
         *cons = asm_cons_add(*cons, format("~{%s}", name));
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
         if (tok->kind != TK_COMMA) break;
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
     }
     *rest = tok;
     return tok;
@@ -6967,9 +7109,9 @@ static Token *asm_goto_labels(Token **rest, Token *tok, Node *node) {
         gotos = ref;
         (*NODE_ASM_SIDE(node))->labels[(*NODE_ASM_SIDE(node))->nlabels++] = ref;
 
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
         if (tok->kind != TK_COMMA) break;
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
         if (tok->kind != TK_IDENT) error(tok, "expected label name in ‘asm’ goto label list");
     }
     *rest = tok;
@@ -6991,13 +7133,13 @@ static Node *asm_stmt(Token **rest, Token *tok) {
     // fields the parser does not set read as zero -- which is what they were
     // when they were members of every node.
     (*NODE_ASM_SIDE(node)) = emalloc(sizeof(AsmSide));
-    tok = asm_qualifiers(tok->next, &(*NODE_ASM_SIDE(node))->flags);
+    tok = asm_qualifiers(tok_next(tok), &(*NODE_ASM_SIDE(node))->flags);
     tok = skip(tok, TK_LPAREN);
 
     if (tok->kind != TK_STRLIT) error(tok, "expected string literal in ‘asm’");
     if (tok->enc_prefix != PREFIX_NONE) error(tok, "expected a plain string literal in ‘asm’");
     char *tmpl = str(tok->id);
-    tok = tok->next;
+    (tok = tok_next(tok), pos_of(tok));
 
     AsmOperand *ops = NULL, **tail = &ops;
     int nouts = 0, nins = 0;
@@ -7020,10 +7162,10 @@ static Node *asm_stmt(Token **rest, Token *tok) {
         if (spare)
             spare--;
         else if (tok->kind == TK_COLON)
-            tok = tok->next;
+            (tok = tok_next(tok), pos_of(tok));
         else {
             spare = 1;
-            tok = tok->next;
+            (tok = tok_next(tok), pos_of(tok));
         }
         if (spare) {
             // The colon just read was the first half of a `::`, and its
@@ -7041,7 +7183,8 @@ static Node *asm_stmt(Token **rest, Token *tok) {
             tok = asm_goto_labels(&tok, tok, node);
         sect++;
     }
-    if ((*NODE_ASM_SIDE(node))->nlabels && !((*NODE_ASM_SIDE(node))->flags & ASM_GOTO)) error(start, "expected ‘goto’ before asm goto label list");
+    if ((*NODE_ASM_SIDE(node))->nlabels && !((*NODE_ASM_SIDE(node))->flags & ASM_GOTO))
+        error(start, "expected ‘goto’ before asm goto label list");
 
     // Two operands may not share a name: the template refers to them by it.
     for (AsmOperand *op = ops; op; op = op->next)
@@ -7123,8 +7266,9 @@ static Node *asm_stmt(Token **rest, Token *tok) {
     // rewritten at all: GCC's dialect alternatives, like its `%` escapes,
     // belong to the extended form. clang keeps `{a|b}` in a basic statement
     // and rewrites it in an extended one, operands or not.
-    (*NODE_ASM_SIDE(node))->tmpl = asm_tmpl_conv(start, tmpl, ops, (*NODE_ASM_SIDE(node))->labels, (*NODE_ASM_SIDE(node))->nlabels, nouts + nins + nplus,
-                                   sect > 0 && T.asm_dialect_alt, false);
+    (*NODE_ASM_SIDE(node))->tmpl =
+        asm_tmpl_conv(start, tmpl, ops, (*NODE_ASM_SIDE(node))->labels, (*NODE_ASM_SIDE(node))->nlabels,
+                      nouts + nins + nplus, sect > 0 && T.asm_dialect_alt, false);
     return node;
 }
 
@@ -7135,8 +7279,8 @@ static Node *asm_stmt(Token **rest, Token *tok) {
 static Token *asm_decl(Token *tok) {
     Token *start = tok;
     uint32_t flags = 0;
-    Token *qual = tok->next;
-    tok = asm_qualifiers(tok->next, &flags);
+    Token *qual = tok_next(tok);
+    tok = asm_qualifiers(tok_next(tok), &flags);
     // There is no statement for `volatile` to say anything about, and no
     // function for `goto` to jump inside: clang reports the first and gcc
     // does not even parse it.
@@ -7145,7 +7289,7 @@ static Token *asm_decl(Token *tok) {
     if (tok->kind != TK_STRLIT) error(tok, "expected string literal in ‘asm’");
     if (tok->enc_prefix != PREFIX_NONE) error(tok, "expected a plain string literal in ‘asm’");
     char *tmpl = str(tok->id);
-    tok = tok->next;
+    (tok = tok_next(tok), pos_of(tok));
     // The colon of an extended statement. gcc reports the register
     // constraint that has nowhere to go; there is no statement to be an
     // lvalue in, which is what its other half of the message is about.
@@ -7278,13 +7422,17 @@ static int cur_pack;
 static bool consume_pragma(Token **rest, Token *tok) {
     if (tok->kind != TK_PRAGMA) return false;
     cur_pack = (int)int128_to_i64(tok->ival);
-    *rest = tok->next;
+    parse_commit(rest, tok_next(tok)), pos_of(tok);
     return true;
 }
 
 static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
     Node dummy = {}, *cur = &dummy;
     Node *node = new_node(ND_COMP_STMT, tok);
+    // A label met while this block is parsed is nested in it, and the chain is
+    // what the marking walks outward along.
+    bool blk_pushed = blk_depth < 64;
+    if (blk_pushed) blk_stack[blk_depth++] = node;
 
     if (!is_func_body) {
         enter_scope();
@@ -7300,7 +7448,7 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
         scope->vla_num = 0;
     }
 
-    tok = tok->next;
+    (tok = tok_next(tok), pos_of(tok));
     while (tok->kind != TK_RBRACE) {
         if (consume_pragma(&tok, tok)) continue;
         Token *start = tok;
@@ -7368,7 +7516,7 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
                     }
                     scope->vla_num = 0;
                     if (tok->kind != TK_COMMA) break;
-                    tok = tok->next;
+                    (tok = tok_next(tok), pos_of(tok));
                 }
             } else {
                 cur = cur->next = declaration(&tok, tok, basety, sclass, align, funcspec, attrs);
@@ -7405,6 +7553,7 @@ static Node *compound_stmt2(Token **rest, Token *tok, bool is_func_body) {
         if (restore) cur = cur->next = restore;
     }
     cur->next = NULL;
+    if (blk_pushed) blk_depth--;
     *rest = skip(tok, TK_RBRACE);
 
     // An empty block falls through. A block with items in it has already
@@ -7442,7 +7591,7 @@ static void check_deprecated_ty(Type *ty, Token *tok) {
 }
 
 static Type *enum_decl(Token **rest, Token *tok) {
-    tok = tok->next;
+    (tok = tok_next(tok), pos_of(tok));
     // EnumSpec ::= "enum" AttrSpec* Ident? ...
     Attr *enum_attrs = NULL;
     while (is_attr_start(tok)) {
@@ -7458,7 +7607,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
     TagNameSpace *ns;
     if (tok->kind == TK_IDENT) {
         tag = tok;
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
     }
 
     // EnumTypeSpec ::= ":" SpecQualList
@@ -7471,7 +7620,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
     if (tok->kind == TK_COLON) {
         Token *colon = tok;
         int align = 0;
-        fixed = declspecs(&tok, tok->next, NULL, &align, NULL, &fixed_attrs);
+        fixed = declspecs(&tok, tok_next(tok), NULL, &align, NULL, &fixed_attrs);
         if (!is_integer(fixed)) diag_exit("error", colon, "the type of an enum shall be an integer type");
         // The alignment does not reach the enum: an enum with a fixed type is
         // as wide and as aligned as that type, which is what clang makes of
@@ -7570,7 +7719,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
                 diag_exit("note", ns2->loc, "previous definition is here");
             }
         }
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
 
         // Enumr ::= Ident AttrSpec* ("=" ConstExp)?
         Attr *enm_attrs = NULL;
@@ -7582,7 +7731,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
             enm_attrs = list;
         }
 
-        if (tok->kind == TK_AS) val = const_expr128(&tok, tok->next);
+        if (tok->kind == TK_AS) val = const_expr128(&tok, tok_next(tok));
 
         if (fixed && !enum_val_fits(fixed, val))
             diag_exit("error", enm_name, "enumerator value %lld is not representable in the type of ‘enum %s’",
@@ -7756,7 +7905,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
                     mem->is_packed = true;
                 } else if (!strcmp(a->info->name, "aligned") && a->args) {
                     Token *t;
-                    mem->align = MAX(mem->align, (int)const_expr(&t, a->args->next));
+                    mem->align = MAX(mem->align, (int)const_expr(&t, tok_next(a->args)));
                     mem->is_align = true;
                 }
             }
@@ -7764,7 +7913,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             if (mem->ty->kind == TY_FUNC) error(mem_name, "field ‘%s’ declared as a function", str(mem_name->id));
             if (is_variably_modified(mem->ty))
                 error(mem_name, "field ‘%s’ has variably modified type", str(mem_name->id));
-            if (mem->ty->size < 0 && tok->next->kind != TK_RBRACE)
+            if (mem->ty->size < 0 && tok_next(tok)->kind != TK_RBRACE)
                 error(mem_name, "variable ‘%s’ has incomplete type", str(mem_name->id));
 
             mem->name = mem_name;
@@ -7793,7 +7942,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
         ty->is_flexible = true;
     }
 
-    *rest = tok->next;
+    parse_commit(rest, tok_next(tok)), pos_of(tok);
     ty->members = dummy.next;
 }
 
@@ -7834,7 +7983,7 @@ static void layout_struct(Type *ty, bool is_union) {
             ty->is_packed = true;
         } else if (!strcmp(a->info->name, "aligned") && a->args) {
             Token *t;
-            attr_align = MAX(attr_align, (int)const_expr(&t, a->args->next));
+            attr_align = MAX(attr_align, (int)const_expr(&t, tok_next(a->args)));
         }
     }
     // The packed / aligned attributes are consumed by the layout; they
@@ -7958,7 +8107,7 @@ static void layout_struct(Type *ty, bool is_union) {
 static Type *record_decl(Token **rest, Token *tok) {
     bool is_union = tok->kind == TK_UNION;
     char *ty_kind = tok->kind == TK_UNION ? "union" : "struct";
-    tok = tok->next;
+    (tok = tok_next(tok), pos_of(tok));
     // RecordSpec ::= Record AttrSpec* Ident? ...
     Attr *rec_attrs = NULL;
     while (is_attr_start(tok)) {
@@ -7974,7 +8123,7 @@ static Type *record_decl(Token **rest, Token *tok) {
     Type *ty = NULL;
     if (tok->kind == TK_IDENT) {
         tag = tok;
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
     }
 
     if (tag && tok->kind != TK_LBRACE) {
@@ -8090,7 +8239,7 @@ note:
 
 // TypeofSpec ::= ("typeof" | "typeof_unqual") "(" (Exp | TypeName) ")"
 static Type *typeof_specifier(Token **rest, Token *tok, bool is_unqual) {
-    tok = skip(tok->next, TK_LPAREN);
+    tok = skip(tok_next(tok), TK_LPAREN);
 
     Type *ty;
     // Only the type is wanted, so only a variable length operand is
@@ -8138,7 +8287,7 @@ static Type *typeof_specifier(Token **rest, Token *tok, bool is_unqual) {
 // whitespace tokens, so "[ [" and "[[]]" are detected structurally.
 
 static bool is_attr_start(Token *tok) {
-    return tok->kind == TK_ATTR || (tok->kind == TK_LBRACKET && tok->next->kind == TK_LBRACKET);
+    return tok->kind == TK_ATTR || (tok->kind == TK_LBRACKET && tok_next(tok)->kind == TK_LBRACKET);
 }
 
 // Attr ::= Ident ("::" Ident)? AttrArg?, one entry of an attribute
@@ -8155,13 +8304,13 @@ static Attr *attr_entry(Token **rest, Token *tok, bool is_gnu) {
     if (tok->kind == TK_IDENT || tk_is_keyword(tok)) {
         char *ns = NULL;
         char *name = str(tok->id);
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
         if (tok->kind == TK_COLONCOLON) {
             ns = name;
-            tok = tok->next;
+            (tok = tok_next(tok), pos_of(tok));
             if (tok->kind != TK_IDENT && !tk_is_keyword(tok)) error(tok, "expected attribute name");
             name = str(tok->id);
-            tok = tok->next;
+            (tok = tok_next(tok), pos_of(tok));
         }
         // The GNU spelling lives in the gnu namespace; the C23 spelling
         // defaults to the standard namespace.
@@ -8191,9 +8340,9 @@ static Attr *attr_entry(Token **rest, Token *tok, bool is_gnu) {
             if (tok->kind == TK_LPAREN || tok->kind == TK_LBRACKET || tok->kind == TK_LBRACE) depth++;
             if (tok->kind == TK_RPAREN || tok->kind == TK_RBRACKET || tok->kind == TK_RBRACE)
                 if (--depth == 0) break;
-            tok = tok->next;
+            (tok = tok_next(tok), pos_of(tok));
         }
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
     }
     *rest = tok;
     return attr;
@@ -8202,21 +8351,21 @@ static Attr *attr_entry(Token **rest, Token *tok, bool is_gnu) {
 // AttrSpec ::= "[" "[" Attr? ("," Attr?)* "]" "]"
 static Attr *attr_list_c23(Token **rest, Token *tok) {
     Token *start = tok;
-    tok = tok->next->next;
+    (tok = tok_next(tok)->next, pos_of(tok));
     Attr dummy = {}, *cur = &dummy;
-    while (tok->kind != TK_RBRACKET || tok->next->kind != TK_RBRACKET) {
+    while (tok->kind != TK_RBRACKET || tok_next(tok)->kind != TK_RBRACKET) {
         if (cur != &dummy) tok = skip(tok, TK_COMMA);
         cur = cur->next = attr_entry(&tok, tok, false);
         if (tok->kind == TK_EOF) error(start, "expected ']]'");
     }
-    *rest = tok->next->next;
+    parse_commit(rest, tok_next(tok)->next), pos_of(tok);
     return dummy.next;
 }
 
 // __attribute__ ( ( Attr ("," Attr)* )? ), the GNU spelling.
 static Attr *attr_list_gnu(Token **rest, Token *tok) {
     Token *start = tok;
-    tok = skip(tok->next, TK_LPAREN);
+    tok = skip(tok_next(tok), TK_LPAREN);
     tok = skip(tok, TK_LPAREN);
     Attr dummy = {}, *cur = &dummy;
     while (tok->kind != TK_RPAREN) {
@@ -8225,7 +8374,7 @@ static Attr *attr_list_gnu(Token **rest, Token *tok) {
         if (tok->kind == TK_EOF) error(start, "expected ')'");
     }
     tok = skip(tok, TK_RPAREN);
-    *rest = tok->next;
+    parse_commit(rest, tok_next(tok)), pos_of(tok);
     return dummy.next;
 }
 
@@ -8284,7 +8433,7 @@ static void attr_decl_apply(Attr *attrs, int *funcspec, int *align, bool gnu_onl
             *funcspec |= Q_NORETURN;
         } else if (!strcmp(a->info->name, "aligned") && a->args) {
             Token *t;
-            *align = MAX(*align, (int)const_expr(&t, a->args->next));
+            *align = MAX(*align, (int)const_expr(&t, tok_next(a->args)));
         }
     }
 }
@@ -8339,7 +8488,7 @@ static void apply_postdecl_attrs(Type *ty) {
         if (a->info->ns == ATTR_NS_CLANG) continue;  // recognized and ignored
         if (!strcmp(a->info->name, "aligned") && a->args) {
             Token *t;
-            ty->align = MAX(ty->align, (int)const_expr(&t, a->args->next));
+            ty->align = MAX(ty->align, (int)const_expr(&t, tok_next(a->args)));
         } else if (a->info->ns == ATTR_NS_GNU && (a->info->targets & ATTR_DECL) && ty->kind != TY_FUNC) {
             // Written after the declarator, a GNU declaration attribute is
             // still a declaration attribute -- sym_attr_flags() reads it --
@@ -8356,9 +8505,9 @@ static void apply_postdecl_attrs(Type *ty) {
 // The priority an initializer attribute carries: its argument, or the
 // default both gcc and clang use.
 static int attr_prio(Attr *a) {
-    if (!a->args || a->args->next->kind == TK_RPAREN) return 65535;
+    if (!a->args || tok_next(a->args)->kind == TK_RPAREN) return 65535;
     Token *t;
-    int prio = (int)const_expr(&t, a->args->next);
+    int prio = (int)const_expr(&t, tok_next(a->args));
     if (prio < 0 || prio > 65535) error(a->tok, "priority for ‘%s’ must be between 0 and 65535", a->info->name);
     return prio;
 }
@@ -8388,7 +8537,8 @@ static void sym_attr_flags(Sym *var, Attr *attrs, bool gnu_only) {
             // The handler is looked up where one can run -- an automatic
             // object at block scope -- and the attribute is diagnosed as
             // ignored everywhere else, so all this keeps is the argument.
-            if (!a->args || a->args->next->kind == TK_RPAREN) error(a->tok, "‘cleanup’ attribute takes one argument");
+            if (!a->args || tok_next(a->args)->kind == TK_RPAREN)
+                error(a->tok, "‘cleanup’ attribute takes one argument");
             var->cleanup_attr = a;
         }
     }
@@ -8425,7 +8575,7 @@ static Token *attr_decl(Token *tok) {
             if (!strcmp(a->info->name, "noreturn")) error(a->tok, "‘noreturn’ attribute only applies to functions");
         }
     }
-    return t->next;
+    return tok_next(t);
 }
 
 static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int *funcspec, Attr **attrs) {
@@ -8433,7 +8583,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
     // diagnostics. cxx has no such diagnostics yet, so it is simply
     // consumed -- glibc's <stdlib.h>/<wchar.h> write
     // `__extension__ typedef struct ...`.
-    while (tok->kind == TK_EXTENSION) tok = tok->next;
+    while (tok->kind == TK_EXTENSION) tok = tok_next(tok);
 
     Type *ty;
     bool seen_auto = false;
@@ -8553,8 +8703,8 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
             case TK_ATOMIC: {
                 Token *start = tok;
                 qual |= Q_ATOMIC;
-                if (tok->next->kind != TK_LPAREN) break;
-                ty = typename(&tok, tok->next->next);
+                if (tok_next(tok)->kind != TK_LPAREN) break;
+                ty = typename(&tok, tok_next(tok)->next);
                 if (is_array(ty)) error(start, "_Atomic cannot be applied to array type");
                 if (ty->kind == TY_FUNC) error(start, "_Atomic cannot be applied to function type");
                 if (ty->qual & Q_ATOMIC) error(start, "_Atomic cannot be applied to atomic type");
@@ -8590,7 +8740,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 goto check_type;
             case TK_ALIGNAS: {
                 if (!align) error(tok, "alignas is not allowed in this context");
-                tok = skip(tok->next, TK_LPAREN);
+                tok = skip(tok_next(tok), TK_LPAREN);
 
                 int a = is_typename(tok, true) ? typename(&tok, tok)->align : const_expr(&tok, tok);
                 // 6.7.5p5: an alignment specification of zero has no effect;
@@ -8654,7 +8804,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
                 break;
             case TK_BITINT: {
                 if (bitint_w >= 0) error(tok, "duplicate ‘_BitInt’");
-                tok = skip(tok->next, TK_LPAREN);
+                tok = skip(tok_next(tok), TK_LPAREN);
                 bitint_w = (int)const_expr(&tok, tok);
                 tok = skip(tok, TK_RPAREN);
                 if (bitint_w < 1 || bitint_w > 128) error(tok, "width of ‘_BitInt’ must be between 1 and %d", 128);
@@ -8670,7 +8820,7 @@ static Type *declspecs(Token **rest, Token *tok, SClass *sclass, int *align, int
             default:
                 break;
         }
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
     check_type:
         switch (typespec_cnt) {
             case VOID:
@@ -8878,9 +9028,7 @@ static void note_param_sym(Type *ty, Sym *var) {
     param_map_add((uintptr_t)ty >> 3, var);
 }
 
-static Sym *param_sym_of(Type *ty) {
-    return param_map_get((uintptr_t)ty >> 3);
-}
+static Sym *param_sym_of(Type *ty) { return param_map_get((uintptr_t)ty >> 3); }
 
 // The prototype scope the last function declarator opened, or NULL. A
 // definition takes the bounds it registered over into the function's own
@@ -8919,11 +9067,11 @@ static void adopt_proto_vla_exprs(void) {
 
 static Type *func_param(Token **rest, Token *tok, Type *ty) {
     tok = skip(tok, TK_LPAREN);
-    if (tok->kind == TK_VOID && tok->next->kind == TK_RPAREN) {
+    if (tok->kind == TK_VOID && tok_next(tok)->kind == TK_RPAREN) {
         // No parameter list, so nothing for a definition to take over either.
         proto_scope = NULL;
         proto_locals = NULL;
-        *rest = tok->next->next;
+        parse_commit(rest, tok_next(tok)->next), pos_of(tok);
         return func_type(ty);
     }
 
@@ -8945,13 +9093,13 @@ static Type *func_param(Token **rest, Token *tok, Type *ty) {
     // nothing may follow it before the ')'.
     if (tok->kind == TK_ELLIPSIS) {
         is_variadic = true;
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
     } else {
         while (tok->kind != TK_RPAREN) {
             if (cur != &dummy) tok = skip(tok, TK_COMMA);
             if (tok->kind == TK_ELLIPSIS) {
                 is_variadic = true;
-                tok = tok->next;
+                (tok = tok_next(tok), pos_of(tok));
                 break;
             }
 
@@ -9088,15 +9236,17 @@ static Type *array_dimensions(Token **rest, Token *tok, Type *ty, bool is_param)
     if (!is_param && qual) error(tmp, "type qualifier used in array declarator outside of function prototype");
     if (is_param && !outermost && qual) error(tmp, "type qualifier used in non-outermost array type derivation");
 
+    fold_seen_comma = false;
     if (is_static) {
         len = assign(&tok, tok);
-    } else if (tok->kind == TK_STAR && tok->next->kind == TK_RBRACKET) {
+    } else if (tok->kind == TK_STAR && tok_next(tok)->kind == TK_RBRACKET) {
         if (!is_param) error(tok, "[*] used outside of function prototype");
         is_star = true;
-        tok = tok->next;
+        (tok = tok_next(tok), pos_of(tok));
     } else if (tok->kind != TK_RBRACKET) {
         len = assign(&tok, tok);
     }
+    if (is_file_scope() && fold_seen_comma) error(tok, "expression is not a constant expression");
 
     tok = skip(tok, TK_RBRACKET);
     ty = decl_suffix(rest, tok, ty, is_param);
@@ -9188,7 +9338,7 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
         bool saved_nested = in_nested_declr;
         bool saved_outermost = param_outermost;
         in_nested_declr = true;
-        declarator(&tok, start->next, &dummy);
+        declarator(&tok, tok_next(start), &dummy);
         tok = skip(tok, TK_RPAREN);
         ty = decl_suffix(rest, tok, ty, false);
         in_nested_declr = saved_nested;
@@ -9197,11 +9347,11 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
         // re-armed for the second read.
         param_outermost = saved_outermost;
         ty = decl_attrs(rest, *rest, ty);
-        return declarator(&tok, start->next, ty);
+        return declarator(&tok, tok_next(start), ty);
     }
 
     if (tok->kind != TK_IDENT) error(tok, "expected identifier or ‘(’");
-    ty = decl_suffix(rest, tok->next, ty, false);
+    ty = decl_suffix(rest, tok_next(tok), ty, false);
     ty->name = tok;
     ty = decl_attrs(rest, *rest, ty);
     return ty;
@@ -9212,7 +9362,7 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, SClass sclass, 
     Node *node = new_node(ND_DECL, tok);
     if (tok->kind == TK_SEMI) {
         if (sclass & SC_CONSTEXPR) error(tok, "‘constexpr’ requires an initialized data declaration");
-        *rest = tok->next;
+        parse_commit(rest, tok_next(tok)), pos_of(tok);
         return node;
     }
     node->body = init_decl_list(&tok, tok, basety, sclass, align, funcspec, attrs);
@@ -9247,7 +9397,7 @@ static void resolve_goto_labels(void) {
 
         // The name is the whole reference for an asm goto, which has no
         // token after it to point at.
-        if (!NODE_REF(x)->target) error(x->kind == ND_ASM_REF ? x->tok : x->tok->next, "use of undeclared label");
+        if (!NODE_REF(x)->target) error(x->kind == ND_ASM_REF ? x->tok : tok_next(x->tok), "use of undeclared label");
     }
 
     gotos = labels = NULL;
@@ -9281,7 +9431,7 @@ static Token *external_declaration(Token *tok) {
     Attr *attrs = NULL;
     Type *basety = declspecs(&tok, tok, &sclass, &align, &funcspec, &attrs);
     attr_decl_apply(attrs, &funcspec, &align, false);
-    if (tok->kind == TK_SEMI) return tok->next;
+    if (tok->kind == TK_SEMI) return tok_next(tok);
 
     int cnt = -1;
     while (1) {
@@ -9619,11 +9769,11 @@ static Token *external_declaration(Token *tok) {
             if (tok->kind == TK_AS) {
                 // Like clang: atomic aggregates cannot be brace-initialized.
                 if ((ty->qual & Q_ATOMIC) && (ty->kind == TY_STRUCT || ty->kind == TY_UNION) &&
-                    tok->next->kind == TK_LBRACE)
+                    tok_next(tok)->kind == TK_LBRACE)
                     error(var_name, "illegal initializer type '_Atomic(%s)'", record_diag_name(ty));
                 Sym *outer = cur_init;
                 cur_init = var;
-                gvar_initializer(&tok, tok->next, var);
+                gvar_initializer(&tok, tok_next(tok), var);
                 cur_init = outer;
                 var->is_defined = true;
                 // A declaration with an initializer is a definition, whatever
@@ -9659,7 +9809,7 @@ static Token *external_declaration(Token *tok) {
         if (match(&tok, tok, TK_COMMA))
             continue;
         else if (tok->kind == TK_SEMI)
-            return tok->next;
+            return tok_next(tok);
         else
             error(tok, "expected ‘;’ after top level declarator");
     note:
@@ -9703,7 +9853,7 @@ static void check_inline_definitions(void) {
             // p5: declared inline, never defined in this unit.
             if (sym->funcspec & Q_INLINE)
                 warning_loc(WG_DEFAULT, sym->loc, "inline function \u2018%s\u2019 declared but never defined",
-                        str(sym->id));
+                            str(sym->id));
             continue;
         }
         if (!sym->all_decls_inline) continue;
@@ -9810,7 +9960,7 @@ static void check_unused_statics(void) {
         // str(tok->id) rather than str(sym->id): a block-scope static is
         // emitted as `f.q`, and gcc and clang name it `q`.
         warning_loc(is_const_object(sym->ty) ? WG_UNUSED_CONST_VARIABLE : WG_UNUSED_VARIABLE, sym->loc,
-                "unused variable ‘%s’", str(sym->id));
+                    "unused variable ‘%s’", str(sym->id));
     }
 }
 

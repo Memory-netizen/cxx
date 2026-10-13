@@ -38,7 +38,7 @@ static bool opt_fsyntax_only;
 static bool opt_P;
 static bool opt_cc1;
 static bool opt_hash_hash_hash;
-static bool opt_ast_dump;
+bool opt_ast_dump;   // read by parser.c: that mode prints the tree as parsed
 static bool opt_dump_tokens;
 static bool opt_dump_raw_tokens;
 
@@ -878,7 +878,7 @@ static bool needs_space(Token *prev, Token *cur) {
     // A `.` that would join a number, and the third one of an ellipsis.
     if (prev->kind == TK_NUM && c2 == '.') return true;
     if (c1 == '.' && cur->kind == TK_NUM) return true;
-    if (c1 == '.' && c2 == '.' && cur->next && cur->next->kind == TK_ELLIPSIS) return true;
+    if (c1 == '.' && c2 == '.' && tok_next(cur) && cur->next->kind == TK_ELLIPSIS) return true;
 
     // Two punctuators that would lex as one longer one; the lexer that reads
     // them is the authority on which those are.
@@ -945,9 +945,9 @@ static void e_emit(Token *tok) {
 // than cleared.
 void print_stream_upto(Token *head, Token *end) {
     if (!e_out || !end) return;
-    Token *tok = e_last ? e_last->next : head;
-    for (; tok && tok->kind != TK_EOF; tok = tok->next) {
-        Token *save = tok->next;
+    Token *tok = e_last ? tok_next(e_last) : head;
+    for (; tok && tok->kind != TK_EOF; tok = tok_next(tok)) {
+        Token *save = tok_next(tok);
         Token eof = {};
         tok->next = &eof;
         convert_keywords(tok);
@@ -963,13 +963,13 @@ void print_stream_end(void) { if (e_out) fprintf(e_out, "\n"); }
 static void print_tokens(Token *tok) {
     print_stream_begin();
     print_stream_upto(tok, NULL);  // no end: the whole chain
-    for (; tok->kind != TK_EOF; tok = tok->next) e_emit(tok);
+    for (; tok->kind != TK_EOF; tok = tok_next(tok)) e_emit(tok);
     print_stream_end();
 }
 
 static Token *filter_tokens(Token *tok) {
     Token dummy = {}, *cur = &dummy;
-    for (; tok; tok = tok->next) {
+    for (; tok; tok = tok_next(tok)) {
         if (tok->kind == TK_LINE) continue;
         cur = cur->next = tok;
     }
@@ -1062,12 +1062,15 @@ static void cc1(void) {
         tok = tokenize_file(base_file);
         if (!tok) fatal("%s: %s", base_file, strerror(errno));
         dump_raw_tokens(tok);
-        tok = preprocess(tok);
+        exit(0);   // the dump is the whole job in this mode
     } else {
         tok = preprocess_file(base_file);
     }
 
-    if (opt_dump_tokens) dump_tokens(tok);
+    if (opt_dump_tokens) {
+        dump_tokens(tok);
+        exit(0);   // the dump is the whole job in this mode
+    }
 
     // If -M or -MD is given, print file dependencies.
     if (opt_M || opt_MD) {
@@ -1091,7 +1094,12 @@ static void cc1(void) {
 
     Module *prog = parse(tok);
 
-    if (opt_ast_dump) dump_ast(prog);
+    if (opt_ast_dump) {
+        // The dump is the original tree: folding below would rewrite it, and
+        // nothing after this point is wanted in this mode either.
+        dump_ast(prog);
+        exit(0);
+    }
 
     fold_ast(prog);
 
