@@ -869,7 +869,7 @@ bool file_exists(char *path) {
 // `sa_family_tsa_family;` that way.
 static bool needs_space(Token *prev, Token *cur) {
     if (!prev) return false;
-    unsigned char c1 = (unsigned char)tok_text(prev)[prev->len - 1];
+    unsigned char c1 = last_logical_byte(prev);
     unsigned char c2 = (unsigned char)tok_text(cur)[0];
 
     // An identifier or a number runs into what follows it.
@@ -885,7 +885,10 @@ static bool needs_space(Token *prev, Token *cur) {
     char buf[8];
     int n = 0;
     buf[n++] = c1;
-    for (uint32_t i = 0; i < cur->len && n < 7; i++) buf[n++] = tok_text(cur)[i];
+    for (char *q = tok_text(cur), *qe = q + cur->len; q < qe && n < 7;) {
+        if (is_splice(q)) { q = splice_end(q); continue; }
+        buf[n++] = *q++;
+    }
     buf[n] = 0;
     uint32_t kind;
     return read_punct(buf, &kind) > 1;
@@ -934,7 +937,7 @@ static void e_emit(Token *tok) {
     // starts with one, so the old loop never asked needs_space() with it unset,
     // but a range can start with real tokens.
     if (tok->is_leadingws || (e_prev && needs_space(e_prev, tok))) fprintf(e_out, " ");
-    fprintf(e_out, "%.*s", (int)tok->len, tok_text(tok));
+    emit_logical(e_out, tok_text(tok), tok->len);
     e_prev = tok;
     e_last = tok;
 }

@@ -666,6 +666,28 @@ extern uint32_t file_tab_cap;
 static inline SrcFile *file_of(uint32_t uid) { return uid && uid < file_tab_cap ? file_tab[uid] : 0; }
 static inline char *tok_text(Token *tok) { return file_of(tok->file_uid)->contents + tok->loc; }
 
+// Translation phase 2, read instead of written (perf.md 8or). A backslash at the
+// end of a line -- LF, CRLF or a lone CR -- and the line break it escapes are one
+// *splice*, and the two lines are one logical line. The file is never rewritten
+// for it, so the splice stays in the bytes and every reader that wants a spelling
+// in one piece asks for the logical bytes instead.
+static inline bool is_splice(char *p) { return *p == '\\' && (p[1] == '\n' || p[1] == '\r'); }
+static inline char *splice_end(char *p) { return p + (p[1] == '\r' && p[2] == '\n' ? 3 : 2); }
+
+// The spelling of [p, p+len) with the splices taken out, NUL-terminated, and its
+// length. `p` itself when there is none -- what almost every token has.
+char *splice_free(char *p, size_t len, size_t *out_len);
+
+// A token's spelling, logically. The token's own span is left alone.
+char *tok_logical(Token *tok, size_t *out_len);
+
+// The last byte the token shows, which is not tok_text()[len-1] when the span
+// ends inside a splice.
+unsigned char last_logical_byte(Token *tok);
+
+// Print a span the way phase 2 would have left it: what -E and the dumps show.
+void emit_logical(FILE *out, char *p, size_t len);
+
 // A speculative parse says "accepted" by moving the caller's position and "rejected"
 // by leaving it. Those are the two acts, named: commit writes the position back through
 // `rest`, rollback does not. With the token chain in hand this is just the pointer; when

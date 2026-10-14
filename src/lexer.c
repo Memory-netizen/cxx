@@ -1,4 +1,5 @@
 #include "cxx.h"
+#include <sys/mman.h>
 
 // Input file
 static SrcFile *cur_file;
@@ -148,6 +149,91 @@ int read_punct(char *p, uint32_t *kind) {
     }
 
     return 0;
+}
+
+// ---- Translation phase 2, read instead of written (perf.md 8or). ----
+
+static bool has_splice(char *p, size_t len) {
+    char *end = p + len;
+    while ((p = memchr(p, '\\', (size_t)(end - p)))) {
+        if (is_splice(p)) return true;
+        p++;
+    }
+    return false;
+}
+
+char *splice_free(char *p, size_t len, size_t *out_len) {
+    if (!has_splice(p, len)) {
+        if (out_len) *out_len = len;
+        return p;
+    }
+    char *end = p + len;
+    size_t n = len;
+    for (char *q = p; (q = memchr(q, '\\', (size_t)(end - q)));) {
+        if (is_splice(q)) { n -= (size_t)(splice_end(q) - q); q = splice_end(q); }
+        else q++;
+    }
+
+    char *buf = emalloc(n + 1);
+    char *w = buf;
+    while (p < end) {
+        if (is_splice(p)) { p = splice_end(p); continue; }
+        *w++ = *p++;
+    }
+    *w = '\0';
+    if (out_len) *out_len = n;
+    return buf;
+}
+
+char *tok_logical(Token *tok, size_t *out_len) {
+    return splice_free(tok_text(tok), tok->len, out_len);
+}
+
+unsigned char last_logical_byte(Token *tok) {
+    char *p = tok_text(tok), *end = p + tok->len;
+    unsigned char c = 0;
+    while (p < end) {
+        if (is_splice(p)) { p = splice_end(p); continue; }
+        c = (unsigned char)*p++;
+    }
+    return c;
+}
+
+void emit_logical(FILE *out, char *p, size_t len) {
+    char *end = p + len;
+    while (p < end) {
+        if (is_splice(p)) { p = splice_end(p); continue; }
+        char *q = p;
+        while (q < end && !is_splice(q)) q++;
+        fwrite(p, 1, (size_t)(q - p), out);
+        p = q;
+    }
+}
+
+// A punctuator a splice splits is still one punctuator, and read_punct() matches
+// contiguous bytes: read it out of a window with the splices taken out. `*raw` is
+// left after the same number of logical bytes in the file.
+static int read_punct_logical(char *p, uint32_t *kind, char **raw) {
+    char buf[16];
+    size_t n = 0;
+    char *q = p;
+    while (n < sizeof(buf) - 1 && *q && !is_ascii_space((unsigned char)*q) && *q != '"' && *q != '\'') {
+        if (is_splice(q)) { q = splice_end(q); continue; }
+        buf[n++] = *q++;
+    }
+    buf[n] = '\0';
+
+    int len = read_punct(buf, kind);
+    if (!len) return 0;
+
+    char *r = p;
+    for (int i = 0; i < len;) {
+        if (is_splice(r)) { r = splice_end(r); continue; }
+        r++;
+        i++;
+    }
+    *raw = r;
+    return len;
 }
 
 static void check_escape_range(Token *tok, uint64_t val) {
@@ -318,6 +404,13 @@ static int read_ident(char *start) {
 
     while (1) {
         char *uc_start = p;
+        // The two lines a splice joins are one line, so the pieces either side of
+        // it are one name. The span keeps the splice; the caller asks for the
+        // logical spelling.
+        if (is_splice(p)) {
+            p = splice_end(p);
+            continue;
+        }
         if (*p == '\\' && (p[1] == 'u' || p[1] == 'U')) {
             c = read_universal_char(&p, p + 2, p[1], cur_file);
             if (c <= 0x9F)
@@ -495,7 +588,8 @@ static void convert_utf32_str_literal(Token *tok, char *str) {
 }
 
 void convert_str_literal(Token *tok) {
-    char *str = convert_universal_chars(tok_text(tok), tok->len, file_of(tok->file_uid));
+    size_t len;
+    char *str = convert_universal_chars(tok_logical(tok, &len), (int)len, file_of(tok->file_uid));
     switch (tok->enc_prefix) {
         case PREFIX_NONE:
         case PREFIX_u8:
@@ -524,9 +618,11 @@ static Token *read_string_literal(char *start, char *quote, uint32_t prefix) {
     if (*p == '\0') goto error;
 
     while (1) {
-        if (*p == '\\')
+        if (is_splice(p))  // the literal goes on at the top of the next line
+            p = splice_end(p);
+        else if (*p == '\\')
             p += 2;
-        else if (*p == '\0' || *p == '\n')
+        else if (*p == '\0' || *p == '\n' || *p == '\r')
             goto error;
         else if (*p == '"')
             break;
@@ -544,9 +640,11 @@ error:
 }
 
 static void convert_char_literal(Token *tok) {
-    char *p = tok_text(tok);
+    size_t len;
+    char *str = tok_logical(tok, &len);
+    char *p = str;
     while (*p++ != '\'');
-    char *end = tok_text(tok) + tok->len - 1;
+    char *end = str + len - 1;
 
     uint32_t val = 0;
     while (p < end) {
@@ -572,9 +670,11 @@ static Token *read_char_literal(char *start, char *quote, uint32_t prefix) {
     if (*p == '\0') goto error;
 
     while (1) {
-        if (*p == '\\')
+        if (is_splice(p))  // the literal goes on at the top of the next line
+            p = splice_end(p);
+        else if (*p == '\\')
             p += 2;
-        else if (*p == '\0' || *p == '\n')
+        else if (*p == '\0' || *p == '\n' || *p == '\r')
             goto error;
         else if (*p == '\'')
             break;
@@ -600,6 +700,10 @@ error:
 static Token *read_int_literal(char *start) {
     char *p = start + 1;
     while (1) {
+        if (is_splice(p)) {  // one pp-number, two lines
+            p = splice_end(p);
+            continue;
+        }
         int c = *p;
         if (c == 'e' || c == 'E' || c == 'p' || c == 'P') {
             c = *++p;
@@ -634,8 +738,10 @@ static bool is_valid_digit(int c, int base) {
 
 static void convert_pp_num(Token *t) {
     t->kind = TK_NUM;
-    char *text = tok_text(t);
-    char *end = tok_text(t) + t->len;
+    // The spelling to read is the logical one: a splice may sit inside the number.
+    size_t tlen;
+    char *text = tok_logical(t, &tlen);
+    char *end = text + tlen;
     char first_ch = *text;
 
     int base = 10;
@@ -1070,7 +1176,12 @@ static void lex_scan(void) {
         // Read line comments.
         if (*p == '/' && p[1] == '/') {
             char *q = p + 2;
-            while (*q != '\n') q++;
+            // A splice continues the comment on the next line; a lone CR ends it,
+            // and so does the end of the file.
+            while (*q && *q != '\n' && *q != '\r') {
+                if (is_splice(q)) { q = splice_end(q); continue; }
+                q++;
+            }
             // A comment is leading white space for the token that follows it,
             // so that flag is all this has to leave behind when the dump
             // options are off.
@@ -1101,19 +1212,29 @@ static void lex_scan(void) {
         // becomes one. The two bits the parser reads off the *next* token --
         // start of line, leading white space -- are set here as they always
         // were, so the stream the parser sees does not change.
-        if (is_ascii_space((unsigned char)*p)) {
+        if (is_ascii_space((unsigned char)*p) || is_splice(p)) {
             char *q = p;
             int nl = 0;
-            while (is_ascii_space((unsigned char)*q)) {
-                if (*q++ == '\n') {
-                    nl++;
+            // Whether the run's last logical byte is space rather than a line
+            // break. A splice is space: the two lines it joins are one line.
+            bool ends_ws = false;
+            while (is_ascii_space((unsigned char)*q) || is_splice(q)) {
+                if (is_splice(q)) {
+                    // A splice contributes nothing: it is not a line break, so it
+                    // does not start a line, and it is not white space either, so
+                    // the run's last logical byte is still whatever came before.
+                    q = splice_end(q);
                     continue;
                 }
+                if (*q == '\r' && q[1] == '\n') { q += 2; nl++; ends_ws = false; continue; }
+                if (*q == '\n' || *q == '\r') { q++; nl++; ends_ws = false; continue; }
+                q++;
+                ends_ws = true;
             }
             if (nl) is_sol = true;
             // Blank space before a newline is leading white space; the newline
             // itself is not. "  \n  x" is both.
-            if (*(q - 1) != '\n') is_leadingws = true;
+            if (ends_ws) is_leadingws = true;
             if (opt_keep_ws_comments && !lex_lazy) {
                 tok = new_token(TK_WS, p, q);
                 if (nl) tok->kind = TK_NL;
@@ -1219,11 +1340,15 @@ static void lex_scan(void) {
             // what interning wants, and that buffer and its copy are pure overhead --
             // intern copies len bytes and terminates its own copy, so it never needed a
             // C string to begin with.
-            bool ucn = has_ucn(p, ident_len);
-            char *buf = ucn ? convert_universal_chars(p, ident_len, cur_file) : p;
+            // The name as it reads, which is the file's bytes unless a splice
+            // is inside it (perf.md 8or).
+            size_t name_len;
+            char *name = splice_free(p, (size_t)ident_len, &name_len);
+            bool ucn = has_ucn(name, (int)name_len);
+            char *buf = ucn ? convert_universal_chars(name, (int)name_len, cur_file) : name;
             // Interning copies the text and hashes it: the one piece of work a
             // skipped region must not pay for.
-            if (!lex_skip) tok->id = intern(buf, ucn ? (uint32_t)strlen(buf) : (uint32_t)ident_len);
+            if (!lex_skip) tok->id = intern(buf, ucn ? (uint32_t)strlen(buf) : (uint32_t)name_len);
             LINK(tok);
             p += tok->len;
             continue;
@@ -1232,15 +1357,25 @@ static void lex_scan(void) {
         // Punctuator
         if (*p <= 0x7F) {
             uint32_t kind;
-            int len = read_punct(p, &kind);
+            int len;
+            char *raw;
+            // A splice can split a punctuator (`+` \ newline `+` is one `++`), so
+            // when one is in reach the match is done on a logical window. Real
+            // sources never take that path: perf.md 8or counted none.
+            if (is_splice(p + 1) || is_splice(p + 2) || is_splice(p + 3)) {
+                len = read_punct_logical(p, &kind, &raw);
+            } else {
+                len = read_punct(p, &kind);
+                raw = p + len;
+            }
             if (len) {
-                tok = new_token(kind, p, p + len);
+                tok = new_token(kind, p, raw);
                 LINK(tok);
                 // The line this '#' introduces belongs to the chunk as well:
                 // read_line()/skip_line() walk it, and cond_directive() returns
                 // its first token as `after`.
                 if (kind == TK_HASH && tok->is_sol) LC->stop_pending = true;
-                p += len;
+                p = raw;
                 continue;
             }
         }
@@ -1347,7 +1482,12 @@ static void lex_skip_to_directive(void) {
         // Line comment.
         if (*p == '/' && p[1] == '/') {
             char *q = p + 2;
-            while (*q != '\n') q++;
+            // A splice continues the comment on the next line; a lone CR ends it,
+            // and so does the end of the file.
+            while (*q && *q != '\n' && *q != '\r') {
+                if (is_splice(q)) { q = splice_end(q); continue; }
+                q++;
+            }
             is_leadingws = true;
             p = q;
             continue;
@@ -1361,17 +1501,19 @@ static void lex_skip_to_directive(void) {
             continue;
         }
         // White space, and the two bits the tokenizer sets here.
-        if (is_ascii_space((unsigned char)*p)) {
+        if (is_ascii_space((unsigned char)*p) || is_splice(p)) {
             char *q = p;
             int nl = 0;
-            while (is_ascii_space((unsigned char)*q)) {
-                if (*q++ == '\n') {
-                    nl++;
-                    continue;
-                }
+            bool ends_ws = false;
+            while (is_ascii_space((unsigned char)*q) || is_splice(q)) {
+                if (is_splice(q)) { q = splice_end(q); continue; }
+                if (*q == '\r' && q[1] == '\n') { q += 2; nl++; ends_ws = false; continue; }
+                if (*q == '\n' || *q == '\r') { q++; nl++; ends_ws = false; continue; }
+                q++;
+                ends_ws = true;
             }
             if (nl) is_sol = true;
-            if (*(q - 1) != '\n') is_leadingws = true;
+            if (ends_ws) is_leadingws = true;
             p = q;
             continue;
         }
@@ -1432,17 +1574,38 @@ static char *read_file(char *path) {
         if (!fp) return NULL;
     }
 
-    // Read the entire file. When it is a regular file its size is known, so it
-    // takes one allocation and one read -- no growing, and no copy.
+    // A regular file is mapped, not copied: its size is known, nothing writes
+    // it, and mapping keeps the pages file-backed -- the kernel can drop them
+    // under pressure and a second compile of the same file shares them. Anything
+    // else (a pipe, or one of the two shapes noted below) is read in.
     char *buf = NULL;
     size_t buflen = 0, cap = 0;
+    bool mapped = false;
 
     struct stat st;
     if (fp != stdin && fstat(fileno(fp), &st) == 0 && S_ISREG(st.st_mode)) {
         cap = (size_t)st.st_size + 2;
-        // A source file is exactly the kind of large request this is for.
-        buf = cap >= BIG_THRESHOLD ? emalloc_big(cap) : emalloc(cap);
-        buflen = fread(buf, 1, (size_t)st.st_size, fp);
+        // The scanner reads up to two bytes past the text (the terminator, and a
+        // splice's CR LF), so the last page has to hold them: a size whose tail
+        // lands in a page that is wholly past the end of the file cannot be
+        // mapped. Three sizes in 4096 are like that, and a file that does not end
+        // with a newline takes the fixup below, which is a write.
+        if (st.st_size > 0 && st.st_size % 4096 <= 4092) {
+            char *m = mmap(NULL, cap, PROT_READ, MAP_PRIVATE, fileno(fp), 0);
+            if (m != MAP_FAILED) {
+                if (m[st.st_size - 1] == '\n') {
+                    buf = m;
+                    buflen = (size_t)st.st_size;
+                    mapped = true;
+                } else {
+                    munmap(m, cap);
+                }
+            }
+        }
+        if (!buf) {
+            buf = cap >= BIG_THRESHOLD ? emalloc_big(cap) : emalloc(cap);
+            buflen = fread(buf, 1, (size_t)st.st_size, fp);
+        }
     } else {
         // A pipe or something else without a size: read in steps. The arena hands
         // out contiguous memory -- it is a bump allocator and nothing else
@@ -1477,7 +1640,9 @@ static char *read_file(char *path) {
 
     // Make sure that the last line is properly terminated with '\n'.
     if (buflen > 0 && buf[buflen - 1] == '\\') fatal("stray ‘\\’ at end of file");
-    if (buflen == 0 || buf[buflen - 1] != '\n') buf[buflen] = '\n';
+    // A mapped file already ends with a newline (it had to, to be mapped), and
+    // writing to it would fault: the mapping is read-only on purpose.
+    if (!mapped && (buflen == 0 || buf[buflen - 1] != '\n')) buf[buflen] = '\n';
 
     return buf;
 }
@@ -1519,126 +1684,6 @@ SrcFile *new_file(char *name, int file_no, char *contents) {
     register_file(file);
     return file;
 }
-
-// Translation phases 2.
-// Removes backslashes followed by a newline.
-// Translation phases 1 and 2 in one pass: \r\n and \r become \n, and a
-// backslash-newline disappears. The newlines a splice swallows are handed back
-// at the next real newline, so that a logical line number still matches the
-// physical one -- which is what the two separate passes did, one copying the
-// whole buffer each time. A file with neither a carriage return nor a
-// backslash needs no rewriting at all, and memchr() -- vectorised -- decides
-// that without touching it.
-// Whether anything here needs rewriting at all: a carriage return, or a
-// backslash-newline to splice. A backslash that splices nothing -- and C source
-// is full of them, in strings and in macros -- does not, so this walks the
-// backslashes only rather than every byte of the file. p[len] is the terminator,
-// so reading p[1] at the last byte is safe.
-// 0: nothing to rewrite. -1: a carriage return, so the pass runs whatever else is
-// there. +1: a spliced line and no carriage return. The pass needs that distinction
-// -- it is what tells the run copy whether to look for '\r' at all -- and this is
-// where it is already known; asking again in the pass meant a second scan of every
-// file, which on a nine-megabyte translation unit is a megabyte of instructions.
-// Where rewriting has to start, or NULL if nowhere. *has_cr reports whether the
-// text holds a carriage return at all, which the run copy needs before it scans for
-// one. Returning the position rather than a yes/no lets the pass begin there: the
-// text before it is already correct and never has to be copied at all.
-static char *newline_fix_start(char *p, size_t len, bool *has_cr) {
-    char *cr = memchr(p, '\r', len);
-    *has_cr = cr != NULL;
-
-    char *end = p + len;
-    char *splice = NULL;
-    char *q = p;
-    while ((q = memchr(q, '\\', (size_t)(end - q)))) {
-        // A backslash followed by CR counts too: it comes before the CR, and if the
-        // start were the CR the backslash would be left unprocessed.
-        if (q[1] == '\n' || q[1] == '\r') {
-            splice = q;
-            break;
-        }
-        q++;
-    }
-
-    if (cr && splice) return cr < splice ? cr : splice;
-    return cr ? cr : splice;
-}
-
-static void canonicalize_and_splice(char *p) {
-    size_t len = strlen(p);
-    bool has_cr = false;
-    char *start = newline_fix_start(p, len, &has_cr);
-    if (!start) return;
-
-    // r reads and w writes; they are equal until something has to disappear, and
-    // the bulk copy below is memmove rather than memcpy because after that they
-    // overlap. Both begin where the rewriting begins: everything before it is
-    // already what it should be.
-    char *end = p + len;
-    char *r = start, *w = start;
-    int swallowed = 0;
-
-    while (r < end) {
-        if (*r == '\r') {
-            r += (r[1] == '\n') ? 2 : 1;
-            *w++ = '\n';
-            while (swallowed-- > 0) *w++ = '\n';
-        } else if (*r == '\\' && (r[1] == '\n' || r[1] == '\r')) {
-            r += (r[1] == '\r' && r[2] == '\n') ? 3 : 2;
-            swallowed++;
-        } else if (*r == '\n' && swallowed > 0) {
-            *w++ = *r++;
-            while (swallowed-- > 0) *w++ = '\n';
-        } else {
-            // Nothing to do until the next byte that needs attention, so copy the
-            // run in one go. memchr is vectorised and so is memmove, which turns a
-            // handful of instructions per byte into a fraction of one -- but a
-            // short run is not worth two calls, so those stay byte-wise.
-            // The run ends at the first byte that needs attention: a carriage
-            // return, a newline that has swallowed newlines waiting to be handed
-            // back, or a backslash that really splices. Backslashes that splice
-            // nothing -- strings, macros, and C source is full of them -- do not
-            // end it, or the copy would be cut into byte-sized pieces at every
-            // one of them.
-            //
-            // Since the branches above have already taken a carriage return, a
-            // lone newline and a splicing backslash, stop is always past r here:
-            // the copy below always advances, which is what keeps this loop
-            // finite. (The same shape without that guarantee is how the first
-            // version of this change hung.)
-            char *stop = end;
-            if (swallowed > 0) {
-                char *c = memchr(r, '\n', (size_t)(end - r));
-                if (c && c < stop) stop = c;
-            }
-            if (has_cr) {
-                char *a = memchr(r, '\r', (size_t)(end - r));
-                if (a && a < stop) stop = a;
-            }
-            char *q = r;
-            while ((q = memchr(q, '\\', (size_t)(end - q)))) {
-                if (q[1] == '\n' || q[1] == '\r') {
-                    if (q < stop) stop = q;
-                    break;
-                }
-                q++;
-            }
-            size_t n = (size_t)(stop - r);
-            if (n >= 16) {
-                memmove(w, r, n);
-                w += n;
-                r = stop;
-            } else {
-                while (r < stop) *w++ = *r++;
-            }
-        }
-    }
-    while (swallowed-- > 0) *w++ = '\n';
-    *w = '\0';
-}
-
-// Replaces \r or \r\n with \n.
-
 
 static void build_line_offsets(SrcFile *f) {
     if (!f || f->num_lines > 0) return;
@@ -1698,7 +1743,8 @@ SrcFile *open_source_file(char *path) {
     // If exists, just skip them because they are useless bytes.
     if (!memcmp(p, "\xef\xbb\xbf", 3)) p += 3;
 
-    canonicalize_and_splice(p);
+    // Nothing is rewritten: the scanner reads phase 2 itself (perf.md 8or), so
+    // the bytes stay as they are on disk and a mapping of them stays clean.
 
     static int file_no = 0;
     SrcFile *file = new_file(path, file_no + 1, p);

@@ -885,12 +885,15 @@ static char *join_tokens(Token *tok) {
 
     char *buf = emalloc(len);
 
-    // Copy token texts.
+    // Copy token texts, logically: a splice in one is not part of the spelling
+    // (perf.md 8or). The length above is the file's, so the copy always fits.
     int pos = 0;
     for (Token *t = tok; t && t->kind != TK_EOF; t = tok_next(t)) {
         if (t != tok && (t->is_leadingws || t->is_sol)) buf[pos++] = ' ';
-        strncpy(buf + pos, tok_text(t), t->len);
-        pos += t->len;
+        size_t n;
+        char *text = splice_free(tok_text(t), t->len, &n);
+        memcpy(buf + pos, text, n);
+        pos += (int)n;
     }
     buf[pos] = '\0';
     return buf;
@@ -909,20 +912,21 @@ static char *join_spelling(Token *tok) {
     int len = 1;
     for (Token *t = tok; t && t->kind != TK_EOF; t = tok_next(t)) {
         if (t != tok && (t->is_leadingws || t->is_sol)) len++;
-        len += t->len;
-        if (t->kind == TK_STRLIT || t->kind == TK_CHARLIT) {
-            char *text = tok_text(t);
-            for (uint32_t i = 0; i < t->len; i++)
+        size_t n;
+        char *text = splice_free(tok_text(t), t->len, &n);
+        len += (int)n;
+        if (t->kind == TK_STRLIT || t->kind == TK_CHARLIT)
+            for (size_t i = 0; i < n; i++)
                 if (text[i] == '\\' || text[i] == '"') len++;
-        }
     }
 
     char *buf = emalloc(len);
     int pos = 0;
     for (Token *t = tok; t && t->kind != TK_EOF; t = tok_next(t)) {
         if (t != tok && (t->is_leadingws || t->is_sol)) buf[pos++] = ' ';
-        char *text = tok_text(t);
-        for (uint32_t i = 0; i < t->len; i++) {
+        size_t n;
+        char *text = splice_free(tok_text(t), t->len, &n);
+        for (size_t i = 0; i < n; i++) {
             if ((t->kind == TK_STRLIT || t->kind == TK_CHARLIT) && (text[i] == '\\' || text[i] == '"'))
                 buf[pos++] = '\\';
             buf[pos++] = text[i];
@@ -1408,7 +1412,9 @@ static char *read_filename(Token **rest, Token *tok, bool *is_dquote, bool to_eo
     if (tok->kind == TK_STRLIT && tok->enc_prefix == PREFIX_NONE) {
         *is_dquote = true;
         *rest = to_eol ? skip_line(tok_next(tok)) : tok_next(tok);
-        return strndup(tok_text(tok) + 1, tok->len - 2);
+        size_t len;
+        char *name = splice_free(tok_text(tok), tok->len, &len);
+        return strndup(name + 1, len - 2);
     }
 
     if (tok->kind == TK_LT) {
