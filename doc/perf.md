@@ -16544,3 +16544,219 @@ NOCLEAR 的"输出相同"是**弱证据** ✗（新鲜 mmap 页本来就零 ✓�
 `-O…`/`-g`/`-ffreestanding`/`-fno-builtin` 等一排选项是"**接受但忽略**" ✓（`main.c:748-753` ✓）。
 **没做的** ✗：这排"忽略"选项没有写进 README ✓（它们只在代码注释里 ✓，要不要变成对外承诺由作者定 ✓）；
 `--help` 的用法行没有扩写 ✗（那是代码的事 ✓）。
+
+### 8ow. 参数**确实解析两次** ✓（驱动一次 ✓、cc1 子进程一次 ✓）；想靠"结构体 + 指针"跳过它 ✗——指针过不了 `execvp` ✓；真正的走法是 **fork 后直接 `cc1(&opts)`** ✓（保 ICE 兜底 ✓），收益 ≈ **1.3 ms/次** ✓ 而启动的大头是 `clang -print-resource-dir` 的 **13.7 ms** ✓
+
+**现状（代码坐标 ✓）**：`main()` → `parse_args(argc, argv)` ✓ 填约 28 个文件级 static ✓（`src/main.c:21-53` ✓）；
+`opt_cc1` 分支里才 `add_default_include_paths(argv[0])` ✓ + `add_dirafter()` ✓ + `cc1()` ✓（`main.c:1418-1422` ✓）；
+常规路径 `run_cc1()` ✓ 把 `-cc1 -cc1-input/-cc1-output` **接到自己 argv 后面** ✓，
+`run_subprocess()` 用 `fork + execvp(argv[0], argv)` ✓ **重新 exec 自己** ✓ ⇒ 同一个二进制再跑一遍 `main()` ✓
+⇒ **argv 被完整解析第二次** ✓（§8ot ✓：这正是 gcc/clang 的 driver↔cc1 分工 ✓）。
+
+**第二次到底重做了什么** ✓（external-call 间谍 ✓ 把 `clang`/`cc` 换成记录脚本 ✓，`argv.log` ✓）：
+
+```
+cxx -E arg.c        （驱动 fork cc1）  外部调用 2 次 ✓：clang -print-resource-dir ✓、cc -dumpmachine ✓
+cxx -E arg.c -cc1   （进程内 ✓）        外部调用 2 次 ✓（同上 ✓）
+cxx -c arg.c -o o   （完整 -c ✓）       3 次 ✓ = 上面两次 + clang -x ir … -c ✓（链接再加 cc -o ✓）
+```
+⇒ 这两种模式的外部调用**完全一样** ✓ ⇒ **重复的只有纯字符串解析** ✓（`-I/-D/-U/-include/-W…/-x/-target` ✓，
+`cmd_buf` 重建成宏文本 ✓、include 路径数组重建 ✓、告警组 ✓、目标字段 ✓），
+而昂贵的那两下（`clang -print-resource-dir` ✓ `cc -dumpmachine` ✓）是 **cc1 自己的活** ✓
+（`get_clang_resource_dir()` 的唯一调用点在 `add_default_include_paths()` ✓，它只挂在 `opt_cc1` 分支 ✓）
+⇒ 驱动一次都不跑外部命令 ✓✓。
+
+**代价读数** ✓（30 次取最小 ✓）：
+```
+cxx（不带参数 ✓ = 启动 + 一次完整解析 + "no input files" ✓）      1,675 µs ✓
+cxx -### -c arg.c（启动 + 解析 + 打印 ✓，不跑 clang/cc1 ✓）         1,798 µs ✓
+cxx -E arg.c        （驱动解析 + fork/exec/子进程再解析 ✓）      16,174 µs ✓
+cxx -E arg.c -cc1   （只解析一次 ✓，进程内 ✓）                   14,901 µs ✓   ⇒ 差 1,273 µs ✓
+单看那一下：clang -print-resource-dir 13,667 µs ✓、clang -dM -E 15,585 µs ✓（后者只在 -m… 时用 ✓）
+argv 变大 ✓：+2000 个 -D ⇒ 两种模式都 +9 ms ✓（≈5.6 µs/个 ✓）
+```
+⇒ **重复解析 ≈ 1.3 ms/次** ✓（其中还含 exec ✓）；对 16 ms 的小编译是 8% ✓，对 94 ms 的 `-E tccgen.c` 是 ~1% ✗。
+⇒ 而 `clang -print-resource-dir` 一次就 **13.7 ms** ✓（小编译里 ~85% ✓）——**启动的大头在这里** ✓，不在第二次解析 ✓。
+
+**"结构体 + 指针"能不能跳过它** ✗：**指针过不了 `execvp`** ✓。今天的子进程是 exec 出来的 ✓
+⇒ 结构体只能**序列化**过去 ✓（env / 临时文件 / 额外 argv ✓），而状态里有 `cmd_buf`（宏**文本** ✓）、
+include 路径数组（来自 argv0 + glob ✓ + 外部命令 ✓）、`T` 的字符串/指针 ✓ ⇒ 序列化的代码比解析还多 ✗，
+省下的还是那 1.3 ms ✗ ⇒ 不划算 ✓。**真要跳过只有两条路** ✓：
+① **进程内** ✓（`-cc1` 已经在 ✓）：只解析一次 ✓，但驱动**就是** cc1 ✓ ⇒ ICE 兜底没了 ✓（§8ot 实测：SIGSEGV ⇒ 退出 139 ✓、无诊断 ✗）；
+② **fork 但不 exec** ✓：`pid = fork(); if (!pid) { cc1(&opts); _exit(st); }` ✓ —— 子进程靠 COW **继承**已解析的状态 ✓
+⇒ 不 exec ✓、不重解析 ✓，而且**保住 ICE 兜底** ✓（它仍是独立进程 ✓，父进程照旧 `waitpid`/`WIFSIGNALED` ✓ §8ot ✓）。
+② 需要：结构体重构 ✓ + 子进程用 `_exit()` 而不是 `exit()` ✓（别跑父进程的 `atexit(cleanup)` ✓、别双重 flush stdio ✓）
++ 注意子进程继承了驱动的地址空间 ✓（COW ⇒ 不拷贝 ✓，但"自有峰值"这类读数会把父进程的页算进来 ✗ ⇒ 要用 `-cc1` 模式或 smaps 区分 ✓）。
+
+**⇒ 结论** ✓：① 想跳过的动机成立但收益小 ✗（1.3 ms ✓，且其中一半是 exec ✓）；
+② **结构体本身值得做** ✓：约 28 个 static（`opt_x/opt_M/MM/MD/MP/opt_S/opt_ll/opt_c/opt_fsyntax_only/opt_P/opt_cc1/
+opt_hash_hash_hash/opt_dump_tokens/opt_dump_raw_tokens/opt_o/opt_MF/opt_MT/output_file/input_paths/num_input/
+tmpfiles/num_tmpfiles/opt_sysroot/machine_args/num_machine/machine_sets_arch/asm_args/num_asmarg` ✓）
++ `cmd_buf`/`cmd_len`（`preprocess.c:2566` ✓）+ `T` + cxx.h 里那几个数组 ✓ ⇒ `parse_args(argc, argv, &opts)` ✓、
+`cc1(&opts)` ✓，`opt_*` 在 main.c 里出现 **122 次** ✓ ⇒ 机械但要一遍过 ✓；好处是 driver→cc1 变成**函数接口** ✓
+（工具/测试不必再造 argv ✓、`-cc1` CLI 仍保留 ✓）；
+③ **顺带记一笔** ✓：exec 模型下驱动**也**把 `-D/-U` 编成了 `cmd_buf` ✓ 而自己从不读它 ✗
+（读它的是 cc1 ✓）⇒ 不算 `-cc1` 时可以整段跳过 ✓（2000 个 `-D` 时省约 9 ms ✓，常态可忽略 ✗）。
+
+**方法学限制** ✓：时间取 30 次最小值 ✓（本机 wall 抖动大 ✓，第 3 节的 `time %e` 只有 10 ms 分辨率 ✗ ⇒ 以 µs 那组为准 ✓）；
+间谍脚本记的是**直接父进程** ✓，而 `popen()` 中间隔了一层 `sh` ✓ ⇒ 间谍**分不清**驱动还是子在问 ✗，
+"驱动不问外部命令"是靠**代码路径**（唯一调用点挂在 `opt_cc1` 分支 ✓）而非间谍读数 ✓；
+单机 ✓、单次解析规模 ✓（真实命令行只有几个 `-D` ✓）。
+
+### 8ox. 命令行封装为 `struct CxxOptions` ✓（落地 ✓ 行为逐字节不变 ✓）：49 字段 ✓、264 处改走 `O->` ✓、`publish_options()` 是外部模块所读全局的**唯一写者** ✓；`cc1(CxxOptions *)` 拿到指针 ✓（**没有**动 exec 模型 ✓，第二次解析仍在 ✓ §8ow ✓）
+
+**做了什么** ✓（`_r1662_opts.py` ✓，只动 `src/main.c` ✓）：
+* `parse_args` 写的**全部**状态进 `typedef struct CxxOptions` ✓（49 个字段 ✓）——
+  标志位 ✓（`opt_x/opt_E/opt_M/…/opt_cc1/opt_hash_hash_hash/opt_ast_dump/opt_dump_*/opt_fsyntax_only/opt_P/
+  opt_fpic/opt_fcommon/opt_nowarn/opt_werror/opt_pedantic*/opt_keep_ws_comments/opt_wgroups` ✓）、
+  字符串 ✓（`opt_o/opt_MF/opt_MT/output_file/base_file/opt_sysroot` ✓）、
+  数组与计数 ✓（`input_paths/num_input` ✓ `ld_extra_args/num_ld_exarg` ✓ `machine_args/num_machine/machine_sets_arch` ✓
+  `asm_args/num_asmarg` ✓ `include_paths/num_include_paths` ✓ `embed_dirs/num_embed_dirs` ✓
+  `std_include_paths/num_std_include_paths` ✓ `dirafter/num_dirafter` ✓）；
+* `static CxxOptions opts = {.opt_wgroups = WG_ALL & ~(uint32_t)WG_OFF_DEFAULT};` ✓ + `static CxxOptions *O = &opts;` ✓；
+* **264 处**读改写为 `O->…` ✓（含 `parse_args` 体内 ✓ —— 它开头 `O = o;`，指针就是它的接口 ✓）；
+* `static void parse_args(int argc, char **argv, CxxOptions *o)` ✓、`static void cc1(CxxOptions *o)` ✓，
+  `main()` 里 `O = &opts;` ✓ → `parse_args(argc, argv, O)` ✓ → `cc1(O)` ✓；
+* **外部模块读的那些名字**保留原来的全局 ✓（`opt_E` ✓ `opt_ast_dump` ✓ `base_file` ✓ `include_paths/num_…` ✓
+  `embed_dirs/num_…` ✓ `opt_fpic/opt_fcommon` ✓ `opt_nowarn/opt_werror/opt_pedantic*/opt_wgroups` ✓
+  `opt_keep_ws_comments`（定义在 `util.c` ✓））✓，由 **`publish_options()` 一处**从结构体写入 ✓
+  （15 条赋值 ✓；`main()` 解析后调一次 ✓、`cc1()` 开头再调一次 ✓ —— 后者在 include 路径定下来之后 ✓）；
+* **留在文件作用域的** ✓：`tmpfiles/num_tmpfiles` ✓（`atexit(cleanup)` 要用 ✓，是运行期状态不是命令行 ✓）、
+  `-E` 打印器的游标 ✓（`e_out/e_cur_line/e_prev/e_last` ✓）、`preproc_linemarkers` ✓（由 `preprocess.c` 写 ✓）。
+
+**判据** ✓（`landopts.log` ✓；与**重构前的同一棵树**、**同一个目录**里的旧二进制对比 ✓）：
+```
+build ✓ 0 error / 0 warning ✓
+三负载 -E 与 IR **逐字节相同** ✓✓  tccgen 562499/1376988 ✓ lparser 124462/322450 ✓ sqlite3 3416144/16048184 ✓
+选项矩阵 **34/34 全同** ✓（退出码 ✓ stdout ✓ stderr ✓ 都比 ✓）：
+  -E ✓ -E -D -U ✓ -E -P ✓ -M -MF -MT ✓ -MD ✓ -fsyntax-only ✓ -c ✓ -S ✓ -ast-dump ✓ -dump-tokens ✓
+  -dump-raw-tokens ✓ 默认警告 ✓ -Werror ✓ -Wall -Wextra ✓ -Wno-… ✓ -pedantic ✓ -pedantic-errors ✓
+  -fpic ✓ -fno-common ✓ -O2 -g ✓ -std=c23/gnu23 ✓ -I/-include ✓ -idirafter ✓ -embed-dir ✓ -x c stdin ✓
+  坏参数 ✓ 无输入 ✓ 被拒程序 ✓ -### ✓ -### -target ✓ -### -m64 -march -Wa, ✓ -### -L -l -static ✓
+  -### -Xlinker ✓ 两个输入 ✓ -o 与两个输入 ✓
+闸门 ✓ mustfail 非零 ✓ conformance 326/0 ✓ c2y 101/0 ✓ tcctests 106/0 ✓ bootstrap 21/21 逐字节 ✓
+```
+⇒ **纯重构** ✓：行为、输出、退出码、诊断逐字节未变 ✓（`-c/-S/-fsyntax-only` 连 IR/汇编都没变 ✓）。
+
+**改完的规模** ✓：`src/main.c` 差异 516 行 ✓（几乎全是机械改名 ✓）；`main.c` 里剩下的文件级 static 16 个 ✓
+（临时文件、打印器游标、函数声明 ✓）；`opt_*` 在 main.c 的出现从 122 处变成 0 处 ✓（都走 `O->` ✓）。
+
+**两条踩过的假阳性** ✓（都记下来 ✓）：
+① 选项矩阵第一版**只**把落地树路径归一化 ✓，而影子树路径 `/home/memory/cxxwork/opts` **包含**落地树路径
+   `/home/memory/cxx` **作为前缀** ✗ ⇒ 变成 `TREEwork/opts/…` ✗ ⇒ 一堆"DIFFERS" ✗ —— **§8oi 那条纪律第四次** ✓
+   （先归一化更长的路径 ✓）；
+② 落地校验第一版把旧二进制放在 `cxxwork/scratch/` ✓ ⇒ 它按 `argv[0]` 的目录找 `include/` ✓
+   ⇒ 拿到了**别的头文件搜索顺序** ✗（`-E` 里 `stdarg.h` 的来源不同 ✓、IR 里 anon 结构体编号跟着变 ✗）
+   ⇒ 三负载全"DIFFERS" ✗ 并触发自动回滚 ✗。**教训** ✓：cxx 的 `include/` 在**自身目录**旁 ✓
+   ⇒ 对比两个二进制必须让它们**同目录** ✓（本轮改成 `~/cxx/cxxpre` ✓，比完即删 ✓）。
+
+**没做的** ✗（§8ow 的后续 ✓）：**exec 模型没动** ✓ ⇒ cc1 子进程**仍然**再解析一遍 argv ✓
+（§8ow 实测 ≈1.3 ms ✓）；要跳过它需要 `fork` + 直接 `cc1(O)` ✓ —— 而现在 `cc1` **已经收指针** ✓，
+那一步随时可以接上 ✓。
+
+### 8oy. mcc 的"逐字符游标"读取设计 vs cxx 的"指针扫描 + 零拷贝 span" ✓（实测 ✓）：**mcc 读取层快 ~1.3–1.4×** ✓（84–100 vs 59–77 MB/s ✓），但**折成编译时间只省 0.05%** ✗（`-E` 省 8% ✓）；cxx 真正的开销在**逐记号记账** ✓（99–105 ns/记号 ✓，mcc 46–56 ✓）⇒ **不值得照搬** ✗
+
+**mcc 的设计** ✓（`~/mcc/src/lexer.c` ✓，415 行 ✓）：`FileReader{data,size,ptr,line_num,uget[4],idx}` ✓ 是**游标 + 4 槽回退** ✓；
+`next_ch()` ✓ **逐字符**读 ✓，并且在同一个函数里就地做相位 1/2 ✓（`\`+换行 拼接 ✓、`\r`/`\r\n` 归一化 ✓、`line_num` 递增 ✓）；
+`next_raw()` ✓ **一次产出**一个原始记号 ✓（大 switch ✓），标识符/数字/字面量的字节**逐字符拷进** 全局 `text[4096]` ✓；
+mmap `PROT_READ` ✓ 与 cxx 同 ✓。对比 cxx：指针扫描 ✓、记号 = `(loc,len)` **零拷贝** ✓、标识符 `intern` ✓、
+行首/前置空白两个位 ✓、拼接在扫描器里读 ✓（§8or ✓）、段落式 pull ✓（§8oo ✓）。
+
+**怎么量的** ✓（`lexspeed.sh` ✓，两边各打一个"只读一个文件成原始记号"的钩子 ✓，**两个仓库都不动** ✓）：
+cxx = `tokenize_file()` ✓（`CXX_BENCH` ✓）；mcc = `tokenize()` 里的 `next_raw()` 循环 ✓（`MCC_BENCH` ✓）；
+同一台机器 ✓、同一组三个文件 ✓、`-O2` 与 `-O0` 各做一遍 ✓、每次跑 N 遍取**最小** ✓（20/20/5 ✓）。
+
+```
+文件      dbg   cxx MB/s  mcc MB/s  cxx ns/B  mcc ns/B  mcc/cxx
+tccgen     0       59.4      84.0    16.83     11.90    0.71x
+tccgen     1       58.8      81.9    17.00     12.22    0.72x
+lparser    0       62.7      86.4    15.96     11.57    0.73x
+lparser    1       61.4      84.7    16.29     11.80    0.72x
+sqlite3    0       77.3     100.0    12.94      9.998   0.77x
+sqlite3    1       76.3      99.4    13.10     10.07    0.77x
+原始记号数（-O2）：tccgen cxx 45,742 / mcc 69,937（1.53×）；lparser 11,654 / 17,622；sqlite3 1,168,131 / 1,713,532
+每个记号：cxx 99 / 90 / 105 ns；mcc 46 / 43 / 56 ns   ← mcc 还多产了 WS/NL 记号
+```
+⇒ 读同一批字节，**mcc 快 1.30–1.41×** ✓（尽管它产出的记号多 1.5× ✓）⇒ 它的**逐记号成本只有 cxx 的一半** ✓：
+因为它**不建链**（不分配 Token ✓）、**不 intern** ✓、**不转关键字** ✓、**不做两遍扫描** ✓
+（cxx 每个标识符还要各扫一遍 `has_splice` ✓ 与 `has_ucn` ✓）。
+
+**折成编译时间** ✓（cxx 落地树 ✓，`-E` 三次取最小 ✓，完整 cc1 一次 ✓）：
+```
+文件      cxx 原始词法  按 mcc 速率   差值       占 -E      占完整 cc1
+tccgen       4.52 ms     3.19 ms    -1.32 ms   -1.6%      -0.05%
+lparser      1.05 ms     0.76 ms    -0.29 ms   -0.8%      -0.17%
+sqlite3    123.14 ms    95.13 ms   -28.00 ms   -8.1%      -0.05%
+```
+⇒ **词法只占完整编译的 0.05–0.6%** ✓（`-E` 时才有 5–36% ✓）⇒ 照搬设计最多把 `-E` 提速 8% ✓、
+完整编译提速 **0.05%** ✗ ⇒ 对"编译速度"没有意义 ✓。
+而且**真实移植会比这更差** ✗：mcc 的设计装不下 cxx 要的东西 —— `text[4096]` 无边界检查 ✓（本轮三个文件最长 run 239 B ✓、
+最长字符串 2 B ✓ 侥幸安全 ✓）、逐字符拷贝 ✓（碰两次字节 ✓）、没有 span ✓（诊断/`-E` 要指回正文 ✓）、
+没有 intern ✓（宏与解析器要 `id` ✓）、没有行首/前置空白位 ✓（预处理用 ✓，mcc 改发 WS/NL 记号 ✓）、
+只读单个文件 ✓（与 cxx 的段落式 pull/流式 ✗ 不兼容 ✓）。把 intern 等加回去，优势就没了 ✗。
+
+**⇒ 真正的洞见** ✓（比"读得快"更重要 ✓）：cxx 每个原始记号 **90–105 ns** ✓ 才是开销所在 ✓ ——
+不是字符循环 ✓，而是**逐记号的记账** ✓：`new_token` ✓、`intern`（哈希 + 拷贝 ✓）、
+以及我上一轮落地拼接时引入的 `has_splice` ✓ 和原有的 `has_ucn` ✓ 各自都要把标识符扫一遍 ✓。
+⇒ 想提速该做的是**把这两遍扫描按文件一次性关掉** ✓（文件里没有 `\`+换行 / 没有 `\u` 就置标志 ✓），
+而不是把读取器改成逐字符 ✓。
+
+**顺带查实的一处构建坑** ✓（本轮实测被卡住 20 分钟 ✓）：**`make clean` 会删掉 `src/width_property.h` /
+`src/xid_property.h`** ✓，而 `tools/extract_width.py` 从 **unicode.org 下载** ✓ ⇒ **离线时构建直接挂死** ✗
+（不是报错 ✓，是无限等待网络 ✓）。本轮绕法：不 `make clean`，只 `rm -rf build`，并把生成头文件 touch 新一点 ✓。
+**建议**（未做 ✗）：把这两个生成头文件入库 ✓，或让脚本在取不到数据时用缓存/报错退出 ✓。
+
+**方法学限制** ✓：两边各打了只读钩子 ✓（不在原仓库 ✓，`~/cxxwork/lexbench/` ✓）；
+cxx 的每遍都**建整条记号链** ✓（sqlite3 每遍 1.17M × 48 B ≈ 56 MB ✓ 含首次触碰页 ✓）而 mcc 一个记号都不留 ✓
+—— 这正是设计差异 ✓，但也意味着这两列不是"纯扫描"对"纯扫描" ✗；
+min-of-N ✓（本机 wall 抖动大 ✓，进程内计时 ✓）；mmap 每遍都算在内 ✓；不含预处理 ✓；单机 ✓（i5-10300H ✓）。
+### 8oz. 标点符号不查表、改**展开分支** ✓（实测 ✓）：词法层快 **2.7% / 2.7% / 25.5%** ✓（tccgen/lparser/sqlite3 ✓），输出**逐字节不变** ✓；`-E` 在 sqlite3 上省 **8.4%** ✓（与 82 ms × 20% 的预测对得上 ✓），完整编译仍只省 **0.01–0.12%** ✗
+
+**改的是什么** ✓：`read_punct()`（`src/lexer.c:109` ✓）原来是
+`punct_cont` 早退（单字节标点 ✓）+ **32 项静态表线性扫描** ✓，每项调 `start_with()` 再**逐字符**比 ✓；
+变体 B 改成**两级分支** ✓（先 `switch (p[0])` ✓、再 `p[1]`/`p[2]`/`p[3]` 比较 ✓），没有循环、没有逐项调用 ✓，
+并在变体里删掉了只为表服务的 `start_with()` ✓（否则 `-Werror` 的 unused-function ✗ 会拦下 ✓，实测就是这样被拦的 ✓）。
+变体 C（对照 ✓）保留表，只把 `start_with` 换成 `memcmp` ✓。
+
+**判据** ✓（`punct.log` ✓）：
+```
+三份构建 ✓ base / switch / memcmp：0 error / 0 warning ✓；二进制 685,808 / 685,720 / 685,808 B ✓
+   read_punct：44 / 84 / 44 行 ✓（switch 版多 40 行 ✓，二进制反而小 88 B ✓）
+输出 ✓ -E 三负载 **逐字节相同** ✓（路径先归一化 ✓ —— 又是 exe_inc 那条：三棵树在不同目录 ✓，
+   `-E` 里带 `<树>/include/stdarg.h` ✓，不归一化必假 DIFFERS ✗）；IR tccgen/lparser 相同 ✓（sqlite3 的 16 MB IR 未跑 ✓）
+闸门 ✓ switch 树：conformance 326/0 ✓ c2y 101/0 ✓ mustfail 非零 ✓
+```
+**词法层** ✓（`-O2` ✓，进程内 N 遍取最小 ✓，同一批三个文件 ✓）：
+```
+文件      base MB/s  switch  memcmp   switch/base  memcmp/base
+tccgen      118.0     126.6   116.6      1.072x       0.987x
+lparser     132.7     136.3   127.5      1.027x       0.961x
+sqlite3     116.4     146.0   136.9      1.255x       1.176x
+每记号：tccgen 49.7 → 46.4 ns ✓；lparser 42.5 → 41.4 ✓；sqlite3 70.0 → 55.8 ✓（−20% ✓）
+```
+**端到端** ✓（`-E` ✓，9 次取最小 ✓）：
+```
+文件      base      switch    memcmp
+tccgen    59.8 ms   60.8 ms   60.4 ms   ← 噪声 ✗（词法只 2.3 ms ✓）
+lparser   32.2 ms   29.9 ms   31.8 ms
+sqlite3  207.3 ms  190.0 ms  211.6 ms   ← −8.4% ✓
+```
+⇒ sqlite3 那一行正好对上：词法 82 ms 里省 20% ≈ 16 ms ✓，实测省 17 ms ✓✓。
+⇒ 但**完整编译**里词法只占 0.05–0.6%（§8oy ✓）⇒ 省 **0.01–0.12%** ✗。
+⇒ `memcmp` 变体是**混合**结果 ✗（tccgen/lparser 反而更慢 ✓、sqlite3 也慢于 switch ✓）⇒ 不值得选 ✓。
+
+**⇒ 结论** ✓：展开分支**行为完全等价** ✓、**代码多 40 行** ✓、**二进制略小** ✓、
+词法层 **+2.7% ~ +25.5%** ✓ ⇒ 对 `-E`/`-M`/IDE 这类"只预处理"的用法是实打实的收益 ✓（sqlite3 −8.4% ✓），
+对完整编译是噪声级 ✗。**建议**：值得落地 ✓（换成 switch ✓，`start_with` 随之删除 ✓），
+但别指望它改变编译速度 ✓ —— 真正的大头仍是 §8oy 说的"逐记号记账" ✓。
+
+**方法学限制** ✓：每格取**最小** ✓（本机 wall 抖动大 ✓，`-E` 的 tccgen 行就是噪声 ✗）；
+词法数来自进程内计时钩子 ✓（只在影子树 ✓，`~/cxxwork/punct/` ✓，两个仓库都没动 ✓）；
+sqlite3 的 IR 等价性没跑 ✗（16 MB × 2 ✓，只做了 `-E` ✓ 与 `make test` ✓）；
+`-O2` 一种优化级别 ✓；单机 ✓（i5-10300H ✓）。
+**⇒ 落地（展开分支，landpunct.sh）** ✓（备份 `backup264` ✓）：`read_punct()` 84 行 ✓、`start_with()` 删除 ✓
+（只剩新注释里提了一句 ✓）、`-Werror` 全绿 ✓、二进制 1,314,880 → 1,317,816 B ✓（+2,936 B ✓）。
+判据 ✓：三负载 `-E` **与 IR 全部逐字节相同** ✓✓（这次含 sqlite3 的 16 MB IR ✓）、mustfail 非零 ✓、
+conformance 326/0 ✓、c2y 101/0 ✓、tcctests 106/0 ✓、bootstrap 21/21 逐字节 ✓。
+落地后的 `-E`（新老交替跑 9 次取最小 ✓）：tccgen 95,976 → 93,056 µs（−3.0% ✓）、
+lparser 40,284 → 39,991 µs（±0 ✓）、sqlite3 403,195 → 369,009 µs（**−8.0%** ✓ —— 与前面的 −8.4% 预测对得上 ✓）。

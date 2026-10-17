@@ -25,66 +25,109 @@ typedef enum {
     FILE_DSO,
 } FileType;
 
-static FileType opt_x;
-bool opt_E;  // read by preprocess.c: only -E wants line markers
-static bool opt_M;
-static bool opt_MM;
-static bool opt_MD;
-static bool opt_MP;
-static bool opt_S;
-static bool opt_ll;
-static bool opt_c;
-static bool opt_fsyntax_only;
-static bool opt_P;
-static bool opt_cc1;
-static bool opt_hash_hash_hash;
-bool opt_ast_dump;   // read by parser.c: that mode prints the tree as parsed
-static bool opt_dump_tokens;
-static bool opt_dump_raw_tokens;
+// The parsed command line, in one place. parse_args() fills this; cc1() takes a
+// pointer to it; the driver, cc1's helpers and -- through the globals below, which
+// publish_options() writes from here and nowhere else -- the modules outside this
+// file read it (perf.md 8ox).
+typedef struct CxxOptions CxxOptions;
 
-static char *opt_o;
-static char *opt_MF;
-// -Wa,<options> collected for the assembly stage; see the argument loop.
-static char *asm_args[16];
-static int num_asmarg;
-static char *opt_MT;
+struct CxxOptions {
+    FileType opt_x;                 // -x, and what the extension says
+    bool opt_E;                     // -E
+    bool opt_M;                     // -M (and -MM, -MD, -MMD, -MP set these too)
+    bool opt_MM;
+    bool opt_MD;
+    bool opt_MP;
+    bool opt_S;                     // -S
+    bool opt_ll;                    // -S under an IR name
+    bool opt_c;                     // -c
+    bool opt_fsyntax_only;
+    bool opt_P;
+    bool opt_cc1;                   // this process is cc1
+    bool opt_hash_hash_hash;        // -###: print the stages
+    bool opt_ast_dump;
+    bool opt_dump_tokens;
+    bool opt_dump_raw_tokens;
+    char *opt_o;                    // -o
+    char *opt_MF;
+    char *opt_MT;
+    char *output_file;
+    char *base_file;
+    char *opt_sysroot;
+    // -Wa,<options> collected for the assembly stage; see the argument loop.
+    char *asm_args[16];
+    int num_asmarg;
+    char **input_paths;
+    int num_input;
+    char **ld_extra_args;
+    int num_ld_exarg;
+    char **machine_args;
+    int num_machine;
+    bool machine_sets_arch;
+    char **include_paths;
+    int num_include_paths;
+    char **embed_dirs;
+    int num_embed_dirs;
+    char **std_include_paths;
+    int num_std_include_paths;
+    char **dirafter;
+    int num_dirafter;
+    bool opt_fpic;
+    bool opt_fcommon;
+    bool opt_nowarn;
+    bool opt_werror;
+    bool opt_pedantic;
+    bool opt_pedantic_errors;
+    bool opt_keep_ws_comments;
+    uint32_t opt_wgroups;
+};
 
-char *base_file;
-static char *output_file;
+// The one a run works on. -cc1 runs in a process of its own and parses its own
+// copy; that is the stage the struct is for, and it is where the second parse
+// still happens (perf.md 8ow).
+static CxxOptions opts = {.opt_wgroups = WG_ALL & ~(uint32_t)WG_OFF_DEFAULT};
+static CxxOptions *O = &opts;
 
-static char **input_paths;
-static int num_input;
+// What the modules outside this file read. They keep reading these globals; the
+// values come from the options above, and this function is the only writer.
+bool opt_E;                    // preprocess.c: only -E wants line markers
+bool opt_ast_dump;             // parser.c: that mode prints the tree as parsed
+char *base_file;               // preprocess.c
+char **include_paths;          // preprocess.c
+int num_include_paths;
+char **embed_dirs;             // preprocess.c
+int num_embed_dirs;
+bool opt_fpic;                 // dumpir.c
+bool opt_fcommon;              // dumpir.c
+bool opt_nowarn;               // util.c
+bool opt_werror;               // util.c
+bool opt_pedantic;             // util.c, unicode.c
+bool opt_pedantic_errors;      // util.c
+uint32_t opt_wgroups = WG_ALL & ~(uint32_t)WG_OFF_DEFAULT;  // util.c
+// opt_keep_ws_comments is defined in util.c; it is published here as well.
 
+static void publish_options(const CxxOptions *o) {
+    opt_E = o->opt_E;
+    opt_ast_dump = o->opt_ast_dump;
+    opt_keep_ws_comments = o->opt_keep_ws_comments;
+    opt_nowarn = o->opt_nowarn;
+    opt_werror = o->opt_werror;
+    opt_pedantic = o->opt_pedantic;
+    opt_pedantic_errors = o->opt_pedantic_errors;
+    opt_wgroups = o->opt_wgroups;
+    opt_fpic = o->opt_fpic;
+    opt_fcommon = o->opt_fcommon;
+    base_file = o->base_file;
+    include_paths = o->include_paths;
+    num_include_paths = o->num_include_paths;
+    embed_dirs = o->embed_dirs;
+    num_embed_dirs = o->num_embed_dirs;
+}
+
+// Temp files and the -E printer's cursor are state of a run, not of the command
+// line: they stay file scope, and so does cleanup(), which atexit() calls.
 static char **tmpfiles;
 static int num_tmpfiles;
-
-static char *opt_sysroot;
-
-char **include_paths;
-int num_include_paths;
-
-char **embed_dirs;
-int num_embed_dirs;
-
-char **std_include_paths;
-int num_std_include_paths;
-
-char **dirafter;
-int num_dirafter;
-
-char **ld_extra_args;
-int num_ld_exarg;
-
-bool opt_fpic;
-bool opt_fcommon;
-bool opt_nowarn;
-// Every group on to start with; see the enum in cxx.h.
-// Every group that is on by default; see the enum in cxx.h. WG_OFF_DEFAULT
-// names the ones -Wall does not enable.
-uint32_t opt_wgroups = WG_ALL & ~(uint32_t)WG_OFF_DEFAULT;
-bool opt_werror;
-bool opt_pedantic;
-bool opt_pedantic_errors;
 
 static void usage(int status) {
     fprintf(stderr,
@@ -106,11 +149,8 @@ static void machine_flag_macros(void);
 // The -m... flags the user gave (-msse4.2, -mavx2, -march=..., -mno-...).
 // clang is the backend, so they are the backend's to honour: they are
 // collected in parse_args() and handed to both clang stages.
-static char **machine_args;
-static int num_machine;
 // True when one of them named the architecture (-march=/-mcpu=): the target's
 // own -march is only a default then, and the user's is the one that counts.
-static bool machine_sets_arch;
 
 static char *get_clang_resource_dir(void) {
     FILE *fp = popen("clang -print-resource-dir 2>/dev/null", "r");
@@ -133,7 +173,7 @@ static void add_gcc_include_paths(char *triple) {
     glob_t g;
     if (glob(pattern, 0, NULL, &g) == 0) {
         for (size_t i = 0; i < g.gl_pathc; i++)
-            std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = strdup(g.gl_pathv[i]);
+            O->std_include_paths[O->num_std_include_paths++] = O->include_paths[O->num_include_paths++] = strdup(g.gl_pathv[i]);
         globfree(&g);
     }
 }
@@ -155,32 +195,32 @@ static bool is_host_triple(char *triple) {
 }
 
 static void add_default_include_paths(char *argv0) {
-    for (int i = 0; i < num_std_include_paths; i++) include_paths[num_include_paths++] = std_include_paths[i];
+    for (int i = 0; i < O->num_std_include_paths; i++) O->include_paths[O->num_include_paths++] = O->std_include_paths[i];
     char *exe_inc = format("%s/include", dirname(strdup(argv0)));
-    std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = exe_inc;
+    O->std_include_paths[O->num_std_include_paths++] = O->include_paths[O->num_include_paths++] = exe_inc;
 
     char *res_dir = get_clang_resource_dir();
     if (res_dir) {
         char *inc = format("%s/include", res_dir);
-        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = inc;
+        O->std_include_paths[O->num_std_include_paths++] = O->include_paths[O->num_include_paths++] = inc;
     }
 
-    char *sysroot = opt_sysroot ?: T.sysroot;
+    char *sysroot = O->opt_sysroot ?: T.sysroot;
     if (sysroot) {
-        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
+        O->std_include_paths[O->num_std_include_paths++] = O->include_paths[O->num_include_paths++] =
             format("%s/usr/include", sysroot);
-        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
+        O->std_include_paths[O->num_std_include_paths++] = O->include_paths[O->num_include_paths++] =
             format("%s/usr/include/%s", sysroot, T.triple);
     } else {
-        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
+        O->std_include_paths[O->num_std_include_paths++] = O->include_paths[O->num_include_paths++] =
             format("/usr/%s/include", T.triple);
-        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] =
+        O->std_include_paths[O->num_std_include_paths++] = O->include_paths[O->num_include_paths++] =
             format("/usr/include/%s", T.triple);
     }
 
     if (is_host_triple(T.triple)) {
-        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/local/include";
-        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = "/usr/include";
+        O->std_include_paths[O->num_std_include_paths++] = O->include_paths[O->num_include_paths++] = "/usr/local/include";
+        O->std_include_paths[O->num_std_include_paths++] = O->include_paths[O->num_include_paths++] = "/usr/include";
     }
 
     // GCC's include directory goes after the system's, which is where clang
@@ -196,8 +236,8 @@ static void add_default_include_paths(char *argv0) {
 }
 
 static void add_dirafter(void) {
-    for (int i = 0; i < num_dirafter; i++)
-        std_include_paths[num_std_include_paths++] = include_paths[num_include_paths++] = dirafter[i];
+    for (int i = 0; i < O->num_dirafter; i++)
+        O->std_include_paths[O->num_std_include_paths++] = O->include_paths[O->num_include_paths++] = O->dirafter[i];
 }
 
 static FileType parse_opt_x(char *s) {
@@ -311,7 +351,9 @@ static const struct {
     {"implicit-function-declaration", WG_IMPLICIT_FUNCTION_DECLARATION},
 };
 
-static void parse_args(int argc, char **argv) {
+static void parse_args(int argc, char **argv, CxxOptions *o) {
+    // The body works through O, like every other function here does.
+    O = o;
     // Make sure that all command line options that take an argument
     // have an argument.
     for (int i = 1; i < argc; i++)
@@ -320,49 +362,49 @@ static void parse_args(int argc, char **argv) {
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-###")) {
-            opt_hash_hash_hash = true;
+            O->opt_hash_hash_hash = true;
             continue;
         }
 
         if (!strcmp(argv[i], "--help")) usage(0);
 
         if (!strcmp(argv[i], "-o")) {
-            opt_o = argv[++i];
+            O->opt_o = argv[++i];
             continue;
         }
 
         if (!strncmp(argv[i], "-o", 2)) {
-            opt_o = argv[i] + 2;
+            O->opt_o = argv[i] + 2;
             continue;
         }
 
         if (!strcmp(argv[i], "-E")) {
-            opt_E = true;
+            O->opt_E = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-M")) {
-            opt_M = true;
+            O->opt_M = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-MM")) {
-            opt_M = opt_MM = true;
+            O->opt_M = O->opt_MM = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-MD")) {
-            opt_MD = true;
+            O->opt_MD = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-MMD")) {
-            opt_MM = opt_MD = true;
+            O->opt_MM = O->opt_MD = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-S")) {
-            opt_S = true;
+            O->opt_S = true;
             continue;
         }
 
@@ -372,69 +414,69 @@ static void parse_args(int argc, char **argv) {
         // are handled before it in the driver, so preprocessing still wins,
         // as it does in both of them.
         if (!strcmp(argv[i], "-fsyntax-only")) {
-            opt_fsyntax_only = true;
+            O->opt_fsyntax_only = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-emit-llvm")) {
-            opt_ll = true;
+            O->opt_ll = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-c") || !strcmp(argv[i], "--c")) {
-            opt_c = true;
+            O->opt_c = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-P")) {
-            opt_P = true;
+            O->opt_P = true;
             continue;
         }
 
         if (!strncmp(argv[i], "--sysroot=", 10)) {
-            opt_sysroot = argv[i] + 10;
-            ld_extra_args[num_ld_exarg++] = argv[i];
+            O->opt_sysroot = argv[i] + 10;
+            O->ld_extra_args[O->num_ld_exarg++] = argv[i];
             continue;
         }
 
         if (!strcmp(argv[i], "--sysroot")) {
-            opt_sysroot = argv[++i];
-            ld_extra_args[num_ld_exarg++] = format("--sysroot=%s", opt_sysroot);
+            O->opt_sysroot = argv[++i];
+            O->ld_extra_args[O->num_ld_exarg++] = format("--sysroot=%s", O->opt_sysroot);
             continue;
         }
 
         if (!strcmp(argv[i], "-I")) {
-            include_paths[num_include_paths++] = argv[++i];
+            O->include_paths[O->num_include_paths++] = argv[++i];
             continue;
         }
 
         if (!strncmp(argv[i], "-I", 2)) {
-            include_paths[num_include_paths++] = argv[i] + 2;
+            O->include_paths[O->num_include_paths++] = argv[i] + 2;
             continue;
         }
 
         if (!strcmp(argv[i], "-embed-dir") || !strcmp(argv[i], "--embed-dir")) {
-            embed_dirs[num_embed_dirs++] = argv[++i];
+            O->embed_dirs[O->num_embed_dirs++] = argv[++i];
             continue;
         }
 
         if (!strncmp(argv[i], "-embed-dir=", 11)) {
-            embed_dirs[num_embed_dirs++] = argv[i] + 11;
+            O->embed_dirs[O->num_embed_dirs++] = argv[i] + 11;
             continue;
         }
 
         if (!strncmp(argv[i], "--embed-dir=", 12)) {
-            embed_dirs[num_embed_dirs++] = argv[i] + 12;
+            O->embed_dirs[O->num_embed_dirs++] = argv[i] + 12;
             continue;
         }
 
         if (!strcmp(argv[i], "-isystem")) {
-            std_include_paths[num_std_include_paths++] = argv[++i];
+            O->std_include_paths[O->num_std_include_paths++] = argv[++i];
             continue;
         }
 
         if (!strcmp(argv[i], "-idirafter")) {
-            dirafter[num_dirafter++] = argv[++i];
+            O->dirafter[O->num_dirafter++] = argv[++i];
             continue;
         }
 
@@ -464,32 +506,32 @@ static void parse_args(int argc, char **argv) {
         }
 
         if (!strcmp(argv[i], "-x")) {
-            opt_x = parse_opt_x(argv[++i]);
+            O->opt_x = parse_opt_x(argv[++i]);
             continue;
         }
 
         if (!strncmp(argv[i], "-x", 2)) {
-            opt_x = parse_opt_x(argv[i] + 2);
+            O->opt_x = parse_opt_x(argv[i] + 2);
             continue;
         }
 
         if (!strncmp(argv[i], "-l", 2) || !strncmp(argv[i], "-Wl,", 4)) {
-            input_paths[num_input++] = argv[i];
+            O->input_paths[O->num_input++] = argv[i];
             continue;
         }
 
         if (!strcmp(argv[i], "-s")) {
-            ld_extra_args[num_ld_exarg++] = "-s";
+            O->ld_extra_args[O->num_ld_exarg++] = "-s";
             continue;
         }
 
         if (!strcmp(argv[i], "-static")) {
-            ld_extra_args[num_ld_exarg++] = "-static";
+            O->ld_extra_args[O->num_ld_exarg++] = "-static";
             continue;
         }
 
         if (!strcmp(argv[i], "-shared")) {
-            ld_extra_args[num_ld_exarg++] = "-shared";
+            O->ld_extra_args[O->num_ld_exarg++] = "-shared";
             continue;
         }
 
@@ -498,7 +540,7 @@ static void parse_args(int argc, char **argv) {
         // POSIX reserves for a program that uses threads. A program using
         // <threads.h> or <pthread.h> otherwise needs three separate flags.
         if (!strcmp(argv[i], "-pthread")) {
-            ld_extra_args[num_ld_exarg++] = "-pthread";
+            O->ld_extra_args[O->num_ld_exarg++] = "-pthread";
             cmd_define_macro("_REENTRANT");
             continue;
         }
@@ -526,65 +568,65 @@ static void parse_args(int argc, char **argv) {
         }
 
         if (!strcmp(argv[i], "-L")) {
-            ld_extra_args[num_ld_exarg++] = "-L";
-            ld_extra_args[num_ld_exarg++] = argv[++i];
+            O->ld_extra_args[O->num_ld_exarg++] = "-L";
+            O->ld_extra_args[O->num_ld_exarg++] = argv[++i];
             continue;
         }
 
         if (!strncmp(argv[i], "-L", 2)) {
-            ld_extra_args[num_ld_exarg++] = "-L";
-            ld_extra_args[num_ld_exarg++] = argv[i] + 2;
+            O->ld_extra_args[O->num_ld_exarg++] = "-L";
+            O->ld_extra_args[O->num_ld_exarg++] = argv[i] + 2;
             continue;
         }
 
         if (!strcmp(argv[i], "-Xlinker")) {
-            ld_extra_args[num_ld_exarg++] = argv[++i];
+            O->ld_extra_args[O->num_ld_exarg++] = argv[++i];
             continue;
         }
 
         if (!strcmp(argv[i], "-MF")) {
-            opt_MF = argv[++i];
+            O->opt_MF = argv[++i];
             continue;
         }
 
         if (!strcmp(argv[i], "-MT")) {
-            if (opt_MT == NULL)
-                opt_MT = argv[++i];
+            if (O->opt_MT == NULL)
+                O->opt_MT = argv[++i];
             else
-                opt_MT = format("%s %s", opt_MT, argv[++i]);
+                O->opt_MT = format("%s %s", O->opt_MT, argv[++i]);
             continue;
         }
 
         if (!strcmp(argv[i], "-MQ")) {
-            if (opt_MT == NULL)
-                opt_MT = quote_makefile(argv[++i]);
+            if (O->opt_MT == NULL)
+                O->opt_MT = quote_makefile(argv[++i]);
             else
-                opt_MT = format("%s %s", opt_MT, quote_makefile(argv[++i]));
+                O->opt_MT = format("%s %s", O->opt_MT, quote_makefile(argv[++i]));
             continue;
         }
 
         if (!strcmp(argv[i], "-MP")) {
-            opt_MP = true;
+            O->opt_MP = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-fpic") || !strcmp(argv[i], "-fPIC")) {
-            opt_fpic = true;
+            O->opt_fpic = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-fno-pic") || !strcmp(argv[i], "-fno-PIC")) {
-            opt_fpic = false;
+            O->opt_fpic = false;
             continue;
         }
 
         if (!strcmp(argv[i], "-fcommon")) {
-            opt_fcommon = true;
+            O->opt_fcommon = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-fno-common")) {
-            opt_fcommon = false;
+            O->opt_fcommon = false;
             continue;
         }
 
@@ -600,39 +642,39 @@ static void parse_args(int argc, char **argv) {
         }
 
         if (!strcmp(argv[i], "-cc1")) {
-            opt_cc1 = true;
+            O->opt_cc1 = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-cc1-input")) {
-            base_file = argv[++i];
+            O->base_file = argv[++i];
             continue;
         }
 
         if (!strcmp(argv[i], "-cc1-output")) {
-            output_file = argv[++i];
+            O->output_file = argv[++i];
             continue;
         }
 
         if (!strcmp(argv[i], "-ast-dump")) {
-            opt_ast_dump = true;
+            O->opt_ast_dump = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-dump-tokens")) {
-            opt_dump_tokens = true;
-            opt_keep_ws_comments = true;
+            O->opt_dump_tokens = true;
+            O->opt_keep_ws_comments = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-raw-dump-tokens") || !strcmp(argv[i], "-dump-raw-tokens")) {
-            opt_dump_raw_tokens = true;
-            opt_keep_ws_comments = true;
+            O->opt_dump_raw_tokens = true;
+            O->opt_keep_ws_comments = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-w")) {
-            opt_nowarn = true;
+            O->opt_nowarn = true;
             continue;
         }
 
@@ -653,10 +695,10 @@ static void parse_args(int argc, char **argv) {
             // The dependency writers are the ones cxx has: -Wp,-MD,file and
             // -Wp,-MMD,file are what -MD/-MMD with -MF file spell.
             if (!strncmp(p, "MD", 2) || !strncmp(p, "MMD", 3)) {
-                if (p[1] == 'M') opt_MM = true;
-                opt_MD = true;
+                if (p[1] == 'M') O->opt_MM = true;
+                O->opt_MD = true;
                 char *file = strchr(p, ',');
-                if (file && file[1]) opt_MF = file + 1;
+                if (file && file[1]) O->opt_MF = file + 1;
                 continue;
             }
             fatal("-Wp,%s: unsupported preprocessor option", p);
@@ -664,7 +706,7 @@ static void parse_args(int argc, char **argv) {
 
         if (!strncmp(argv[i], "-Wa,", 4)) {
             char *a = argv[i] + 4;
-            if (num_asmarg < (int)(sizeof(asm_args) / sizeof(asm_args[0]))) asm_args[num_asmarg++] = a;
+            if (O->num_asmarg < (int)(sizeof(O->asm_args) / sizeof(O->asm_args[0]))) O->asm_args[O->num_asmarg++] = a;
             continue;
         }
 
@@ -677,14 +719,14 @@ static void parse_args(int argc, char **argv) {
             // `off` has already been read off the name, so -Wno-pedantic
             // clears the mode rather than setting it.
             if (!strcmp(name, "pedantic")) {
-                opt_pedantic = !off;
+                O->opt_pedantic = !off;
                 continue;
             }
             if (strcmp(name, "error")) {
                 if (!strcmp(name, "all") || !strcmp(name, "extra")) {
                     // -Wall turns on what is on by default; it does not reach the
                     // WG_OFF_DEFAULT groups, which need their own flag.
-                    opt_wgroups |= WG_ALL & ~(uint32_t)WG_OFF_DEFAULT;
+                    O->opt_wgroups |= WG_ALL & ~(uint32_t)WG_OFF_DEFAULT;
                     continue;
                 }
                 int bit = 0;
@@ -695,41 +737,41 @@ static void parse_args(int argc, char **argv) {
                     }
                 if (!bit) fatal("unknown warning group: -W%s%s", off ? "no-" : "", name);
                 if (off)
-                    opt_wgroups &= ~(uint32_t)bit;
+                    O->opt_wgroups &= ~(uint32_t)bit;
                 else
-                    opt_wgroups |= (uint32_t)bit;
+                    O->opt_wgroups |= (uint32_t)bit;
                 continue;
             }
         }
 
         if (!strcmp(argv[i], "-pedantic") || !strcmp(argv[i], "-Wpedantic")) {
-            opt_pedantic = true;
+            O->opt_pedantic = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-pedantic-errors")) {
-            opt_pedantic = opt_pedantic_errors = true;
+            O->opt_pedantic = O->opt_pedantic_errors = true;
             continue;
         }
 
         if (!strcmp(argv[i], "-Werror")) {
-            opt_werror = true;
+            O->opt_werror = true;
             continue;
         }
 
-        // Machine flags are the backend's (see machine_args). -m32 and -mx32
+        // Machine flags are the backend's (see O->machine_args). -m32 and -mx32
         // change the *target*, which cxx's own type model does not have, so
         // taking them would mean 64-bit IR assembled as 32-bit code -- they
         // are refused rather than silently mis-compiled.
         if (!strncmp(argv[i], "-m", 2) && argv[i][2]) {
             if (!strcmp(argv[i], "-m32") || !strcmp(argv[i], "-mx32"))
                 fatal("%s: cxx has no 32-bit x86 target (use -target i386-unknown-linux-gnu)", argv[i]);
-            if (!strncmp(argv[i], "-march=", 7) || !strncmp(argv[i], "-mcpu=", 6)) machine_sets_arch = true;
-            if (!machine_args)
-                machine_args = vnew(8, sizeof(char *));
+            if (!strncmp(argv[i], "-march=", 7) || !strncmp(argv[i], "-mcpu=", 6)) O->machine_sets_arch = true;
+            if (!O->machine_args)
+                O->machine_args = vnew(8, sizeof(char *));
             else
-                machine_args = vgrow(machine_args, (num_machine + 8) * sizeof(char *));
-            machine_args[num_machine++] = argv[i];
+                O->machine_args = vgrow(O->machine_args, (O->num_machine + 8) * sizeof(char *));
+            O->machine_args[O->num_machine++] = argv[i];
             continue;
         }
 
@@ -754,12 +796,12 @@ static void parse_args(int argc, char **argv) {
 
         if (argv[i][0] == '-' && argv[i][1] != '\0') fatal("unknown argument: %s", argv[i]);
 
-        input_paths[num_input++] = argv[i];
+        O->input_paths[O->num_input++] = argv[i];
     }
-    if (!num_input && !base_file) fatal("no input files");
+    if (!O->num_input && !O->base_file) fatal("no input files");
 
     // -E implies that the input is the C macro language.
-    if (opt_E) opt_x = FILE_C;
+    if (O->opt_E) O->opt_x = FILE_C;
 }
 
 static FILE *open_outfile(char *path) {
@@ -802,7 +844,7 @@ static char *create_tmpfile(void) {
 
 static void run_subprocess(char **argv) {
     // If -### is given, just print the command line and return.
-    if (opt_hash_hash_hash) {
+    if (O->opt_hash_hash_hash) {
         fprintf(stderr, "%s", argv[0]);
         for (int i = 1; argv[i]; i++) fprintf(stderr, " %s", argv[i]);
         fprintf(stderr, "\n");
@@ -903,7 +945,7 @@ static Token *e_prev;
 static Token *e_last;  // the last token printed
 
 void print_stream_begin(void) {
-    e_out = open_outfile(opt_o ? opt_o : "-");
+    e_out = open_outfile(O->opt_o ? O->opt_o : "-");
     e_cur_line = 0;
     e_prev = NULL;
     e_last = NULL;
@@ -918,7 +960,7 @@ static void e_emit(Token *tok) {
         Token *orig = tok;
         while (orig->origin) orig = orig->origin;
         get_location(file_of(orig->file_uid), orig->loc, &line, &col);
-        if (!opt_P)
+        if (!O->opt_P)
             while (e_cur_line < line + line_delta_of(orig)) {
                 fprintf(e_out, "\n");
                 e_cur_line++;
@@ -929,7 +971,7 @@ static void e_emit(Token *tok) {
     }
     if (tok->kind == TK_LINE) {
         e_cur_line = tok->id;
-        if (opt_P) return;
+        if (O->opt_P) return;
         fprintf(e_out, "# %lu \"%s\"", (unsigned long)tok->id, str(line_name(tok)));
         return;
     }
@@ -980,8 +1022,8 @@ static Token *filter_tokens(Token *tok) {
 }
 
 static bool in_std_include_path(char *path) {
-    for (int i = 0; i < num_std_include_paths; i++) {
-        char *dir = std_include_paths[i];
+    for (int i = 0; i < O->num_std_include_paths; i++) {
+        char *dir = O->std_include_paths[i];
         int len = strlen(dir);
         while (len > 1 && dir[len - 1] == '/') len--;
         if (strncmp(dir, path, len) == 0 && (path[len] == '/' || path[len] == '\0')) return true;
@@ -992,31 +1034,31 @@ static bool in_std_include_path(char *path) {
 // If -M options is given, the compiler write a list of input files to stdout
 static void print_dependencies(void) {
     char *path;
-    if (opt_MF)
-        path = opt_MF;
-    else if (opt_MD)
-        path = replace_extn(opt_o ? opt_o : base_file, ".d");
-    else if (opt_o)
-        path = opt_o;
+    if (O->opt_MF)
+        path = O->opt_MF;
+    else if (O->opt_MD)
+        path = replace_extn(O->opt_o ? O->opt_o : O->base_file, ".d");
+    else if (O->opt_o)
+        path = O->opt_o;
     else
         path = "-";
     FILE *out = open_outfile(path);
 
-    if (opt_MT)
-        fprintf(out, "%s:", opt_MT);
+    if (O->opt_MT)
+        fprintf(out, "%s:", O->opt_MT);
     else
-        fprintf(out, "%s:", quote_makefile(replace_extn(base_file, ".o")));
+        fprintf(out, "%s:", quote_makefile(replace_extn(O->base_file, ".o")));
 
     SrcFile **files = get_input_files();
     for (int i = 0; files[i] && files[i]->id; i++) {
-        if (opt_MM && in_std_include_path(files[i]->name)) continue;
+        if (O->opt_MM && in_std_include_path(files[i]->name)) continue;
         fprintf(out, " \\\n  %s", files[i]->name);
     }
     fprintf(out, "\n\n");
 
-    if (opt_MP)
+    if (O->opt_MP)
         for (int i = 1; files[i] && files[i]->id; i++) {
-            if (opt_MM && in_std_include_path(files[i]->name)) continue;
+            if (O->opt_MM && in_std_include_path(files[i]->name)) continue;
             fprintf(out, "%s:\n\n", quote_makefile(files[i]->name));
         }
 }
@@ -1052,52 +1094,56 @@ static void char_sign_macro(void) {
 }
 
 // Stage 1: .c → .ll  (cc1: tokenize + preprocess + parse + irgen)
-static void cc1(void) {
+static void cc1(CxxOptions *o) {
+    O = o;
+    // The modules outside this file read the globals, so they are filled in
+    // here, after the include paths have been settled (publish_options).
+    publish_options(O);
     // The machine flags' macro effects come from clang, and the preprocessor
     // is about to run with whatever definitions are already queued.
     machine_flag_macros();
     char_sign_macro();
 
     Token *tok;
-    if (opt_dump_raw_tokens) {
+    if (O->opt_dump_raw_tokens) {
         // The raw-token dump wants the whitespace and comment tokens, which
         // only the whole-file path makes.
-        tok = tokenize_file(base_file);
-        if (!tok) fatal("%s: %s", base_file, strerror(errno));
+        tok = tokenize_file(O->base_file);
+        if (!tok) fatal("%s: %s", O->base_file, strerror(errno));
         dump_raw_tokens(tok);
         exit(0);   // the dump is the whole job in this mode
     } else {
-        tok = preprocess_file(base_file);
+        tok = preprocess_file(O->base_file);
     }
 
-    if (opt_dump_tokens) {
+    if (O->opt_dump_tokens) {
         dump_tokens(tok);
         exit(0);   // the dump is the whole job in this mode
     }
 
     // If -M or -MD is given, print file dependencies.
-    if (opt_M || opt_MD) {
+    if (O->opt_M || O->opt_MD) {
         print_dependencies();
-        if (opt_M) return;
+        if (O->opt_M) return;
     }
 
     // If -E is given, print out preprocessed C code as a result.
-    if (opt_E) {
+    if (O->opt_E) {
         // A lazy run has already streamed the output from inside the
         // preprocessor; only the batch path prints here.
-        if (opt_dump_raw_tokens) print_tokens(tok);
+        if (O->opt_dump_raw_tokens) print_tokens(tok);
         return;
     }
 
     // Nothing to strip when no marker was produced and whitespace tokens are
     // not being kept: this pass used to walk every token of every compile.
-    if (preproc_linemarkers || opt_keep_ws_comments) tok = filter_tokens(tok);
+    if (preproc_linemarkers || O->opt_keep_ws_comments) tok = filter_tokens(tok);
 
     join_adjacent_string_literals(tok);
 
     Module *prog = parse(tok);
 
-    if (opt_ast_dump) {
+    if (O->opt_ast_dump) {
         // The dump is the original tree: folding below would rewrite it, and
         // nothing after this point is wanted in this mode either.
         dump_ast(prog);
@@ -1118,11 +1164,11 @@ static void cc1(void) {
     // conversions and shift counts a program is warned about are seen -- and
     // before irgen, which only lowers: every demand a program has to meet is
     // the front end's to make, so nothing user-facing is skipped.
-    if (opt_fsyntax_only) return;
+    if (O->opt_fsyntax_only) return;
 
     Module *module = irgen(prog);
 
-    FILE *out = open_outfile(output_file);
+    FILE *out = open_outfile(O->output_file);
     dump_module(module, out);
 
     fclose(out);
@@ -1194,12 +1240,12 @@ static ClangMacro *find_clang_macro(ClangMacro *m, int n, char *name) {
 // flags make, whatever they are (`-march=native` and every CPU name
 // included).
 static void machine_flag_macros(void) {
-    if (!num_machine) return;
+    if (!O->num_machine) return;
 
     char extra[4096] = "";
-    for (int i = 0; i < num_machine; i++) {
-        if (strlen(extra) + strlen(machine_args[i]) + 2 >= sizeof(extra)) break;
-        strcat(extra, machine_args[i]);
+    for (int i = 0; i < O->num_machine; i++) {
+        if (strlen(extra) + strlen(O->machine_args[i]) + 2 >= sizeof(extra)) break;
+        strcat(extra, O->machine_args[i]);
         strcat(extra, " ");
     }
 
@@ -1299,11 +1345,11 @@ static void compile(char *input, char *output) {
     }
     // The target's -march is a default; a -march=/-mcpu= the user gave
     // replaces it (two -march options in one command line conflict).
-    if (T.clang_march && !machine_sets_arch) {
+    if (T.clang_march && !O->machine_sets_arch) {
         strncat(march, T.clang_march, 56);
         cmd[n++] = march;
     }
-    for (int i = 0; i < num_machine && n < 23; i++) cmd[n++] = machine_args[i];
+    for (int i = 0; i < O->num_machine && n < 23; i++) cmd[n++] = O->machine_args[i];
     cmd[n] = NULL;
     run_subprocess(cmd);
 }
@@ -1317,16 +1363,16 @@ static void assemble(char *input, char *output) {
     cmd[n++] = "clang";
     cmd[n++] = "-target";
     cmd[n++] = T.triple;
-    for (int i = 0; i < num_machine && n < 11; i++) cmd[n++] = machine_args[i];
+    for (int i = 0; i < O->num_machine && n < 11; i++) cmd[n++] = O->machine_args[i];
     // One -Wa, argument holding everything the user wrote, which is how clang
     // spells the same thing.
     char wa[1024] = "-Wa";
-    for (int i = 0; i < num_asmarg; i++) {
-        if (strlen(wa) + strlen(asm_args[i]) + 2 >= sizeof(wa)) break;
+    for (int i = 0; i < O->num_asmarg; i++) {
+        if (strlen(wa) + strlen(O->asm_args[i]) + 2 >= sizeof(wa)) break;
         strcat(wa, ",");
-        strcat(wa, asm_args[i]);
+        strcat(wa, O->asm_args[i]);
     }
-    if (num_asmarg) cmd[n++] = wa;
+    if (O->num_asmarg) cmd[n++] = wa;
     cmd[n++] = "-x";
     cmd[n++] = "assembler";
     cmd[n++] = "-c";
@@ -1365,11 +1411,11 @@ static void compile_object(char *input, char *output) {
         strncat(mabi, T.clang_mabi, 56);
         cmd[n++] = mabi;
     }
-    if (T.clang_march && !machine_sets_arch) {
+    if (T.clang_march && !O->machine_sets_arch) {
         strncat(march, T.clang_march, 56);
         cmd[n++] = march;
     }
-    for (int i = 0; i < num_machine && n < 27; i++) cmd[n++] = machine_args[i];
+    for (int i = 0; i < O->num_machine && n < 27; i++) cmd[n++] = O->machine_args[i];
     cmd[n] = NULL;
     run_subprocess(cmd);
 }
@@ -1379,12 +1425,12 @@ static void run_linker(char **ld_args, int num_ldarg, char *output) {
     ld_args[0] = "cc";
     ld_args[1] = "-o";
     ld_args[2] = output;
-    memcpy(ld_args + num_ldarg, ld_extra_args, num_ld_exarg * sizeof(char *));
+    memcpy(ld_args + num_ldarg, O->ld_extra_args, O->num_ld_exarg * sizeof(char *));
     run_subprocess(ld_args);
 }
 
 static FileType get_file_type(char *filename) {
-    if (opt_x != FILE_NONE) return opt_x;
+    if (O->opt_x != FILE_NONE) return O->opt_x;
 
     if (endswith(filename, ".a")) return FILE_AR;
     if (endswith(filename, ".so")) return FILE_DSO;
@@ -1401,42 +1447,46 @@ int main(int argc, char **argv) {
     atexit(cleanup);
     select_target(&Deftgt);
 
-    input_paths = emalloc(argc * sizeof(char *));
+    O = &opts;   // parse_args fills this; cc1 takes the pointer
+
+    O->input_paths = emalloc(argc * sizeof(char *));
     tmpfiles = emalloc(argc * 4 * sizeof(char *));
-    include_paths = emalloc((argc + 16) * sizeof(char *));
-    embed_dirs = emalloc((argc + 16) * sizeof(char *));
-    std_include_paths = emalloc((argc + 16) * sizeof(char *));
-    dirafter = emalloc(argc * sizeof(char *));
-    // ld_extra_args holds every argument that must follow the object files:
+    O->include_paths = emalloc((argc + 16) * sizeof(char *));
+    O->embed_dirs = emalloc((argc + 16) * sizeof(char *));
+    O->std_include_paths = emalloc((argc + 16) * sizeof(char *));
+    O->dirafter = emalloc(argc * sizeof(char *));
+    // O->ld_extra_args holds every argument that must follow the object files:
     // --sysroot/-L/-s/-static/-shared/-Xlinker, and -l/-Wl, below. A -Wl,
     // argument expands to one entry per comma-separated token, so allow more
     // room than one entry per command-line argument.
-    ld_extra_args = emalloc(argc * 4 * sizeof(char *));
+    O->ld_extra_args = emalloc(argc * 4 * sizeof(char *));
 
-    parse_args(argc, argv);
+    parse_args(argc, argv, O);
+    // The driver path reports warnings of its own before cc1 runs.
+    publish_options(O);
 
-    if (opt_cc1) {
+    if (O->opt_cc1) {
         add_default_include_paths(argv[0]);
         add_dirafter();
-        cc1();
+        cc1(O);
         return 0;
     }
 
-    if (num_input > 1 && opt_o && (opt_c || opt_S || opt_E))
+    if (O->num_input > 1 && O->opt_o && (O->opt_c || O->opt_S || O->opt_E))
         fatal("cannot specify '-o' with '-c' ,'-S' or '-E' with multiple files");
 
     char **ld_args = vnew(argc + 4, sizeof(char *));
     int num_ldarg = 3;
 
-    for (int i = 0; i < num_input; i++) {
-        char *input = input_paths[i];
+    for (int i = 0; i < O->num_input; i++) {
+        char *input = O->input_paths[i];
 
         // Libraries belong after the objects that reference them: the
         // linker only pulls a member out of an archive to satisfy a symbol
         // that is already undefined, so `-lm` ahead of the object file is a
-        // no-op. run_linker appends ld_extra_args last.
+        // no-op. run_linker appends O->ld_extra_args last.
         if (!strncmp(input, "-l", 2)) {
-            ld_extra_args[num_ld_exarg++] = input;
+            O->ld_extra_args[O->num_ld_exarg++] = input;
             continue;
         }
 
@@ -1444,18 +1494,18 @@ int main(int argc, char **argv) {
             char *s = strdup(input + 4);
             char *arg = strtok(s, ",");
             while (arg) {
-                ld_extra_args[num_ld_exarg++] = arg;
+                O->ld_extra_args[O->num_ld_exarg++] = arg;
                 arg = strtok(NULL, ",");
             }
             continue;
         }
 
         char *output;
-        if (opt_o)
-            output = opt_o;
-        else if (opt_S && opt_ll)
+        if (O->opt_o)
+            output = O->opt_o;
+        else if (O->opt_S && O->opt_ll)
             output = replace_extn(input, ".ll");
-        else if (opt_S)
+        else if (O->opt_S)
             output = replace_extn(input, ".s");
         else
             output = replace_extn(input, ".o");
@@ -1465,7 +1515,7 @@ int main(int argc, char **argv) {
         // -fsyntax-only has nothing to do with an object file, an archive
         // or an assembly source, and it must not put them in the linker's
         // argument list either: the link does not happen.
-        if (opt_fsyntax_only && type != FILE_C) continue;
+        if (O->opt_fsyntax_only && type != FILE_C) continue;
 
         // Handle .o, .a or .so — pass straight to linker.
         if (type == FILE_OBJ || type == FILE_AR || type == FILE_DSO) {
@@ -1485,28 +1535,28 @@ int main(int argc, char **argv) {
             cmd[m++] = "clang";
             cmd[m++] = "-target";
             cmd[m++] = T.triple;
-            for (int j = 0; j < num_machine && m < 24; j++) cmd[m++] = machine_args[j];
-            for (int j = 0; j < num_include_paths && m < 24; j++) cmd[m++] = format("-I%s", include_paths[j]);
+            for (int j = 0; j < O->num_machine && m < 24; j++) cmd[m++] = O->machine_args[j];
+            for (int j = 0; j < O->num_include_paths && m < 24; j++) cmd[m++] = format("-I%s", O->include_paths[j]);
             // When this ends in a link, the object goes to a temporary
             // file: `-o` names the executable the linker is about to write.
-            char *obj = opt_E || opt_S || opt_c ? output : create_tmpfile();
-            cmd[m++] = opt_E ? "-E" : (opt_S ? "-S" : "-c");
+            char *obj = O->opt_E || O->opt_S || O->opt_c ? output : create_tmpfile();
+            cmd[m++] = O->opt_E ? "-E" : (O->opt_S ? "-S" : "-c");
             cmd[m++] = input;
             cmd[m++] = "-o";
             cmd[m++] = obj;
             cmd[m] = NULL;
             run_subprocess(cmd);
-            if (!opt_E && !opt_S && !opt_c) ld_args[num_ldarg++] = obj;
+            if (!O->opt_E && !O->opt_S && !O->opt_c) ld_args[num_ldarg++] = obj;
             continue;
         }
 
         // Handle .s — assemble, unless -S stops here.
 
         if (type == FILE_ASM) {
-            if (opt_S) continue;
-            char *obj = opt_c ? output : create_tmpfile();
+            if (O->opt_S) continue;
+            char *obj = O->opt_c ? output : create_tmpfile();
             assemble(input, obj);
-            if (!opt_c) ld_args[num_ldarg++] = obj;
+            if (!O->opt_c) ld_args[num_ldarg++] = obj;
             continue;
         }
 
@@ -1514,7 +1564,7 @@ int main(int argc, char **argv) {
         assert(type == FILE_C);
 
         // -E: .c → stdout
-        if (opt_E || opt_M) {
+        if (O->opt_E || O->opt_M) {
             run_cc1(argc, argv, input, NULL);
             continue;
         }
@@ -1522,21 +1572,21 @@ int main(int argc, char **argv) {
         // -fsyntax-only: .c → nothing at all. The front end runs in full
         // (see cc1()), and no output path is handed to it, so no file of any
         // kind is written.
-        if (opt_fsyntax_only) {
+        if (O->opt_fsyntax_only) {
             run_cc1(argc, argv, input, NULL);
             continue;
         }
 
         // -S: .c → .ll → .s
-        if (opt_S) {
-            char *tmp_ll = opt_ll ? output : create_tmpfile();
+        if (O->opt_S) {
+            char *tmp_ll = O->opt_ll ? output : create_tmpfile();
             run_cc1(argc, argv, input, tmp_ll);
-            if (!opt_ll) compile(tmp_ll, output);
+            if (!O->opt_ll) compile(tmp_ll, output);
             continue;
         }
 
         // -c: .c → .ll → .s → .o
-        if (opt_c) {
+        if (O->opt_c) {
             char *tmp_ll = create_tmpfile();
             run_cc1(argc, argv, input, tmp_ll);
             compile_object(tmp_ll, output);
@@ -1551,7 +1601,7 @@ int main(int argc, char **argv) {
         ld_args[num_ldarg++] = tmp_o;
     }
 
-    if (num_ldarg > 3) run_linker(ld_args, num_ldarg, opt_o ? opt_o : "a.out");
+    if (num_ldarg > 3) run_linker(ld_args, num_ldarg, O->opt_o ? O->opt_o : "a.out");
 
     return 0;
 }

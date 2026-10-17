@@ -96,55 +96,91 @@ Token *skip(Token *tok, uint32_t kind) {
     return tok_next(tok);
 }
 
-// Compare if the pending matching string matches the target string
-static inline bool start_with(char *p, char *q) {
-    while (*q)
-        if (*p++ != *q++) return false;
-
-    return true;
-}
-
 // Read a punctuator at `p`, storing its kind in `*kind`.
 // Returns the length of the punctuator, or 0 if `p` does not begin with one.
+//
+// Two levels of branch -- the first byte, then the second -- instead of the
+// table that was scanned with start_with(), which cost a call per entry and a
+// character loop inside it (perf.md 8oz).
 int read_punct(char *p, uint32_t *kind) {
-    static struct {
-        char *punct;
-        uint32_t type;
-        int len;
-    } punct[] = {
-        {"%:%:", TK_HASHHASH, 4}, {"<<=", TK_LEFTAS, 3},  {">>=", TK_RIGHTAS, 3}, {"...", TK_ELLIPSIS, 3},
-        {"<%", TK_LBRACE, 2},     {"%>", TK_RBRACE, 2},   {"%:", TK_HASH, 2},     {"%=", TK_MODAS, 2},
-        {"+=", TK_ADDAS, 2},      {"-=", TK_SUBAS, 2},    {"*=", TK_MULAS, 2},    {"/=", TK_DIVAS, 2},
-        {"&=", TK_ANDAS, 2},      {"^=", TK_XORAS, 2},    {"|=", TK_ORAS, 2},     {"::", TK_COLONCOLON, 2},
-        {"<<", TK_LEFT, 2},       {">>", TK_RIGHT, 2},    {"==", TK_EQ, 2},       {"!=", TK_NE, 2},
-        {"<=", TK_LE, 2},         {">=", TK_GE, 2},       {"&&", TK_AND, 2},      {"||", TK_OR, 2},
-        {"->", TK_ARROW, 2},      {"++", TK_INC, 2},      {"--", TK_DEC, 2},      {"##", TK_HASHHASH, 2},
-        {"<:", TK_LBRACKET, 2},   {":>", TK_RBRACKET, 2},
-    };
+    unsigned char c0 = (unsigned char)p[0], c1 = (unsigned char)p[1];
 
-    // Bytes that may follow the first byte of a multi-byte punctuator.
-    static bool punct_cont[256] = {
-        [':'] = true, ['<'] = true, ['>'] = true, ['.'] = true, ['%'] = true, ['='] = true,
-        ['&'] = true, ['|'] = true, ['-'] = true, ['+'] = true, ['#'] = true,
-    };
-
-    unsigned char c = *p;
-
-    // Single-byte punctuators are encoded as their own ASCII code. No
-    // multi-byte punctuator can match if the next byte doesn't continue one.
-    if (ispunct(c) && !punct_cont[(unsigned char)p[1]]) {
-        *kind = c;
-        return 1;
+    switch (c0) {
+        case '<':
+            if (c1 == '<') {
+                if (p[2] == '=') { *kind = TK_LEFTAS; return 3; }
+                *kind = TK_LEFT;
+                return 2;
+            }
+            if (c1 == '=') { *kind = TK_LE; return 2; }
+            if (c1 == ':') { *kind = TK_LBRACKET; return 2; }
+            if (c1 == '%') { *kind = TK_LBRACE; return 2; }
+            break;
+        case '>':
+            if (c1 == '>') {
+                if (p[2] == '=') { *kind = TK_RIGHTAS; return 3; }
+                *kind = TK_RIGHT;
+                return 2;
+            }
+            if (c1 == '=') { *kind = TK_GE; return 2; }
+            break;
+        case '.':
+            if (c1 == '.' && p[2] == '.') { *kind = TK_ELLIPSIS; return 3; }
+            break;
+        case '%':
+            if (c1 == ':') {
+                if (p[2] == '%' && p[3] == ':') { *kind = TK_HASHHASH; return 4; }
+                *kind = TK_HASH;
+                return 2;
+            }
+            if (c1 == '>') { *kind = TK_RBRACE; return 2; }
+            if (c1 == '=') { *kind = TK_MODAS; return 2; }
+            break;
+        case '+':
+            if (c1 == '+') { *kind = TK_INC; return 2; }
+            if (c1 == '=') { *kind = TK_ADDAS; return 2; }
+            break;
+        case '-':
+            if (c1 == '-') { *kind = TK_DEC; return 2; }
+            if (c1 == '=') { *kind = TK_SUBAS; return 2; }
+            if (c1 == '>') { *kind = TK_ARROW; return 2; }
+            break;
+        case '*':
+            if (c1 == '=') { *kind = TK_MULAS; return 2; }
+            break;
+        case '/':
+            if (c1 == '=') { *kind = TK_DIVAS; return 2; }
+            break;
+        case '&':
+            if (c1 == '&') { *kind = TK_AND; return 2; }
+            if (c1 == '=') { *kind = TK_ANDAS; return 2; }
+            break;
+        case '^':
+            if (c1 == '=') { *kind = TK_XORAS; return 2; }
+            break;
+        case '|':
+            if (c1 == '|') { *kind = TK_OR; return 2; }
+            if (c1 == '=') { *kind = TK_ORAS; return 2; }
+            break;
+        case '=':
+            if (c1 == '=') { *kind = TK_EQ; return 2; }
+            break;
+        case '!':
+            if (c1 == '=') { *kind = TK_NE; return 2; }
+            break;
+        case ':':
+            if (c1 == ':') { *kind = TK_COLONCOLON; return 2; }
+            if (c1 == '>') { *kind = TK_RBRACKET; return 2; }
+            break;
+        case '#':
+            if (c1 == '#') { *kind = TK_HASHHASH; return 2; }
+            break;
+        default:
+            break;
     }
 
-    for (size_t i = 0; i < sizeof(punct) / sizeof(punct[0]); ++i)
-        if (start_with(p, punct[i].punct)) {
-            *kind = punct[i].type;
-            return punct[i].len;
-        }
-
-    if (ispunct(c)) {
-        *kind = c;
+    if (c0 < 0x80 && ispunct(c0)) {
+        *kind = c0;
         return 1;
     }
 
