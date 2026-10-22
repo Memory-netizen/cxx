@@ -16760,3 +16760,76 @@ sqlite3 的 IR 等价性没跑 ✗（16 MB × 2 ✓，只做了 `-E` ✓ 与 `ma
 conformance 326/0 ✓、c2y 101/0 ✓、tcctests 106/0 ✓、bootstrap 21/21 逐字节 ✓。
 落地后的 `-E`（新老交替跑 9 次取最小 ✓）：tccgen 95,976 → 93,056 µs（−3.0% ✓）、
 lparser 40,284 → 39,991 µs（±0 ✓）、sqlite3 403,195 → 369,009 µs（**−8.0%** ✓ —— 与前面的 −8.4% 预测对得上 ✓）。
+
+### 8pa. 参考 mcc 的驱动能否减少 cxx 的二次解析 ✓（实测 ✓）：**不能** ✗ —— cxx 一次 `parse_args` 只要 **0.5–3.0 µs** ✓，mcc 的两招（位置化语法 ✓、只转发需要的选项 ✓）合起来只省 **0.7 µs** ✗；真正花掉的是 **fork+exec+动态链接** ≈ **0.3–0.6 ms** ✓，而那要 **fork 不 exec** 才能省掉 ✓（`CxxOptions` 已落地 ✓，原型已验证输出逐字节相同 ✓）
+
+**mcc 的驱动解析做了什么** ✓（`~/mcc/src/main.c` ✓）：
+① **子进程语法是位置化的固定 6 槽** ✓ —— `-cc1 -cc1-input <in> -cc1-output <out>` 必须在 argv[1..5] ✓，之后只用一个 **5 项** `strcmp` 链收尾 ✓（未知即 `fatal` ✓），不是重跑驱动那套长选项表 ✓；
+② **只转发驱动收集到的选项** ✓（`s->cmd[]` ✓），不把用户原始 argv 原样丢给子进程 ✓ ⇒ 子进程要看的参数个数更少 ✓。
+cxx 相反：`run_cc1()` 把**整个** argv 复制一份再追加 4 个 ✓（`src/main.c:879` ✓），子进程因此把用户所有选项重走一遍 ✓（`parse_args` ✓）。
+
+**实测量的是什么** ✓（`noexec.sh` ✓，两个影子树：`base` 只加计时钩子 ✓、`noexec` 再加"fork 后直接 `cc1(O)`"原型 ✓；都在 `~/cxxwork/noexec/` ✓，两个仓库都没动 ✓，`-O2` ✓）：
+```
+① 一次 parse_args 的耗时（同一 argv 跑 200 遍取最小 ✓，CXX_PT 钩子 ✓）
+   5 个参数（cxx -w -O0 -E tccgen.c）                    0.5 µs
+   25 个参数（带 -o/-c/-I/-D/-W*/-f*/-m*/-Wa,/-Xlinker/-L/-l）  3.0 µs
+   16 个参数（剥掉驱动专用项 = mcc 式"只转发需要的"）      2.3 µs   ⇒ mcc 那两招合计只省 0.7 µs
+② 把 exec 去掉（子进程继承 CxxOptions，直接 cc1(O)）     -E 端到端（新老交替跑 9 次取最小 ✓）
+   tccgen   50,940 → 50,384 µs  (−556 µs, −1.0%)
+   lparser  26,365 → 26,056 µs  (−309 µs, −1.0%)
+   sqlite3 169,057 → 168,571 µs (−486 µs, −0.3%)
+③ 正确性 ✓  -E 三负载**逐字节相同** ✓（路径归一化后 ✓）、IR 相同 ✓、-### 输出相同 ✓、-c 目标文件相同 ✓
+```
+⇒ **结论** ✓：二次解析本身（0.5–3 µs ✓）不是成本 ✓ —— mcc 的驱动技巧只能省掉 **0.7 µs 量级** ✗，
+对编译时间没有意义 ✓；有意义的是**每次编译固定花掉的 0.3–0.6 ms** ✓（fork ✓ + exec 一个 686 KB 的二进制 ✓ +
+动态链接 ✓ + 重新初始化 ✓），**只有 fork 不 exec 能省掉它** ✓，并且**顺带把二次解析降为 0** ✓。
+
+**原型要点** ✓（真做的时候必须照做 ✓，都是踩出来的 ✓）：
+* 子进程要**补上 `-cc1` 分支的那套 setup** ✓（`add_default_include_paths(argv[0])` ✓、`add_dirafter()` ✓、
+  `publish_options(O)` ✓）—— 少了它 `<limits.h>` 直接找不到 ✓（实测 ✓）；
+* `fork` 前 `fflush(NULL)` ✓（否则父子各刷一次缓冲 ✓），子进程用 `_exit(0)` 退出 ✓
+  （否则会跑父进程的 `cleanup()` ✓ 把驱动还要用的临时文件删掉 ✓）；
+* `-###` 仍走原来的打印路径 ✓（原型里显式跳过 ✓，输出实测相同 ✓）；
+* 崩溃报告不变 ✓（父进程仍 `waitpid` + `WIFSIGNALED` ✓）；
+* 代价：子进程不再是一个干净进程 ✓ —— 现有全局状态里任何"假定刚初始化"的东西都要复查 ✗（本轮只发现 include 路径这一处 ✓）。
+
+**方法学限制** ✓：`-c` 端到端在本机负载下噪声太大 ✗（tccgen 735,833 vs 771,778 µs ✓ 与 159 ms 的历史值差 4 倍 ✓），
+所以只采信**交替跑、取最小**的 `-E` 行 ✓；空文件 `-c` 那组（43,979 vs 40,669 µs）同样受负载影响 ✗，仅作参考 ✓；
+单机 ✓、`-O2` ✓、原型在影子树 ✓；`parse_args` 计时用 `CxxOptions tmp = opts` 的副本 ✓（每轮会往共享数组里追加 ✓ 只影响内存 ✓）。
+### 8pb. `-cc1` 是不是必须固定位置 ✓（实测 ✓）：**clang 是** ✓ —— 只认 argv[1] ✓，其余位置一律 `unknown argument` ✗；mcc 照抄了这条 ✓；**cxx 是三者里唯一的例外** ✗（`-cc1` 放哪都行 ✓，自己的驱动还把它追加在末尾 ✓）
+
+**clang 23.1.4 实测** ✓：
+```
+clang -cc1 -E -x c f.c            rc=0 ✓
+clang -O2 -cc1 -E -x c f.c        rc=1  clang: error: unknown argument: '-cc1'
+clang f.c -cc1 -E -x c            rc=1  clang: error: unknown argument: '-cc1'
+clang -triple ... -cc1 -E -x c    rc=1  clang: error: unknown argument '-triple'; did you mean '-Xclang -triple'?
+clang -### -cc1 ...               rc=1  同上（`-###` 挡在 `-cc1` 前面，模式就没切过去）
+clang -filetype asm -cc1as ...    rc=1  clang: error: unknown argument: '-filetype'   （-cc1as 同样只认首位）
+```
+**机制** ✓：`-cc1` **不在驱动器的选项表里** ✓，它是**模式开关** ✓ —— 必须先决定"用哪张表"，才能解析后面的参数 ✓
+（所以 `-triple` 在驱动模式下压根不存在 ✓，clang 自己的建议是 `-Xclang -triple` ✓）。
+判据也印证了这一点 ✓：驱动器的错误带 `clang:` 前缀 ✓，切进 cc1 之后的错误是**裸 `error:`** ✓
+（`clang -cc1 -bogus` ⇒ `error: unknown argument: '-bogus'` ✓；`clang -cc1 -###` ⇒ `error: unknown argument: '-###'` ✓）。
+**切换之后次序无所谓** ✓：`clang -cc1 -O2 -E -x c f.c -o out.i` ✓、`-cc1 -emit-obj -O1 f.c -o out.o` ✓ 都成立 ✓。
+
+**三家对比** ✓：
+| | `-cc1` 位置 | 子进程命令行怎么来 |
+|---|---|---|
+| clang | **必须 argv[1]** ✓ | 驱动器**构造** ✓：`clang -c f.c`（2 个参数）⇒ cc1 argv **54 个** ✓，`-cc1` 在首位 ✓ |
+| mcc | **必须 argv[1]** ✓（实测 `-dump-raw-tokens -cc1 ...` ⇒ `unknown argument: -cc1` ✗） | `run_cc1()` 拼固定 6 槽 + 收集到的选项 ✓ |
+| cxx | **任意位置** ✓（`-c f.c -cc1 ...` ✓、`-w -cc1 ...` ✓ 都 rc=0 ✓） | 把用户 argv **原样复制**再**追加** `-cc1 -cc1-input -cc1-output` ✓ |
+
+**顺带把上一轮的结论做了交叉验证** ✓（`-E` 一次 vs 驱动器 `-###` 印出来的**同一条** cc1 命令 ✓，交替跑 9 次取最小 ✓）：
+```
+clang  driver 42,487 µs   same cc1 line 42,238 µs   差值 249 µs   输出逐字节相同 ✓
+cxx    driver 78,277 µs   same cc1 line 77,866 µs   差值 411 µs   输出逐字节相同 ✓
+```
+⇒ 两个编译器的驱动器都只是"同一份 cc1 工作 + 一个进程"✓（输出逐字节相同就说明了这一点 ✓），
+第二个进程的固定成本都是 **百微秒量级** ✓（clang ~0.25 ms ✓、cxx ~0.4–0.6 ms ✓），与 §8pa 的结论一致 ✓
+（解析只占 µs ✓，成本在 fork+exec+动态链接 ✓）。绝对时间受本机负载影响会漂 ✓（cxx 这行本轮 78 ms、上轮 51 ms ✓），只采信差值 ✓。
+
+**对 cxx 的含义** ✓：① 想要与 clang/mcc 一致的契约 ⇒ 把 `-cc1` 放首位 + 独立解析器 ✓，但**速度上没收益** ✗（§8pa 的 0.7 µs ✓）；
+② 现在的宽松接受是**超集** ✓（能直接吃 `clang -###` 风格的行 ✓），代价只是子进程重走一遍驱动解析 ✓；
+③ cxx 的 `-cc1-input` / `-cc1-output` **不是** clang 的写法 ✓（clang 用位置输入 + `-o` ✓）—— 是 cxx 自己的一对 ✓，mcc 抄的是 cxx 这一对 ✓
+⇒ 所以"位置固定"在 cxx 里并非必须跟随 clang ✓；④ 若采用 §8pa 的 fork 不 exec，位置契约就与性能无关了 ✓。
